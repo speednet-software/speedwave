@@ -149,7 +149,7 @@ When the watchdog respawns the oauth worker it:
 
 1. Stops and re-runs `OauthProcess::spawn_in`, getting a new port.
 2. Adds the project to a `respawned` list (built under the worker map's mutex, then drained outside it).
-3. Calls `host_exec_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
+3. Calls `containers_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
 4. `recreate_project_containers_if_running` regenerates the compose YAML via `render_compose()`, runs the security check, and recreates the project's containers — they pick up the new `WORKER_OAUTH_URL` in env.
 
 The `is_oauth_alive` TCP probe retries 3 × with a 200 ms backoff before declaring a worker dead, because every false-positive respawn cascades into a full container recreate of every OAuth consumer.

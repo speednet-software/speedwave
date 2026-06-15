@@ -547,7 +547,6 @@ test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
-	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/host-exec.bats
 
 # Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
@@ -707,7 +706,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec oauth; do \
+	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done

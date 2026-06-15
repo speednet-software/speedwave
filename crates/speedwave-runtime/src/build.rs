@@ -379,29 +379,6 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
     resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
-/// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
-/// Mirrors [`resolve_mcp_os_script`]; ADR-054.
-pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
-        dev,
-    )
-}
-
-#[cfg(test)]
-fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        home,
-        dev,
-    )
-}
-
 /// Resolves the `oauth` worker `index.js` (bundle → CARGO source → marker).
 /// Mirrors [`resolve_mcp_os_script`]; ADR-060.
 pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
@@ -436,22 +413,8 @@ fn resolve_mcp_os_script_inner(
     )
 }
 
-/// Test-only alias — implementation is `resolve_worker_script_inner`.
-#[cfg(test)]
-fn resolve_host_exec_script_inner(
-    home: Option<PathBuf>,
-    dev_path: Option<PathBuf>,
-) -> Option<std::path::PathBuf> {
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        home,
-        dev_path,
-    )
-}
-
 /// Resolve a host-side worker script via the three-tier fallback shared by all
-/// bundled workers (`mcp-os`, `host_exec`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
+/// bundled workers (`mcp-os`, `oauth`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
 /// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
 /// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
 fn resolve_worker_script_inner(
@@ -1876,102 +1839,6 @@ mod tests {
 
         let result = resolve_mcp_os_script_inner(Some(fake_home), Some(dev_script.clone()));
         assert_eq!(result, Some(dev_script), "dev path should win over marker");
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_dev_mode() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
-        // The worker dist may or may not exist depending on whether host_exec
-        // was built; just verify it doesn't panic.
-        let result = resolve_host_exec_script_with_home(None);
-        let _ = result;
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_from_env() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let script_path = tmp
-            .path()
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        std::fs::write(&script_path, "// stub").unwrap();
-        std::env::set_var(
-            crate::consts::BUNDLE_RESOURCES_ENV,
-            tmp.path().to_string_lossy().as_ref(),
-        );
-        let result = resolve_host_exec_script_inner(None, None);
-        assert_eq!(result, Some(script_path));
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_from_marker() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        let fake_resources = tmp.path().join("fake-resources");
-
-        let script_path = fake_resources
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        std::fs::write(&script_path, "// stub").unwrap();
-
-        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
-
-        // Pass None as dev_path to test marker fallback in isolation
-        let result = resolve_host_exec_script_inner(Some(fake_home), None);
-        assert_eq!(result, Some(script_path));
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_dev_path_beats_marker() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        let fake_resources = tmp.path().join("fake-resources");
-        let fake_dev = tmp.path().join("dev-repo");
-
-        let marker_script = fake_resources
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
-        std::fs::write(&marker_script, "// marker").unwrap();
-        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
-
-        let dev_script = fake_dev.join("mcp-servers/host_exec/dist/index.js");
-        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
-        std::fs::write(&dev_script, "// dev").unwrap();
-
-        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_script.clone()));
-        assert_eq!(result, Some(dev_script), "dev path should win over marker");
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_none_when_nothing_present() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home"); // no marker file
-        let dev_path = tmp.path().join("dev/mcp-servers/host_exec/dist/index.js"); // does not exist
-
-        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_path));
-        assert_eq!(result, None);
     }
 
     #[test]

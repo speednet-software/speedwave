@@ -6,9 +6,9 @@
 // session swap) lives in `start_session_inner`.
 
 use crate::chat::{self, ChatSession, SharedChatSession};
-use crate::reconcile::{SharedHostExec, SharedOauth};
+use crate::reconcile::SharedOauth;
 use crate::types::check_project;
-use crate::{containers_cmd, ensure_host_exec_running, ensure_oauth_running, host_exec_cmd};
+use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
 /// Shared implementation for `start_chat` and `resume_conversation`.
@@ -24,17 +24,15 @@ fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
     session_arc: SharedChatSession,
-    host_exec_arc: SharedHostExec,
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let host_exec_just_started = ensure_host_exec_running(&host_exec_arc, project);
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
     containers_cmd::ensure_images_ready()?;
 
-    if host_exec_just_started || oauth_just_started {
-        host_exec_cmd::recreate_project_containers_if_running(project);
+    if oauth_just_started {
+        containers_cmd::recreate_project_containers_if_running(project);
     }
 
     // Per-project compose lock serialises auth check with concurrent compose ops.
@@ -81,23 +79,14 @@ pub(crate) async fn start_chat(
     project: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
-    let host_exec_arc = host_exec.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(
-            &project,
-            None,
-            session_arc,
-            host_exec_arc,
-            oauth_arc,
-            app_handle,
-        )
+        start_session_inner(&project, None, session_arc, oauth_arc, app_handle)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -177,21 +166,18 @@ pub(crate) async fn resume_conversation(
     session_id: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
-    let host_exec_arc = host_exec.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
             Some(&session_id),
             session_arc,
-            host_exec_arc,
             oauth_arc,
             app_handle,
         )
@@ -302,7 +288,7 @@ mod tests {
     #[test]
     fn start_session_inner_waits_for_image_readiness_before_compose_paths() {
         // Race guard: both recreate_project_containers_if_running (fresh
-        // host_exec/oauth branch) and check_claude_auth → ensure_exec_healthy
+        // oauth branch) and check_claude_auth → ensure_exec_healthy
         // can call compose_up_recreate. Gate must come BEFORE the if-block
         // (covers fresh-worker branch) AND BEFORE check_claude_auth (covers
         // the always-runs path).

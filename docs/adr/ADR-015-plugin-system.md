@@ -32,7 +32,7 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 ## Service ID constants (current values — verify against `consts.rs`)
 
 - `consts::BUILT_IN_SERVICES` (compose names, for SecurityCheck): `claude`, `mcp-hub`, `mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, `mcp-github`, `mcp-atlassian`, `mcp-office`, `mcp-playwright`, `mcp-context7`.
-- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `host_exec`, `oauth`, `ide`. (`host_exec`, `oauth`, `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-054, ADR-060, ADR-063.)
+- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063.)
 - A guard test verifies no overlap between the two lists.
 
 ## Where it lives in code
@@ -60,4 +60,4 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 - [ADR-009](ADR-009-per-project-isolation-preserved.md) — per-project isolation and the reserved `:rw` token mount
 - [ADR-038](ADR-038-single-internal-worker-port.md) — single internal worker port (3000)
 - [ADR-051](ADR-051-plugin-signature-runtime-verification.md) — plugin signature as a runtime invariant
-- [ADR-054](ADR-054-host-exec-worker.md), [ADR-060](ADR-060-host-side-oauth-refresh-worker.md), [ADR-063](ADR-063-host-bridge-generic.md) — host-side workers/bridges reserved in `BUILT_IN_SERVICE_IDS`
+- [ADR-060](ADR-060-host-side-oauth-refresh-worker.md), [ADR-063](ADR-063-host-bridge-generic.md) — host-side workers/bridges reserved in `BUILT_IN_SERVICE_IDS`

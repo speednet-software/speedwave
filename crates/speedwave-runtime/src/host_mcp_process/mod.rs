@@ -1,9 +1,9 @@
 //! Shared infrastructure for host-side Node MCP worker process managers.
 //!
-//! Three workers (mcp-os, host_exec, oauth) all spawn a Node child,
-//! read a `{"port": N}` handshake on stdout, drain stdio into an audit
-//! log, and persist `lock.json` for compose injection. This module
-//! holds the SSOT pieces:
+//! Two workers (mcp-os, oauth) all spawn a Node child, read a
+//! `{"port": N}` handshake on stdout, drain stdio into an audit log,
+//! and persist `lock.json` for compose injection. This module holds
+//! the SSOT pieces:
 //!
 //! - `drain` — stdout/stderr drain + handshake.
 //! - `env_policy` — `env_clear()` + minimal re-add, `EnvSource` trait

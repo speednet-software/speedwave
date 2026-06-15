@@ -63,12 +63,6 @@ fn mcp_os_path(data_dir: &Path, _project: &str) -> Option<PathBuf> {
     Some(data_dir.join(consts::MCP_OS_LOG_FILE))
 }
 
-fn host_exec_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
-    Some(
-        crate::host_exec::host_exec_project_dir(data_dir, project).join(consts::HOST_EXEC_LOG_FILE),
-    )
-}
-
 fn claude_session_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(consts::claude_session_log_path_under(data_dir, project))
 }
@@ -108,13 +102,6 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(mcp_os_path),
-    },
-    DiagnosticSource {
-        key: "host-exec",
-        zip_entry: "host-exec/log",
-        displayable: true,
-        platforms: Platforms::All,
-        kind: SourceKind::File(host_exec_path),
     },
     DiagnosticSource {
         key: "claude",
@@ -229,7 +216,6 @@ mod tests {
         };
         assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
-        assert!(entry("host-exec").ends_with(consts::HOST_EXEC_LOG_FILE));
         // `lima`/`compose-yml` filenames are Lima's / compose's own conventions,
         // not Speedwave consts, so there's nothing to drift against.
     }

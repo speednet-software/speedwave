@@ -187,7 +187,6 @@ pub(crate) struct LogSources {
     pub compose: String,
     pub desktop: String,
     pub mcp_os: String,
-    pub host_exec: String,
     pub claude: String,
     /// Lima VM serial log (macOS only; empty elsewhere). Parity with the ZIP —
     /// it's a displayable log, so it must also appear in /logs.
@@ -203,15 +202,12 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let compose = prefix_lines("compose", &sources.compose, Some(project));
     let desktop = prefix_lines("desktop", &sources.desktop, None);
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
-    let host_exec = prefix_lines("host-exec", &sources.host_exec, None);
     let claude = prefix_lines("claude", &sources.claude, None);
     let lima = prefix_lines("lima", &sources.lima, None);
 
     // Apply the sanitizer once to the merged buffer (idempotent — sources are
     // already individually sanitized, this is a defence-in-depth pass).
-    speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{host_exec}{claude}{lima}"
-    ))
+    speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}{lima}"))
 }
 
 /// Reads every host-side log file, fetches the compose stream, and returns a
@@ -222,8 +218,7 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
 ///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
 ///      Swift CLI stderr forwarded by `check_os_permission`)
 ///   3. mcp-os    — `~/.speedwave/mcp-os.log`
-///   4. host-exec — `~/.speedwave/host-exec/<project>/log` (if host_exec enabled)
-///   5. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
+///   4. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
 ///
 /// Each source uses the full `tail` budget independently (default 200, cap
 /// 10 000). With 5 sources × 10 000 the upper bound is 50 000 lines — trivial
@@ -317,7 +312,6 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
                 compose,
                 desktop,
                 mcp_os: read_source("mcp-os"),
-                host_exec: read_source("host-exec"),
                 claude: read_source("claude"),
                 lima: read_source("lima"),
             },
@@ -637,7 +631,6 @@ mod tests {
                 compose: String::new(),
                 desktop: String::new(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
                 lima: String::new(),
             },
@@ -655,9 +648,6 @@ mod tests {
                 compose: compose_line.clone(),
                 desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
                 mcp_os: "ready\n".to_string(),
-                host_exec:
-                    r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
-                        .to_string(),
                 claude: "session started\n".to_string(),
                 lima: String::new(),
             },
@@ -670,10 +660,6 @@ mod tests {
         assert!(!merged.contains(&format!("{prefix}_testproj_claude")));
         assert!(merged.contains("desktop | 2026-01-01T00:00:00.000+0000 INFO [x] d"));
         assert!(merged.contains("mcp-os | ready"));
-        assert!(
-            merged.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#),
-            "host-exec line must be prefixed, got: {merged}"
-        );
         assert!(merged.contains("claude | session started"));
     }
 
@@ -689,7 +675,6 @@ mod tests {
                 compose: "MARKER_compose\n".to_string(),
                 desktop: "MARKER_desktop\n".to_string(),
                 mcp_os: "MARKER_mcp_os\n".to_string(),
-                host_exec: "MARKER_host_exec\n".to_string(),
                 claude: "MARKER_claude\n".to_string(),
                 lima: "MARKER_lima\n".to_string(),
             },
@@ -712,26 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_log_sources_sanitizes_host_exec_projectdir() {
-        let merged = merge_log_sources(
-            LogSources {
-                compose: String::new(),
-                desktop: String::new(),
-                mcp_os: String::new(),
-                host_exec: r#"{"cwd":"/Users/john-doe/Projects/mine","cmd":"npm test"}"#
-                    .to_string(),
-                claude: String::new(),
-                lima: String::new(),
-            },
-            "mine",
-        );
-        assert!(
-            !merged.contains("john-doe"),
-            "projectDir username must be redacted: {merged}"
-        );
-    }
-
-    #[test]
     fn merge_log_sources_sanitizes_secrets_across_sources() {
         let merged = merge_log_sources(
             LogSources {
@@ -740,7 +705,6 @@ mod tests {
                     "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
                         .to_string(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
                 lima: String::new(),
             },
@@ -761,7 +725,6 @@ mod tests {
                 compose: compose_line,
                 desktop: "desktop_only_line\n".to_string(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
                 lima: String::new(),
             },
@@ -773,31 +736,29 @@ mod tests {
     }
 
     #[test]
-    fn merge_log_sources_host_exec_block_between_mcp_os_and_claude() {
+    fn merge_log_sources_block_order_mcp_os_before_claude() {
         let merged = merge_log_sources(
             LogSources {
                 compose: String::new(),
                 desktop: String::new(),
                 mcp_os: "mcp_os_line\n".to_string(),
-                host_exec: "host_exec_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
                 lima: String::new(),
             },
             "testproj",
         );
         let mcp_idx = merged.find("mcp-os | mcp_os_line").unwrap();
-        let he_idx = merged.find("host-exec | host_exec_line").unwrap();
         let claude_idx = merged.find("claude | claude_line").unwrap();
-        assert!(mcp_idx < he_idx && he_idx < claude_idx, "got: {merged}");
+        assert!(mcp_idx < claude_idx, "got: {merged}");
     }
 
     #[test]
-    fn prefix_lines_does_not_unwrap_brackets_for_host_exec() {
+    fn prefix_lines_does_not_unwrap_brackets_in_json() {
         let raw = r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#;
-        let out = prefix_lines("host-exec", raw, None);
+        let out = prefix_lines("mcp-os", raw, None);
         assert!(
-            out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
-            "host-exec content must pass through verbatim with only the prefix, got: {out}"
+            out.contains(r#"mcp-os | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
+            "JSON content must pass through verbatim with only the prefix, got: {out}"
         );
     }
 

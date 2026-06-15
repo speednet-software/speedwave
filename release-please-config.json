@@ -33,7 +33,6 @@
         "mcp-servers/atlassian/package.json",
         "mcp-servers/office/package.json",
         "mcp-servers/os/package.json",
-        "mcp-servers/host_exec/package.json",
         "mcp-servers/oauth/package.json",
         "mcp-servers/context7/package.json",
         "mcp-servers/playwright/package.json",

@@ -255,8 +255,7 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
 
 /// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
 /// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
-/// `host_exec` when enabled (host-side, no image — ADR-054), and enabled plugin
-/// service IDs. Excludes the always-on `claude` / `mcp-hub`.
+/// and enabled plugin service IDs. Excludes the always-on `claude` / `mcp-hub`.
 /// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
 /// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
 pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
@@ -267,9 +266,6 @@ pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec
         .collect();
     if integrations.any_os_enabled() {
         ids.push("os".to_string());
-    }
-    if integrations.host_exec {
-        ids.push("host_exec".to_string());
     }
     ids.extend(
         integrations
@@ -448,28 +444,6 @@ pub(crate) fn read_lock_port(
     crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
 }
 
-/// Read a worker's `port` file. `None` when missing or unparseable; warns on invalid content.
-#[cfg(test)]
-pub(crate) fn read_worker_port_file(port_path: &std::path::Path, label: &str) -> Option<u16> {
-    let content = std::fs::read_to_string(port_path).ok()?;
-    match content.trim().parse::<u16>() {
-        Ok(p) => Some(p),
-        Err(e) => {
-            log::warn!(
-                "invalid {label} port file content '{}': {e}",
-                content.trim()
-            );
-            None
-        }
-    }
-}
-
-/// Test-only alias — implementation is `read_worker_port_file`.
-#[cfg(test)]
-pub(crate) fn read_host_exec_port(port_path: &std::path::Path) -> Option<u16> {
-    read_worker_port_file(port_path, "host_exec")
-}
-
 /// URL where a host-side worker listens, as seen from inside a container.
 pub(crate) fn worker_gateway_url(port: u16) -> String {
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
@@ -478,12 +452,6 @@ pub(crate) fn worker_gateway_url(port: u16) -> String {
 /// Test-only alias — implementation is `worker_gateway_url`.
 #[cfg(test)]
 pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
-    worker_gateway_url(port)
-}
-
-/// Test-only alias — implementation is `worker_gateway_url`.
-#[cfg(test)]
-pub(crate) fn host_exec_gateway_url(port: u16) -> String {
     worker_gateway_url(port)
 }
 

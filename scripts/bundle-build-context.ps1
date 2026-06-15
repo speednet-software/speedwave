@@ -1,5 +1,5 @@
 # bundle-build-context.ps1 — PowerShell equivalent of bundle-build-context.sh
-# Copies container build context, mcp-os, host_exec, and the oauth worker into
+# Copies container build context, mcp-os, and the oauth worker into
 # desktop\src-tauri\ for Tauri resource bundling.
 #
 # Usage: powershell -File scripts/bundle-build-context.ps1
@@ -60,7 +60,7 @@ try {
     "$PID" | Out-File -FilePath "$lockDir\pid" -Encoding ascii
 
 # Clean destination
-Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\host_exec","$dest\oauth" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
 
 # -- Build context (containers + MCP server sources) --------------------------
 
@@ -116,7 +116,7 @@ foreach ($svc in $services) {
     }
 }
 
-# -- mcp-os + host_exec + oauth (host-side TypeScript workers) ---------------
+# -- mcp-os + oauth (host-side TypeScript workers) ---------------------------
 
 # Stage-Host-Worker <worker-dir-name> <bundle-dir-name>
 #   Mirrors stage_host_worker() in bundle-build-context.sh — stages
@@ -140,7 +140,6 @@ function Stage-Host-Worker {
 }
 
 Stage-Host-Worker -worker os -bundle mcp-os
-Stage-Host-Worker -worker host_exec -bundle host_exec
 Stage-Host-Worker -worker oauth -bundle oauth
 
 Write-Host "Build context bundled into $dest"

@@ -51,9 +51,8 @@ impl EnvSource for CurrentProcessEnv {
 /// Clears the inherited environment then re-adds only PATH,
 /// HOME/USERPROFILE, optional Windows CSPRNG vars, and
 /// `SPEEDWAVE_RESOURCES_DIR`/`SPEEDWAVE_PROD` when the parent is a
-/// bundled .app. `path_override` lets callers (notably `host_exec`)
-/// substitute the recovered login-shell PATH; pass `None` to forward
-/// the inherited PATH instead.
+/// bundled .app. `path_override` lets a caller substitute a recovered
+/// PATH; pass `None` to forward the inherited PATH instead.
 pub fn apply_child_env(cmd: &mut Command, path_override: Option<&str>, env: &dyn EnvSource) {
     cmd.env_clear();
 

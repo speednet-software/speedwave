@@ -23,7 +23,6 @@ import {
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
-import { HostExecConfigComponent } from './host-exec-config/host-exec-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 
@@ -50,13 +49,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [
-    ServiceCardComponent,
-    RedmineConfigComponent,
-    HostExecConfigComponent,
-    IdeBridgeComponent,
-    ProjectPillComponent,
-  ],
+  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -296,12 +289,6 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
               </div>
             }
           }
-        }
-
-        @if (betaEnabled()) {
-          <div class="mt-6" data-testid="integrations-host-exec-slot">
-            <app-host-exec-config />
-          </div>
         }
 
         <div class="mt-6" data-testid="integrations-ide-bridge-slot">
