@@ -110,15 +110,14 @@ export interface LlmConfigResponse {
 /**
  * Provider kind discriminator (ADR-073). Mirror of the Rust
  * `speedwave_runtime::config::LlmProviderKind` serde representation
- * (snake_case strings).
+ * (snake_case strings). Drift guarded by `llm_provider_kind_matches_ts_union`.
  */
 export type LlmProviderKind =
   | 'anthropic_oauth'
   | 'anthropic_api_key'
   | 'local'
   | 'open_router'
-  | 'open_ai_compat'
-  | 'custom';
+  | 'open_ai_compat';
 
 /**
  * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust

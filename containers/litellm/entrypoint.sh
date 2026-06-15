@@ -24,11 +24,16 @@ if [ -d "$TOKENS_DIR" ]; then
         [ -f "$token_file" ] || continue
         base="$(basename "$token_file")"
         provider_id="${base%_api_key}"
-        # Defense in depth: skip names that would not have passed the
-        # host-side slug validation (also guards the env-name injection
-        # surface). LC_ALL=C because pattern ranges in `case` are
-        # locale-collation-dependent and would accept uppercase.
+        # Defense in depth: skip names that fail the host-side slug shape
+        # `^[a-z][a-z0-9-]{0,63}$` (also guards env-name injection). LC_ALL=C
+        # below because `case` ranges are locale-collated (would accept upper).
         [ -n "$provider_id" ] || continue
+        # First char must be [a-z] — the charset check below misses a leading
+        # digit/hyphen.
+        case "$(printf '%s' "$provider_id" | cut -c1)" in
+            [abcdefghijklmnopqrstuvwxyz]) ;;
+            *) continue ;;
+        esac
         leftover="$(printf '%s' "$provider_id" | LC_ALL=C tr -d 'a-z0-9-')"
         [ -z "$leftover" ] || continue
         env_name="SPW_KEY_$(printf '%s' "$provider_id" | tr 'a-z-' 'A-Z_')"

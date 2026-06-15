@@ -20,8 +20,9 @@ litellm 1.88.1, see ADR-073):
   ``message_start`` usage).
 
 Every line carries ``capture`` naming the path; the host-side aggregator
-deduplicates by ``(capture, response_id)`` should a future litellm version
-start emitting success events for streamed unified-route requests too.
+deduplicates by ``response_id`` alone (across capture paths) so that, should
+a future litellm version start emitting success events for streamed
+unified-route requests too, the two lines for one request collapse to one.
 
 This file must stay dependency-free beyond litellm itself — it is baked
 into the image and runs inside the hardened container (read-only fs; the

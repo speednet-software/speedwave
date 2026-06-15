@@ -1116,7 +1116,7 @@ fn validate_provider_entries(
         }
         let needs_url = matches!(
             entry.kind,
-            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat | LlmProviderKind::Custom
+            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat
         );
         match (&entry.base_url, needs_url) {
             (Some(url), _) => {

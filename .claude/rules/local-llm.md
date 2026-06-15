@@ -85,7 +85,7 @@ SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
 `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only
 an active `anthropic_oauth` provider runs the in-container OAuth check; all
-other kinds (api key, local, openrouter, openai-compat, custom) skip it.
+other kinds (api key, local, openrouter, openai-compat) skip it.
 Legacy v1 configs keep the `LOCAL_PROVIDERS` rule. Any new Anthropic-auth
 checkpoint must use the same predicate.
 

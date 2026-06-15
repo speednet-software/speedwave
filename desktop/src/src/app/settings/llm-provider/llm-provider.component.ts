@@ -28,6 +28,7 @@ import {
   LlmActive,
   LlmConfigResponse,
   LlmProviderEntry,
+  LlmProviderKind,
 } from '../../models/llm';
 
 /**
@@ -68,6 +69,16 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     contextTokens: null,
   });
   return [empty('openrouter', 'open_router'), empty('compat', 'open_ai_compat')];
+}
+
+/**
+ * Tri-state credential value for a touched field: empty/blank → null (delete),
+ * otherwise the value. Callers gate on the field's touched flag first.
+ * @param value - The raw field value.
+ * @returns The trimmed-non-empty value, or null when blank.
+ */
+function nullIfEmpty(value: string): string | null {
+  return value.trim() === '' ? null : value;
 }
 
 /**
@@ -1037,23 +1048,14 @@ export class LlmProviderComponent implements OnInit {
   /**
    * Returns a placeholder model name based on the selected LLM provider. For
    * Anthropic it derives the hint from the SSOT catalog (latest non-Opus, i.e.
-   * the everyday Sonnet) rather than a hard-coded string, mirroring how
-   * `baseUrlPlaceholder()` defers to the backend — empty while the catalog
-   * loads so we never flash a stale model id.
+   * the everyday Sonnet) rather than a hard-coded string — empty while the
+   * catalog loads so we never flash a stale model id.
    */
   modelPlaceholder(): string {
     if (this.provider === 'anthropic') {
       return this.anthropicModels.latestEverydayModelId() ?? '';
     }
     return 'llama3.3';
-  }
-
-  /** Returns a fallback base URL placeholder when backend default_base_url is unavailable. */
-  baseUrlPlaceholder(): string {
-    // Backend is SSOT for known-provider defaults (see default_base_url in
-    // compose.rs); this is just a fallback hint if the backend response
-    // arrives late.
-    return '';
   }
 
   /**
@@ -1185,10 +1187,10 @@ export class LlmProviderComponent implements OnInit {
         customHeaders?: string | null;
       } = { provider: this.provider, baseUrl: effectiveUrl };
       if (this.apiKeyTouched) {
-        args.apiKey = this.apiKey.trim() === '' ? null : this.apiKey;
+        args.apiKey = nullIfEmpty(this.apiKey);
       }
       if (this.customHeadersTouched) {
-        args.customHeaders = this.customHeaders.trim() === '' ? null : this.customHeaders;
+        args.customHeaders = nullIfEmpty(this.customHeaders);
       }
       const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
         args,
@@ -1301,13 +1303,14 @@ export class LlmProviderComponent implements OnInit {
    * key configured (classifies the anthropic entry's kind).
    */
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
+    // Resolve the active target once — it's stable for this invocation.
+    const target = this.effectiveTarget();
     // The anthropic entry carries the model too — symmetric with local/remote.
     // When the anthropic card is active `this.model` is authoritative; when
     // another provider is active the card field was cleared, so fall back to
     // the snapshot taken on load (otherwise an explicit Anthropic model is
     // wiped the first time the user activates another provider and saves).
-    const anthropicModel =
-      this.effectiveTarget() === 'anthropic' ? this.model : this.loadedAnthropicModel;
+    const anthropicModel = target === 'anthropic' ? this.model : this.loadedAnthropicModel;
     const providers: LlmProviderEntry[] = [
       {
         id: 'anthropic',
@@ -1319,7 +1322,7 @@ export class LlmProviderComponent implements OnInit {
     // When the local card is NOT being edited, its loaded entry passes
     // through verbatim — rebuilding it from the (then anthropic- or
     // extra-derived) card fields silently erased base_url and model.
-    const editingLocal = this.effectiveTarget() === 'local';
+    const editingLocal = target === 'local';
     if (!editingLocal && this.loadedLocalEntry) {
       providers.push({ ...this.loadedLocalEntry });
     } else {
@@ -1378,6 +1381,21 @@ export class LlmProviderComponent implements OnInit {
     return this.provider === 'anthropic' ? 'anthropic' : 'local';
   }
 
+  /**
+   * Finds a permanent remote row by exact id, falling back to kind so entries
+   * saved under a legacy generated id (`openrouter-2`, suffixed compat) still
+   * land on their fixed row.
+   * @param id - Exact provider id to match first.
+   * @param kind - Optional kind to fall back on when no id matches.
+   * @returns The matching row, or undefined.
+   */
+  private findExtraRow(id: string, kind?: LlmProviderKind): ExtraProviderEdit | undefined {
+    return (
+      this.extraProviders.find((r) => r.id === id) ??
+      (kind ? this.extraProviders.find((r) => r.kind === kind) : undefined)
+    );
+  }
+
   /** The active selection Save will persist, derived from the radio state. */
   private buildActive(): LlmActive {
     const target = this.effectiveTarget();
@@ -1419,21 +1437,10 @@ export class LlmProviderComponent implements OnInit {
       // and remote rows ignore the flat baseUrl, so null is correct there.
       const effectiveBaseUrl =
         active.provider_id === 'local' ? this.baseUrl || this.defaultBaseUrl || null : null;
-      // Anthropic-entry classification (oauth vs api key) comes from the
-      // project's stored auth state; failure degrades to oauth, which routes
-      // identically (both ride the passthrough — ADR-073).
-      let anthropicHasApiKey = false;
-      const project = this.projectState.activeProject;
-      if (project) {
-        try {
-          const auth = await this.tauri.invoke<{ api_key_configured: boolean }>('get_auth_status', {
-            project,
-          });
-          anthropicHasApiKey = auth.api_key_configured;
-        } catch {
-          // Conservative default: oauth.
-        }
-      }
+      // Input signal — the single project source (drives the restart below).
+      const project = this.activeProject();
+      // Reuse the cached auth state (loadAuthStatus) — no redundant round-trip.
+      const anthropicHasApiKey = this.apiKeyConfigured;
       // The flat provider/model/base_url fields are the legacy (kill-switch
       // direct path) mirror and drive the backend's model-required gate. When
       // a card is active they keep the card's provider verbatim (preserving a
@@ -1461,30 +1468,35 @@ export class LlmProviderComponent implements OnInit {
         active,
       };
       if (this.apiKeyTouched) {
-        update.api_key = this.apiKey.trim() === '' ? null : this.apiKey;
+        update.api_key = nullIfEmpty(this.apiKey);
       }
       if (this.customHeadersTouched) {
-        update.custom_headers = this.customHeaders.trim() === '' ? null : this.customHeaders;
+        update.custom_headers = nullIfEmpty(this.customHeaders);
+      }
+      // Write per-provider keys BEFORE persisting config (ADR-073: values
+      // bypass config.json). A key-write failure throws here, before the
+      // config commit, so the two never end up out of sync. State resets are
+      // deferred until every write + the config save succeed.
+      const touchedExtras = this.extraProviders.filter((e) => e.keyTouched);
+      for (const extra of touchedExtras) {
+        await this.tauri.invoke('set_llm_provider_key', {
+          providerId: extra.id,
+          key: nullIfEmpty(extra.keyInput),
+        });
       }
       await this.tauri.invoke('update_llm_config', { update });
+
+      // Everything persisted — now reset UI state to mirror what was saved.
       // Mirror exactly what was persisted: if the save dropped the local entry
       // (e.g. base_url cleared), forget the snapshot too — otherwise the stale
       // entry would be re-pushed verbatim on the next save and resurrect a
       // provider the user removed.
       const savedLocal = update.providers.find((p) => p.id === 'local');
       this.loadedLocalEntry = savedLocal ? { ...savedLocal } : null;
-
-      // Per-provider key mutations (values bypass config.json — ADR-073).
-      for (const extra of this.extraProviders) {
-        if (extra.keyTouched) {
-          await this.tauri.invoke('set_llm_provider_key', {
-            providerId: extra.id,
-            key: extra.keyInput.trim() === '' ? null : extra.keyInput,
-          });
-          extra.hasKey = extra.keyInput.trim() !== '';
-          extra.keyInput = '';
-          extra.keyTouched = false;
-        }
+      for (const extra of touchedExtras) {
+        extra.hasKey = extra.keyInput.trim() !== '';
+        extra.keyInput = '';
+        extra.keyTouched = false;
       }
       this.saved = true;
       // Reset touched flags so subsequent saves don't re-send the credentials
@@ -1616,9 +1628,7 @@ export class LlmProviderComponent implements OnInit {
         if (p.kind !== 'open_router' && p.kind !== 'open_ai_compat') {
           continue;
         }
-        const row =
-          this.extraProviders.find((r) => r.id === p.id) ??
-          this.extraProviders.find((r) => r.kind === p.kind);
+        const row = this.findExtraRow(p.id, p.kind);
         if (row) {
           row.baseUrl = p.base_url ?? '';
           row.model = p.model ?? '';
@@ -1631,9 +1641,7 @@ export class LlmProviderComponent implements OnInit {
       // the active entry's kind — the fixed rows absorbed that entry above.
       const activeId = config.active?.provider_id;
       const activeEntry = (config.providers ?? []).find((p) => p.id === activeId);
-      const activeRow =
-        this.extraProviders.find((p) => p.id === activeId) ??
-        (activeEntry ? this.extraProviders.find((p) => p.kind === activeEntry.kind) : undefined);
+      const activeRow = activeId ? this.findExtraRow(activeId, activeEntry?.kind) : undefined;
       if (activeRow) {
         this.selectedTarget = activeRow.id;
         this.expandedExtraId = activeRow.id;

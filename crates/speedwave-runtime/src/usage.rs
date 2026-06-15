@@ -58,8 +58,9 @@ pub struct UsageRecord {
     pub cache_write: Option<u64>,
 }
 
-/// Aggregate for one (day, model) bucket.
-#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+/// Aggregate for one (day, model) bucket. No `PartialEq` derive: the
+/// `cost_usd` f64 makes `==` an exact-float trap; tests compare fields.
+#[derive(Serialize, Debug, Clone, Default)]
 pub struct UsageBucket {
     /// Total requests in the bucket.
     pub requests: u64,
@@ -290,6 +291,50 @@ mod tests {
             .hours
             .get("2026-06-12")
             .is_none_or(|h| h.iter().all(|c| *c == 0)));
+    }
+
+    #[test]
+    fn multibyte_timestamp_does_not_panic_on_byte_slicing() {
+        // `ts` is sliced by byte index (get(0..10)/get(11..13)). A multibyte
+        // char straddling byte 10 or 13 makes str::get return None (not panic):
+        // the record still aggregates under day "unknown", histogram skipped.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                // 'éé' (2 bytes each) makes byte 10 land mid-char, so the day
+                // slice get(0..10) returns None → day "unknown".
+                r#"{"ts":"2026-06éé2T10:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
+                // Emoji (4 bytes) at byte 11 makes the hour slice get(11..13)
+                // return None → valid day, histogram entry skipped.
+                r#"{"ts":"2026-06-12T😀0:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
+            ],
+        );
+        let s = read_usage_summary_in(dir.path(), "proj");
+        // Both records aggregate (no panic, nothing skipped as unparsable).
+        assert_eq!(s.totals.requests, 2);
+        assert_eq!(s.totals.prompt_tokens, 3);
+        assert_eq!(
+            s.skipped_lines, 0,
+            "valid JSON — only ts derivation degrades"
+        );
+        // Non-boundary day slice → "unknown"; the emoji record keeps its day.
+        assert!(
+            s.days.contains_key("unknown"),
+            "non-boundary day → 'unknown'"
+        );
+        assert!(
+            s.days.contains_key("2026-06-12"),
+            "emoji record keeps its day"
+        );
+        // The emoji record's hour slice returned None, so no histogram entry.
+        assert!(
+            s.hours
+                .get("2026-06-12")
+                .is_none_or(|h| h.iter().all(|c| *c == 0)),
+            "non-boundary hour slice must skip the histogram"
+        );
     }
 
     #[test]

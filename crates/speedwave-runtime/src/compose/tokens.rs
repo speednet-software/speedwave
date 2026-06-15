@@ -167,3 +167,96 @@ pub fn ensure_token_dir_in(
     crate::fs_perms::ensure_owner_only_dir(&service_dir)?;
     Ok(service_dir)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn data_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    // ── llm token namespace (ADR-073) ────────────────────────────────────
+
+    #[test]
+    fn llm_key_path_happy_path() {
+        let d = data_dir();
+        let p = llm_provider_key_path_in(d.path(), "proj", "openrouter").unwrap();
+        assert!(
+            p.ends_with("tokens/proj/llm/openrouter_api_key"),
+            "got {p:?}"
+        );
+    }
+
+    #[test]
+    fn llm_file_must_end_with_api_key_suffix() {
+        // `llm` service file names must carry the `_api_key` suffix.
+        let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "openrouter")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must end with"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_provider_id_must_be_a_slug() {
+        // Leading capital, dot, and traversal segments all fail the slug shape
+        // before they can reach a file path.
+        for bad in [
+            "Bad_api_key",
+            "a.b_api_key",
+            "../escape_api_key",
+            "9lead_api_key",
+        ] {
+            let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, bad)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("not a valid slug") || err.contains("must end with"),
+                "id '{bad}' should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_empty_provider_id_rejected() {
+        // `_api_key` alone strips to an empty id, which is not a valid slug.
+        let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "_api_key")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a valid slug"), "got: {err}");
+    }
+
+    // ── service allow-list ────────────────────────────────────────────────
+
+    #[test]
+    fn unknown_service_rejected() {
+        let err = tokens_path_in(data_dir().path(), "proj", "evil", "api_key")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in allow-list"), "got: {err}");
+    }
+
+    #[test]
+    fn local_llm_file_allow_list_enforced() {
+        let d = data_dir();
+        assert!(tokens_path_in(d.path(), "proj", "local-llm", "api_key").is_ok());
+        let err = tokens_path_in(d.path(), "proj", "local-llm", "secret")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_project_name_rejected_before_file_check() {
+        let err = tokens_path_in(
+            data_dir().path(),
+            "../escape",
+            LLM_TOKEN_SERVICE,
+            "ok_api_key",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.is_empty(), "project-name validation must fire first");
+    }
+}

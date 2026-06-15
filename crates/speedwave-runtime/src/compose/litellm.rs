@@ -69,7 +69,7 @@ pub fn render_litellm_config(llm: &LlmConfig) -> String {
                     "  - model_name: \"openrouter/*\"\n    litellm_params:\n      model: \"openrouter/*\"\n      api_key: {key_ref}\n",
                 ));
             }
-            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat | LlmProviderKind::Custom => {
+            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat => {
                 let Some(base_url) = entry.base_url.as_deref() else {
                     log::warn!(
                         "litellm config: provider '{}' has no base_url — skipped",
@@ -77,6 +77,15 @@ pub fn render_litellm_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 };
+                // Defense in depth: re-validate before embedding bare in YAML
+                // (pure check; the save path already gates it).
+                if let Err(e) = super::llm::validate_base_url(base_url) {
+                    log::warn!(
+                        "litellm config: provider '{}' has invalid base_url — skipped: {e}",
+                        entry.id
+                    );
+                    continue;
+                }
                 // Container-side URL: the claude/litellm containers reach a
                 // host-side server via host.docker.internal (ADR-062); the
                 // stored base_url already uses that alias (validate_base_url).
@@ -399,6 +408,31 @@ general_settings: {}
         let yaml = render_litellm_config(&llm);
         assert!(!yaml.contains("local/*"), "no base_url → skipped: {yaml}");
         assert!(!yaml.contains("Bad.Id"), "invalid id → skipped: {yaml}");
+    }
+
+    #[test]
+    fn render_skips_provider_with_invalid_base_url() {
+        // Defense in depth: a corrupted/replayed base_url (credentials, traversal,
+        // non-http scheme) is re-validated at render time and the entry dropped
+        // rather than embedded bare in the YAML.
+        for bad in [
+            "http://user:pass@host.docker.internal:9000",
+            "file:///etc/passwd",
+            "http://host.docker.internal:9000/a/b",
+        ] {
+            let llm = LlmConfig {
+                providers: vec![LlmProviderEntry {
+                    base_url: Some(bad.into()),
+                    ..entry("local", LlmProviderKind::Local)
+                }],
+                ..Default::default()
+            };
+            let yaml = render_litellm_config(&llm);
+            assert!(
+                !yaml.contains("local/*"),
+                "invalid base_url '{bad}' must be skipped, got: {yaml}"
+            );
+        }
     }
 
     #[test]

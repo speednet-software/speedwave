@@ -338,6 +338,66 @@ describe('LlmProviderComponent', () => {
     expect(update['apiKeyEnv']).toBeUndefined();
   });
 
+  it('hot-reloads the proxy with the input-signal project, not projectState', async () => {
+    // T10 regression: saveConfig must read the active project from the
+    // activeProject() input, not ProjectStateService. When the active
+    // selection is unchanged, it hot-reloads litellm for that project.
+    fixture.componentRef.setInput('activeProject', 'proj-from-input');
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject = 'wrong-project';
+
+    let restartProject: unknown = null;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'restart_llm_proxy') {
+        restartProject = args?.['project'];
+        return undefined;
+      }
+      return undefined;
+    };
+
+    component.provider = 'anthropic';
+    component.model = '';
+    // Make the active selection unchanged so the hot-reload branch fires.
+    component['loadedActiveKey'] = 'anthropic|';
+
+    await component.saveConfig();
+
+    expect(restartProject).toBe('proj-from-input');
+    expect(projectState.needsRestart).toBe(false);
+  });
+
+  it('writes provider keys before the config and aborts the config on key failure', async () => {
+    // T11 regression: a per-provider key write must precede update_llm_config,
+    // so a key failure leaves config and keys consistent (neither applied).
+    const errorSpy = vi.fn();
+    component.errorOccurred.subscribe(errorSpy);
+
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'set_llm_provider_key') {
+        throw new Error('key write failed');
+      }
+      return undefined;
+    };
+
+    // Configure the openrouter row with a touched key so the loop runs.
+    const row = component.extraProviders.find((r) => r.id === 'openrouter');
+    expect(row).toBeDefined();
+    row!.keyInput = 'sk-or-test';
+    row!.keyTouched = true;
+
+    await component.saveConfig();
+
+    expect(calls).toContain('set_llm_provider_key');
+    expect(calls).not.toContain('update_llm_config');
+    expect(errorSpy).toHaveBeenCalledWith('key write failed');
+    expect(component.saved).toBe(false);
+    // The failed key stays editable (not optimistically cleared).
+    expect(row!.keyTouched).toBe(true);
+    expect(row!.keyInput).toBe('sk-or-test');
+  });
+
   describe('resolveContextTokensForSave (via saveConfig payload)', () => {
     async function captureUpdate(): Promise<Record<string, unknown>> {
       let captured: Record<string, unknown> = {};
@@ -1541,7 +1601,8 @@ describe('LlmProviderComponent', () => {
     };
     const projectState = TestBed.inject(ProjectStateService);
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
-    projectState.activeProject = 'proj';
+    // The active project comes from the input signal (not projectState).
+    fixture.componentRef.setInput('activeProject', 'proj');
 
     // Anthropic card active, default model — same as the loaded snapshot.
     component.provider = 'anthropic';

@@ -60,7 +60,7 @@ services:
       # (a ~20k-token Claude Code prompt reprocesses from scratch — ~50 s
       # per turn on a Mac-class host) and ignores --chat-template-kwargs
       # (re-enabling Qwen's silent thinking). Chat completions is the path
-      # validated in the ADR-072 spike.
+      # validated in the ADR-073 spike.
       - LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
       # Not read by litellm — forces container recreation on config-up
       # when the rendered config or a provider key changed.

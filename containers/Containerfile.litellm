@@ -1,4 +1,4 @@
-# OCI Containerfile for the Speedwave LiteLLM proxy (ADR-072)
+# OCI Containerfile for the Speedwave LiteLLM proxy (ADR-073)
 # Base: python:3.13-slim-bookworm (Debian)
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
 #
@@ -30,13 +30,12 @@ RUN apt-get update -o Acquire::Retries=3 && \
 COPY litellm/requirements.txt /opt/speedwave/requirements.txt
 RUN pip install --no-cache-dir --require-hashes -r /opt/speedwave/requirements.txt
 
-# Usage callback (PYTHONPATH so `litellm_callback.speedwave_usage_logger`
-# resolves from config.yaml) + entrypoint.
-COPY litellm/litellm_callback.py /opt/speedwave/litellm_callback.py
+# Entrypoint only. The usage callback is written next to config.yaml at render
+# time (compose/litellm.rs), because litellm resolves `callbacks:` from the
+# --config directory, never PYTHONPATH — a baked copy would be unreachable.
 COPY litellm/entrypoint.sh /opt/speedwave/entrypoint.sh
 RUN chmod 0755 /opt/speedwave/entrypoint.sh && \
     chown -R 1000:1000 /opt/speedwave
-ENV PYTHONPATH=/opt/speedwave
 
 # Mount points: config (ro), per-provider tokens (ro), usage sink (rw).
 RUN mkdir -p /config /tokens /usage && chown 1000:1000 /config /tokens /usage

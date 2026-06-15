@@ -70,10 +70,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
         }
-        LlmProviderKind::Local
-        | LlmProviderKind::OpenRouter
-        | LlmProviderKind::OpenAiCompat
-        | LlmProviderKind::Custom => {
+        LlmProviderKind::Local | LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
             if model.is_empty() {
                 anyhow::bail!(
                     "Provider '{}' requires a model name. \

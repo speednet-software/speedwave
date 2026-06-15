@@ -66,6 +66,31 @@ teardown() {
     [[ "$output" != *"SPW_KEY_UPPER"* ]]
 }
 
+@test "rejects a provider id with a leading digit" {
+    # `^[a-z]...` — a digit-leading id fails host-side validation; the
+    # entrypoint must not normalise it into an env name.
+    printf 'v' > "$TOKENS_DIR/9bad_api_key"
+    run "$ENTRYPOINT"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SPW_KEY_9BAD"* ]]
+}
+
+@test "rejects a provider id with a leading hyphen" {
+    # A hyphen-leading id would normalise to SPW_KEY__BAD — rejected.
+    printf 'v' > "$TOKENS_DIR/-bad_api_key"
+    run "$ENTRYPOINT"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SPW_KEY__BAD"* ]]
+    [[ "$output" != *"_BAD="* ]]
+}
+
+@test "accepts a valid slug starting with a letter" {
+    printf 'v' > "$TOKENS_DIR/a-valid-slug_api_key"
+    run "$ENTRYPOINT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SPW_KEY_A_VALID_SLUG=v"* ]]
+}
+
 @test "never exports canonical provider env names" {
     # The ADR-073 invariant: a key must not surface as ANTHROPIC_API_KEY etc.
     printf 'sk-test' > "$TOKENS_DIR/anthropic_api_key"

@@ -27,8 +27,6 @@ pub enum LlmProviderKind {
     OpenRouter,
     /// Any remote OpenAI-compatible endpoint (key required).
     OpenAiCompat,
-    /// Escape hatch: provider string passed to LiteLLM verbatim.
-    Custom,
 }
 
 /// One configured LLM provider (ADR-073). Key VALUES never live here —
@@ -41,7 +39,7 @@ pub struct LlmProviderEntry {
     pub id: String,
     /// Backend class.
     pub kind: LlmProviderKind,
-    /// Base URL for `Local`/`OpenAiCompat`/`Custom` kinds (user-only).
+    /// Base URL for `Local`/`OpenAiCompat` kinds (user-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Last model used with this provider — restored on re-activation;
@@ -233,7 +231,7 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
         }
         // No v1 equivalent — an older Speedwave treats these as anthropic
         // (its safest default); the v2 fields keep the real selection.
-        LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat | LlmProviderKind::Custom => {
+        LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
             llm.has_api_key = false;
@@ -1021,6 +1019,60 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ---- LlmProviderKind Rust↔TS mirror (ADR-073) ---------------------------
+
+    #[test]
+    fn llm_provider_kind_matches_ts_union() {
+        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
+        // the TS union must list exactly the Rust serde strings, so the
+        // provider-save wire contract can't drift.
+        let all = [
+            LlmProviderKind::AnthropicOauth,
+            LlmProviderKind::AnthropicApiKey,
+            LlmProviderKind::Local,
+            LlmProviderKind::OpenRouter,
+            LlmProviderKind::OpenAiCompat,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for kind in all {
+            match kind {
+                LlmProviderKind::AnthropicOauth
+                | LlmProviderKind::AnthropicApiKey
+                | LlmProviderKind::Local
+                | LlmProviderKind::OpenRouter
+                | LlmProviderKind::OpenAiCompat => {}
+            }
+        }
+        let mut rust_kinds: Vec<String> = all
+            .iter()
+            .map(|k| {
+                serde_json::to_value(k)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust_kinds.sort();
+
+        let src = include_str!("../../../desktop/src/src/app/models/llm.ts");
+        let re = regex::Regex::new(r"export\s+type\s+LlmProviderKind\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("llm.ts must declare `export type LlmProviderKind`");
+        let mut ts_kinds: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts_kinds.sort();
+
+        assert_eq!(
+            rust_kinds, ts_kinds,
+            "TS LlmProviderKind union must match Rust LlmProviderKind serde strings"
+        );
+    }
 
     // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
 

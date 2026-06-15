@@ -1377,7 +1377,7 @@ impl VolumeCheckRules {
         // (same convention as SHAREPOINT above).
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "Slack token mount must be :ro (ADR-071)",
-        token_mount_mode_rem: "Slack refresh runs in the host-side `oauth` worker;              /tokens must be :ro like every other worker.",
+        token_mount_mode_rem: "Slack refresh runs in the host-side `oauth` worker; /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::SlackWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SlackWorkspaceMountMode,
         workspace_mount_mode_msg: "Slack workspace mount must be :rw",
