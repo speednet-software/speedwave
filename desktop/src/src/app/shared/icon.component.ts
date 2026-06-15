@@ -27,7 +27,8 @@ export type IconName =
   | 'document'
   | 'microphone'
   | 'refresh'
-  | 'trash';
+  | 'trash'
+  | 'chart';
 
 /**
  * Inline SVG icon — glyphs taken verbatim from the terminal-minimal mockup
@@ -91,6 +92,12 @@ export type IconName =
         }
         @case ('chevron-right') {
           <path d="M9 5l7 7-7 7" />
+        }
+        @case ('chart') {
+          <path d="M3 3v18h18" />
+          <path d="M7 15v3" />
+          <path d="M12 9v9" />
+          <path d="M17 5v13" />
         }
         @case ('chevron-down') {
           <path d="M6 9l6 6 6-6" />

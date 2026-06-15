@@ -4,7 +4,9 @@ import {
   Component,
   OnInit,
   computed,
+  effect,
   inject,
+  input,
   output,
   signal,
 } from '@angular/core';
@@ -15,14 +17,69 @@ import { AnthropicModelsService } from '../../services/anthropic-models.service'
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { AuthTerminalComponent } from '../auth-terminal.component';
+import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   AnthropicModel,
   DiscoveredModel,
   DiscoverResult,
   formatContextLabel,
   LEGACY_LOCAL_PROVIDERS,
+  LlmActive,
   LlmConfigResponse,
+  LlmProviderEntry,
+  LlmProviderKind,
 } from '../../models/llm';
+
+/**
+ * Edit-state row of a remote (proxy-routed) provider — ADR-073. The key
+ * VALUE lives only in `keyInput` until Save sends it through
+ * `set_llm_provider_key`; config carries the `hasKey` presence flag.
+ */
+interface ExtraProviderEdit {
+  id: string;
+  kind: 'open_router' | 'open_ai_compat';
+  baseUrl: string;
+  model: string;
+  keyInput: string;
+  keyTouched: boolean;
+  hasKey: boolean;
+  /** Catalog models (openrouter rows); null until discovery ran. */
+  models: DiscoveredModel[] | null;
+  discovering: boolean;
+  /** Context window of the selected catalog model. */
+  contextTokens: number | null;
+}
+
+/**
+ * The two permanent remote rows (`openrouter`, `compat`) — rendered like the
+ * anthropic/local cards; an unconfigured row is simply not persisted.
+ */
+function fixedExtraRows(): ExtraProviderEdit[] {
+  const empty = (id: string, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
+    id,
+    kind,
+    baseUrl: '',
+    model: '',
+    keyInput: '',
+    keyTouched: false,
+    hasKey: false,
+    models: null,
+    discovering: false,
+    contextTokens: null,
+  });
+  return [empty('openrouter', 'open_router'), empty('compat', 'open_ai_compat')];
+}
+
+/**
+ * Tri-state credential value for a touched field: empty/blank → null (delete),
+ * otherwise the value. Callers gate on the field's touched flag first.
+ * @param value - The raw field value.
+ * @returns The trimmed-non-empty value, or null when blank.
+ */
+function nullIfEmpty(value: string): string | null {
+  return value.trim() === '' ? null : value;
+}
 
 /**
  * Discovery state for the LLM model listing. Discriminated union makes the
@@ -39,29 +96,18 @@ type DiscoveryState =
   | { kind: 'ready'; url: string; models: DiscoveredModel[] }
   | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
 
-/** Static catalog of provider cards rendered at the top of the section. */
-interface ProviderCard {
-  readonly id: 'anthropic' | 'local';
-  readonly label: string;
-  readonly tag: string;
-}
-
-const PROVIDER_CARDS: readonly ProviderCard[] = [
-  { id: 'anthropic', label: 'anthropic', tag: 'cloud · default' },
-  { id: 'local', label: 'local', tag: 'any anthropic messages server' },
-] as const;
-
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  imports: [CommonModule, TooltipDirective],
+  imports: [CommonModule, TooltipDirective, AuthTerminalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     <section id="section-llm-provider">
-      <h2 class="view-title view-title-section text-[var(--ink)]">LLM provider</h2>
+      <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
       <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Where Claude Code routes model requests. Local providers keep everything on-device.
+        One active provider per project — every session routes through the local proxy.
+        <code>/model</code> switches between the configured providers' models in-session.
       </p>
 
       @if (legacyMigrationProvider) {
@@ -74,238 +120,481 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
         </div>
       }
 
-      <!-- Provider cards (2-column grid: anthropic + local) -->
-      <div class="mt-4 grid grid-cols-2 gap-2" role="radiogroup" aria-label="LLM provider">
-        @for (p of providerCards; track p.id) {
+      <!-- ── anthropic row ─────────────────────────────────────────────── -->
+      <div
+        class="mt-4 rounded border"
+        [class]="
+          selectedTarget === 'anthropic'
+            ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+            : 'border-[var(--line)] bg-[var(--bg-1)]'
+        "
+      >
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="selectedTarget === 'anthropic'"
+          class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
+          [class]="
+            selectedTarget === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+          "
+          data-testid="settings-llm-provider-anthropic"
+          (click)="selectProvider('anthropic')"
+        >
+          <span>
+            {{ selectedTarget === 'anthropic' ? '● ' : '○ ' }}anthropic
+            <span class="text-[10px] text-[var(--ink-mute)]"> · cloud</span>
+          </span>
+          <span class="flex items-center gap-2" data-testid="auth-status-row">
+            @if (apiKeyConfigured || oauthAuthenticated) {
+              <span class="pill green" data-testid="auth-status-value">● connected</span>
+              <span class="pill green" data-testid="auth-status-method">{{
+                apiKeyConfigured ? 'api key' : 'oauth'
+              }}</span>
+            } @else {
+              <span class="pill amber" data-testid="auth-status-value">not configured</span>
+            }
+          </span>
+        </button>
+
+        @if (selectedTarget === 'anthropic') {
+          <div class="border-t border-[var(--line)] px-3 py-3">
+            <!-- Auth method: subscription (oauth) vs raw API key -->
+            <div
+              class="flex overflow-hidden rounded border border-[var(--line)]"
+              role="radiogroup"
+              aria-label="Authentication method"
+            >
+              <button
+                type="button"
+                role="radio"
+                [attr.aria-checked]="authMethod === 'oauth'"
+                class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
+                [class]="
+                  authMethod === 'oauth'
+                    ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                    : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+                "
+                data-testid="settings-auth-method-oauth"
+                (click)="authMethod = 'oauth'"
+              >
+                subscription (oauth · claude.ai)
+              </button>
+              <button
+                type="button"
+                role="radio"
+                [attr.aria-checked]="authMethod === 'api_key'"
+                class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+                [class]="
+                  authMethod === 'api_key'
+                    ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                    : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+                "
+                data-testid="settings-auth-method-api-key"
+                (click)="authMethod = 'api_key'"
+              >
+                api key
+              </button>
+            </div>
+
+            @if (authMethod === 'api_key') {
+              <div class="mt-3">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="api-key-input"
+                  >anthropic_api_key</label
+                >
+                <input
+                  id="api-key-input"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  [value]="anthropicApiKeyInput"
+                  (input)="anthropicApiKeyInput = $any($event.target).value"
+                  placeholder="sk-ant-..."
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-api-key"
+                />
+              </div>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  data-testid="settings-api-key-save"
+                  (click)="saveAnthropicApiKey()"
+                  [disabled]="anthropicApiKeySaving || !anthropicApiKeyInput"
+                >
+                  {{ anthropicApiKeySaving ? 'saving...' : 'save key' }}
+                </button>
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  data-testid="settings-api-key-remove"
+                  (click)="deleteAnthropicApiKey()"
+                  [disabled]="!apiKeyConfigured"
+                >
+                  remove key
+                </button>
+                @if (anthropicApiKeySaved) {
+                  <span class="mono text-[11px] text-[var(--green)]">saved!</span>
+                }
+              </div>
+            }
+            @if (authMethod === 'oauth' && activeProject(); as project) {
+              <div class="mt-3">
+                <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
+              </div>
+            }
+
+            <!-- Default model -->
+            <div class="mt-3">
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                for="llm-model"
+                >default_model</label
+              >
+              <select
+                id="llm-model"
+                [value]="model"
+                (change)="model = $any($event.target).value"
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-model"
+              >
+                <!-- Empty value = no ANTHROPIC_MODEL injected; the label
+                     resolves the Opus family from the SSOT (three-state:
+                     in-flight keeps the option blank-but-valid). -->
+                @if (defaultAnthropicLabel() === undefined) {
+                  <option value=""></option>
+                } @else if (defaultAnthropicLabel(); as label) {
+                  <option value="">Default — {{ label }} (switchable via /model)</option>
+                } @else {
+                  <option value="">(default — let Claude Code choose)</option>
+                }
+                @if (latestAnthropicModels().length > 0) {
+                  <optgroup label="Latest">
+                    @for (m of latestAnthropicModels(); track m.id) {
+                      <option [value]="m.id">{{ formatModelLabel(m) }}</option>
+                    }
+                  </optgroup>
+                }
+                @if (legacyAnthropicModels().length > 0) {
+                  <optgroup label="Legacy">
+                    @for (m of legacyAnthropicModels(); track m.id) {
+                      <option [value]="m.id">{{ formatModelLabel(m) }}</option>
+                    }
+                  </optgroup>
+                }
+                @if (model && !modelInCatalog(model)) {
+                  <option [value]="model">{{ model }} (not in catalog)</option>
+                }
+              </select>
+            </div>
+          </div>
+        }
+      </div>
+
+      <!-- ── local row ─────────────────────────────────────────────────── -->
+      <div
+        class="mt-2 rounded border"
+        [class]="
+          selectedTarget === 'local'
+            ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+            : 'border-[var(--line)] bg-[var(--bg-1)]'
+        "
+      >
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="selectedTarget === 'local'"
+          class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
+          [class]="selectedTarget === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+          data-testid="settings-llm-provider-local"
+          (click)="selectProvider('local')"
+        >
+          <span>
+            {{ selectedTarget === 'local' ? '● ' : '○ ' }}local
+            <span class="text-[10px] text-[var(--ink-mute)]"> · own server</span>
+          </span>
+          @if (selectedTarget !== 'local' && baseUrlByProviderView()) {
+            <span class="mono text-[10px] text-[var(--ink-mute)]">{{
+              baseUrlByProviderView()
+            }}</span>
+          }
+        </button>
+
+        @if (selectedTarget === 'local') {
+          <div class="border-t border-[var(--line)] px-3 py-3">
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-base-url"
+                  >base_url</label
+                >
+                <input
+                  id="llm-base-url"
+                  type="text"
+                  [value]="baseUrl"
+                  (input)="baseUrl = $any($event.target).value"
+                  [placeholder]="defaultBaseUrl"
+                  (blur)="discoverModels(false)"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-base-url"
+                />
+              </div>
+              <div>
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-model"
+                  >default_model</label
+                >
+                @if (discoveryState.kind === 'ready') {
+                  <select
+                    id="llm-model"
+                    [value]="model"
+                    (change)="onLocalModelChange($any($event.target).value)"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-llm-model"
+                  >
+                    @if (model && !discoveredModelIds().includes(model)) {
+                      <option [value]="model">{{ model }} (not on server)</option>
+                    }
+                    @for (m of discoveryState.models; track m.id) {
+                      <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
+                    }
+                  </select>
+                } @else {
+                  <input
+                    id="llm-model"
+                    type="text"
+                    [value]="model"
+                    (input)="model = $any($event.target).value"
+                    [placeholder]="modelPlaceholder()"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-llm-model"
+                  />
+                }
+                @if (discoveryState.kind === 'failed') {
+                  <p
+                    class="mono mt-1 text-[11px] text-[var(--amber)]"
+                    data-testid="settings-llm-discovery-error"
+                  >
+                    {{ discoveryFailureMessage() }}
+                  </p>
+                }
+                @if (discoveryState.kind === 'in-flight') {
+                  <p
+                    class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+                    data-testid="settings-llm-discovering"
+                  >
+                    Probing {{ discoveryState.url }}...
+                  </p>
+                }
+              </div>
+            </div>
+
+            <button
+              type="button"
+              data-testid="settings-llm-refresh"
+              class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+              [disabled]="discoveryState.kind === 'in-flight'"
+              (click)="discoverModels(true)"
+              appTooltip="Fetch the list of models from the server"
+              placement="top"
+            >
+              @if (discoveryState.kind === 'in-flight') {
+                &#8635; discovering...
+              } @else {
+                &#8635; discover models
+              }
+            </button>
+
+            @if (messagesEndpointOk === false) {
+              <div
+                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-messages-endpoint-warning"
+              >
+                <strong>Warning:</strong> the server returned a model list but did not respond to
+                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
+                will fail.
+              </div>
+            }
+
+            <!-- Bearer for servers requiring auth; on a load-balanced cluster
+                 a unique per-user value also pins session stickiness. -->
+            <div class="mt-3">
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                for="llm-api-key"
+                >api_key (optional)</label
+              >
+              <input
+                id="llm-api-key"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                [value]="apiKey"
+                (input)="onApiKeyInput($any($event.target).value)"
+                [placeholder]="
+                  hasApiKey
+                    ? '••••• (key saved — type to replace, clear to remove)'
+                    : 'Bearer token (e.g. sk-…)'
+                "
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-api-key"
+              />
+            </div>
+
+            <details class="mt-3">
+              <summary
+                class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              >
+                advanced
+              </summary>
+              <div class="mt-2">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-custom-headers"
+                  >custom_headers</label
+                >
+                <textarea
+                  id="llm-custom-headers"
+                  rows="3"
+                  spellcheck="false"
+                  [value]="customHeaders"
+                  (input)="onCustomHeadersInput($any($event.target).value)"
+                  [placeholder]="
+                    hasCustomHeaders
+                      ? '••••• (saved — type to replace, clear to remove)'
+                      : 'X-Tenant-ID: foo'
+                  "
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-custom-headers"
+                ></textarea>
+                <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+                  One header per line, <code>Name: Value</code>. Cannot set Authorization. Sessions
+                  with custom headers bypass the proxy (no usage tracking).
+                </p>
+              </div>
+            </details>
+          </div>
+        }
+      </div>
+
+      <!-- ── remote provider rows (ADR-073) ────────────────────────────── -->
+      @for (entry of extraProviders; track entry.id) {
+        <div
+          class="mt-2 rounded border"
+          [class]="
+            selectedTarget === entry.id
+              ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+              : 'border-[var(--line)] bg-[var(--bg-1)]'
+          "
+          [attr.data-testid]="'settings-llm-extra-' + entry.id"
+        >
           <button
             type="button"
             role="radio"
-            [attr.aria-checked]="provider === p.id"
-            [attr.data-testid]="'settings-llm-provider-' + p.id"
-            class="rounded border px-3 py-2 text-left transition-colors"
-            [class]="
-              provider === p.id
-                ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
-                : 'border-[var(--line)] bg-[var(--bg-1)] hover:border-[var(--line-strong)]'
-            "
-            (click)="selectProvider(p.id)"
+            [attr.aria-checked]="selectedTarget === entry.id"
+            class="mono flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium"
+            [class]="selectedTarget === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+            [attr.data-testid]="'settings-llm-extra-select-' + entry.id"
+            (click)="onExtraHeaderClick(entry)"
           >
-            <div
-              class="mono text-[11px] font-medium"
-              [class]="provider === p.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
-            >
-              {{ p.label }}
-            </div>
-            <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">{{ p.tag }}</div>
+            {{ selectedTarget === entry.id ? '●' : '○' }} {{ entry.id }}
+            <span class="text-[10px] text-[var(--ink-mute)]">
+              · {{ entry.kind === 'open_router' ? 'openrouter' : 'openai-compatible' }}
+            </span>
           </button>
-        }
-      </div>
-
-      <!-- BASE_URL + DEFAULT_MODEL row -->
-      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div>
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="llm-base-url"
-            >base_url</label
-          >
-          <input
-            id="llm-base-url"
-            type="text"
-            [value]="baseUrl"
-            (input)="baseUrl = $any($event.target).value"
-            [placeholder]="defaultBaseUrl || anthropicBaseUrlHint()"
-            [readOnly]="provider === 'anthropic'"
-            (blur)="discoverModels(false)"
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-            data-testid="settings-llm-base-url"
-          />
-        </div>
-        <div>
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="llm-model"
-            >default_model</label
-          >
-          @if (provider !== 'anthropic' && discoveryState.kind === 'ready') {
-            <select
-              id="llm-model"
-              [value]="model"
-              (change)="onLocalModelChange($any($event.target).value)"
-              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-              data-testid="settings-llm-model"
+          @if (expandedExtraId === entry.id) {
+            <div
+              class="grid grid-cols-1 gap-2 border-t border-[var(--line)] px-3 py-3 md:grid-cols-2"
             >
-              @if (model && !discoveredModelIds().includes(model)) {
-                <option [value]="model">{{ model }} (not on server)</option>
+              @if (entry.kind === 'open_ai_compat') {
+                <input
+                  type="text"
+                  [value]="entry.baseUrl"
+                  (input)="entry.baseUrl = $any($event.target).value"
+                  placeholder="base_url (e.g. https://api.example.com/v1)"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  [attr.data-testid]="'settings-llm-extra-url-' + entry.id"
+                />
               }
-              @for (m of discoveryState.models; track m.id) {
-                <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
-              }
-            </select>
-          } @else if (provider === 'anthropic') {
-            <select
-              id="llm-model"
-              [value]="model"
-              (change)="model = $any($event.target).value"
-              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-              data-testid="settings-llm-model"
-            >
-              <!-- Empty value = no ANTHROPIC_MODEL injected; Claude Code
-                   picks its built-in default via ANTHROPIC_DEFAULT_OPUS_MODEL
-                   (set by compose::apply_llm_config). The label resolves the
-                   Opus family from the SSOT so the user knows what they
-                   actually get. Three-state render: undefined keeps the
-                   option blank-but-valid while the SSOT label is in flight
-                   (so a model=null config still has something selectable
-                   and we do not flash the misleading generic wording);
-                   string renders the dynamic hint; null (resolved without
-                   a label, e.g. older backend) falls back to the generic
-                   wording. -->
-              @if (defaultAnthropicLabel() === undefined) {
-                <option value=""></option>
-              } @else if (defaultAnthropicLabel(); as label) {
-                <option value="">Default — {{ label }} (switchable via /model)</option>
+              @if (entry.kind === 'open_router' && entry.models && entry.models.length > 0) {
+                <div class="flex items-center gap-2">
+                  <!-- Selection lives on the options: a [value] binding on the
+                       select applies before the async catalog options exist
+                       and the browser silently falls back to the first row. -->
+                  <select
+                    (change)="onExtraModelSelect(entry, $any($event.target).value)"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
+                  >
+                    <option value="" disabled [selected]="!entry.model">select model…</option>
+                    @if (entry.model && !catalogHasModel(entry, entry.model)) {
+                      <option [value]="entry.model" [selected]="true">{{ entry.model }}</option>
+                    }
+                    @for (m of entry.models; track m.id) {
+                      <option [value]="m.id" [selected]="m.id === entry.model">
+                        {{ m.id
+                        }}{{ m.context_tokens ? ' (' + ctxLabel(m.context_tokens) + ')' : '' }}
+                      </option>
+                    }
+                  </select>
+                  <button
+                    type="button"
+                    class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                    [disabled]="entry.discovering"
+                    (click)="discoverExtraModels(entry)"
+                    [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
+                  >
+                    {{ entry.discovering ? '…' : '↻' }}
+                  </button>
+                </div>
               } @else {
-                <option value="">(default — let Claude Code choose)</option>
-              }
-              @if (latestAnthropicModels().length > 0) {
-                <optgroup label="Latest">
-                  @for (m of latestAnthropicModels(); track m.id) {
-                    <option [value]="m.id">{{ formatModelLabel(m) }}</option>
+                <div class="flex items-center gap-2">
+                  <input
+                    type="text"
+                    [value]="entry.model"
+                    (input)="entry.model = $any($event.target).value"
+                    [placeholder]="
+                      entry.kind === 'open_router'
+                        ? 'model (e.g. qwen/qwen3-coder)'
+                        : 'model (e.g. gpt-5.2)'
+                    "
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
+                  />
+                  @if (entry.kind === 'open_router') {
+                    <button
+                      type="button"
+                      class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                      [disabled]="entry.discovering"
+                      (click)="discoverExtraModels(entry)"
+                      [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
+                    >
+                      {{ entry.discovering ? '…' : '↻' }}
+                    </button>
                   }
-                </optgroup>
+                </div>
               }
-              @if (legacyAnthropicModels().length > 0) {
-                <optgroup label="Legacy">
-                  @for (m of legacyAnthropicModels(); track m.id) {
-                    <option [value]="m.id">{{ formatModelLabel(m) }}</option>
-                  }
-                </optgroup>
-              }
-              <!-- Preserve a previously-saved model that the SSOT no longer
-                   carries (e.g. config persisted before a model was
-                   deprecated) so the user sees what's actually in their
-                   config rather than an empty selection. -->
-              @if (model && !modelInCatalog(model)) {
-                <option [value]="model">{{ model }} (not in catalog)</option>
-              }
-            </select>
-          } @else {
-            <input
-              id="llm-model"
-              type="text"
-              [value]="model"
-              (input)="model = $any($event.target).value"
-              [placeholder]="modelPlaceholder()"
-              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-              data-testid="settings-llm-model"
-            />
-          }
-          @if (discoveryState.kind === 'failed') {
-            <p
-              class="mono mt-1 text-[11px] text-[var(--amber)]"
-              data-testid="settings-llm-discovery-error"
-            >
-              {{ discoveryFailureMessage() }}
-            </p>
-          }
-          @if (discoveryState.kind === 'in-flight') {
-            <p
-              class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-              data-testid="settings-llm-discovering"
-            >
-              Probing {{ discoveryState.url }}...
-            </p>
+              <input
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                [value]="entry.keyInput"
+                (input)="onExtraKeyInput(entry, $any($event.target).value)"
+                [placeholder]="
+                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
+                "
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
+              />
+            </div>
           }
         </div>
-      </div>
-
-      @if (provider !== 'anthropic') {
-        <!-- API key (optional) — Bearer token for servers requiring auth. -->
-        <div class="mt-4">
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="llm-api-key"
-            >api_key (optional)</label
-          >
-          <input
-            id="llm-api-key"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            [value]="apiKey"
-            (input)="onApiKeyInput($any($event.target).value)"
-            [placeholder]="
-              hasApiKey
-                ? '••••• (key saved — type to replace, clear to remove)'
-                : 'Bearer token (e.g. sk-…)'
-            "
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-            data-testid="settings-llm-api-key"
-          />
-        </div>
-
-        <!-- Custom headers (optional) — Azure APIM, corporate gateways. -->
-        <div class="mt-3">
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="llm-custom-headers"
-            >custom_headers (optional)</label
-          >
-          <textarea
-            id="llm-custom-headers"
-            rows="3"
-            spellcheck="false"
-            [value]="customHeaders"
-            (input)="onCustomHeadersInput($any($event.target).value)"
-            [placeholder]="
-              hasCustomHeaders
-                ? '••••• (saved — type to replace, clear to remove)'
-                : 'X-Tenant-ID: foo
-Ocp-Apim-Subscription-Key: bar'
-            "
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-            data-testid="settings-llm-custom-headers"
-          ></textarea>
-          <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-            One header per line, format <code>Name: Value</code>. Cannot set Authorization (use
-            api_key) or hop-by-hop headers.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          data-testid="settings-llm-refresh"
-          class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
-          [disabled]="discoveryState.kind === 'in-flight'"
-          (click)="discoverModels(true)"
-          appTooltip="Fetch the list of models from the server"
-          placement="top"
-        >
-          @if (discoveryState.kind === 'in-flight') {
-            &#8635; discovering...
-          } @else {
-            &#8635; discover models
-          }
-        </button>
-        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-          Sends a 1-token test request to verify chat endpoint compatibility.
-        </p>
-
-        @if (messagesEndpointOk === false) {
-          <div
-            class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
-            data-testid="settings-llm-messages-endpoint-warning"
-          >
-            <strong>Warning:</strong> the server returned a model list but did not respond to
-            <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat will
-            fail. Use a server with Anthropic Messages support (Ollama 0.14+, LM Studio 0.4.1+,
-            llama.cpp Jan 2026+, or LiteLLM via <code>/anthropic</code>).
-          </div>
-        }
       }
 
-      <div class="mt-3 flex items-center gap-3">
+      <div class="mt-4 flex items-center gap-3">
         <button
           type="button"
           class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -354,6 +643,44 @@ export class LlmProviderComponent implements OnInit {
   /** Result of the latest discovery probe — populated for `provider==="local"`. */
   messagesEndpointOk: boolean | null = null;
 
+  /** Active project — drives the auth-status load and the OAuth terminal. */
+  readonly activeProject = input<string | null>(null);
+
+  /**
+   * Anthropic auth (absorbed from the former Authentication section):
+   * subscription OAuth is the recommended default; the api-key tab is one
+   * click away. The key VALUE goes through `save_api_key` into
+   * `secrets/<project>/anthropic_api_key` — never through LlmConfig.
+   */
+  authMethod: 'oauth' | 'api_key' = 'oauth';
+  anthropicApiKeyInput = '';
+  anthropicApiKeySaving = false;
+  anthropicApiKeySaved = false;
+  apiKeyConfigured = false;
+  oauthAuthenticated = false;
+
+  /**
+   * Remote (proxy-routed) providers — ADR-073. Parsed from the v2
+   * `providers` list on load (anthropic/local entries stay on the cards);
+   * Save sends the reconstructed full set.
+   */
+  extraProviders: ExtraProviderEdit[] = fixedExtraRows();
+
+  /**
+   * Which target is active: `'anthropic'`, `'local'`, or an extra provider
+   * id. The cards and the extra rows share this one radio state.
+   */
+  selectedTarget = 'anthropic';
+
+  /**
+   * `provider_id|model` snapshot taken on load. When Save leaves it
+   * unchanged, only the proxy config changed (keys, added/removed
+   * providers) — a litellm-only hot reload suffices and the running claude
+   * session survives. Any change to it requires the full project restart
+   * (the claude env carries the active provider/model).
+   */
+  private loadedActiveKey = '';
+
   /**
    * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) detected in the
    * persisted config. `null` when the config carries the current `local`
@@ -374,7 +701,6 @@ export class LlmProviderComponent implements OnInit {
   private loadedLocalContextTokens: number | null = null;
 
   /** Cards rendered at the top of the section (mockup-aligned). */
-  readonly providerCards: readonly ProviderCard[] = PROVIDER_CARDS;
 
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
   discoveryState: DiscoveryState = { kind: 'idle' };
@@ -402,6 +728,12 @@ export class LlmProviderComponent implements OnInit {
    */
   private baseUrlByProvider: Record<string, string> = {};
 
+  /** Loaded `local` entry — passed through Save while the card is inactive. */
+  private loadedLocalEntry: LlmProviderEntry | null = null;
+
+  /** Loaded anthropic model — preserved when another provider is active. */
+  private loadedAnthropicModel: string | null = null;
+
   /**
    * Cache of the backend-authoritative default base URL per provider.
    * Populated on ngOnInit via `get_default_base_url` for each local provider
@@ -416,6 +748,15 @@ export class LlmProviderComponent implements OnInit {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+
+  /** Reloads the Anthropic auth status whenever the active project changes. */
+  constructor() {
+    effect(() => {
+      if (this.activeProject()) {
+        void this.loadAuthStatus();
+      }
+    });
+  }
   private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
   private log = inject(LoggerService);
@@ -578,39 +919,143 @@ export class LlmProviderComponent implements OnInit {
    * Click handler for provider cards. Routes through the existing
    * `onProviderChange` so URL caching, default fetching, and discovery probe
    * gating all stay intact — the cards are just a different control surface.
-   * @param id - Provider identifier matching a `ProviderCard.id`.
+   * @param id - Card-class provider id (`anthropic` | `local`).
    */
-  async selectProvider(id: ProviderCard['id']): Promise<void> {
+  async selectProvider(id: 'anthropic' | 'local'): Promise<void> {
+    this.selectedTarget = id;
     if (this.provider === id) return;
     this.provider = id;
     await this.onProviderChange();
   }
 
-  /** Placeholder shown for the read-only Anthropic base URL field. */
-  anthropicBaseUrlHint(): string {
-    return this.provider === 'anthropic' ? 'https://api.anthropic.com' : '';
+  /** Currently expanded (editable) remote row — independent of the radio. */
+  expandedExtraId: string | null = null;
+
+  /**
+   * Whole-bar click: first click activates the row (and expands it);
+   * a click on the already-active row toggles the edit panel.
+   * @param entry - The clicked row.
+   */
+  onExtraHeaderClick(entry: ExtraProviderEdit): void {
+    if (this.selectedTarget !== entry.id) {
+      this.selectExtraProvider(entry);
+    } else {
+      this.toggleExtraExpanded(entry);
+    }
+  }
+
+  /**
+   * Makes the row the active provider (and expands it).
+   * @param entry - The selected row.
+   */
+  selectExtraProvider(entry: ExtraProviderEdit): void {
+    this.selectedTarget = entry.id;
+    this.expandedExtraId = entry.id;
+    this.maybeDiscover(entry);
+  }
+
+  /**
+   * Toggles the row's edit panel without changing the active provider.
+   * @param entry - The toggled row.
+   */
+  toggleExtraExpanded(entry: ExtraProviderEdit): void {
+    this.expandedExtraId = this.expandedExtraId === entry.id ? null : entry.id;
+    if (this.expandedExtraId === entry.id) {
+      this.maybeDiscover(entry);
+    }
+  }
+
+  private maybeDiscover(entry: ExtraProviderEdit): void {
+    if (entry.kind === 'open_router' && entry.models === null && !entry.discovering) {
+      void this.discoverExtraModels(entry);
+    }
+  }
+
+  /**
+   * Fetches the OpenRouter catalog (host-side, filtered to tool-capable
+   * models). Failure keeps the free-text input — the catalog is a
+   * convenience, not a gate.
+   * @param entry - The openrouter row to populate.
+   */
+  async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
+    if (entry.kind !== 'open_router' || entry.discovering) {
+      return;
+    }
+    entry.discovering = true;
+    this.cdr.markForCheck();
+    try {
+      const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
+        args: { provider: 'openrouter', baseUrl: '' },
+      });
+      const models = res?.models ?? [];
+      const row = this.extraProviders.find((p) => p.id === entry.id);
+      if (row && models.length > 0) {
+        row.models = models;
+        if (row.model) {
+          row.contextTokens =
+            models.find((m) => m.id === row.model)?.context_tokens ?? row.contextTokens;
+        }
+      }
+    } catch (e: unknown) {
+      this.log.warn(
+        `openrouter catalog discovery failed: ${e instanceof Error ? e.message : String(e)}`
+      );
+    } finally {
+      entry.discovering = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /**
+   * Dropdown selection handler for an openrouter row — records the model
+   * and its catalog context window.
+   * @param entry - The edited row.
+   * @param modelId - Selected catalog model id.
+   */
+  onExtraModelSelect(entry: ExtraProviderEdit, modelId: string): void {
+    entry.model = modelId;
+    entry.contextTokens = entry.models?.find((m) => m.id === modelId)?.context_tokens ?? null;
+  }
+
+  /**
+   * Whether the discovered catalog contains `modelId` — drives the extra
+   * `<option>` preserving a previously saved model that left the catalog.
+   * @param entry - The row whose catalog to check.
+   * @param modelId - Model id to look up.
+   */
+  catalogHasModel(entry: ExtraProviderEdit, modelId: string): boolean {
+    return !!entry.models?.some((m) => m.id === modelId);
+  }
+
+  /**
+   * Context window as a short label (`128k`, `1M`) for dropdown options.
+   * @param tokens - Context-token count from the catalog.
+   */
+  ctxLabel(tokens: number): string {
+    return formatContextLabel(tokens);
+  }
+
+  /**
+   * Key-field input handler for a remote provider row.
+   * @param entry - The edited row.
+   * @param value - Current input value.
+   */
+  onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
+    entry.keyInput = value;
+    entry.keyTouched = true;
   }
 
   /**
    * Returns a placeholder model name based on the selected LLM provider. For
    * Anthropic it derives the hint from the SSOT catalog (latest non-Opus, i.e.
-   * the everyday Sonnet) rather than a hard-coded string, mirroring how
-   * `baseUrlPlaceholder()` defers to the backend — empty while the catalog
-   * loads so we never flash a stale model id.
+   * the everyday Sonnet) rather than a hard-coded string — empty while the
+   * catalog loads so we never flash a stale model id.
    */
   modelPlaceholder(): string {
     if (this.provider === 'anthropic') {
       return this.anthropicModels.latestEverydayModelId() ?? '';
     }
     return 'llama3.3';
-  }
-
-  /** Returns a fallback base URL placeholder when backend default_base_url is unavailable. */
-  baseUrlPlaceholder(): string {
-    // Backend is SSOT for known-provider defaults (see default_base_url in
-    // compose.rs); this is just a fallback hint if the backend response
-    // arrives late.
-    return '';
   }
 
   /**
@@ -663,12 +1108,20 @@ export class LlmProviderComponent implements OnInit {
     if (previousProvider !== 'anthropic' && this.baseUrl) {
       this.baseUrlByProvider[previousProvider] = this.baseUrl;
     }
+    // Snapshot the anthropic model when leaving the card so it survives the
+    // round-trip and is restored below (symmetric with loadedLocalEntry).
+    if (previousProvider === 'anthropic' && this.model) {
+      this.loadedAnthropicModel = this.model;
+    }
     this.lastKnownProvider = this.provider;
     this.discoveryCounter++;
     // Clear stale state synchronously so the UI reflects the provider change
     // immediately — even while the async default-URL fetch is in-flight.
-    // Model is provider-specific; clearing prevents stale options on the new provider.
-    this.model = '';
+    // Model is provider-specific; restore the target's persisted one, else clear.
+    this.model =
+      this.provider === 'anthropic'
+        ? (this.loadedAnthropicModel ?? '')
+        : (this.loadedLocalEntry?.model ?? '');
     this.discoveryState = { kind: 'idle' };
     this.providerChange.emit(this.provider);
     this.cdr.markForCheck();
@@ -734,10 +1187,10 @@ export class LlmProviderComponent implements OnInit {
         customHeaders?: string | null;
       } = { provider: this.provider, baseUrl: effectiveUrl };
       if (this.apiKeyTouched) {
-        args.apiKey = this.apiKey.trim() === '' ? null : this.apiKey;
+        args.apiKey = nullIfEmpty(this.apiKey);
       }
       if (this.customHeadersTouched) {
-        args.customHeaders = this.customHeaders.trim() === '' ? null : this.customHeaders;
+        args.customHeaders = nullIfEmpty(this.customHeaders);
       }
       const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
         args,
@@ -774,23 +1227,229 @@ export class LlmProviderComponent implements OnInit {
     }
   }
 
+  /** Collapsed-row summary of the local server URL. */
+  baseUrlByProviderView(): string {
+    return this.baseUrl || this.baseUrlByProvider['local'] || '';
+  }
+
+  /** Loads the current Anthropic authentication status from the backend. */
+  async loadAuthStatus(): Promise<void> {
+    const project = this.activeProject();
+    if (!project) return;
+    try {
+      const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
+      this.apiKeyConfigured = status.api_key_configured;
+      this.oauthAuthenticated = status.oauth_authenticated;
+      this.projectState.applyAuthStatus(status);
+    } catch {
+      // Auth status check failed — container may not be running.
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Saves the Anthropic API key to the project's secrets directory. */
+  async saveAnthropicApiKey(): Promise<void> {
+    const project = this.activeProject();
+    if (!project || !this.anthropicApiKeyInput) return;
+    this.anthropicApiKeySaving = true;
+    this.anthropicApiKeySaved = false;
+    this.errorOccurred.emit('');
+    try {
+      await this.tauri.invoke('save_api_key', {
+        project,
+        apiKey: this.anthropicApiKeyInput,
+      });
+      this.anthropicApiKeySaved = true;
+      this.anthropicApiKeyInput = '';
+      await this.loadAuthStatus();
+      setTimeout(() => {
+        this.anthropicApiKeySaved = false;
+        this.cdr.markForCheck();
+      }, 2000);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
+    this.anthropicApiKeySaving = false;
+    this.cdr.markForCheck();
+  }
+
+  /** Removes the stored Anthropic API key for the active project. */
+  async deleteAnthropicApiKey(): Promise<void> {
+    const project = this.activeProject();
+    if (!project) return;
+    this.errorOccurred.emit('');
+    try {
+      await this.tauri.invoke('delete_api_key', { project });
+      await this.loadAuthStatus();
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * OAuth terminal completion — refresh the status pills.
+   * @param _success - whether the login succeeded (status reload decides).
+   */
+  async onOAuthDone(_success: boolean): Promise<void> {
+    await this.loadAuthStatus();
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Builds the full v2 provider set (ADR-073): the two cards map to the
+   * `anthropic`/`local` entries, remote rows append verbatim.
+   * @param anthropicHasApiKey - Whether the project has an Anthropic API
+   * key configured (classifies the anthropic entry's kind).
+   */
+  private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
+    // Resolve the active target once — it's stable for this invocation.
+    const target = this.effectiveTarget();
+    // The anthropic entry carries the model too — symmetric with local/remote.
+    // When the anthropic card is active `this.model` is authoritative; when
+    // another provider is active the card field was cleared, so fall back to
+    // the snapshot taken on load (otherwise an explicit Anthropic model is
+    // wiped the first time the user activates another provider and saves).
+    const anthropicModel = target === 'anthropic' ? this.model : this.loadedAnthropicModel;
+    const providers: LlmProviderEntry[] = [
+      {
+        id: 'anthropic',
+        kind: anthropicHasApiKey ? 'anthropic_api_key' : 'anthropic_oauth',
+        model: anthropicModel || null,
+        has_api_key: anthropicHasApiKey,
+      },
+    ];
+    // When the local card is NOT being edited, its loaded entry passes
+    // through verbatim — rebuilding it from the (then anthropic- or
+    // extra-derived) card fields silently erased base_url and model.
+    const editingLocal = target === 'local';
+    if (!editingLocal && this.loadedLocalEntry) {
+      providers.push({ ...this.loadedLocalEntry });
+    } else {
+      const localUrl = editingLocal
+        ? this.baseUrl || this.defaultBaseUrl
+        : this.baseUrlByProvider['local'] || '';
+      if (localUrl) {
+        providers.push({
+          id: 'local',
+          kind: 'local',
+          base_url: localUrl,
+          model: (editingLocal ? this.model : this.loadedLocalEntry?.model) || null,
+          has_api_key: this.hasApiKey || (this.apiKeyTouched && this.apiKey.trim() !== ''),
+          has_custom_headers:
+            this.hasCustomHeaders ||
+            (this.customHeadersTouched && this.customHeaders.trim() !== ''),
+          context_tokens: this.resolveContextTokensForSave(),
+        });
+      }
+    }
+    for (const extra of this.extraProviders) {
+      // The rows are permanent UI; only configured ones are persisted (a
+      // bare compat row would also fail the backend's base-URL validation).
+      // hasKey reflects the post-save truth: an edited-then-cleared field
+      // drops the key, so the entry must record has_api_key:false (otherwise
+      // the rendered config keeps an os.environ ref the entrypoint can't fill).
+      const hasKey = extra.keyTouched ? extra.keyInput.trim() !== '' : extra.hasKey;
+      const configured =
+        extra.kind === 'open_ai_compat'
+          ? extra.baseUrl.trim() !== ''
+          : hasKey || extra.model.trim() !== '';
+      if (!configured) {
+        continue;
+      }
+      providers.push({
+        id: extra.id,
+        kind: extra.kind,
+        base_url: extra.kind === 'open_ai_compat' ? extra.baseUrl || null : null,
+        model: extra.model || null,
+        has_api_key: hasKey,
+        context_tokens: extra.contextTokens,
+      });
+    }
+    return providers;
+  }
+
+  /**
+   * Resolves the radio state to a concrete target id. When `selectedTarget`
+   * points at no extra row, the cards win — `provider` decides (covers
+   * programmatic `provider` mutation that bypasses `selectProvider`).
+   */
+  private effectiveTarget(): string {
+    if (this.extraProviders.some((p) => p.id === this.selectedTarget)) {
+      return this.selectedTarget;
+    }
+    return this.provider === 'anthropic' ? 'anthropic' : 'local';
+  }
+
+  /**
+   * Finds a permanent remote row by exact id, falling back to kind so entries
+   * saved under a legacy generated id (`openrouter-2`, suffixed compat) still
+   * land on their fixed row.
+   * @param id - Exact provider id to match first.
+   * @param kind - Optional kind to fall back on when no id matches.
+   * @returns The matching row, or undefined.
+   */
+  private findExtraRow(id: string, kind?: LlmProviderKind): ExtraProviderEdit | undefined {
+    return (
+      this.extraProviders.find((r) => r.id === id) ??
+      (kind ? this.extraProviders.find((r) => r.kind === kind) : undefined)
+    );
+  }
+
+  /** The active selection Save will persist, derived from the radio state. */
+  private buildActive(): LlmActive {
+    const target = this.effectiveTarget();
+    const extra = this.extraProviders.find((p) => p.id === target);
+    if (extra) {
+      return { provider_id: extra.id, model: extra.model || null };
+    }
+    return {
+      provider_id: target,
+      model: this.model || null,
+    };
+  }
+
   /** Persists the LLM provider configuration to the backend. */
   async saveConfig(): Promise<void> {
     // Surface the model-required error at Save time. compose::apply_llm_config
     // also rejects this, but its error only surfaces at container start —
     // a user who clicks Save sees no immediate feedback otherwise.
-    if (this.provider !== 'anthropic' && !this.model) {
+    const localIsActive = this.effectiveTarget() === 'local';
+    if (this.provider !== 'anthropic' && !this.model && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
+      return;
+    }
+    const activeExtra = this.extraProviders.find((p) => p.id === this.effectiveTarget());
+    if (activeExtra && !activeExtra.model.trim()) {
+      this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a model name`);
+      return;
+    }
+    if (activeExtra?.kind === 'open_ai_compat' && !activeExtra.baseUrl.trim()) {
+      this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a base URL`);
       return;
     }
     this.saving = true;
     this.saved = false;
     try {
-      // If the user left baseUrl blank for a local provider, fall back to the
-      // provider default so compose can inject ANTHROPIC_BASE_URL. Anthropic
-      // ignores baseUrl entirely, so null is correct there.
+      const active = this.buildActive();
+      // If the user left baseUrl blank for the active local card, fall back to
+      // the provider default so compose can inject ANTHROPIC_BASE_URL. Anthropic
+      // and remote rows ignore the flat baseUrl, so null is correct there.
       const effectiveBaseUrl =
-        this.provider === 'anthropic' ? null : this.baseUrl || this.defaultBaseUrl || null;
+        active.provider_id === 'local' ? this.baseUrl || this.defaultBaseUrl || null : null;
+      // Input signal — the single project source (drives the restart below).
+      const project = this.activeProject();
+      // Reuse the cached auth state (loadAuthStatus) — no redundant round-trip.
+      const anthropicHasApiKey = this.apiKeyConfigured;
+      // The flat provider/model/base_url fields are the legacy (kill-switch
+      // direct path) mirror and drive the backend's model-required gate. When
+      // a card is active they keep the card's provider verbatim (preserving a
+      // legacy alias like `ollama` the user hasn't migrated). When a REMOTE row
+      // is active they must NOT describe the local card's leftover state — send
+      // the remote id (neither 'local' nor 'anthropic', so the model-required
+      // gate doesn't fire); the v2 providers/active blocks carry routing.
+      const activeIsRemote = this.extraProviders.some((p) => p.id === active.provider_id);
+      const flatProvider = activeIsRemote ? active.provider_id : this.provider;
       const update: {
         provider: string;
         model: string | null;
@@ -798,19 +1457,47 @@ export class LlmProviderComponent implements OnInit {
         context_tokens: number | null;
         api_key?: string | null;
         custom_headers?: string | null;
+        providers: LlmProviderEntry[];
+        active: LlmActive;
       } = {
-        provider: this.provider,
-        model: this.model || null,
+        provider: flatProvider,
+        model: active.model ?? null,
         base_url: effectiveBaseUrl,
         context_tokens: this.resolveContextTokensForSave(),
+        providers: this.buildProviderSet(anthropicHasApiKey),
+        active,
       };
       if (this.apiKeyTouched) {
-        update.api_key = this.apiKey.trim() === '' ? null : this.apiKey;
+        update.api_key = nullIfEmpty(this.apiKey);
       }
       if (this.customHeadersTouched) {
-        update.custom_headers = this.customHeaders.trim() === '' ? null : this.customHeaders;
+        update.custom_headers = nullIfEmpty(this.customHeaders);
+      }
+      // Write per-provider keys BEFORE persisting config (ADR-073: values
+      // bypass config.json). A key-write failure throws here, before the
+      // config commit, so the two never end up out of sync. State resets are
+      // deferred until every write + the config save succeed.
+      const touchedExtras = this.extraProviders.filter((e) => e.keyTouched);
+      for (const extra of touchedExtras) {
+        await this.tauri.invoke('set_llm_provider_key', {
+          providerId: extra.id,
+          key: nullIfEmpty(extra.keyInput),
+        });
       }
       await this.tauri.invoke('update_llm_config', { update });
+
+      // Everything persisted — now reset UI state to mirror what was saved.
+      // Mirror exactly what was persisted: if the save dropped the local entry
+      // (e.g. base_url cleared), forget the snapshot too — otherwise the stale
+      // entry would be re-pushed verbatim on the next save and resurrect a
+      // provider the user removed.
+      const savedLocal = update.providers.find((p) => p.id === 'local');
+      this.loadedLocalEntry = savedLocal ? { ...savedLocal } : null;
+      for (const extra of touchedExtras) {
+        extra.hasKey = extra.keyInput.trim() !== '';
+        extra.keyInput = '';
+        extra.keyTouched = false;
+      }
       this.saved = true;
       // Reset touched flags so subsequent saves don't re-send the credentials
       // unless the user edits the fields again. Update the `has_*` flags
@@ -830,7 +1517,26 @@ export class LlmProviderComponent implements OnInit {
       // not after the next session start.
       void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(this.provider);
-      this.projectState.requestRestart();
+      // Restart scope (ADR-073): the active provider/model lives in the
+      // claude env — changing it needs the full project restart. Anything
+      // else (keys, added/removed remote providers) only changes the litellm
+      // config: hot-reload the proxy and keep the claude session running.
+      const activeKey = `${active.provider_id}|${active.model ?? ''}`;
+      if (activeKey === this.loadedActiveKey && project) {
+        try {
+          await this.tauri.invoke('restart_llm_proxy', { project });
+        } catch (e: unknown) {
+          this.log.warn(
+            `restart_llm_proxy failed, falling back to full restart: ${
+              e instanceof Error ? e.message : String(e)
+            }`
+          );
+          this.projectState.requestRestart();
+        }
+      } else {
+        this.projectState.requestRestart();
+      }
+      this.loadedActiveKey = activeKey;
       setTimeout(() => {
         this.saved = false;
         this.cdr.markForCheck();
@@ -894,6 +1600,61 @@ export class LlmProviderComponent implements OnInit {
       if (this.provider !== 'anthropic' && this.baseUrl) {
         this.baseUrlByProvider[this.provider] = this.baseUrl;
       }
+
+      // v2 provider list (ADR-073): anthropic/local entries map onto the
+      // cards (already seeded from the legacy flat fields above, which
+      // sync_llm_legacy_fields keeps coherent); everything else becomes a
+      // remote row.
+      this.loadedLocalEntry = (config.providers ?? []).find((p) => p.id === 'local') ?? null;
+      if (this.loadedLocalEntry?.base_url && !this.baseUrlByProvider['local']) {
+        this.baseUrlByProvider['local'] = this.loadedLocalEntry.base_url;
+      }
+      // Anthropic model snapshot: prefer the v2 entry / active selection, then
+      // fall back to the flat field already seeded into this.model above (the
+      // v1 shape carries the model only there). Never clobber a model the flat
+      // path loaded.
+      const anthropicEntry = (config.providers ?? []).find((p) => p.id === 'anthropic');
+      this.loadedAnthropicModel =
+        anthropicEntry?.model ??
+        (config.active?.provider_id === 'anthropic' ? (config.active?.model ?? null) : null) ??
+        (this.provider === 'anthropic' ? this.model || null : null);
+      if (this.provider === 'anthropic' && this.loadedAnthropicModel) {
+        this.model = this.loadedAnthropicModel;
+      }
+      // Overlay persisted entries onto the two permanent rows (id first,
+      // then kind so entries saved under older generated ids still land).
+      this.extraProviders = fixedExtraRows();
+      for (const p of config.providers ?? []) {
+        if (p.kind !== 'open_router' && p.kind !== 'open_ai_compat') {
+          continue;
+        }
+        const row = this.findExtraRow(p.id, p.kind);
+        if (row) {
+          row.baseUrl = p.base_url ?? '';
+          row.model = p.model ?? '';
+          row.hasKey = !!p.has_api_key;
+          row.contextTokens = p.context_tokens ?? null;
+        }
+      }
+      // Resolve the active remote row, tolerating legacy generated ids
+      // (`openrouter-2`, suffixed compat): match by exact id first, then by
+      // the active entry's kind — the fixed rows absorbed that entry above.
+      const activeId = config.active?.provider_id;
+      const activeEntry = (config.providers ?? []).find((p) => p.id === activeId);
+      const activeRow = activeId ? this.findExtraRow(activeId, activeEntry?.kind) : undefined;
+      if (activeRow) {
+        this.selectedTarget = activeRow.id;
+        this.expandedExtraId = activeRow.id;
+        activeRow.model = config.active?.model ?? activeRow.model;
+        if (activeRow.kind === 'open_router') {
+          void this.discoverExtraModels(activeRow);
+        }
+      } else {
+        this.selectedTarget = this.provider === 'anthropic' ? 'anthropic' : 'local';
+      }
+      this.loadedActiveKey = `${config.active?.provider_id ?? this.selectedTarget}|${
+        config.active?.model ?? config.model ?? ''
+      }`;
       this.providerChange.emit(this.provider);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

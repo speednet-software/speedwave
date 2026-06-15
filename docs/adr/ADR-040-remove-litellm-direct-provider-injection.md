@@ -1,6 +1,6 @@
 # ADR-040: Remove LiteLLM — Direct Local Provider Injection
 
-> **Status:** Accepted
+> **Status:** Superseded in part by [ADR-073](ADR-073-embedded-per-project-litellm-proxy.md) — the "no proxy" decision is reversed under a hardened threat model (pinned hashes, local build, no management plane, per-project network); the credential-handling, SSRF, and repo-config rules of this ADR remain in force. The direct-injection path survives behind the `llm.proxy_enabled` kill-switch until N+2.
 > **Context:** A LiteLLM supply-chain compromise (March 2026) plus native Anthropic Messages support in local LLM servers made the LiteLLM proxy container an unnecessary attack surface.
 
 ## Decision

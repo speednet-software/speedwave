@@ -92,6 +92,12 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_up_recreate(project))
     }
 
+    /// Recreates one built-in compose service without touching the rest of
+    /// the stack (under the per-project lock) — ADR-073 litellm hot-reload.
+    pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
+        with_acquired(project, || self.inner.compose_up_service(project, service))
+    }
+
     /// Validates the project's compose file (under the per-project lock).
     pub fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_validate(project))

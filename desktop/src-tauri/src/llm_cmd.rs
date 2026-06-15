@@ -758,6 +758,52 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
     Ok(out)
 }
 
+/// Public OpenRouter model catalog — fixed URL, never user input.
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+
+/// Parses the OpenRouter `/api/v1/models` catalog, keeping only models that
+/// list `"tools"` in `supported_parameters` — Claude Code cannot run a
+/// session without tool calling, so the rest are unselectable by design.
+fn parse_openrouter_models(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("failed to parse OpenRouter models response: {e}"))?;
+    let data = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| "OpenRouter models response missing `data` array".to_string())?;
+    let mut out = Vec::new();
+    for entry in data {
+        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let supports_tools = entry
+            .get("supported_parameters")
+            .and_then(|p| p.as_array())
+            .is_some_and(|p| p.iter().any(|s| s.as_str() == Some("tools")));
+        if !supports_tools {
+            continue;
+        }
+        out.push(DiscoveredModel {
+            id: id.to_string(),
+            context_tokens: entry
+                .get("context_length")
+                .and_then(|n| n.as_u64())
+                .and_then(non_zero_u32),
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+async fn discover_openrouter(
+    transport: &dyn ProbeTransport,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let resp = transport.get(OPENROUTER_MODELS_URL).await?;
+    enforce_json_response(&resp, OPENROUTER_MODELS_URL)?;
+    parse_openrouter_models(&resp.body)
+}
+
 /// Strips a leading `Bearer ` (case-insensitive) and trims whitespace.
 /// Returns `None` when the result is empty. Shared between save-time
 /// validation (`containers_cmd::validate_api_key`) and the discovery
@@ -839,6 +885,18 @@ pub(crate) async fn do_discover_llm_models(
 ) -> Result<DiscoverResult, String> {
     if provider == "anthropic" {
         return Err("unsupported".to_string());
+    }
+
+    // Fixed catalog URL — no user-supplied base_url to validate.
+    if provider == "openrouter" {
+        let models = discover_openrouter(transport).await?;
+        if models.is_empty() {
+            return Err("empty".to_string());
+        }
+        return Ok(DiscoverResult {
+            models,
+            messages_endpoint_ok: None,
+        });
     }
 
     let validated = normalize_and_validate_discovery_url(base_url)?;
@@ -953,6 +1011,25 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
         Err(e) => log::warn!("discover_llm_models: err — {e}"),
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Usage dashboard (ADR-073)
+// ---------------------------------------------------------------------------
+
+/// Aggregated LLM usage for the project's dashboard. The single source is
+/// the litellm callback JSONL (see `speedwave_runtime::usage`); chat-stream
+/// session stats are deliberately NOT mixed in (double counting).
+#[tauri::command]
+pub async fn get_llm_usage(
+    project: String,
+) -> Result<speedwave_runtime::usage::UsageSummary, String> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    speedwave_runtime::usage::rotate_usage_if_large_in(data_dir.as_path(), &project);
+    Ok(speedwave_runtime::usage::read_usage_summary_in(
+        data_dir.as_path(),
+        &project,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2046,5 +2123,85 @@ mod tests {
         // `Bearer` alone (no trailing token) is NOT a prefix — trims to the
         // literal word; caller's validation logic decides what to do with it.
         assert_eq!(strip_bearer_prefix("Bearer"), Some("Bearer".to_string()));
+    }
+
+    // ── OpenRouter catalog discovery ────────────────────────────────────
+
+    const OPENROUTER_CATALOG: &[u8] = br#"{"data":[
+        {"id":"deepseek/deepseek-v3.2","context_length":163840,
+         "supported_parameters":["tools","tool_choice","max_tokens"]},
+        {"id":"nvidia/llama-nemotron-rerank-vl-1b-v2:free","context_length":8192,
+         "supported_parameters":["max_tokens"]},
+        {"id":"qwen/qwen3-coder","context_length":262144,
+         "supported_parameters":["tools"]},
+        {"id":"vendor/no-params-model","context_length":4096},
+        {"id":"","context_length":1},
+        {"id":"vendor/zero-ctx","context_length":0,"supported_parameters":["tools"]}
+    ]}"#;
+
+    #[test]
+    fn parse_openrouter_keeps_only_tool_capable_models_sorted() {
+        let models = parse_openrouter_models(OPENROUTER_CATALOG).unwrap();
+        assert_eq!(
+            model_ids(&models),
+            vec![
+                "deepseek/deepseek-v3.2",
+                "qwen/qwen3-coder",
+                "vendor/zero-ctx"
+            ]
+        );
+        assert_eq!(models[0].context_tokens, Some(163840));
+        assert_eq!(models[2].context_tokens, None, "zero context → unknown");
+    }
+
+    #[test]
+    fn parse_openrouter_rejects_malformed_payloads() {
+        assert!(parse_openrouter_models(b"not json").is_err());
+        assert!(parse_openrouter_models(br#"{"models":[]}"#).is_err());
+        assert_eq!(
+            parse_openrouter_models(br#"{"data":[]}"#).unwrap(),
+            Vec::new()
+        );
+    }
+
+    /// Canned transport: serves one body for the catalog URL, fails the rest.
+    struct CatalogTransport(Vec<u8>);
+
+    #[async_trait::async_trait]
+    impl ProbeTransport for CatalogTransport {
+        async fn get(&self, url: &str) -> Result<ProbeResponse, String> {
+            assert_eq!(url, OPENROUTER_MODELS_URL);
+            Ok(ProbeResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                body: self.0.clone(),
+            })
+        }
+        async fn post(
+            &self,
+            _url: &str,
+            _body: &serde_json::Value,
+        ) -> Result<ProbeResponse, String> {
+            Err("unexpected POST".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_openrouter_ignores_base_url_and_skips_messages_probe() {
+        let transport = CatalogTransport(OPENROUTER_CATALOG.to_vec());
+        let res = super::do_discover_llm_models("openrouter", "", &transport)
+            .await
+            .unwrap();
+        assert_eq!(res.models.len(), 3);
+        assert_eq!(res.messages_endpoint_ok, None);
+    }
+
+    #[tokio::test]
+    async fn discover_openrouter_empty_catalog_maps_to_empty_error() {
+        let transport = CatalogTransport(br#"{"data":[]}"#.to_vec());
+        let err = super::do_discover_llm_models("openrouter", "", &transport)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "empty");
     }
 }

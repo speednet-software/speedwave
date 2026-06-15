@@ -1,0 +1,605 @@
+//! Renders the per-project `litellm-config.yaml` (ADR-073).
+//!
+//! The file lands at `<data_dir>/litellm/<project>/config.yaml` (0600,
+//! atomic) and is mounted `:ro` at `/config` in the `litellm` container.
+//! It carries NO secrets: every key is referenced as
+//! `os.environ/SPW_KEY_<PROVIDER_ID>`, resolved inside the container by
+//! the entrypoint from the `/tokens` mount.
+//!
+//! INVARIANT (validated in the Phase 0 spike): the rendered config and the
+//! container environment must never define Anthropic credentials under
+//! their canonical names (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`).
+//! LiteLLM's `/anthropic` passthrough route forwards the client's
+//! `Authorization` header (the subscription OAuth token) only while the
+//! proxy itself holds no Anthropic credential — a canonical name would
+//! silently override every passthrough call.
+
+use crate::config::{LlmConfig, LlmProviderKind};
+use std::path::{Path, PathBuf};
+
+/// Port the litellm container listens on (fixed in its entrypoint).
+pub const LITELLM_PORT: u16 = 4000;
+
+/// In-network base URL of the proxy as the claude container sees it.
+pub const LITELLM_BASE_URL: &str = "http://litellm:4000";
+
+/// Subscription sessions use the passthrough route — OAuth `Authorization`
+/// forwarded verbatim to api.anthropic.com.
+pub const LITELLM_ANTHROPIC_PASSTHROUGH_URL: &str = "http://litellm:4000/anthropic";
+
+/// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
+/// uppercased — same normalisation as `plugin::derive_worker_env`).
+pub fn spw_key_env_name(provider_id: &str) -> String {
+    format!(
+        "SPW_KEY_{}",
+        provider_id.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// Path of the rendered config: `<data_dir>/litellm/<project>/config.yaml`.
+pub fn litellm_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("litellm").join(project).join("config.yaml")
+}
+
+/// Renders the litellm config for the project's provider set. Pure —
+/// no filesystem access; `write_litellm_config_in` persists the result.
+pub fn render_litellm_config(llm: &LlmConfig) -> String {
+    let mut model_list = String::new();
+
+    for entry in &llm.providers {
+        // ids are slug-validated on resolve (migrate_llm_to_v2); the YAML
+        // below embeds them bare, so re-check defensively.
+        if !crate::plugin::is_valid_slug(&entry.id) {
+            log::warn!("litellm config: skipping provider with invalid id");
+            continue;
+        }
+        let key_ref = format!("os.environ/{}", spw_key_env_name(&entry.id));
+        match entry.kind {
+            // Subscription traffic never enters model_list: it rides the
+            // built-in /anthropic passthrough with the client's own OAuth
+            // Authorization header.
+            LlmProviderKind::AnthropicOauth => {}
+            LlmProviderKind::AnthropicApiKey => {
+                model_list.push_str(&format!(
+                    "  - model_name: \"anthropic/*\"\n    litellm_params:\n      model: \"anthropic/*\"\n      api_key: {key_ref}\n",
+                ));
+            }
+            LlmProviderKind::OpenRouter => {
+                model_list.push_str(&format!(
+                    "  - model_name: \"openrouter/*\"\n    litellm_params:\n      model: \"openrouter/*\"\n      api_key: {key_ref}\n",
+                ));
+            }
+            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat => {
+                let Some(base_url) = entry.base_url.as_deref() else {
+                    log::warn!(
+                        "litellm config: provider '{}' has no base_url — skipped",
+                        entry.id
+                    );
+                    continue;
+                };
+                // Defense in depth: re-validate before embedding bare in YAML
+                // (pure check; the save path already gates it).
+                if let Err(e) = super::llm::validate_base_url(base_url) {
+                    log::warn!(
+                        "litellm config: provider '{}' has invalid base_url — skipped: {e}",
+                        entry.id
+                    );
+                    continue;
+                }
+                // Container-side URL: the claude/litellm containers reach a
+                // host-side server via host.docker.internal (ADR-062); the
+                // stored base_url already uses that alias (validate_base_url).
+                let api_base = ensure_v1_suffix(base_url);
+                let api_key = if entry.has_api_key {
+                    key_ref.clone()
+                } else {
+                    // llama.cpp/Ollama ignore the key but litellm's OpenAI
+                    // client requires one.
+                    "\"dummy\"".to_string()
+                };
+                model_list.push_str(&format!(
+                    "  - model_name: \"{id}/*\"\n    litellm_params:\n      model: \"openai/*\"\n      api_base: \"{api_base}\"\n      api_key: {api_key}\n",
+                    id = entry.id,
+                ));
+            }
+        }
+    }
+
+    format!(
+        "# GENERATED by speedwave-runtime (ADR-073) — do not edit.\n\
+         # Secrets are env references resolved by the container entrypoint;\n\
+         # this file must never contain a key value.\n\
+         model_list:\n{model_list}\n\
+         litellm_settings:\n  \
+           drop_params: true\n  \
+           callbacks: litellm_callback.speedwave_usage_logger\n\n\
+         general_settings: {{}}\n"
+    )
+}
+
+/// Appends `/v1` to an OpenAI-compatible base URL when absent — litellm's
+/// `openai/` provider expects the versioned root.
+fn ensure_v1_suffix(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
+/// Usage-callback source, embedded at compile time. LiteLLM resolves the
+/// `callbacks: litellm_callback.…` module RELATIVE TO THE CONFIG FILE's
+/// directory when started with `--config` (its `get_instance_fn` requires
+/// `<config dir>/litellm_callback.py` to exist and never falls back to
+/// PYTHONPATH) — so the renderer must place the module next to config.yaml.
+/// The copy baked into the image at /opt/speedwave is unreachable for this
+/// purpose.
+const LITELLM_CALLBACK_SRC: &str =
+    include_str!("../../../../containers/litellm/litellm_callback.py");
+
+/// Renders and atomically persists the config (0600 + fsync) under
+/// `<data_dir>/litellm/<project>/config.yaml`, alongside the usage-callback
+/// module litellm imports from the same directory. Also lifts a legacy
+/// `local-llm/api_key` into the llm token namespace so a migrated `local`
+/// entry's `SPW_KEY_LOCAL` reference resolves (ADR-073 migration).
+pub fn write_litellm_config_in(
+    data_dir: &Path,
+    project: &str,
+    llm: &LlmConfig,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    let path = litellm_config_path_in(data_dir, project);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        crate::fs_perms::ensure_owner_only_dir(parent)?;
+        crate::fs_perms::write_restricted_file_atomic(
+            &parent.join("litellm_callback.py"),
+            LITELLM_CALLBACK_SRC,
+        )?;
+    }
+    migrate_legacy_local_key_in(data_dir, project, llm);
+    let content = render_litellm_config(llm);
+    crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
+    Ok(path)
+}
+
+/// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
+/// every key file's NAME + CONTENT HASH. Key values are folded in as their
+/// own sha256, not raw — the digest is a one-way fingerprint that can't
+/// reveal a secret, and content-hashing (not size/mtime) means a rotated
+/// same-length key always changes it. litellm reads both config and keys
+/// only at container start, so any change here must alter the compose
+/// definition to force a recreate.
+pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let config_dir = data_dir.join("litellm").join(project);
+    let mut rendered: Vec<PathBuf> = std::fs::read_dir(&config_dir)
+        .map(|dir| {
+            dir.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    rendered.sort();
+    for path in rendered {
+        hasher.update(path.file_name().unwrap_or_default().as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(std::fs::read(&path).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    let tokens_dir = data_dir.join("tokens").join(project).join("llm");
+    let mut entries: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(&tokens_dir)
+        .map(|dir| {
+            dir.filter_map(|e| e.ok())
+                .map(|e| {
+                    let content_hash = Sha256::digest(std::fs::read(e.path()).unwrap_or_default());
+                    (e.file_name(), content_hash.to_vec())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, content_hash) in entries {
+        hasher.update(name.as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(&content_hash);
+        hasher.update(b"\n");
+    }
+    crate::bundle::bytes_to_hex(&hasher.finalize())
+}
+
+/// v1→v2 key-file migration: the legacy `local` provider stored its Bearer
+/// at `tokens/<project>/local-llm/api_key`; the litellm entrypoint reads
+/// `tokens/<project>/llm/local_api_key`. Copy once when the target is
+/// missing — the legacy file stays for the kill-switch direct path.
+/// Failures are non-fatal (the proxy then sends the dummy key, exactly the
+/// pre-migration behaviour for keyless servers).
+fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
+    let needs_local_key = llm
+        .providers
+        .iter()
+        .any(|p| p.id == "local" && p.kind == LlmProviderKind::Local && p.has_api_key);
+    if !needs_local_key {
+        return;
+    }
+    let Ok(target) = super::tokens::llm_provider_key_path_in(data_dir, project, "local") else {
+        return;
+    };
+    if target.exists() {
+        return;
+    }
+    let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
+        log::warn!("litellm: local entry flags has_api_key but no legacy key file to migrate");
+        return;
+    };
+    if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
+        log::warn!("litellm: legacy local key migration failed: {e}");
+    } else {
+        log::info!("litellm: migrated legacy local-llm api_key into the llm token namespace");
+    }
+}
+
+/// Validates and persists one provider's API key under the llm token
+/// namespace. Mirrors the ADR-040 local-llm key rules: strips an
+/// accidental `Bearer ` prefix, rejects control characters (CRLF header
+/// injection), rejects empty values.
+pub fn write_llm_provider_key_in(
+    data_dir: &Path,
+    project: &str,
+    provider_id: &str,
+    key: &str,
+) -> anyhow::Result<PathBuf> {
+    let value = key.trim();
+    let value = value.strip_prefix("Bearer ").unwrap_or(value).trim();
+    if value.is_empty() {
+        anyhow::bail!("API key must not be empty");
+    }
+    if value.chars().any(|c| c.is_control()) {
+        anyhow::bail!("API key must not contain control characters");
+    }
+    let path = super::tokens::llm_provider_key_path_in(data_dir, project, provider_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        crate::fs_perms::ensure_owner_only_dir(parent)?;
+    }
+    crate::fs_perms::write_restricted_file_atomic(&path, value)?;
+    Ok(path)
+}
+
+/// Removes one provider's key file (e.g. provider deleted in Settings).
+/// Missing file is not an error.
+pub fn remove_llm_provider_key_in(
+    data_dir: &Path,
+    project: &str,
+    provider_id: &str,
+) -> anyhow::Result<()> {
+    let path = super::tokens::llm_provider_key_path_in(data_dir, project, provider_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::config::{LlmActive, LlmProviderEntry};
+
+    fn entry(id: &str, kind: LlmProviderKind) -> LlmProviderEntry {
+        LlmProviderEntry {
+            id: id.into(),
+            kind,
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
+    }
+
+    #[test]
+    fn spw_key_env_name_normalises_like_worker_env() {
+        assert_eq!(spw_key_env_name("openrouter"), "SPW_KEY_OPENROUTER");
+        assert_eq!(spw_key_env_name("my-anthropic"), "SPW_KEY_MY_ANTHROPIC");
+    }
+
+    /// Golden file: the full provider mix renders exactly this YAML.
+    #[test]
+    fn render_full_provider_mix_golden() {
+        let llm = LlmConfig {
+            providers: vec![
+                entry("anthropic", LlmProviderKind::AnthropicOauth),
+                LlmProviderEntry {
+                    has_api_key: true,
+                    ..entry("anthropic-key", LlmProviderKind::AnthropicApiKey)
+                },
+                LlmProviderEntry {
+                    base_url: Some("http://host.docker.internal:9000".into()),
+                    ..entry("local", LlmProviderKind::Local)
+                },
+                LlmProviderEntry {
+                    has_api_key: true,
+                    ..entry("openrouter", LlmProviderKind::OpenRouter)
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen3".into()),
+            }),
+            ..Default::default()
+        };
+
+        let expected = "\
+# GENERATED by speedwave-runtime (ADR-073) — do not edit.
+# Secrets are env references resolved by the container entrypoint;
+# this file must never contain a key value.
+model_list:
+  - model_name: \"anthropic/*\"
+    litellm_params:
+      model: \"anthropic/*\"
+      api_key: os.environ/SPW_KEY_ANTHROPIC_KEY
+  - model_name: \"local/*\"
+    litellm_params:
+      model: \"openai/*\"
+      api_base: \"http://host.docker.internal:9000/v1\"
+      api_key: \"dummy\"
+  - model_name: \"openrouter/*\"
+    litellm_params:
+      model: \"openrouter/*\"
+      api_key: os.environ/SPW_KEY_OPENROUTER
+
+litellm_settings:
+  drop_params: true
+  callbacks: litellm_callback.speedwave_usage_logger
+
+general_settings: {}
+";
+        assert_eq!(render_litellm_config(&llm), expected);
+    }
+
+    #[test]
+    fn render_never_embeds_key_values_or_canonical_names() {
+        let llm = LlmConfig {
+            providers: vec![
+                LlmProviderEntry {
+                    has_api_key: true,
+                    ..entry("openrouter", LlmProviderKind::OpenRouter)
+                },
+                LlmProviderEntry {
+                    has_api_key: true,
+                    ..entry("anthropic-key", LlmProviderKind::AnthropicApiKey)
+                },
+            ],
+            ..Default::default()
+        };
+        let yaml = render_litellm_config(&llm);
+        assert!(!yaml.contains("ANTHROPIC_API_KEY"));
+        assert!(!yaml.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!yaml.contains("sk-"));
+        assert!(yaml.contains("os.environ/SPW_KEY_OPENROUTER"));
+    }
+
+    #[test]
+    fn render_oauth_only_has_empty_model_list() {
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
+            ..Default::default()
+        };
+        let yaml = render_litellm_config(&llm);
+        assert!(
+            yaml.contains("model_list:\n\nlitellm_settings"),
+            "oauth-only config must not add model_list entries: {yaml}"
+        );
+    }
+
+    #[test]
+    fn render_skips_local_without_base_url_and_invalid_ids() {
+        let mut bad_id = entry("ok-id", LlmProviderKind::OpenRouter);
+        bad_id.id = "Bad.Id".into();
+        let llm = LlmConfig {
+            providers: vec![entry("local", LlmProviderKind::Local), bad_id],
+            ..Default::default()
+        };
+        let yaml = render_litellm_config(&llm);
+        assert!(!yaml.contains("local/*"), "no base_url → skipped: {yaml}");
+        assert!(!yaml.contains("Bad.Id"), "invalid id → skipped: {yaml}");
+    }
+
+    #[test]
+    fn render_skips_provider_with_invalid_base_url() {
+        // Defense in depth: a corrupted/replayed base_url (credentials, traversal,
+        // non-http scheme) is re-validated at render time and the entry dropped
+        // rather than embedded bare in the YAML.
+        for bad in [
+            "http://user:pass@host.docker.internal:9000",
+            "file:///etc/passwd",
+            "http://host.docker.internal:9000/a/b",
+        ] {
+            let llm = LlmConfig {
+                providers: vec![LlmProviderEntry {
+                    base_url: Some(bad.into()),
+                    ..entry("local", LlmProviderKind::Local)
+                }],
+                ..Default::default()
+            };
+            let yaml = render_litellm_config(&llm);
+            assert!(
+                !yaml.contains("local/*"),
+                "invalid base_url '{bad}' must be skipped, got: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_v1_suffix_variants() {
+        assert_eq!(ensure_v1_suffix("http://h:9000"), "http://h:9000/v1");
+        assert_eq!(ensure_v1_suffix("http://h:9000/"), "http://h:9000/v1");
+        assert_eq!(ensure_v1_suffix("http://h:9000/v1"), "http://h:9000/v1");
+        assert_eq!(ensure_v1_suffix("http://h:9000/v1/"), "http://h:9000/v1");
+    }
+
+    #[test]
+    fn write_config_creates_restricted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
+            ..Default::default()
+        };
+        let path = write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        assert!(path.is_file());
+        assert!(path.ends_with("litellm/proj/config.yaml"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config must be owner-only");
+        }
+        // litellm resolves the callbacks module relative to the config file's
+        // directory — the module MUST land next to config.yaml or the proxy
+        // fails startup with "Could not find module file".
+        let callback = path.parent().unwrap().join("litellm_callback.py");
+        assert!(
+            callback.is_file(),
+            "callback module must sit next to config"
+        );
+        let src = std::fs::read_to_string(&callback).unwrap();
+        assert!(
+            src.contains("speedwave_usage_logger"),
+            "embedded callback must export the instance the config references"
+        );
+    }
+
+    /// v1→v2 key migration: a legacy `local-llm/api_key` is lifted into the
+    /// llm namespace when the migrated entry references SPW_KEY_LOCAL —
+    /// once, without clobbering an existing new-namespace key.
+    #[test]
+    fn write_config_migrates_legacy_local_key() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed the legacy key file.
+        let legacy_dir =
+            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy-token\n").unwrap();
+
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+
+        let target =
+            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "sk-legacy-token",
+            "legacy key must be copied (trimmed) into the llm namespace"
+        );
+
+        // Idempotent + non-clobbering: a newer key in the llm namespace wins.
+        std::fs::write(&target, "sk-new-token").unwrap();
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
+
+        // No legacy file + no target → non-fatal (dummy-key behaviour).
+        let dir2 = tempfile::tempdir().unwrap();
+        write_litellm_config_in(dir2.path(), "proj", &llm).unwrap();
+    }
+
+    #[test]
+    fn write_key_validates_and_strips_bearer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path =
+            write_llm_provider_key_in(dir.path(), "proj", "openrouter", "Bearer sk-or-v1-abc ")
+                .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "sk-or-v1-abc");
+
+        assert!(write_llm_provider_key_in(dir.path(), "proj", "openrouter", "  ").is_err());
+        assert!(
+            write_llm_provider_key_in(dir.path(), "proj", "openrouter", "evil\r\nheader").is_err()
+        );
+        assert!(write_llm_provider_key_in(dir.path(), "proj", "../escape", "v").is_err());
+    }
+
+    #[test]
+    fn remove_key_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-x").unwrap();
+        remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
+        // Second removal: missing file is fine.
+        remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
+        assert!(remove_llm_provider_key_in(dir.path(), "proj", "../x").is_err());
+    }
+
+    #[test]
+    fn state_digest_tracks_config_and_key_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("local", LlmProviderKind::Local)],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+
+        let d1 = litellm_state_digest_in(dir.path(), "proj");
+        assert_eq!(d1.len(), 64);
+        assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(d1, litellm_state_digest_in(dir.path(), "proj"));
+
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-abc").unwrap();
+        let d2 = litellm_state_digest_in(dir.path(), "proj");
+        assert_ne!(d1, d2);
+        assert!(!d2.contains("sk-or-v1-abc"));
+
+        // Same-length rotation must still flip the digest — it hashes key
+        // content, not size/mtime (the metadata-only digest could collide).
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
+        let d3 = litellm_state_digest_in(dir.path(), "proj");
+        assert_ne!(d2, d3, "same-length key rotation must change the digest");
+
+        remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
+        assert_ne!(d3, litellm_state_digest_in(dir.path(), "proj"));
+
+        let llm2 = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                ..entry("openrouter", LlmProviderKind::OpenRouter)
+            }],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm2).unwrap();
+        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn state_digest_covers_every_rendered_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("local", LlmProviderKind::Local)],
+            ..Default::default()
+        };
+        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        let d1 = litellm_state_digest_in(dir.path(), "proj");
+
+        let callback = litellm_config_path_in(dir.path(), "proj")
+            .parent()
+            .unwrap()
+            .join("litellm_callback.py");
+        std::fs::write(&callback, "# patched in a newer binary\n").unwrap();
+        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn state_digest_handles_missing_config_and_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = litellm_state_digest_in(dir.path(), "proj");
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, litellm_state_digest_in(dir.path(), "proj"));
+    }
+}

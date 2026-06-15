@@ -718,7 +718,21 @@ Before Host Exec existed, some users wired their own bridge — an LLM-generated
 
 ## Local LLM Setup
 
-You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
+You can run Claude Code inside Speedwave against a local or third-party LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to configure providers.
+
+Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) every session routes through an **embedded, per-project LiteLLM proxy** (container `litellm`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install LiteLLM yourself; Speedwave builds and starts it. The proxy translates between Anthropic Messages and OpenAI Chat Completions, so an OpenAI-only backend works without you standing up your own translation layer.
+
+Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
+
+| Kind                    | What it is                                                  | Key needed                        |
+| ----------------------- | ----------------------------------------------------------- | --------------------------------- |
+| **Anthropic (OAuth)**   | Your Claude subscription (the default)                      | No (managed by Claude Code login) |
+| **Anthropic (API key)** | Anthropic via a raw API key                                 | Yes                               |
+| **Local**               | A local server (Ollama, LM Studio, llama.cpp, …)            | Only if the server requires one   |
+| **OpenRouter**          | OpenRouter's model catalog                                  | Yes                               |
+| **OpenAI-compatible**   | Any remote OpenAI-compatible endpoint (vLLM, TGI, gateways) | Usually                           |
+
+Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
 
 ### Ollama (requires 0.14.0+)
 
@@ -751,7 +765,7 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 
 ### Non-standard addresses
 
-If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select any local provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/anthropic` (LiteLLM) or `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
+If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select a local or OpenAI-compatible provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
 
 ### Servers requiring authentication
 
@@ -766,16 +780,22 @@ A leading `Bearer ` typed by mistake is stripped automatically (Claude Code alre
 
 For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscription-Key`, tenant routing), use the **custom_headers** textarea. Format: one `Name: Value` per line. The parser rejects `Authorization` (use the api_key field instead), `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, and any CRLF in values (HTTP request-smuggling defense).
 
-### LiteLLM proxy (route via `/anthropic`)
+### OpenRouter
 
-LiteLLM exposes an Anthropic-compatible path at `/anthropic`. Configure it as:
+1. In Settings → LLM Provider, open the **OpenRouter** row and enter your OpenRouter API key.
+2. Click **Discover models** to pull OpenRouter's catalog (the dropdown lists tool-capable models); pick one.
+3. Set the row active. No base URL is needed — OpenRouter is a fixed endpoint.
 
-- **Base URL:** `http://host.docker.internal:4000/anthropic`
-- **api_key:** the value of `LITELLM_MASTER_KEY` set on the LiteLLM server
+### OpenAI-compatible servers (vLLM, TGI, gateways)
 
-### Servers without `/v1/messages`
+Pure OpenAI Chat Completions servers (vLLM stock, TGI, corporate gateways) **work** — the embedded proxy translates Anthropic Messages ⇄ OpenAI for you; you no longer need to stand up your own translation proxy.
 
-Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. Pure OpenAI Chat Completions servers (vLLM stock, TGI, Triton) **will not work for chat** — Settings shows a yellow banner after Discover when the sanity probe detects a missing `/v1/messages` endpoint. Resolve by running a translation proxy (LiteLLM with `/anthropic` route is the common choice) between Speedwave and the OpenAI-only server.
+1. In Settings → LLM Provider, open the **OpenAI-compatible** row.
+2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). The proxy appends `/v1` when needed.
+3. Enter an **api_key** if the server requires one, then **Discover models** and pick one.
+4. Set the row active.
+
+> A **local** provider that needs custom headers (see below) is the one case that bypasses the proxy and talks to the server directly — there the server must speak Anthropic Messages on `POST /v1/messages`.
 
 ## See Also
 

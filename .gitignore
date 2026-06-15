@@ -102,3 +102,7 @@ desktop/src-tauri/oauth/
 
 # Local Python venvs (test tooling)
 .office-test-venv/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

@@ -32,6 +32,8 @@ const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults:
 
 /// Claude Code container image name.
 pub const IMAGE_CLAUDE: &str = "speedwave-claude";
+/// LiteLLM proxy image name (ADR-073).
+pub const IMAGE_LITELLM: &str = "speedwave-litellm";
 /// MCP hub image name.
 pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
 /// Slack MCP worker image name.
@@ -68,6 +70,14 @@ pub const IMAGES: &[ImageDef] = &[
             "containers/install-claude.sh",
             "containers/osc52-copy.sh",
         ],
+    },
+    ImageDef {
+        name: IMAGE_LITELLM,
+        context_dir: "containers",
+        containerfile: "containers/Containerfile.litellm",
+        build_args: &[],
+        // Everything the Containerfile COPYies lives under containers/litellm.
+        hash_inputs: &["containers/Containerfile.litellm", "containers/litellm"],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
@@ -1968,7 +1978,7 @@ mod tests {
     fn test_images_count() {
         // Catalogue size, not build behaviour — the build set is filtered per
         // project by `enabled_images`. Bump this when adding a built-in worker.
-        assert_eq!(IMAGES.len(), 11);
+        assert_eq!(IMAGES.len(), 12);
     }
 
     #[test]
@@ -1977,7 +1987,7 @@ mod tests {
             .iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_LITELLM, IMAGE_MCP_HUB]);
     }
 
     #[test]
@@ -1992,6 +2002,7 @@ mod tests {
             names,
             vec![
                 IMAGE_CLAUDE,
+                IMAGE_LITELLM,
                 IMAGE_MCP_HUB,
                 IMAGE_MCP_SLACK,
                 IMAGE_MCP_PLAYWRIGHT
@@ -2004,7 +2015,7 @@ mod tests {
         let mut cfg = ResolvedIntegrationsConfig::default();
         cfg.plugins.insert("example-plugin".to_string(), true);
         let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
-        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_MCP_HUB]);
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_LITELLM, IMAGE_MCP_HUB]);
     }
 
     #[test]
@@ -2014,9 +2025,10 @@ mod tests {
         // can never silently drop (or keep) a worker.
         for img in IMAGES {
             let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
-                assert_eq!(
-                    img.name, IMAGE_CLAUDE,
-                    "only speedwave-claude lacks the prefix"
+                assert!(
+                    img.name == IMAGE_CLAUDE || img.name == IMAGE_LITELLM,
+                    "only speedwave-claude and speedwave-litellm lack the prefix, got '{}'",
+                    img.name
                 );
                 continue;
             };
@@ -2315,13 +2327,14 @@ mod tests {
         let (rt, handles) = lazy_build_mock(root.clone(), vec![]);
         let manifest = crate::bundle::BundleManifest::for_tests("b1");
         let n = build_images_for_bundle_in(&rt, &enabled_images(&cfg), &manifest, &root).unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
         let mut built = handles.build_tags();
         built.sort();
         assert_eq!(
             built,
             vec![
                 image_ref(IMAGE_CLAUDE, "b1"),
+                image_ref(IMAGE_LITELLM, "b1"),
                 image_ref(IMAGE_MCP_GITHUB, "b1"),
                 image_ref(IMAGE_MCP_HUB, "b1"),
             ]

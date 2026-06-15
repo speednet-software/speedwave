@@ -99,6 +99,80 @@ export interface LlmConfigResponse {
   has_api_key?: boolean;
   /** True when a custom_headers file exists for this project. */
   has_custom_headers?: boolean;
+  /** v2 provider list (ADR-073); absent on never-migrated legacy configs. */
+  providers?: LlmProviderEntry[];
+  /** v2 active provider+model selection (ADR-073). */
+  active?: LlmActive | null;
+  /** ADR-073 kill-switch; absent = enabled. */
+  proxy_enabled?: boolean | null;
+}
+
+/**
+ * Provider kind discriminator (ADR-073). Mirror of the Rust
+ * `speedwave_runtime::config::LlmProviderKind` serde representation
+ * (snake_case strings). Drift guarded by `llm_provider_kind_matches_ts_union`.
+ */
+export type LlmProviderKind =
+  | 'anthropic_oauth'
+  | 'anthropic_api_key'
+  | 'local'
+  | 'open_router'
+  | 'open_ai_compat';
+
+/**
+ * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust
+ * `LlmProviderEntry`. Key VALUES never reach the frontend — only the
+ * `has_api_key` presence flag.
+ */
+export interface LlmProviderEntry {
+  /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
+  id: string;
+  kind: LlmProviderKind;
+  base_url?: string | null;
+  /** Last model used with this provider — restored on re-activation. */
+  model?: string | null;
+  has_api_key?: boolean;
+  context_tokens?: number | null;
+  has_custom_headers?: boolean;
+}
+
+/** Active provider+model selection (ADR-073). Mirror of Rust `LlmActive`. */
+export interface LlmActive {
+  provider_id: string;
+  model?: string | null;
+}
+
+/**
+ * One aggregate bucket of the usage dashboard. Mirror of the Rust
+ * `speedwave_runtime::usage::UsageBucket` returned by `get_llm_usage`.
+ */
+export interface UsageBucket {
+  requests: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  cost_usd: number;
+  /** Throughput numerator: completion tokens from successful timed records. */
+  throughput_completion_tokens: number;
+  /** Throughput denominator: latency of the same successful timed records. */
+  throughput_latency_ms_sum: number;
+}
+
+/**
+ * Usage dashboard payload from `get_llm_usage` (ADR-073). The single
+ * source is the litellm callback JSONL; per-session chat statistics come
+ * from the stream and are deliberately NOT part of this payload.
+ */
+export interface UsageSummary {
+  /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
+  days: Record<string, Record<string, UsageBucket>>;
+  /** `YYYY-MM-DD` → requests per local hour (24 entries) — heatmap input. */
+  hours: Record<string, number[]>;
+  totals: UsageBucket;
+  /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
+  skipped_lines: number;
 }
 
 /**

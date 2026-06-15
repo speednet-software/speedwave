@@ -59,6 +59,35 @@ The user-level config file stores project definitions, the active project, and I
 }
 ```
 
+#### `claude.llm` schema v2 (ADR-073)
+
+The example above shows the legacy flat `llm` shape, which is still read and auto-migrated. Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) the Settings UI writes a provider **list** with an `active` selection and `schema_version: 2`. A typical v2 block (with the equivalent flat fields the app also writes for one-release downgrade) looks like:
+
+```json
+"llm": {
+  "schema_version": 2,
+  "providers": [
+    { "id": "anthropic", "kind": "anthropic_oauth", "model": null },
+    {
+      "id": "local",
+      "kind": "local",
+      "base_url": "http://host.docker.internal:11434",
+      "model": "qwen3",
+      "has_api_key": false
+    },
+    { "id": "openrouter", "kind": "open_router", "has_api_key": true }
+  ],
+  "active": { "provider_id": "local", "model": "qwen3" },
+  "proxy_enabled": true,
+  "provider": "local",
+  "model": "qwen3",
+  "base_url": "http://host.docker.internal:11434",
+  "context_tokens": null
+}
+```
+
+Key VALUES never appear here — only the `has_api_key` presence flag; the secret lives at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key`. The `active` block is the routing source of truth; the trailing flat fields are the auto-written downgrade mirror.
+
 ### `ui.beta_enabled`
 
 Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-058](../adr/ADR-058-beta-features-toggle.md).
@@ -68,7 +97,7 @@ Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). W
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider (`anthropic`, `local`, or legacy `ollama` / `lmstudio` / `llamacpp`), model name, optional base URL, and optional `context_tokens`. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details and [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` are not merged from the repo file** — only the user config may set them.
+- `claude.llm` — LLM provider configuration. Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) the schema is a provider **list** (`providers[]` with `id`, `kind`, optional `base_url`, `has_api_key`) plus an `active` selection (`provider_id` + `model`) and `schema_version: 2`; provider kinds are `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`, `open_ai_compat`. The legacy flat fields (`provider`, `model`, `base_url`, `context_tokens`) are still read (auto-migrated on resolve) and still written for one release (downgrade story). `proxy_enabled: false` is the temporary kill-switch restoring pre-proxy direct injection (removal in N+2). See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` / `providers` / `active` / `proxy_enabled` are not merged from the repo file** — only the user config may set them; the repo may suggest `model` only.
 - `integrations` — enable/disable individual integrations per project. **`integrations.hostExec` is the exception: it is ignored in the repo file** — a Host Exec command whitelist is user-config-only (see [`integrations.hostExec`](#integrationshostexec--host-exec-whitelist) below and [ADR-054](../adr/ADR-054-host-exec-worker.md)).
 
 ### `claude.llm.context_tokens`

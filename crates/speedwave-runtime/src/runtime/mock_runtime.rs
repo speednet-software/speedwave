@@ -18,6 +18,8 @@ pub struct MockHandles {
     pub down_calls: Arc<Mutex<Vec<String>>>,
     /// Recorded `compose_up_recreate` project args.
     pub recreate_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `compose_up_service` (project, service) args.
+    pub up_service_calls: Arc<Mutex<Vec<(String, String)>>>,
     /// Recorded `compose_ps` project args.
     pub ps_calls: Arc<Mutex<Vec<String>>>,
     /// Recorded `compose_logs` project args.
@@ -654,6 +656,16 @@ impl ContainerRuntime for MockRuntime {
         if self.fail_on_recreate.contains(project) {
             anyhow::bail!("mock compose_up_recreate failure for '{project}'");
         }
+        Ok(())
+    }
+
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
+        super::validate_builtin_service_name(service)?;
+        self.handles
+            .up_service_calls
+            .lock()
+            .unwrap()
+            .push((project.to_string(), service.to_string()));
         Ok(())
     }
 

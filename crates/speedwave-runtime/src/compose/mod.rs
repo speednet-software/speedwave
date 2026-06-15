@@ -15,12 +15,20 @@ use std::path::{Path, PathBuf};
 // Self-contained concerns split out of this module. Each is re-exported below
 // so the public path `compose::*` is preserved for external callers.
 mod addressing;
+mod litellm;
 mod llm;
 mod plugins;
 mod quoting;
 mod security_check;
 mod tokens;
 mod workers;
+
+// LiteLLM proxy config rendering + key management (ADR-073).
+pub use litellm::{
+    litellm_config_path_in, remove_llm_provider_key_in, render_litellm_config, spw_key_env_name,
+    write_litellm_config_in, write_llm_provider_key_in, LITELLM_ANTHROPIC_PASSTHROUGH_URL,
+    LITELLM_BASE_URL, LITELLM_PORT,
+};
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{
@@ -62,7 +70,8 @@ pub(crate) use plugins::{apply_plugins, ApplyPluginsCtx};
 
 // Token / secrets directory paths.
 pub use tokens::{
-    ensure_token_dir, ensure_token_dir_in, init_secrets_dir, tokens_path, tokens_path_in,
+    ensure_token_dir, ensure_token_dir_in, init_secrets_dir, llm_provider_key_path_in, tokens_path,
+    tokens_path_in, LLM_TOKEN_FILE_SUFFIX, LLM_TOKEN_SERVICE,
 };
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
@@ -105,6 +114,7 @@ const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.temp
 /// `build::IMAGES` and the template is pinned by `image_placeholders_align_*`.
 const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
     ("${IMAGE_CLAUDE}", build::IMAGE_CLAUDE),
+    ("${IMAGE_LITELLM}", build::IMAGE_LITELLM),
     ("${IMAGE_MCP_HUB}", build::IMAGE_MCP_HUB),
     ("${IMAGE_MCP_SLACK}", build::IMAGE_MCP_SLACK),
     ("${IMAGE_MCP_SHAREPOINT}", build::IMAGE_MCP_SHAREPOINT),
@@ -218,6 +228,31 @@ pub fn render_compose_in(
         std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
+
+    // LiteLLM proxy mounts (ADR-073): rendered config (ro) + usage sink (rw).
+    // Both per-project; the config file is rendered here, inside the same
+    // render transaction as the compose file itself.
+    litellm::write_litellm_config_in(data_dir, project_name, &resolved_config.llm)?;
+    let litellm_config_dir = data_dir.join("litellm").join(project_name);
+    std::fs::create_dir_all(&litellm_config_dir)?;
+    let litellm_usage_dir = data_dir.join("usage").join(project_name).join("litellm");
+    std::fs::create_dir_all(&litellm_usage_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&litellm_config_dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&litellm_usage_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    yaml = yaml.replace(
+        "${LITELLM_CONFIG_DIR}",
+        &to_engine_path(&litellm_config_dir)?,
+    );
+    yaml = yaml.replace("${LITELLM_USAGE_DIR}", &to_engine_path(&litellm_usage_dir)?);
+    yaml = yaml.replace(
+        "${LITELLM_CONFIG_DIGEST}",
+        &litellm::litellm_state_digest_in(data_dir, project_name),
+    );
+
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -319,7 +354,9 @@ fn format_cpus(cpus: f32) -> String {
 /// MiB (`Nm`) for one canonical format; CPU as one-decimal (`2.0`). The
 /// resource-drift test asserts the template carries exactly these placeholders.
 fn apply_container_resources(yaml: &str) -> String {
-    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES};
+    use crate::resources::{
+        ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, LITELLM_RESOURCES,
+    };
 
     // Substitute the ${PREFIX_*} placeholders for one container into `out`.
     fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
@@ -340,6 +377,7 @@ fn apply_container_resources(yaml: &str) -> String {
     out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
     apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
+    apply(&mut out, "LITELLM", &LITELLM_RESOURCES);
 
     for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
         // compose_name "mcp-slack" → placeholder prefix "MCP_SLACK".
@@ -1070,7 +1108,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 38;
+    const SECURITY_RULE_COUNT: usize = 39;
 
     /// Repo root (workspace dir holding `containers/`, `mcp-servers/`), derived
     /// from this crate's manifest dir — used as the injected bundle build root
@@ -1149,6 +1187,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: true,
                 has_custom_headers: true,
+                ..Default::default()
             },
         };
         let integrations = ResolvedIntegrationsConfig::default();
@@ -1232,6 +1271,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
 
@@ -1318,6 +1358,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: true,
                 has_custom_headers: true,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -2545,8 +2586,10 @@ services:
         let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
         for (name_value, svc) in services {
             let name = name_value.as_str().unwrap_or("");
-            // Only workers have PORT=; claude does not define PORT.
-            if name == "claude" || name == "mcp-hub" {
+            // Only workers have PORT=; claude does not define PORT, and
+            // litellm listens on a fixed port baked into its entrypoint
+            // (ADR-073) — it is not an MCP worker.
+            if name == "claude" || name == "mcp-hub" || name == "litellm" {
                 continue;
             }
             let env = svc
@@ -2913,11 +2956,18 @@ services:
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // Expected paths must derive from the SAME data_dir the render used —
+        // `compute()` reads the production singleton, which diverges from the
+        // tempdir-rooted tokens mount (litellm always mounts tokens/<p>/llm).
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::compute("test-project", "/home/user/projects/test").unwrap(),
+            &SecurityExpectedPaths::from_raw(
+                "/home/user/projects/test",
+                &tokens_dir.to_string_lossy(),
+            ),
             tmp.path(),
         );
         assert!(
@@ -3290,6 +3340,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3324,6 +3375,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3366,18 +3418,20 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
+        // Default anthropic (legacy direct path): the litellm SERVICE exists in
+        // every rendered compose (ADR-073) but the claude container's env must
+        // not be redirected at it until the proxy injection path is active.
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
         );
         assert!(
-            !yaml.contains("litellm"),
-            "Default anthropic provider should not reference litellm"
+            !get_claude_env(&yaml).iter().any(|e| e.contains("litellm")),
+            "Default anthropic (direct path) must not point claude env at litellm"
         );
         assert!(
             !yaml.contains("ghcr.io/berriai"),
-            "Default anthropic provider should not reference litellm image"
+            "litellm image must be the locally built one, never pulled from ghcr"
         );
         // Should not contain base_url override (unless explicitly configured)
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3397,6 +3451,209 @@ services:
         );
     }
 
+    /// Builds a resolved (v2) LlmConfig the way production resolve does —
+    /// proxy-path tests must exercise the migrated shape.
+    fn v2_llm(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfig {
+        let mut llm = LlmConfig {
+            provider: Some(provider.to_string()),
+            model: model.map(str::to_string),
+            base_url: base_url.map(str::to_string),
+            ..Default::default()
+        };
+        crate::config::migrate_llm_to_v2(&mut llm, false);
+        llm
+    }
+
+    /// ADR-073: subscription (oauth) sessions route through the litellm
+    /// /anthropic passthrough and must NOT carry any Bearer/API key env —
+    /// either would disable Claude Code's OAuth.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_injection_anthropic_oauth() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: v2_llm("anthropic", None, None),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000/anthropic"),
+            "oauth sessions must use the passthrough route, got: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_AUTH_TOKEN=")
+                    || e.starts_with("ANTHROPIC_API_KEY=")),
+            "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
+        );
+        // 1M alias pins survive the proxy (passthrough is transparent).
+        assert!(
+            env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
+            "alias pins must be present: {env:?}"
+        );
+    }
+
+    /// ADR-073: local sessions route through the litellm root with an
+    /// id-prefixed model matching the rendered wildcard route.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_injection_local_provider() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: v2_llm(
+                "llamacpp",
+                Some("qwen3"),
+                Some("http://host.docker.internal:9000"),
+            ),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000"),
+            "local sessions use the unified root: {env:?}"
+        );
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=local/qwen3"),
+            "model must be provider-id-prefixed: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_SMALL_FAST_MODEL=local/qwen3"),
+            "subagent model must be pinned: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "dummy bearer expected: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
+            "alias remap is forbidden for non-Anthropic providers: {env:?}"
+        );
+        // The rendered litellm config must carry the matching route.
+        let litellm_cfg = std::fs::read_to_string(
+            data_dir
+                .path()
+                .join("litellm")
+                .join("test-project")
+                .join("config.yaml"),
+        )
+        .unwrap();
+        assert!(
+            litellm_cfg.contains("model_name: \"local/*\""),
+            "wildcard route must exist for the provider: {litellm_cfg}"
+        );
+    }
+
+    /// ADR-073 kill-switch: proxy_enabled=false falls back to the direct
+    /// injection path (legacy behaviour).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_kill_switch_uses_direct_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut llm = v2_llm(
+            "llamacpp",
+            Some("qwen3"),
+            Some("http://host.docker.internal:9000"),
+        );
+        llm.proxy_enabled = Some(false);
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9000"),
+            "kill-switch must restore direct injection: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|e| e.contains("litellm")),
+            "no litellm reference on the direct path: {env:?}"
+        );
+    }
+
+    /// Local providers with custom headers stay on the direct path — the
+    /// proxy would consume headers addressed to the LLM server.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_proxy_local_custom_headers_falls_back_to_direct() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tokens_dir = ensure_token_dir_in(data_dir.path(), "test-project", "local-llm").unwrap();
+        std::fs::write(tokens_dir.join("custom_headers"), "X-Test: 1\n").unwrap();
+        let mut llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            has_custom_headers: true,
+            ..Default::default()
+        };
+        crate::config::migrate_llm_to_v2(&mut llm, false);
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9000"),
+            "custom-header setups must use the direct path: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "custom headers must be injected on the direct path: {env:?}"
+        );
+    }
+
     fn get_claude_env(yaml: &str) -> Vec<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         doc.get("services")
@@ -3407,6 +3664,115 @@ services:
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
+    }
+
+    /// ADR-073: the litellm service renders in every compose with the locally
+    /// built image, hardened mounts (config ro, tokens ro, usage rw), no host
+    /// ports, and the per-project network — and its host-side mount dirs are
+    /// created by the renderer.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_litellm_service_rendered() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let svc = doc
+            .get("services")
+            .and_then(|s| s.get("litellm"))
+            .expect("litellm service must render");
+
+        let image = svc.get("image").and_then(|i| i.as_str()).unwrap();
+        assert!(
+            image.starts_with(build::IMAGE_LITELLM),
+            "litellm must use the locally built image, got {image}"
+        );
+        assert_eq!(
+            svc.get("pull_policy").and_then(|p| p.as_str()),
+            Some("never"),
+            "litellm image must never be pulled"
+        );
+        assert!(
+            svc.get("ports").is_none(),
+            "litellm must not expose host ports"
+        );
+        assert_eq!(
+            svc.get("read_only").and_then(|r| r.as_bool()),
+            Some(true),
+            "litellm must be read_only"
+        );
+        let env: Vec<&str> = svc
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            env.contains(&"LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true"),
+            "chat-completions forcing env must be present (prompt-cache + \
+             chat-template-kwargs depend on it — see template comment), got {env:?}"
+        );
+        let digest_env = env
+            .iter()
+            .find(|e| e.starts_with("SPW_CONFIG_DIGEST="))
+            .expect("litellm must carry the config digest env");
+        let digest = digest_env.trim_start_matches("SPW_CONFIG_DIGEST=");
+        assert_eq!(digest.len(), 64, "substituted sha256 hex, got {digest}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let volumes: Vec<&str> = svc
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            volumes.iter().any(|v| v.ends_with(":/config:ro")),
+            "config mount must be ro, got {volumes:?}"
+        );
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v.contains("/llm:/tokens") && v.ends_with(":ro")),
+            "tokens mount must be the llm namespace, ro, got {volumes:?}"
+        );
+        assert!(
+            volumes.iter().any(|v| v.ends_with(":/usage:rw")),
+            "usage mount must be rw, got {volumes:?}"
+        );
+
+        // Renderer must create the host-side mount sources.
+        assert!(
+            data_dir
+                .path()
+                .join("litellm")
+                .join("test-project")
+                .is_dir(),
+            "litellm config dir must be created"
+        );
+        assert!(
+            data_dir
+                .path()
+                .join("usage")
+                .join("test-project")
+                .join("litellm")
+                .is_dir(),
+            "usage dir must be created"
+        );
     }
 
     #[test]
@@ -3423,6 +3789,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3488,8 +3855,8 @@ services:
         );
         assert!(!yaml.contains("llm-proxy"), "Ollama must not add llm-proxy");
         assert!(
-            !yaml.contains("litellm"),
-            "Ollama must not reference litellm"
+            !env.iter().any(|e| e.contains("litellm")),
+            "Ollama (direct path) must not point claude env at litellm"
         );
     }
 
@@ -3507,6 +3874,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3544,6 +3912,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -3581,6 +3950,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3618,6 +3988,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let result = render_compose_isolated(
@@ -3665,6 +4036,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let result1 =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -3891,6 +4263,7 @@ services:
         // Every container's resources come from the SSOT.
         assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
         assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+        assert_resources_from_ssot(&doc, "litellm", &crate::resources::LITELLM_RESOURCES);
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
         }
@@ -3950,6 +4323,9 @@ services:
             "${MCP_HUB_MEM}",
             "${MCP_HUB_CPUS}",
             "${MCP_HUB_TMPFS}",
+            "${LITELLM_MEM}",
+            "${LITELLM_CPUS}",
+            "${LITELLM_TMPFS}",
         ] {
             assert!(
                 COMPOSE_TEMPLATE.contains(placeholder),
@@ -4226,6 +4602,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4254,6 +4631,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4272,6 +4650,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered_blank = apply_llm_config_in(
             data_dir.path(),
@@ -4303,6 +4682,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -4332,6 +4712,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let llm_anthropic = LlmConfig::default();
 
@@ -4396,6 +4777,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -4430,6 +4812,7 @@ services:
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         };
         let yaml = render_compose_isolated(
@@ -6960,6 +7343,161 @@ services:
     /// Expected paths for plugin security tests. Token dir = /test/.speedwave/tokens/test.
     fn test_expected_paths() -> SecurityExpectedPaths {
         SecurityExpectedPaths::from_raw("/test/project", "/test/.speedwave/tokens/test")
+    }
+
+    /// Litellm service YAML with parameterised volumes (ADR-073 tests).
+    fn litellm_yaml(volumes: &str, extra: &str) -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  litellm:
+    image: speedwave-litellm:1.0.0
+    user: "{user}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+{volumes}
+{extra}
+"#,
+            user = container_user(),
+        )
+    }
+
+    #[test]
+    fn test_security_litellm_canonical_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test/llm:/tokens:ro\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw",
+            "",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::LitellmVolumes),
+            "canonical litellm mounts must pass, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_litellm_rejects_writable_tokens_and_extra_mounts() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // tokens :rw + an extra workspace mount → both flagged.
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test/llm:/tokens:rw\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw\n      \
+             - /test/project:/workspace:rw",
+            "",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.iter().any(|v| v.message.contains("/tokens")),
+            "rw tokens mount must be flagged: {litellm:?}"
+        );
+        assert!(
+            litellm.iter().any(|v| v.message.contains("unexpected")),
+            "extra workspace mount must be flagged: {litellm:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_litellm_rejects_foreign_tokens_namespace_and_host_network() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Whole tokens dir (all services!) instead of the llm namespace +
+        // host networking → both flagged.
+        let yaml = litellm_yaml(
+            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+             - /test/.speedwave/tokens/test:/tokens:ro\n      \
+             - /test/.speedwave/usage/test/litellm:/usage:rw",
+            "    network_mode: host",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.iter().any(|v| v.message.contains("llm namespace")),
+            "whole-tokens-dir mount must be flagged: {litellm:?}"
+        );
+        assert!(
+            litellm.iter().any(|v| v.message.contains("network_mode")),
+            "host network must be flagged: {litellm:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_security_litellm_full_render_passes() {
+        // The real rendered compose must satisfy the litellm profile checks
+        // (read_only/tmpfs/no-ports come from the shared core rules).
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let expected = SecurityExpectedPaths::from_raw(
+            "/home/user/projects/test",
+            &tokens_dir.to_string_lossy(),
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &expected,
+            data_dir.path(),
+        );
+        let litellm: Vec<_> = violations
+            .iter()
+            .filter(|v| v.container == "litellm" || v.rule == SecurityRule::LitellmVolumes)
+            .collect();
+        assert!(
+            litellm.is_empty(),
+            "rendered litellm service must pass all checks: {litellm:?}"
+        );
     }
 
     /// Standard valid plugin YAML fragment with correct token + workspace mounts.
@@ -10460,6 +10998,62 @@ services:
         assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
     }
 
+    // ── LiteLLM `llm` token namespace (ADR-073) ──────────────────────────
+
+    #[test]
+    fn llm_provider_key_path_resolves_for_valid_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let p =
+            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "openrouter").unwrap();
+        let expected = dir
+            .path()
+            .join("tokens")
+            .join("myproj")
+            .join("llm")
+            .join("openrouter_api_key");
+        assert_eq!(p, expected);
+        // Hyphenated ids are valid slugs.
+        assert!(
+            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "my-anthropic").is_ok()
+        );
+    }
+
+    #[test]
+    fn llm_provider_key_path_rejects_traversal_and_bad_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [
+            "../passwd",
+            "a/b",
+            "a\\b",
+            "UPPER",
+            "Bad.Provider",
+            "under_score",
+            "",
+            "1starts-with-digit",
+        ] {
+            assert!(
+                super::tokens::llm_provider_key_path_in(dir.path(), "myproj", bad).is_err(),
+                "provider id '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_tokens_path_requires_api_key_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter_api_key").is_ok());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter").is_err());
+        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "../escape_api_key").is_err());
+    }
+
+    #[test]
+    fn ensure_token_dir_supports_llm_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "llm").unwrap();
+        assert!(service_dir.is_dir());
+        assert!(service_dir.ends_with("tokens/myproj/llm"));
+    }
+
     #[test]
     fn ensure_token_dir_creates_three_levels() {
         let dir = tempfile::tempdir().unwrap();
@@ -10516,6 +11110,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -10581,6 +11176,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -10753,6 +11349,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: false,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
@@ -10809,6 +11406,7 @@ services:
             context_tokens: None,
             has_api_key: false,
             has_custom_headers: true,
+            ..Default::default()
         };
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();

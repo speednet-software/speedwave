@@ -51,17 +51,70 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 /// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
 /// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
 /// (validated by `plugin::validate_manifest`).
-const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm"];
+const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
+
+/// LiteLLM per-provider key namespace (ADR-073). Mounted `:ro` at `/tokens`
+/// in the litellm container; its entrypoint exports each file as
+/// `SPW_KEY_<PROVIDER_ID>`. The namespace is reserved against plugin slugs
+/// in `consts::BUILT_IN_SERVICE_IDS`.
+pub const LLM_TOKEN_SERVICE: &str = "llm";
+
+/// Suffix every LiteLLM provider key file carries: `<provider_id>_api_key`.
+pub const LLM_TOKEN_FILE_SUFFIX: &str = "_api_key";
 
 /// Per-service whitelist of file names allowed under
 /// `tokens/<project>/<service>/`. Adding a new file = edit this map.
 const ALLOWED_TOKEN_FILES_LOCAL_LLM: &[&str] = &["api_key", "custom_headers"];
 
-fn allowed_files_for(service: &str) -> Option<&'static [&'static str]> {
+/// Validates a file name for the given token service. `local-llm` uses a
+/// static whitelist; `llm` file names embed a user-defined provider id, so
+/// the id segment is validated against the plugin-grade slug shape instead
+/// (`^[a-z][a-z0-9-]{0,63}$` — no dots, no slashes, no traversal).
+fn validate_token_file(service: &str, file: &str) -> anyhow::Result<()> {
     match service {
-        "local-llm" => Some(ALLOWED_TOKEN_FILES_LOCAL_LLM),
-        _ => None,
+        "local-llm" => {
+            if !ALLOWED_TOKEN_FILES_LOCAL_LLM.contains(&file) {
+                anyhow::bail!(
+                    "tokens_path: file '{}' not allowed for service '{}'",
+                    file,
+                    service
+                );
+            }
+            Ok(())
+        }
+        LLM_TOKEN_SERVICE => {
+            let provider_id = file.strip_suffix(LLM_TOKEN_FILE_SUFFIX).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tokens_path: file '{}' must end with '{}'",
+                    file,
+                    LLM_TOKEN_FILE_SUFFIX
+                )
+            })?;
+            if !crate::plugin::is_valid_slug(provider_id) {
+                anyhow::bail!(
+                    "tokens_path: provider id '{}' is not a valid slug",
+                    provider_id
+                );
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("tokens_path: no file allow-list for service '{}'", service),
     }
+}
+
+/// Resolves the key-file path for one LiteLLM provider:
+/// `tokens/<project>/llm/<provider_id>_api_key`. Slug-validates the id.
+pub fn llm_provider_key_path_in(
+    data_dir: &Path,
+    project: &str,
+    provider_id: &str,
+) -> anyhow::Result<PathBuf> {
+    tokens_path_in(
+        data_dir,
+        project,
+        LLM_TOKEN_SERVICE,
+        &format!("{provider_id}{LLM_TOKEN_FILE_SUFFIX}"),
+    )
 }
 
 /// Resolves the on-disk path for a per-project local-LLM token file.
@@ -81,16 +134,7 @@ pub fn tokens_path_in(
     if !ALLOWED_TOKEN_SERVICES.contains(&service) {
         anyhow::bail!("tokens_path: service '{}' not in allow-list", service);
     }
-    let files = allowed_files_for(service).ok_or_else(|| {
-        anyhow::anyhow!("tokens_path: no file allow-list for service '{}'", service)
-    })?;
-    if !files.contains(&file) {
-        anyhow::bail!(
-            "tokens_path: file '{}' not allowed for service '{}'",
-            file,
-            service
-        );
-    }
+    validate_token_file(service, file)?;
     Ok(data_dir
         .join("tokens")
         .join(project)
@@ -122,4 +166,97 @@ pub fn ensure_token_dir_in(
     let service_dir = project_dir.join(service);
     crate::fs_perms::ensure_owner_only_dir(&service_dir)?;
     Ok(service_dir)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn data_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    // ── llm token namespace (ADR-073) ────────────────────────────────────
+
+    #[test]
+    fn llm_key_path_happy_path() {
+        let d = data_dir();
+        let p = llm_provider_key_path_in(d.path(), "proj", "openrouter").unwrap();
+        assert!(
+            p.ends_with("tokens/proj/llm/openrouter_api_key"),
+            "got {p:?}"
+        );
+    }
+
+    #[test]
+    fn llm_file_must_end_with_api_key_suffix() {
+        // `llm` service file names must carry the `_api_key` suffix.
+        let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "openrouter")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must end with"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_provider_id_must_be_a_slug() {
+        // Leading capital, dot, and traversal segments all fail the slug shape
+        // before they can reach a file path.
+        for bad in [
+            "Bad_api_key",
+            "a.b_api_key",
+            "../escape_api_key",
+            "9lead_api_key",
+        ] {
+            let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, bad)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("not a valid slug") || err.contains("must end with"),
+                "id '{bad}' should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_empty_provider_id_rejected() {
+        // `_api_key` alone strips to an empty id, which is not a valid slug.
+        let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "_api_key")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a valid slug"), "got: {err}");
+    }
+
+    // ── service allow-list ────────────────────────────────────────────────
+
+    #[test]
+    fn unknown_service_rejected() {
+        let err = tokens_path_in(data_dir().path(), "proj", "evil", "api_key")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in allow-list"), "got: {err}");
+    }
+
+    #[test]
+    fn local_llm_file_allow_list_enforced() {
+        let d = data_dir();
+        assert!(tokens_path_in(d.path(), "proj", "local-llm", "api_key").is_ok());
+        let err = tokens_path_in(d.path(), "proj", "local-llm", "secret")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_project_name_rejected_before_file_check() {
+        let err = tokens_path_in(
+            data_dir().path(),
+            "../escape",
+            LLM_TOKEN_SERVICE,
+            "ok_api_key",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.is_empty(), "project-name validation must fire first");
+    }
 }

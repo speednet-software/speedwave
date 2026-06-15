@@ -1000,6 +1000,30 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         );
     }
 
+    // v2 provider list (ADR-073): validate ids, base URLs and the active
+    // selection before anything is persisted.
+    if let Some(ref providers) = update.providers {
+        validate_provider_entries(providers)?;
+        if let Some(ref active) = update.active {
+            if !providers.iter().any(|p| p.id == active.provider_id) {
+                return Err(format!(
+                    "active provider '{}' is not in the provider list",
+                    active.provider_id
+                ));
+            }
+            // active.model is the routing SSOT (injected as ANTHROPIC_MODEL /
+            // ANTHROPIC_SMALL_FAST_MODEL) — apply the same flag-collision guard
+            // as the flat field and per-entry models.
+            if let Some(model) = active.model.as_deref() {
+                if model.starts_with('-') {
+                    return Err(
+                        "active model must not start with '-' (CLI flag collision)".to_string()
+                    );
+                }
+            }
+        }
+    }
+
     // Validate credentials *before* touching the filesystem.
     let api_key_action =
         resolve_credential_action(update.api_key.as_ref(), validate_api_key, "api_key")?;
@@ -1038,14 +1062,30 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
             CredentialAction::Write(_) => new_has_custom_headers = true,
         }
 
-        let merged = config::LlmConfig {
+        let mut merged = config::LlmConfig {
             provider: update.provider,
             model: update.model,
             base_url: update.base_url,
             context_tokens: update.context_tokens,
             has_api_key: new_has_api_key,
             has_custom_headers: new_has_custom_headers,
+            ..Default::default()
         };
+        // v2 fields (ADR-073): the UI sends the full provider set; preserve
+        // the stored one when absent so a legacy-shaped save cannot wipe it.
+        let stored = user_config
+            .active_project_entry()
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.clone())
+            .unwrap_or_default();
+        merged.providers = update.providers.clone().unwrap_or(stored.providers);
+        merged.active = update.active.clone().or(stored.active);
+        merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
+        if !merged.providers.is_empty() {
+            merged.schema_version = Some(config::LLM_SCHEMA_VERSION);
+            // Keep the legacy flat fields coherent for the downgrade story.
+            config::sync_llm_legacy_fields(&mut merged);
+        }
         apply_llm_config(&mut user_config, merged)?;
         config::save_user_config(&user_config)?;
         log::info!(
@@ -1055,6 +1095,127 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         Ok(())
     })
     .map_err(|e| e.to_string())
+}
+
+/// Validates a v2 provider list before save (ADR-073): slug ids, no
+/// duplicates, SSRF-clean base URLs where the kind requires one.
+fn validate_provider_entries(
+    providers: &[speedwave_runtime::config::LlmProviderEntry],
+) -> Result<(), String> {
+    use speedwave_runtime::config::LlmProviderKind;
+    let mut seen = std::collections::HashSet::new();
+    for entry in providers {
+        if !speedwave_runtime::plugin::is_valid_slug(&entry.id) {
+            return Err(format!(
+                "provider id '{}' must match ^[a-z][a-z0-9-]{{0,63}}$",
+                entry.id
+            ));
+        }
+        if !seen.insert(entry.id.as_str()) {
+            return Err(format!("duplicate provider id '{}'", entry.id));
+        }
+        let needs_url = matches!(
+            entry.kind,
+            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat
+        );
+        match (&entry.base_url, needs_url) {
+            (Some(url), _) => {
+                let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+                crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+                speedwave_runtime::compose::validate_base_url(&normalized)
+                    .map_err(|e| e.to_string())?;
+            }
+            (None, true) => {
+                return Err(format!("provider '{}' requires a base URL", entry.id));
+            }
+            (None, false) => {}
+        }
+        if let Some(model) = entry.model.as_deref() {
+            if model.starts_with('-') {
+                return Err(format!(
+                    "provider '{}': model must not start with '-' (CLI flag collision)",
+                    entry.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes or removes one provider's API key (ADR-073). The value lands in
+/// `tokens/<project>/llm/<provider_id>_api_key` — never in config.json; the
+/// matching entry's `has_api_key` flag is updated in the same lock.
+#[tauri::command]
+pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
+    log::info!(
+        "set_llm_provider_key: provider_id={provider_id} action={}",
+        if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+            "write"
+        } else {
+            "delete"
+        }
+    );
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let data_dir = speedwave_runtime::consts::data_dir();
+
+        let has_key = match key.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => {
+                speedwave_runtime::compose::write_llm_provider_key_in(
+                    data_dir.as_path(),
+                    &active,
+                    &provider_id,
+                    value,
+                )?;
+                true
+            }
+            _ => {
+                speedwave_runtime::compose::remove_llm_provider_key_in(
+                    data_dir.as_path(),
+                    &active,
+                    &provider_id,
+                )?;
+                false
+            }
+        };
+
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
+                entry.has_api_key = has_key;
+            } else {
+                // Normal Angular flow follows with update_llm_config, which
+                // rewrites providers wholesale; a direct caller would leave a
+                // key file with has_api_key stuck false — surface that.
+                log::warn!(
+                    "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
+                );
+            }
+        }
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
+/// Re-renders the project's compose (which rewrites the litellm config.yaml
+/// in the same transaction) and recreates ONLY the litellm service — the
+/// ADR-073 hot-reload path. The claude session keeps running; callers use
+/// the full project restart instead when the claude env itself changed
+/// (provider class or active model).
+#[tauri::command]
+pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
+    check_project(&project)?;
+    render_and_save_compose(&project)?;
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    rt.compose_up_service(&project, "litellm")
+        .map_err(|e| e.to_string())
 }
 
 /// Three possible outcomes of a tri-state credential field.
@@ -1117,6 +1278,7 @@ fn apply_credential_action(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            mirror_local_key_to_llm_namespace(project, file, None)?;
             Ok(())
         }
         CredentialAction::Write(value) => {
@@ -1128,9 +1290,46 @@ fn apply_credential_action(
                 path.display(),
                 value.len()
             );
+            mirror_local_key_to_llm_namespace(project, file, Some(value))?;
             Ok(())
         }
     }
+}
+
+/// Keeps the litellm-readable `tokens/<project>/llm/local_api_key` in sync
+/// with the local card's `api_key` write/delete. The legacy
+/// `local-llm/api_key` feeds the kill-switch direct path; the proxy entrypoint
+/// reads only the `llm/` namespace, so without this mirror a rotated key (and
+/// the one-time migration's copy) would go stale. Only `api_key` is mirrored —
+/// `custom_headers` belongs to the legacy direct path alone. Non-fatal: a
+/// failure leaves the proxy on the previous key rather than aborting the save.
+fn mirror_local_key_to_llm_namespace(
+    project: &str,
+    file: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    if file != "api_key" {
+        return Ok(());
+    }
+    let data_dir = speedwave_runtime::consts::data_dir();
+    let result = match value {
+        Some(v) => speedwave_runtime::compose::write_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+            v,
+        )
+        .map(|_| ()),
+        None => speedwave_runtime::compose::remove_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+        ),
+    };
+    if let Err(e) = result {
+        log::warn!("update_llm_config: mirroring local api_key to llm namespace failed: {e}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,6 +1365,7 @@ mod tests {
                             context_tokens: None,
                             has_api_key: false,
                             has_custom_headers: false,
+                            ..Default::default()
                         }),
                     }),
                     integrations: None,
@@ -1192,9 +1392,7 @@ mod tests {
             provider: Some(provider.to_string()),
             model: model.map(str::to_string),
             base_url: base_url.map(str::to_string),
-            context_tokens: None,
-            has_api_key: false,
-            has_custom_headers: false,
+            ..Default::default()
         }
     }
 
@@ -1205,9 +1403,7 @@ mod tests {
             provider: Some(provider.to_string()),
             model: model.map(str::to_string),
             base_url: base_url.map(str::to_string),
-            context_tokens: None,
-            api_key: None,
-            custom_headers: None,
+            ..Default::default()
         }
     }
 
@@ -1262,6 +1458,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         );
         assert!(result.is_ok());
@@ -1393,6 +1590,7 @@ mod tests {
                 context_tokens: Some(0),
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -1497,6 +1695,116 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── v2 provider list validation (ADR-073) ────────────────────────────
+
+    fn v2_entry(
+        id: &str,
+        kind: speedwave_runtime::config::LlmProviderKind,
+        base_url: Option<&str>,
+    ) -> speedwave_runtime::config::LlmProviderEntry {
+        speedwave_runtime::config::LlmProviderEntry {
+            id: id.to_string(),
+            kind,
+            base_url: base_url.map(str::to_string),
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_flag_shaped_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut entry = v2_entry("openrouter", K::OpenRouter, None);
+        entry.model = Some("--dangerously-skip".to_string());
+        let err = validate_provider_entries(&[entry]).unwrap_err();
+        assert!(err.contains("must not start with '-'"));
+
+        let mut ok = v2_entry("openrouter", K::OpenRouter, None);
+        ok.model = Some("deepseek/deepseek-v4-flash".to_string());
+        assert!(validate_provider_entries(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_entries_accepts_a_valid_mix() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+            v2_entry("local", K::Local, Some("http://host.docker.internal:9000")),
+        ];
+        assert!(validate_provider_entries(&providers).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_bad_slug_and_duplicates() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let err =
+            validate_provider_entries(&[v2_entry("Bad.Id", K::OpenRouter, None)]).unwrap_err();
+        assert!(err.contains("Bad.Id"), "slug error must name the id: {err}");
+
+        let err = validate_provider_entries(&[
+            v2_entry("dup", K::OpenRouter, None),
+            v2_entry("dup", K::OpenRouter, None),
+        ])
+        .unwrap_err();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_missing_or_ssrf_url() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Local without a URL.
+        let err = validate_provider_entries(&[v2_entry("local", K::Local, None)]).unwrap_err();
+        assert!(err.contains("requires a base URL"), "got: {err}");
+        // Metadata endpoint must fail the shared SSRF validator.
+        assert!(validate_provider_entries(&[v2_entry(
+            "local",
+            K::Local,
+            Some("http://169.254.169.254")
+        )])
+        .is_err());
+        // Credentials embedded in the URL.
+        assert!(validate_provider_entries(&[v2_entry(
+            "compat",
+            K::OpenAiCompat,
+            Some("http://user:pass@example.com")
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn update_llm_config_rejects_dangling_active_provider() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let result = update_llm_config(LlmConfigUpdate {
+            providers: Some(vec![v2_entry("openrouter", K::OpenRouter, None)]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "ghost".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("ghost") && err.contains("not in the provider list"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_invalid_v2_entries_before_any_io() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Validation fires before the config lock / fs — even with no active
+        // project the slug error must surface, not a project error.
+        let err = update_llm_config(LlmConfigUpdate {
+            providers: Some(vec![v2_entry("UPPER", K::OpenRouter, None)]),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.contains("UPPER"), "got: {err}");
+    }
+
     #[test]
     fn update_llm_config_rejects_zero_context_tokens() {
         // Persisted `context_tokens = 0` would divide-by-zero in the chat
@@ -1509,6 +1817,7 @@ mod tests {
             context_tokens: Some(0),
             api_key: None,
             custom_headers: None,
+            ..Default::default()
         });
         assert!(result.is_err());
         assert!(

@@ -12,7 +12,6 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { BetaService } from '../services/beta.service';
-import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
@@ -69,7 +68,6 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
   imports: [
     RouterLink,
     LlmProviderComponent,
-    AuthSectionComponent,
     AdvancedSectionComponent,
     TranscriptionSectionComponent,
     UpdateSectionComponent,
@@ -116,13 +114,8 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         }
 
         <app-llm-provider
-          (providerChange)="llmProvider = $event"
-          (errorOccurred)="error = $event"
-        />
-
-        <app-auth-section
           [activeProject]="activeProject"
-          [llmProvider]="llmProvider"
+          (providerChange)="llmProvider = $event"
           (errorOccurred)="error = $event"
         />
 

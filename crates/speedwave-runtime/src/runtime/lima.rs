@@ -670,6 +670,32 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
+        super::validate_builtin_service_name(service)?;
+        self.require_running()?;
+        let compose_file = super::compose_file_path(project)?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::lima_vm_name(),
+                "--",
+                "sudo",
+                "nerdctl",
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "up",
+                "-d",
+                "--force-recreate",
+                service,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
@@ -1915,6 +1941,44 @@ mod tests {
             commands[0].contains("-p testproject"),
             "command should include project name, got: {}",
             commands[0]
+        );
+    }
+
+    /// ADR-073: single-service recreate targets exactly the named service,
+    /// keeps --force-recreate, and never removes orphans (the rest of the
+    /// stack must stay untouched).
+    #[test]
+    fn test_compose_up_service_targets_one_service() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.compose_up_service("testproject", "litellm").unwrap();
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].ends_with("--force-recreate litellm"),
+            "service must be the last argv token: {}",
+            commands[0]
+        );
+        assert!(
+            !commands[0].contains("--remove-orphans"),
+            "single-service recreate must not remove orphans: {}",
+            commands[0]
+        );
+    }
+
+    /// Unknown service names are rejected before reaching the engine argv.
+    #[test]
+    fn test_compose_up_service_rejects_unknown_service() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(rt
+            .compose_up_service("testproject", "evil; rm -rf")
+            .is_err());
+        assert!(rt.compose_up_service("testproject", "mcp-unknown").is_err());
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "no engine command may run for a rejected service"
         );
     }
 

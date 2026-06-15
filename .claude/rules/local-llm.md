@@ -1,61 +1,110 @@
 ---
 paths:
-  - 'crates/speedwave-runtime/src/compose.rs'
+  - 'crates/speedwave-runtime/src/compose/**'
   - 'crates/speedwave-runtime/src/config.rs'
+  - 'crates/speedwave-runtime/src/usage.rs'
+  - 'containers/Containerfile.litellm'
+  - 'containers/litellm/**'
   - 'desktop/src-tauri/src/llm_cmd.rs'
   - 'desktop/src-tauri/src/containers_cmd.rs'
   - 'desktop/src-tauri/src/http_util.rs'
   - 'desktop/src/src/app/settings/llm-provider/**'
   - 'docs/adr/ADR-040-remove-litellm-direct-provider-injection.md'
   - 'docs/adr/ADR-041-local-llm-model-discovery.md'
+  - 'docs/adr/ADR-073-embedded-per-project-litellm-proxy.md'
 ---
 
-# Local LLM Rules
+# LLM Provider Rules
 
-Speedwave is a **local-first** platform. Since ADR-040 LiteLLM is gone — Claude Code talks directly to a local LLM server (any Anthropic Messages compatible) or to Anthropic. There is no proxy in between. ADR-040 and ADR-041 are mandatory reading before touching any code under the `paths:` above.
+Speedwave is a **local-first** platform. Since ADR-073 every session routes
+through a per-project LiteLLM proxy container (`litellm`, port 4000, compose
+network only); ADR-040's direct-injection path survives behind the
+`llm.proxy_enabled` kill-switch until N+2. ADR-040, ADR-041 and ADR-073 are
+mandatory reading before touching any code under the `paths:` above.
 
 ## Invariants (non-negotiable)
 
-Whether you are adding a feature, fixing a bug, or refactoring something adjacent, none of these may regress:
+1. **The litellm container must never hold a canonical Anthropic credential.**
+   No `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` env name may reach it —
+   the `/anthropic` passthrough forwards the client's subscription OAuth
+   header only while the proxy has no Anthropic credential of its own.
+   Provider keys are exported exclusively as `SPW_KEY_<PROVIDER_ID>` by the
+   entrypoint. Guarded by `render_never_embeds_key_values_or_canonical_names`
+   and the entrypoint BATS suite — keep both green.
+2. **OAuth sessions carry no auth env.** Injecting any of
+   `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`apiKeyHelper` into the claude
+   container disables Claude Code OAuth. The `anthropic_oauth` proxy branch
+   must inject `ANTHROPIC_BASE_URL` (passthrough) and model pins only.
+3. **Key VALUES never land in config.json or the rendered litellm
+   config.yaml.** Values live in `tokens/<project>/llm/<provider_id>_api_key`
+   (0600, atomic, `Bearer `-stripped, CRLF-rejected); configs carry presence
+   flags and `os.environ/SPW_KEY_<ID>` references. Provider ids are
+   plugin-grade slugs — they become file names and env names; validate with
+   `plugin::is_valid_slug`, never a second regex.
+4. **`provider`, `base_url`, `providers`, `active`, and `proxy_enabled` are
+   user-only configuration.** Repo `.speedwave.json` may set `model` only —
+   `merge_llm_repo()` strips the rest. A malicious cloned repo must not be
+   able to redirect traffic, add providers, or flip the kill-switch.
+5. **Anthropic model strings have one SSOT** —
+   `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`. Frontend
+   reads it via `list_anthropic_models`. Do not hard-code model strings.
+6. **Usage has one dashboard source.** The litellm callback JSONL
+   (aggregated by `speedwave_runtime::usage`) feeds the usage dashboard; the
+   Claude Code result stream feeds per-session chat stats. Never sum the two
+   — the same request appears in both.
 
-1. **Only Anthropic Messages servers.** The supported provider set is `anthropic | local` (legacy `ollama|lmstudio|llamacpp` aliases accepted on read for two release cycles, auto-migrated by Settings UI to `local`; planned removal in v0.X+2). The server must speak `POST /v1/messages` — pure OpenAI Chat Completions (vLLM stock, TGI, Triton) is out of scope; resurrecting a translation proxy would re-introduce the LiteLLM-shaped attack surface ADR-040 removed.
-2. **Local-LLM credentials live in token files, not config.json.** When the user configures an API key or custom headers, the _values_ land in `~/.speedwave/tokens/<project>/local-llm/{api_key,custom_headers}` (chmod 0600 / Windows owner-only ACL via `fs_perms`); only the `has_api_key`/`has_custom_headers` presence flags reach `LlmConfig`. `apply_llm_config` reads the files at compose-render time and injects values as `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_CUSTOM_HEADERS` env vars on the `claude` container. This is **deliberately different from the plugin token regime** (which file-mounts `:ro` into the worker) — Claude Code reads from env, not files. ADR-040 §"Threat model — env vs file mount" documents the accepted residual risk (secret visible in compose YAML, `/proc/<pid>/environ`).
-3. **`provider` and `base_url` are user-only configuration.** Repo `.speedwave.json` may set `model` only — `merge_llm_repo()` strips the rest. A malicious cloned repo must not be able to redirect the user's traffic. If you add a new LLM-related field to config, decide explicitly which side (user vs repo) may set it, and add the merge test.
-4. **Anthropic model strings have one SSOT** — `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`. Frontend reads it via the `list_anthropic_models` Tauri command and `AnthropicModelsService`. Bumping a model = editing one const. Do not hard-code model strings in Angular, in compose injection, or in tests.
+## Env-var injection (compose/llm.rs)
 
-## Env-var injection (compose.rs)
-
-The full table lives in ADR-040. Two rules when modifying it:
-
-- **`ANTHROPIC_MODEL` is primary**, `ANTHROPIC_CUSTOM_MODEL_OPTION` is supplementary. Without `ANTHROPIC_MODEL` Claude Code falls back to the account-tier default and the UI lies about which model is running. Don't drop one and keep the other.
-- **`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is forbidden in the LOCAL-provider branch.** Pointing an alias at a local model silently remaps built-in aliases and leaves three misleading Anthropic names in `/model` — choose explicit naming over silent remapping. The Anthropic-provider branch is the deliberate exception: it pins each alias to _its own_ Anthropic model (Opus stays Opus) and appends the documented `[1m]` 1M-context suffix (anthropics/claude-code#34083 workaround in `defaults.rs::anthropic_default_models_env`). That neither remaps nor misleads, so it is allowed. Any env value carrying YAML flow indicators (`[ ] { } ,`, e.g. `[1m]`) is re-quoted by `compose::harden_env_scalar_quoting` so nerdctl's strict Go YAML parser accepts it — never hand-emit such a value unquoted.
+- **`ANTHROPIC_MODEL` is primary**, `ANTHROPIC_CUSTOM_MODEL_OPTION` is
+  supplementary. For non-Anthropic kinds the model is `<provider_id>/<model>`
+  — it must match the wildcard route in the rendered litellm config.
+- **`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is forbidden for
+  non-Anthropic kinds** (silent alias remapping). The Anthropic branches pin
+  each alias to its own model with the `[1m]` suffix (ADR-040 rule, upheld).
+  `ANTHROPIC_SMALL_FAST_MODEL` (subagent traffic) is pinned to the active
+  model for non-Anthropic kinds instead.
+- A `local` provider with custom headers falls back to the direct path —
+  the proxy would consume headers addressed to the LLM server.
 
 ## SSRF policy (host-side)
 
-The discovery probe (`discover_llm_models`) and the save path (`update_llm_config`) **share one validator** — `validate_llm_base_url` in `desktop/src-tauri/src/llm_cmd.rs`, parameterised by `PrivatePolicy`. Two callsites, one policy. When you add a third callsite (e.g. a future "test connection" button):
-
-- Reuse `validate_llm_base_url`. Do not write a second URL validator.
-- If your callsite needs a different loopback policy than the existing two, extend `PrivatePolicy` (already used by Redmine — Rule of Three is satisfied), don't fork the function.
-- Block list is **fixed**: loopback (per `PrivatePolicy`), RFC 1918 private (10/8, 172.16/12, 192.168/16), CGNAT shared space (100.64.0.0/10), link-local (incl. cloud metadata 169.254.169.254 and IPv6 `fe80::/10`), IPv6 ULA (`fc00::/7`) and deprecated site-local (`fec0::/10`), TEST-NET (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), RFC 2544 benchmarking (198.18.0.0/15), IPv6 documentation (`2001:db8::/32`)/discard (`100::/64`) prefixes, unspecified, `localhost`/`*.localhost`, embedded credentials, query/fragment, non-`http(s)` schemes. IPv6-mapped IPv4 bypasses are checked. **Multicast (IPv4 224.0.0.0/4, IPv6 `ff00::/8`) is NOT currently blocked** — `is_private_or_reserved` does not call `is_multicast()`, so a multicast literal passes `validate_url`. Adding multicast (or anything else) to — or removing from — this list requires an ADR delta.
-
-The HTTP probe itself runs through reqwest with: `redirect::Policy::none()`, 5-second timeout, 5 MiB body cap (`http_util::read_body_limited`), `Content-Type` allow-list. These four are a unit — if you add a new probe, copy the configuration constants by **reusing the existing reqwest client builder**, not by re-typing the values.
+Unchanged from ADR-040/ADR-041: discovery probe and save path share
+`validate_llm_base_url` (`llm_cmd.rs`), parameterised by `PrivatePolicy`.
+The block list is fixed; changes require an ADR delta. The litellm proxy URL
+(`http://litellm:4000[/anthropic]`) is compose-internal and never flows
+through user-facing URL fields.
 
 ## Container-host alias rewrite
 
-`host.docker.internal` resolves **inside the container** (injected via Compose `extra_hosts` per-service) but not from the Desktop host process — Speedwave does not bundle Docker Desktop. Host-side code that probes a base URL must call `http_util::rewrite_container_alias_to_loopback`. The single SSOT is `consts::HOST_GATEWAY_ALIAS`. Do not reintroduce per-platform aliases (`host.lima.internal`, `host.speedwave.internal`, `host.containers.internal`) — one canonical hostname; per-platform divergence is in the gateway IP only, resolved at runtime by `compose::host_addressing` (macOS: static `LIMA_VZ_HOST_IP`; Windows: detected from `wsl.exe -d <distro> -- sh -c 'ip -4 route show default'`, see ADR-067).
+`host.docker.internal` resolves inside containers (litellm included — it
+carries `extra_hosts` for local backends) but not from the Desktop host
+process. Host-side probes call `http_util::rewrite_container_alias_to_loopback`.
+SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
 ## Authentication bypass
 
-`check_claude_auth` short-circuits to `Ok(true)` when the provider is in `LOCAL_PROVIDERS` (`ollama | lmstudio | llamacpp | local`). This is the **only** Anthropic auth check that may be bypassed for local providers. If you add another auth checkpoint (telemetry, model lookup, license check), it must follow the same pattern — local providers never reach Anthropic, so requiring an Anthropic token there blocks legitimate offline users.
+`check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only
+an active `anthropic_oauth` provider runs the in-container OAuth check; all
+other kinds (api key, local, openrouter, openai-compat) skip it.
+Legacy v1 configs keep the `LOCAL_PROVIDERS` rule. Any new Anthropic-auth
+checkpoint must use the same predicate.
 
 ## When designing or fixing any feature, ask:
 
-- Does it talk to an LLM? Then it goes through the Claude Code container — no host-side LLM calls except the discovery probe under `llm_cmd.rs`.
-- Does it accept a URL? Then it goes through `validate_llm_base_url` (or the Redmine equivalent for non-LLM services).
-- Does it surface a model name to the user? Read it from `ANTHROPIC_MODELS` (Anthropic side) or from the discovery result (`DiscoveredModel`) — never hard-code.
-- Does it write to repo `.speedwave.json` parsing? Verify the `merge_llm_repo()` allow-list still excludes it.
-- Does the feature only make sense with a cloud provider? Stop — write an ADR first; the local-first invariant is load-bearing.
+- Does it talk to an LLM? It goes through the claude container → litellm —
+  no host-side LLM calls except the discovery probe under `llm_cmd.rs`.
+- Does it accept a URL? `validate_llm_base_url` (host) or
+  `compose::validate_base_url` (render) — never a third validator.
+- Does it add a provider kind or change routing? Update the renderer
+  (`compose/litellm.rs`), the injection (`compose/llm.rs`), the security
+  rule expectations, AND ADR-073 in the same change.
+- Does it touch litellm's version? Follow the bump procedure in
+  `containers/litellm/requirements.in` (regenerate hashes, audit changelog).
+- Does it surface usage numbers? Decide which source of truth (invariant 6)
+  and document the choice.
 
 ## Chat / context windows
 
-Local model context is reported by the discovery probe as `context_tokens: Option<u32>`. The `discover_local` path extracts it per-entry from `/v1/models` (inline `meta.n_ctx_train` for llama.cpp/Unsloth/vLLM, `max_context_length` for LM Studio 0.4.1+) with a single sanity `/api/show` fallback for Ollama. When `None`, **propagate `null` to the frontend** — `ChatStateService.resolveContextWindow` returns `null` for local providers and `session-stats.component` hides the `used / max` ratio. Never substitute `DEFAULT_CONTEXT_TOKENS` (200 K Anthropic baseline) for a local model — that is exactly the "guess" ADR-041 forbids.
+Unchanged from ADR-041: local model context comes from the discovery probe
+as `context_tokens: Option<u32>` (now per provider entry). When `None`,
+propagate `null` — never substitute the 200K Anthropic baseline.

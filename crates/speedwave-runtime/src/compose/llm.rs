@@ -1,8 +1,9 @@
-//! LLM provider switching: Anthropic model pinning (ADR-040) + local-provider
-//! base-URL/auth/custom-header env injection into the `claude` service.
+//! LLM provider switching (ADR-073): routes the `claude` container at the
+//! per-project LiteLLM proxy, with the pre-proxy direct-injection path kept
+//! behind the `proxy_enabled` kill-switch (removal in N+2).
 
 use super::{inject_claude_env, tokens_path_in};
-use crate::config::LlmConfig;
+use crate::config::{LlmConfig, LlmProviderKind};
 use crate::consts;
 use std::path::Path;
 
@@ -11,6 +12,128 @@ use std::path::Path;
 /// `~/.speedwave/tokens`. The only caller is `render_compose_in`, which
 /// already threads the data dir.
 pub(crate) fn apply_llm_config_in(
+    data_dir: &Path,
+    yaml: &str,
+    llm: &LlmConfig,
+    project: &str,
+) -> anyhow::Result<String> {
+    if llm.proxy_enabled.unwrap_or(true) {
+        if let Some(entry) = llm.active_provider() {
+            // Local custom headers are addressed to the LLM server itself;
+            // LiteLLM would consume rather than forward them. Those setups
+            // stay on the direct path until the proxy learns to relay them.
+            let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
+            if !needs_direct {
+                return apply_llm_config_proxy(yaml, llm);
+            }
+            log::info!("llm: custom headers configured — using the direct (non-proxy) path");
+        }
+    }
+    apply_llm_config_legacy_in(data_dir, yaml, llm, project)
+}
+
+/// ADR-073 proxy path: every session talks to the litellm service; the
+/// provider kind picks the route and model prefix.
+///
+/// Auth rules (validated in the Phase 0 spike):
+/// - `AnthropicOauth`: passthrough route, and **no** `ANTHROPIC_AUTH_TOKEN` /
+///   `ANTHROPIC_API_KEY` may be injected — any of them disables Claude
+///   Code's OAuth. The OAuth `Authorization` header transits LiteLLM
+///   untouched because the proxy holds no canonical Anthropic credential.
+/// - `AnthropicApiKey`: same passthrough route; the key keeps riding the
+///   claude env (`apply_auth_config_in`) as `x-api-key`, which the
+///   passthrough forwards. This keeps `/model` aliases and the `[1m]`
+///   suffix semantics identical to the direct path.
+/// - Everything else: the unified `/v1/messages` root with a dummy Bearer
+///   (OAuth intentionally disabled) and a `<provider_id>/<model>` name that
+///   matches the wildcard route in the rendered litellm config.
+fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+    let entry = llm
+        .active_provider()
+        .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
+    let model = llm
+        .active
+        .as_ref()
+        .and_then(|a| a.model.as_deref())
+        .map(str::trim)
+        .unwrap_or("");
+
+    let mut extra_env = std::collections::HashMap::new();
+    match entry.kind {
+        LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
+            extra_env.extend(crate::defaults::anthropic_default_models_env());
+            extra_env.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                super::LITELLM_ANTHROPIC_PASSTHROUGH_URL.to_string(),
+            );
+            if !model.is_empty() {
+                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
+            }
+        }
+        LlmProviderKind::Local | LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
+            if model.is_empty() {
+                anyhow::bail!(
+                    "Provider '{}' requires a model name. \
+                     Configure it in Settings → LLM Provider → Model.",
+                    entry.id
+                );
+            }
+            // `<id>/<model>` matches the per-provider wildcard route in the
+            // rendered litellm config (OpenRouter models already carry the
+            // `openrouter/` prefix as their provider id by convention).
+            let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
+                model.to_string()
+            } else {
+                format!("{}/{}", entry.id, model)
+            };
+            extra_env.extend(std::collections::HashMap::from([
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    super::LITELLM_BASE_URL.to_string(),
+                ),
+                // Dummy Bearer: disables OAuth (intended — these sessions
+                // never reach Anthropic) and satisfies servers that demand a
+                // non-empty Authorization.
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "sk-no-key-required".to_string(),
+                ),
+                ("ANTHROPIC_MODEL".to_string(), routed_model.clone()),
+                // Subagents / background tasks default to a haiku alias no
+                // non-Anthropic backend knows — pin them to the same model.
+                (
+                    "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+                    routed_model.clone(),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
+                    routed_model.clone(),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".to_string(),
+                    format!("{model} ({})", entry.id),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION".to_string(),
+                    format!("Served via Speedwave LLM proxy ({})", entry.id),
+                ),
+                (
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                    "1".to_string(),
+                ),
+            ]));
+        }
+    }
+    extra_env.insert(
+        "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
+        "0".to_string(),
+    );
+    inject_claude_env(yaml, &extra_env)
+}
+
+/// Pre-ADR-073 direct-injection path, kept verbatim behind the
+/// `proxy_enabled` kill-switch. Scheduled for removal in N+2.
+fn apply_llm_config_legacy_in(
     data_dir: &Path,
     yaml: &str,
     llm: &LlmConfig,

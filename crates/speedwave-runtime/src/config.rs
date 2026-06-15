@@ -6,7 +6,77 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// LLM provider selection and model settings (`anthropic` or `local`).
+/// Current LLM config schema version. Version 2 introduces the provider
+/// list + active selection (ADR-073); absent/`None` means the legacy flat
+/// v1 shape, auto-migrated on resolve by [`migrate_llm_to_v2`].
+pub const LLM_SCHEMA_VERSION: u32 = 2;
+
+/// What class of backend a configured provider entry is (ADR-073).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProviderKind {
+    /// Anthropic via the user's Claude subscription (OAuth managed by Claude
+    /// Code, ADR-052). Inference passes through LiteLLM's `/anthropic` route.
+    AnthropicOauth,
+    /// Anthropic via a raw API key (key in the llm token namespace).
+    AnthropicApiKey,
+    /// Local Anthropic-Messages or OpenAI-compatible server (Ollama,
+    /// LM Studio, llama.cpp, custom URL).
+    Local,
+    /// OpenRouter (key required).
+    OpenRouter,
+    /// Any remote OpenAI-compatible endpoint (key required).
+    OpenAiCompat,
+}
+
+/// One configured LLM provider (ADR-073). Key VALUES never live here —
+/// they sit in `tokens/<project>/llm/<id>_api_key`; only presence flags do.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LlmProviderEntry {
+    /// Stable user-scoped identifier; plugin-grade slug
+    /// (`^[a-z][a-z0-9-]{0,63}$`). Becomes the token file name segment and
+    /// the `SPW_KEY_<ID>` env name in the litellm container.
+    pub id: String,
+    /// Backend class.
+    pub kind: LlmProviderKind,
+    /// Base URL for `Local`/`OpenAiCompat` kinds (user-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Last model used with this provider — restored on re-activation;
+    /// `active.model` stays the routing source of truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// True when `tokens/<project>/llm/<id>_api_key` exists.
+    #[serde(default)]
+    pub has_api_key: bool,
+    /// Context window of this provider's selected model, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+    /// True when the legacy `local-llm/custom_headers` file applies (Local
+    /// entries migrated from v1 only).
+    #[serde(default)]
+    pub has_custom_headers: bool,
+}
+
+/// The provider+model a project's sessions start with (ADR-073).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LlmActive {
+    /// `LlmProviderEntry::id` of the selected provider.
+    pub provider_id: String,
+    /// Model id, or `None` for the provider/account default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// LLM provider selection and model settings.
+///
+/// Two coexisting shapes (ADR-073 migration):
+/// - **v1 (legacy, flat)**: `provider`/`model`/`base_url`/`context_tokens`/
+///   `has_api_key`/`has_custom_headers`. Still WRITTEN on save for one
+///   release so an older Speedwave reads the config without losing the
+///   active selection (downgrade story).
+/// - **v2**: `providers` list + `active` selection + `schema_version=2`.
+///   [`migrate_llm_to_v2`] lifts v1 data into v2 on resolve.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
     /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
@@ -30,6 +100,146 @@ pub struct LlmConfig {
     /// True when custom headers file exists at `tokens/<project>/local-llm/custom_headers`.
     #[serde(default)]
     pub has_custom_headers: bool,
+    /// LLM schema version; `None` = legacy v1 (see [`LLM_SCHEMA_VERSION`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
+    /// Kill-switch (ADR-073): `false` routes Claude Code directly at the
+    /// provider (pre-proxy behaviour). Default `true`. User-only — the repo
+    /// layer cannot set it (merge_llm_repo ignores it). Removal in N+2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
+    /// Configured providers (v2). Entries with invalid slugs are dropped on
+    /// resolve with a warning — the id reaches file paths and env names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<LlmProviderEntry>,
+    /// Active provider+model selection (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<LlmActive>,
+}
+
+impl LlmConfig {
+    /// The active provider entry, when both halves of the v2 shape agree.
+    pub fn active_provider(&self) -> Option<&LlmProviderEntry> {
+        let active = self.active.as_ref()?;
+        self.providers.iter().find(|p| p.id == active.provider_id)
+    }
+}
+
+/// Lifts a legacy (v1) flat `LlmConfig` into the v2 provider-list shape.
+/// Idempotent: a config already at v2 is only re-validated, never rebuilt.
+///
+/// `has_anthropic_secret` tells the migration whether
+/// `secrets/<project>/anthropic_api_key` exists — that distinguishes
+/// `AnthropicApiKey` from `AnthropicOauth` for legacy `provider=anthropic`.
+///
+/// Invalid provider ids (non-slug) are dropped with a warning; if the active
+/// selection pointed at a dropped entry it falls back to the first valid one.
+pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
+    if llm.schema_version.is_none() && llm.providers.is_empty() {
+        let legacy_provider = llm.provider.as_deref();
+        if is_local_provider(legacy_provider) {
+            llm.providers.push(LlmProviderEntry {
+                id: "local".to_string(),
+                kind: LlmProviderKind::Local,
+                base_url: llm.base_url.clone(),
+                model: llm.model.clone(),
+                has_api_key: llm.has_api_key,
+                context_tokens: llm.context_tokens,
+                has_custom_headers: llm.has_custom_headers,
+            });
+            llm.active = Some(LlmActive {
+                provider_id: "local".to_string(),
+                model: llm.model.clone(),
+            });
+        } else {
+            // `anthropic` or unset (default).
+            let kind = if has_anthropic_secret {
+                LlmProviderKind::AnthropicApiKey
+            } else {
+                LlmProviderKind::AnthropicOauth
+            };
+            llm.providers.push(LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind,
+                base_url: None,
+                model: llm.model.clone(),
+                has_api_key: has_anthropic_secret,
+                context_tokens: llm.context_tokens,
+                has_custom_headers: false,
+            });
+            llm.active = Some(LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: llm.model.clone(),
+            });
+        }
+    }
+    llm.schema_version = Some(LLM_SCHEMA_VERSION);
+
+    // Repo `.speedwave.json` may suggest a model (merge_llm_repo writes the
+    // flat field only) — lift it into the active selection when the user has
+    // not pinned one. Also covers the v1→v2 lift for user-set legacy models.
+    if let Some(active) = &mut llm.active {
+        if active.model.is_none() && llm.model.is_some() {
+            active.model.clone_from(&llm.model);
+        }
+    }
+
+    // Validate ids — they reach token file paths and env names.
+    let before = llm.providers.len();
+    llm.providers.retain(|p| {
+        let ok = crate::plugin::is_valid_slug(&p.id);
+        if !ok {
+            log::warn!("llm config: dropping provider with invalid id slug");
+        }
+        ok
+    });
+    if llm.providers.len() != before {
+        if let Some(active) = &llm.active {
+            if !llm.providers.iter().any(|p| p.id == active.provider_id) {
+                llm.active = llm.providers.first().map(|p| LlmActive {
+                    provider_id: p.id.clone(),
+                    model: None,
+                });
+            }
+        }
+    }
+
+    sync_llm_legacy_fields(llm);
+}
+
+/// Downgrade story (one release): derive the legacy flat fields from the
+/// active v2 entry so an older Speedwave reading this config keeps working.
+pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
+    let Some(active) = llm.active.clone() else {
+        return;
+    };
+    let Some(entry) = llm.providers.iter().find(|p| p.id == active.provider_id) else {
+        return;
+    };
+    match entry.kind {
+        LlmProviderKind::Local => {
+            llm.provider = Some("local".to_string());
+            llm.base_url.clone_from(&entry.base_url);
+            llm.has_api_key = entry.has_api_key;
+            llm.has_custom_headers = entry.has_custom_headers;
+        }
+        LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
+            llm.provider = Some("anthropic".to_string());
+            llm.base_url = None;
+            llm.has_api_key = false;
+            llm.has_custom_headers = false;
+        }
+        // No v1 equivalent — an older Speedwave treats these as anthropic
+        // (its safest default); the v2 fields keep the real selection.
+        LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
+            llm.provider = Some("anthropic".to_string());
+            llm.base_url = None;
+            llm.has_api_key = false;
+            llm.has_custom_headers = false;
+        }
+    }
+    llm.model.clone_from(&active.model);
+    llm.context_tokens = entry.context_tokens;
 }
 
 /// Claude container overrides: extra env, settings.json patch, LLM config.
@@ -475,6 +685,11 @@ pub fn resolve_project_config(
         }
     }
 
+    // Lift the merged result into the v2 provider-list shape (ADR-073). The
+    // anthropic-secret presence decides AnthropicApiKey vs AnthropicOauth for
+    // legacy `provider=anthropic` configs.
+    migrate_llm_to_v2(&mut llm, anthropic_secret_exists(project_name));
+
     // Local LLMs receive the full default Claude Code system prompt (Unsloth-style
     // routing). Modern local models commonly ship with 32K-128K context windows
     // that absorb the ~30K-token baseline (system prompt + tool definitions). This
@@ -488,6 +703,17 @@ pub fn resolve_project_config(
 
     let claude = ResolvedClaudeConfig { env, flags, llm };
     (claude, integrations)
+}
+
+/// True when `secrets/<project>/anthropic_api_key` exists in the production
+/// data dir. Used by the v1→v2 LLM migration to classify legacy `anthropic`
+/// configs; tests call [`migrate_llm_to_v2`] directly with an explicit bool.
+fn anthropic_secret_exists(project_name: &str) -> bool {
+    crate::consts::data_dir()
+        .join("secrets")
+        .join(project_name)
+        .join("anthropic_api_key")
+        .is_file()
 }
 
 /// Provider names that route through a local LLM server (no Anthropic API
@@ -724,11 +950,29 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.has_custom_headers {
         base.has_custom_headers = true;
     }
+    // v2 (ADR-073): the user layer carries the provider list wholesale.
+    if overlay.schema_version.is_some() {
+        base.schema_version = overlay.schema_version;
+    }
+    if overlay.proxy_enabled.is_some() {
+        base.proxy_enabled = overlay.proxy_enabled;
+    }
+    if !overlay.providers.is_empty() {
+        base.providers.clone_from(&overlay.providers);
+    }
+    if overlay.active.is_some() {
+        base.active.clone_from(&overlay.active);
+    }
 }
 
 /// Merge LLM config from repo source (.speedwave.json).
 /// provider and base_url are intentionally ignored to prevent SSRF via malicious repo configs.
 /// Only model is merged, allowing repos to suggest a default model name.
+/// The v2 fields (`providers`, `active`, `schema_version`) are equally
+/// ignored — a repo must never add providers, redirect base URLs, or switch
+/// the active provider (ADR-073 keeps the ADR-040 rule). The model
+/// suggestion reaches `active.model` via the lift in [`migrate_llm_to_v2`]
+/// only when the user has not pinned a model.
 fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.model.is_some() {
         base.model.clone_from(&overlay.model);
@@ -775,6 +1019,60 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ---- LlmProviderKind Rust↔TS mirror (ADR-073) ---------------------------
+
+    #[test]
+    fn llm_provider_kind_matches_ts_union() {
+        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
+        // the TS union must list exactly the Rust serde strings, so the
+        // provider-save wire contract can't drift.
+        let all = [
+            LlmProviderKind::AnthropicOauth,
+            LlmProviderKind::AnthropicApiKey,
+            LlmProviderKind::Local,
+            LlmProviderKind::OpenRouter,
+            LlmProviderKind::OpenAiCompat,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for kind in all {
+            match kind {
+                LlmProviderKind::AnthropicOauth
+                | LlmProviderKind::AnthropicApiKey
+                | LlmProviderKind::Local
+                | LlmProviderKind::OpenRouter
+                | LlmProviderKind::OpenAiCompat => {}
+            }
+        }
+        let mut rust_kinds: Vec<String> = all
+            .iter()
+            .map(|k| {
+                serde_json::to_value(k)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust_kinds.sort();
+
+        let src = include_str!("../../../desktop/src/src/app/models/llm.ts");
+        let re = regex::Regex::new(r"export\s+type\s+LlmProviderKind\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("llm.ts must declare `export type LlmProviderKind`");
+        let mut ts_kinds: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts_kinds.sort();
+
+        assert_eq!(
+            rust_kinds, ts_kinds,
+            "TS LlmProviderKind union must match Rust LlmProviderKind serde strings"
+        );
+    }
 
     // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
 
@@ -1072,6 +1370,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,
@@ -1084,11 +1383,22 @@ mod tests {
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User config wins over repo config
-        assert_eq!(resolved.llm.provider.as_deref(), Some("ollama"));
+        // User config wins over repo config. The v1→v2 migration (ADR-073)
+        // normalises the legacy `ollama` alias to `local` on resolve.
+        assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(
             resolved.llm.base_url.as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+        // And the v2 shape carries the same selection.
+        let active = resolved.llm.active.as_ref().expect("active set");
+        assert_eq!(active.provider_id, "local");
+        assert_eq!(active.model.as_deref(), Some("llama3.3"));
+        let entry = resolved.llm.active_provider().expect("entry");
+        assert_eq!(entry.kind, LlmProviderKind::Local);
+        assert_eq!(
+            entry.base_url.as_deref(),
             Some("http://host.docker.internal:11434")
         );
     }
@@ -1113,9 +1423,210 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // provider and base_url from repo config must be ignored (SSRF prevention — ADR-040)
-        assert_eq!(resolved.llm.provider, None);
+        // provider and base_url from repo config must be ignored (SSRF
+        // prevention — ADR-040, upheld by ADR-073). Post-migration the
+        // default resolves to anthropic, NOT the repo's "ollama".
+        assert_eq!(resolved.llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(resolved.llm.base_url, None);
+        let active = resolved.llm.active.as_ref().expect("active set");
+        assert_eq!(active.provider_id, "anthropic");
+        let entry = resolved.llm.active_provider().expect("entry");
+        assert!(matches!(
+            entry.kind,
+            LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey
+        ));
+        assert_eq!(entry.base_url, None);
+    }
+
+    /// ADR-073: a repo `.speedwave.json` must not be able to inject the v2
+    /// fields either — providers (base URLs!), active selection, schema.
+    #[test]
+    fn test_repo_config_cannot_set_v2_providers_or_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "llm": {{
+                        "schema_version": 2,
+                        "providers": [{{
+                            "id": "evil",
+                            "kind": "open_ai_compat",
+                            "base_url": "http://attacker.example.com/v1",
+                            "has_api_key": true
+                        }}],
+                        "active": {{ "provider_id": "evil", "model": "x" }}
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert!(
+            !resolved.llm.providers.iter().any(|p| p.id == "evil"),
+            "repo must not inject providers: {:?}",
+            resolved.llm.providers
+        );
+        assert_ne!(
+            resolved.llm.active.as_ref().map(|a| a.provider_id.as_str()),
+            Some("evil"),
+            "repo must not switch the active provider"
+        );
+    }
+
+    /// v1→v2 migration unit coverage: every legacy shape lands in the right
+    /// kind, the lift is idempotent, and the downgrade fields round-trip.
+    #[test]
+    fn test_migrate_llm_to_v2_variants() {
+        // anthropic + secret → AnthropicApiKey
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            model: Some("claude-opus-4-8".into()),
+            ..Default::default()
+        };
+        migrate_llm_to_v2(&mut llm, true);
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        let entry = llm.active_provider().expect("entry");
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
+        assert!(entry.has_api_key);
+        assert_eq!(
+            llm.active.as_ref().unwrap().model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+
+        // anthropic without secret → AnthropicOauth
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        migrate_llm_to_v2(&mut llm, false);
+        assert_eq!(
+            llm.active_provider().unwrap().kind,
+            LlmProviderKind::AnthropicOauth
+        );
+
+        // unset provider → AnthropicOauth default
+        let mut llm = LlmConfig::default();
+        migrate_llm_to_v2(&mut llm, false);
+        assert_eq!(
+            llm.active_provider().unwrap().kind,
+            LlmProviderKind::AnthropicOauth
+        );
+        // Downgrade story: legacy fields are written back.
+        assert_eq!(llm.provider.as_deref(), Some("anthropic"));
+
+        // every legacy local alias → Local, base_url + flags carried over
+        for alias in LOCAL_PROVIDERS {
+            let mut llm = LlmConfig {
+                provider: Some((*alias).into()),
+                model: Some("qwen".into()),
+                base_url: Some("http://host.docker.internal:9000".into()),
+                context_tokens: Some(131072),
+                has_api_key: true,
+                has_custom_headers: true,
+                ..Default::default()
+            };
+            migrate_llm_to_v2(&mut llm, false);
+            let entry = llm
+                .active_provider()
+                .unwrap_or_else(|| panic!("alias '{alias}' must migrate to an active entry"));
+            assert_eq!(entry.kind, LlmProviderKind::Local);
+            assert_eq!(
+                entry.base_url.as_deref(),
+                Some("http://host.docker.internal:9000")
+            );
+            assert!(entry.has_api_key && entry.has_custom_headers);
+            assert_eq!(entry.context_tokens, Some(131072));
+            // Downgrade fields: alias normalised to `local`.
+            assert_eq!(llm.provider.as_deref(), Some("local"));
+            assert_eq!(llm.model.as_deref(), Some("qwen"));
+        }
+
+        // Idempotence: re-running must not duplicate or rebuild entries.
+        let mut llm = LlmConfig {
+            provider: Some("local".into()),
+            base_url: Some("http://host.docker.internal:8080".into()),
+            ..Default::default()
+        };
+        migrate_llm_to_v2(&mut llm, false);
+        let first = serde_json::to_string(&llm).unwrap();
+        migrate_llm_to_v2(&mut llm, true); // even with secret flag flipped
+        assert_eq!(first, serde_json::to_string(&llm).unwrap());
+    }
+
+    /// Invalid provider ids are dropped and the active selection falls back.
+    #[test]
+    fn test_migrate_llm_drops_invalid_provider_ids() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "Bad.Id".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: None,
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "good-id".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: None,
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "Bad.Id".into(),
+                model: Some("m".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm_to_v2(&mut llm, false);
+        assert_eq!(llm.providers.len(), 1);
+        assert_eq!(llm.providers[0].id, "good-id");
+        assert_eq!(
+            llm.active.as_ref().map(|a| a.provider_id.as_str()),
+            Some("good-id"),
+            "active must fall back to the surviving entry"
+        );
+    }
+
+    /// Downgrade round-trip: a config saved by v2 deserialises in the v1
+    /// shape (unknown fields ignored) with a usable provider/model pair.
+    #[test]
+    fn test_v2_config_readable_by_v1_schema() {
+        /// The exact v1 struct shape (pre-ADR-073) — what an older
+        /// Speedwave's serde sees.
+        #[derive(serde::Deserialize)]
+        struct LlmConfigV1 {
+            provider: Option<String>,
+            model: Option<String>,
+            base_url: Option<String>,
+        }
+
+        let mut llm = LlmConfig {
+            provider: Some("llamacpp".into()),
+            model: Some("qwen3".into()),
+            base_url: Some("http://host.docker.internal:9000".into()),
+            ..Default::default()
+        };
+        migrate_llm_to_v2(&mut llm, false);
+        let json = serde_json::to_string(&llm).unwrap();
+        let v1: LlmConfigV1 = serde_json::from_str(&json).expect("v1 must parse v2 output");
+        assert_eq!(v1.provider.as_deref(), Some("local"));
+        assert_eq!(v1.model.as_deref(), Some("qwen3"));
+        assert_eq!(
+            v1.base_url.as_deref(),
+            Some("http://host.docker.internal:9000")
+        );
     }
 
     #[test]
@@ -1545,6 +2056,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,
@@ -1596,6 +2108,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,

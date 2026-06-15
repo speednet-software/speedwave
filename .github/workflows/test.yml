@@ -370,6 +370,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
+      # The runner image carries the Visual Studio version used to build the
+      # vendored whisper.cpp (whisper-rs-sys) via CMake. Fold the image version
+      # into the cache key so a runner-image bump (e.g. VS 2022 -> VS 2026)
+      # never restores a target/ whose CMakeCache.txt names a now-absent
+      # generator — which makes cmake-rs abort the build script.
+      - name: Capture runner image version
+        run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
       - name: Cache Cargo
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
@@ -378,8 +386,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             desktop/src-tauri/target/
-          key: ${{ runner.os }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-desktop-check-
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 
       - name: Create resource stubs for Tauri build script
         run: scripts/create-desktop-stubs.sh

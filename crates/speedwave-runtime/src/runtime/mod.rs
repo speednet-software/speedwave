@@ -122,6 +122,13 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
+    /// Recreates ONE compose service (`--force-recreate`, no orphan removal)
+    /// without touching the rest of the stack — e.g. restarting `litellm`
+    /// after an LLM-settings change while the claude session keeps running
+    /// (ADR-073). `service` must be a built-in compose service name; impls
+    /// validate before splicing it into argv.
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()>;
+
     /// Validates compose.yml as the container engine sees it. Every impl MUST
     /// run the engine's `compose config` so a silent no-op cannot mask a torn
     /// or invalid compose file.
@@ -553,6 +560,17 @@ pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
         .join(project)
         .join("compose.yml");
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Guards a compose service name before it is spliced into engine argv.
+/// Only built-in services qualify — `compose_up_service` exists for
+/// runtime-managed services (litellm), never plugin/user input.
+pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()> {
+    if consts::BUILT_IN_SERVICES.contains(&service) {
+        Ok(())
+    } else {
+        anyhow::bail!("'{service}' is not a built-in compose service")
+    }
 }
 
 /// Testable variant: resolves compose file path under an explicit data directory.
@@ -2649,6 +2667,9 @@ impl ContainerRuntime for NoopRuntime {
         Ok(true)
     }
     fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_up_service(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())
     }
     fn compose_validate(&self, _: &str) -> anyhow::Result<()> {

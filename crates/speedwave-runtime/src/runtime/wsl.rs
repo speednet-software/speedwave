@@ -650,6 +650,31 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
+        super::validate_builtin_service_name(service)?;
+        let distro = self.distro();
+        let compose_file = wsl_compose_file_path(project)?;
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d",
+                distro,
+                "--",
+                "nerdctl",
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "up",
+                "-d",
+                "--force-recreate",
+                service,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
