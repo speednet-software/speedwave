@@ -20,15 +20,15 @@
     "lint:fix": "eslint --fix 'src/**/*.ts' 'src/**/*.html'"
   },
   "dependencies": {
-    "@angular/animations": "^21.2.12",
+    "@angular/animations": "^22.0.1",
     "@angular/cdk": "^21.2.10",
-    "@angular/common": "^21.2.12",
+    "@angular/common": "^22.0.1",
     "@angular/compiler": "^21.2.12",
-    "@angular/core": "^21.2.12",
-    "@angular/forms": "^21.2.12",
-    "@angular/platform-browser": "^21.2.12",
-    "@angular/platform-browser-dynamic": "^21.2.12",
-    "@angular/router": "^21.2.12",
+    "@angular/core": "^22.0.1",
+    "@angular/forms": "^22.0.1",
+    "@angular/platform-browser": "^22.0.1",
+    "@angular/platform-browser-dynamic": "^22.0.1",
+    "@angular/router": "^22.0.1",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-log": "^2",
@@ -43,7 +43,7 @@
     "undici": "^7.24.0"
   },
   "devDependencies": {
-    "@angular/build": "^21.2.10",
+    "@angular/build": "^22.0.1",
     "@angular/cli": "^21.2.10",
     "@angular/compiler-cli": "^21.2.12",
     "@eslint/js": "^10.0.1",
