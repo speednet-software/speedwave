@@ -70,7 +70,7 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # Windows capture (Phase 4-W): WASAPI loopback via cpal. Windows-only — macOS
 # uses the bundled audio-capture-cli, so cpal is dead weight there. Still gated
 # behind `audio-transcription` so the CLI build stays lean.
-cpal = { version = "0.17", optional = true }
+cpal = { version = "0.18", optional = true }
 # Job Object kill-on-parent-close for host MCP workers
 # (`host_mcp_process::job_object`). `Win32_Security` is required to gate
 # `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
