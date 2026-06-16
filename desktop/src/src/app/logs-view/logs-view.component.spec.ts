@@ -492,22 +492,9 @@ describe('parseLogLine', () => {
   });
 
   it('strips STDERR: drain marker too', () => {
-    const line = parseLogLine('host-exec | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
+    const line = parseLogLine('mcp-os | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
     expect(line.message).toBe('something broke');
-  });
-
-  it('extracts the drain timestamp from a host-exec audit JSON line, keeping the JSON as message', () => {
-    // The audit JSON's `ts` field stays UTC `Z` (a JSON value, not a log-line
-    // prefix); only the drain prefix carries the local offset.
-    const line = parseLogLine(
-      'host-exec | 2026-05-12T14:34:02.814+02:00 {"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
-    );
-    expect(line.source).toBe('host-exec');
-    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
-    expect(line.message).toBe(
-      '{"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
-    );
   });
 
   it('preserves the semantic SESSION: prefix on a claude-session line', () => {
@@ -1060,9 +1047,9 @@ describe('LogsViewComponent — status bar layout', () => {
   //
   // The component now invokes `get_all_logs` instead of `get_compose_logs`
   // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
-  // mcp-os.log, host-exec/<project>/log, claude-session.log) in addition to
-  // compose containers. These tests pin the new behaviour so a future refactor
-  // cannot silently revert to compose-only output.
+  // mcp-os.log, claude-session.log) in addition to compose containers. These
+  // tests pin the new behaviour so a future refactor cannot silently revert
+  // to compose-only output.
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -1160,13 +1147,12 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(setSpy).not.toHaveBeenCalled();
   });
 
-  it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {
+  it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
     // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
     // The existing `parseLogLine` extracts that source token and the
     // `sources()` signal exposes distinct values. This test pins the
     // contract: a merged backend response with all token types must produce
-    // matching entries in the dropdown — including `host-exec` (per-project
-    // worker audit/stdout log, ADR-054).
+    // matching entries in the dropdown.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
@@ -1175,8 +1161,6 @@ describe('LogsViewComponent — status bar layout', () => {
         'mcp_hub | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
         'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
         'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
-        // audit JSON `ts` field stays UTC `Z`; the drain prefix is local offset.
-        'host-exec | 2026-05-12T14:34:04.000+02:00 {"ts":"2026-05-12T12:34:04.000Z","recipe":"docker_ps","status":"exited"}',
         'claude | 2026-05-12T14:34:05.000+02:00 SESSION: started',
       ].join('\n');
     };
@@ -1186,7 +1170,6 @@ describe('LogsViewComponent — status bar layout', () => {
     // Order is: 'all' first, then sorted distinct sources.
     expect(sources).toContain('desktop');
     expect(sources).toContain('mcp-os');
-    expect(sources).toContain('host-exec');
     expect(sources).toContain('claude');
     expect(sources).toContain('mcp_hub'); // compose container, prefix-stripped
     expect(sources[0]).toBe('all');

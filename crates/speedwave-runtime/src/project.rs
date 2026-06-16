@@ -20,7 +20,6 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         "secrets",
         "snapshots",
         crate::consts::OAUTH_SUBDIR,
-        crate::consts::HOST_EXEC_SUBDIR,
     ] {
         let dir = data_dir.join(sub).join(project);
         if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -829,12 +828,7 @@ mod tests {
         .unwrap();
 
         // Seed long-lived per-project dirs alongside the ones add_project created.
-        for sub in &[
-            "secrets",
-            "snapshots",
-            crate::consts::OAUTH_SUBDIR,
-            crate::consts::HOST_EXEC_SUBDIR,
-        ] {
+        for sub in &["secrets", "snapshots", crate::consts::OAUTH_SUBDIR] {
             let d = data_dir.join(sub).join("alpha");
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("secret"), b"x").unwrap();
@@ -853,7 +847,6 @@ mod tests {
             "secrets",
             "snapshots",
             crate::consts::OAUTH_SUBDIR,
-            crate::consts::HOST_EXEC_SUBDIR,
         ] {
             assert!(
                 !data_dir.join(sub).join("alpha").exists(),

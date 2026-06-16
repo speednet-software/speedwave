@@ -349,26 +349,6 @@ describe('IntegrationsComponent', () => {
       expect(component.services.map((s) => s.service)).toContain(svc);
     });
 
-    it('hides host-exec slot when beta is off', async () => {
-      betaEnabled.set(false);
-      await component.ngOnInit();
-      fixture.detectChanges();
-      const slot = fixture.nativeElement.querySelector(
-        '[data-testid="integrations-host-exec-slot"]'
-      );
-      expect(slot).toBeNull();
-    });
-
-    it('shows host-exec slot when beta is on', async () => {
-      betaEnabled.set(true);
-      await component.ngOnInit();
-      fixture.detectChanges();
-      const slot = fixture.nativeElement.querySelector(
-        '[data-testid="integrations-host-exec-slot"]'
-      );
-      expect(slot).not.toBeNull();
-    });
-
     it('reveals all beta surfaces when beta toggles off → on mid-session', async () => {
       setupWithBetaServices();
       betaEnabled.set(false);
@@ -378,9 +358,6 @@ describe('IntegrationsComponent', () => {
       for (const svc of betaServices) {
         expect(namesOff).not.toContain(svc);
       }
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
-      ).toBeNull();
 
       betaEnabled.set(true);
       // fakeAsync doesn't integrate with Angular Signals under Vitest — one macrotask lets the effect flush.
@@ -391,9 +368,6 @@ describe('IntegrationsComponent', () => {
       for (const svc of betaServices) {
         expect(namesOn).toContain(svc);
       }
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="integrations-host-exec-slot"]')
-      ).not.toBeNull();
     });
   });
 

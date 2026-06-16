@@ -90,7 +90,7 @@ mod windows_impl {
 
     /// Full paths of the host listeners that must be pre-authorized at the WDF
     /// layer to suppress the per-binary "allow access" prompt: the bundled
-    /// node.exe (mcp-os / host_exec / oauth workers) and this desktop exe.
+    /// node.exe (mcp-os / oauth workers) and this desktop exe.
     /// Resolved relative to the running exe so they match the actual install
     /// location (perUser dir or C:\Speedwave) — WDF needs exact paths.
     fn host_listener_programs() -> Vec<String> {

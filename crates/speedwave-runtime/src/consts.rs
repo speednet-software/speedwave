@@ -60,22 +60,8 @@ pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 /// watchdog — it supersedes the legacy split `port`/`pid`/`auth-token` files.
 pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 
-/// Subdirectory under the data dir holding per-project `host_exec` state.
-/// SSOT — do not hard-code `"host-exec"` at call sites.
-pub const HOST_EXEC_SUBDIR: &str = "host-exec";
-/// Per-project worker snapshot, written `0o600` (may hold env-value secrets).
-pub const HOST_EXEC_CONFIG_FILE: &str = "config.json";
-/// Per-project bind-mount token file. Hub mounts this at
-/// `/secrets/host_exec-auth-token:ro`; compose reads the port from
-/// `PER_PROJECT_LOCK_FILE`. Dual-written by
-/// `host_exec_process::spawn_in` alongside the lock so the container
-/// sees a token-only file (never the structured JSON).
-pub const HOST_EXEC_AUTH_TOKEN_FILE: &str = "auth-token";
-/// Per-project audit log; env values redacted (ADR-054 §"Security model").
-pub const HOST_EXEC_LOG_FILE: &str = "log";
-
 /// TCP connection probe timeout used by host-process liveness checks
-/// (oauth_process, host_exec_process). SSOT for both modules — see ADR-060.
+/// (oauth_process). SSOT — see ADR-060.
 pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// Number of TCP probe attempts for liveness checks where a respawn is expensive
 /// (oauth, where every respawn rotates the ephemeral port and recreates every
@@ -83,47 +69,6 @@ pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 pub const PORT_PROBE_ATTEMPTS: u8 = 3;
 /// Backoff between TCP probe attempts.
 pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
-/// Ceiling on a recipe parameter's value length and on the declared `maxLen`.
-pub const HOST_EXEC_PARAM_MAX_LEN: usize = 65536;
-/// Sanity ceiling on a parameter's regex `pattern` length (semantics live in the worker).
-pub const HOST_EXEC_PARAM_PATTERN_MAX_LEN: usize = 4096;
-
-/// Banned `exec` basenames (shell / eval launchers).
-/// SSOT; case-insensitive. See ADR-054 §"Hard ban on direct shell/eval launchers".
-/// Windows interpreters (`powershell`, `cmd`, `pwsh`, `cscript`, `wscript`,
-/// `mshta`, `wsl`) are banned alongside Unix shells: each accepts an inline
-/// command or script argument (`-Command`/`/c`/script path) that executes
-/// arbitrary code.
-pub const HOST_EXEC_SHELL_LAUNCHERS: &[&str] = &[
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    "fish",
-    "eval",
-    "env",
-    "xargs",
-    "find",
-    "ssh",
-    "sshpass",
-    "busybox",
-    "toybox",
-    "powershell",
-    "cmd",
-    "pwsh",
-    "cscript",
-    "wscript",
-    "mshta",
-    "wsl",
-];
-
-/// Meta-tools banned only with a *bare* `{param}` argv element.
-/// SSOT; case-insensitive. See ADR-054 §"Config schema" (parameterised meta-invocation rule).
-pub const HOST_EXEC_META_TOOLS: &[&str] = &[
-    "node", "deno", "python", "python3", "perl", "ruby", "make", "npm", "npx", "pnpm", "yarn",
-    "awk", "gawk", "mawk", "nawk",
-];
 
 /// Subdirectory under the data dir holding per-project `oauth` worker state.
 /// SSOT — do not hard-code `"oauth"` at call sites. See ADR-060.
@@ -1118,19 +1063,13 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-context7",
 ];
 
-/// Host-side worker reached via WORKER_HOST_EXEC_URL on the hub (ADR-054).
-/// Single SSOT for the literal — referenced by BUILT_IN_SERVICE_IDS and integration tests.
-pub const HOST_EXEC_CONFIG_KEY: &str = "host_exec";
-
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
 ///
-/// `host_exec` is here even though it has no compose service — it is a
-/// host-side worker (like `os`/`mcp-os`) reached via `WORKER_HOST_EXEC_URL`
-/// on the hub (ADR-054). Both Rust (`plugin::derive_worker_env`) and
-/// TypeScript (`mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv`) normalize
-/// hyphens in the slug to underscores in the env var name, so slugs like
-/// `my-plugin` resolve to `WORKER_MY_PLUGIN_URL`.
+/// Both Rust (`plugin::derive_worker_env`) and TypeScript
+/// (`mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv`) normalize hyphens in
+/// the slug to underscores in the env var name, so slugs like `my-plugin`
+/// resolve to `WORKER_MY_PLUGIN_URL`.
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
     "sharepoint",
@@ -1142,7 +1081,6 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "playwright",
     "context7",
     "os",
-    HOST_EXEC_CONFIG_KEY,
     // Host-side OAuth refresh worker (ADR-060). Reserved so plugins cannot
     // shadow it. The oauth worker is NEVER enumerated to Claude — it is not
     // in ENABLED_SERVICES and the hub has no bearer for it. The reservation
@@ -1191,10 +1129,6 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "IFS",
     "BASH_ENV",
     "ENV",
-    // host_exec worker-internal env (must never reach a recipe child)
-    "HOST_EXEC_AUTH_TOKEN",
-    "HOST_EXEC_CONFIG_PATH",
-    "HOST_EXEC_LOG_FILE",
 ];
 
 /// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
@@ -1430,7 +1364,7 @@ mod tests {
         // A change here is deliberate — bumping this count signals a new
         // hijack vector was added (and the matching test in plugin.rs
         // should grow too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 21);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 18);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -2660,71 +2594,6 @@ mod tests {
         );
     }
 
-    /// Parses the quoted entries of a TS `export const NAME ... = [ ... ];`
-    /// array literal out of a TS source file. Used by the host-exec mirror
-    /// guards below — keeps the Rust SSOT and the Desktop mirror in lockstep.
-    fn parse_ts_string_array(src: &str, name: &str) -> Vec<String> {
-        let decl = format!("export const {name}");
-        let start = src
-            .find(&decl)
-            .unwrap_or_else(|| panic!("host-exec.ts must declare `{decl}`"));
-        // Anchor on the assignment `=`, then the first `[` — skips the
-        // `: readonly string[]` type annotation, whose own `[]` precedes it.
-        let eq = src[start..]
-            .find('=')
-            .map(|i| start + i)
-            .expect("array assignment `=` not found");
-        let open = src[eq..]
-            .find('[')
-            .map(|i| eq + i)
-            .expect("array literal `[` not found");
-        let close = src[open..]
-            .find(']')
-            .map(|i| open + i)
-            .expect("array literal `]` not found");
-        let body = &src[open + 1..close];
-        let re = regex::Regex::new(r#"['"]([^'"]*)['"]"#).unwrap();
-        re.captures_iter(body).map(|c| c[1].to_string()).collect()
-    }
-
-    // Cross-language SSOT: the Desktop host-exec mirror (`host-exec.ts`) must
-    // carry the exact same launcher / meta-tool / reserved-env lists as the
-    // Rust SSOT — same pattern as `host_gateway_alias_matches_mcp_shared_ts`.
-    // A missing Windows interpreter or env key in the TS mirror trips these.
-
-    #[test]
-    fn host_exec_shell_launchers_match_ts_mirror() {
-        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
-        let ts = parse_ts_string_array(src, "HOST_EXEC_SHELL_LAUNCHERS");
-        let rust: Vec<&str> = HOST_EXEC_SHELL_LAUNCHERS.to_vec();
-        assert_eq!(
-            ts, rust,
-            "host-exec.ts HOST_EXEC_SHELL_LAUNCHERS must mirror the Rust SSOT exactly"
-        );
-    }
-
-    #[test]
-    fn host_exec_meta_tools_match_ts_mirror() {
-        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
-        let ts = parse_ts_string_array(src, "HOST_EXEC_META_TOOLS");
-        let rust: Vec<&str> = HOST_EXEC_META_TOOLS.to_vec();
-        assert_eq!(
-            ts, rust,
-            "host-exec.ts HOST_EXEC_META_TOOLS must mirror the Rust SSOT exactly"
-        );
-    }
-
-    #[test]
-    fn host_exec_reserved_env_keys_match_ts_mirror() {
-        let src = include_str!("../../../desktop/src/src/app/models/host-exec.ts");
-        let ts = parse_ts_string_array(src, "HOST_EXEC_RESERVED_ENV_KEYS");
-        let rust: Vec<&str> = RESERVED_ENV_KEYS.to_vec();
-        assert_eq!(
-            ts, rust,
-            "host-exec.ts HOST_EXEC_RESERVED_ENV_KEYS must mirror RESERVED_ENV_KEYS exactly"
-        );
-    }
-
     // Cross-language SSOT: the plugin slug regex `SLUG_PATTERN` (plugin.rs) is
     // mirrored in the oauth worker as `SERVICE_SLUG_RE` (defense in depth on
     // the bearer-map path). Extract both literals from source and compare.
@@ -2781,8 +2650,8 @@ mod tests {
             .expect("repo root resolves three levels above the runtime crate");
         let resources_root = repo_root.join("containers").join("claude-resources");
 
-        // Allowed integration directory names: TOGGLEABLE_MCP_SERVICES.config_key + OS sub-services
-        // + host_exec. `oauth` and `ide` from BUILT_IN_SERVICE_IDS are intentionally excluded:
+        // Allowed integration directory names: TOGGLEABLE_MCP_SERVICES.config_key + OS sub-services.
+        // `oauth` and `ide` from BUILT_IN_SERVICE_IDS are intentionally excluded:
         // they are not user-toggleable and never have per-integration claude-resources.
         let mut allowed: std::collections::HashSet<&str> = TOGGLEABLE_MCP_SERVICES
             .iter()
@@ -2791,7 +2660,6 @@ mod tests {
         for sub in TOGGLEABLE_OS_SERVICES {
             allowed.insert(sub.config_key);
         }
-        allowed.insert(HOST_EXEC_CONFIG_KEY);
 
         for resource_type in ["skills", "commands", "agents", "hooks"] {
             let integrations_dir = resources_root.join(resource_type).join("integrations");
@@ -2809,8 +2677,8 @@ mod tests {
                 assert!(
                     allowed.contains(key),
                     "containers/claude-resources/{resource_type}/integrations/{key}/ \
-                     does not match any TOGGLEABLE_MCP_SERVICES.config_key, \
-                     TOGGLEABLE_OS_SERVICES.config_key, or 'host_exec' — the \
+                     does not match any TOGGLEABLE_MCP_SERVICES.config_key or \
+                     TOGGLEABLE_OS_SERVICES.config_key — the \
                      entrypoint would never link it. Rename the directory or \
                      add a corresponding descriptor."
                 );

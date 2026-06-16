@@ -37,7 +37,7 @@ The diagram above splits into **host-side** processes (Tauri app, CLI, host MCP 
 | -------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Speedwave.app / Tauri**  | Host           | Desktop UI + the runtime orchestrator. Manages the Lima VM / WSL2 distro, renders per-project compose, and starts/stops containers.                  |
 | **speedwave CLI**          | Host           | Terminal entry point. Starts the same containers and launches Claude Code's TUI inside the `claude` container.                                       |
-| **Host MCP workers**       | Host           | Workers that need host APIs Claude must never hold — `mcp-os` (Calendar/Mail/Reminders/Notes), `host_exec`, `oauth`. Reached over an HTTP bridge.    |
+| **Host MCP workers**       | Host           | Workers that need host APIs Claude must never hold — `mcp-os` (Calendar/Mail/Reminders/Notes), `oauth`. Reached over an HTTP bridge.                 |
 | **IDE Bridge**             | Host           | Writes `~/.speedwave/ide-bridge/<port>.lock`, mounted into the container as `~/.claude/ide/`, so VS Code / JetBrains can attach to the session.      |
 | **Claude container**       | Lima VM / WSL2 | The hardened, token-free container where Claude Code runs. Sees only the MCP Hub; has no service credentials and no container socket.                |
 | **MCP Hub container**      | Lima VM / WSL2 | The single MCP endpoint Claude sees (port 4000). Discovers and routes to enabled workers; holds zero tokens.                                         |

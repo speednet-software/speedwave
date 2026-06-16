@@ -855,7 +855,7 @@ fn main() -> anyhow::Result<()> {
     // It logs its own summary; do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Host workers (oauth, host_exec) are owned by the Desktop app. The CLI must
+    // Host workers (oauth, mcp-os) are owned by the Desktop app. The CLI must
     // NOT spawn its own — two supervisors for one worker kill each other's
     // process via `kill_stale_node`, cycling every ~20s and crashing the
     // interactive Claude exec (exit 137). render_compose reads the Desktop-held
@@ -1212,9 +1212,7 @@ mod tests {
         // type-prefix catches any spawn variant (spawn / spawn_in).
         let forbidden = [
             (concat!("maybe_", "spawn_oauth_worker"), "oauth"),
-            (concat!("maybe_", "spawn_host_exec_worker"), "host_exec"),
             (concat!("OauthProcess::", "spawn"), "oauth"),
-            (concat!("HostExecProcess::", "spawn"), "host_exec"),
             (concat!("McpOsProcess::", "spawn"), "mcp-os"),
         ];
         for (needle, worker) in forbidden {

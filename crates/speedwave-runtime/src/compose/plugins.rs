@@ -29,8 +29,8 @@ use crate::plugin;
 /// **Host-gateway note:** `ensure_host_gateway_extra_host` is intentionally NOT
 /// called for plugin services. Plugin workers communicate with `mcp-hub` over
 /// the internal compose network — they have no direct host-side dependency.
-/// If a future plugin needs to reach the host (e.g. invoking `host_exec`),
-/// the helper must be called for that plugin's compose service.
+/// If a future plugin needs to reach the host, the helper must be called for
+/// that plugin's compose service.
 pub(crate) fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
     apply_plugins_from_verified(yaml, ctx, &plugins)

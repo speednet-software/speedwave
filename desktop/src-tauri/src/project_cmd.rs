@@ -7,7 +7,7 @@
 // config/event-payload glue.
 
 use crate::chat::{ChatSession, SharedChatSession};
-use crate::reconcile::{self, SharedHostExec};
+use crate::reconcile;
 use crate::types::{check_project, ProjectEntry, ProjectList};
 use crate::{containers_cmd, integrations_cmd};
 use speedwave_runtime::config;
@@ -51,7 +51,6 @@ pub(crate) async fn switch_project(
     name: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, SharedChatSession>,
-    host_exec: tauri::State<'_, SharedHostExec>,
 ) -> Result<(), String> {
     use containers_cmd::{
         spawn_background_teardown, switch_project_core, teardown_only, SwitchResult,
@@ -84,8 +83,6 @@ pub(crate) async fn switch_project(
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     use tauri::Manager;
-    let host_exec_arc = host_exec.inner().clone();
-    let host_exec_for_teardown = host_exec_arc.clone();
     let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
     let oauth_for_teardown = oauth_arc.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
@@ -104,7 +101,6 @@ pub(crate) async fn switch_project(
             }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
-            crate::ensure_host_exec_running(&host_exec_arc, proj);
             crate::ensure_oauth_running(&oauth_arc, proj);
             // Previous project is stopped in the background after the switch
             // fully succeeds — never here.
@@ -156,7 +152,6 @@ pub(crate) async fn switch_project(
         // down the new project, then rebind chat back to previous.
         // The eagerly-started host workers for the destination must be
         // retired too, or they linger pointing at downed containers.
-        reconcile::teardown_host_exec_for_project(&host_exec_for_teardown, &name);
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
         let mut cleanup_parts: Vec<String> = Vec::new();
 
@@ -199,9 +194,8 @@ pub(crate) async fn switch_project(
 
     // Switch fully succeeded — stop the previous project in the background
     // and retire its host workers. Doing this only AFTER success keeps a
-    // failed switch's previous project fully functional (host_exec included).
+    // failed switch's previous project fully functional.
     if let Some(prev) = pending_teardown {
-        reconcile::teardown_host_exec_for_project(host_exec.inner(), &prev);
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
     }
@@ -365,7 +359,7 @@ mod tests {
     }
 
     /// Structural: host workers must eager-start BEFORE compose render, or the
-    /// rendered WORKER_*_URLs are dead and host_exec_cmd later force-recreates
+    /// rendered WORKER_*_URLs are dead and the watchdog later force-recreates
     /// every container (killing the fresh chat session). Mirrors add_project.
     #[test]
     fn switch_eager_starts_host_workers_before_render() {
@@ -375,9 +369,6 @@ mod tests {
             .nth(1)
             .expect("switch_project must exist");
         let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
-        let host_exec_pos = body
-            .find("ensure_host_exec_running")
-            .expect("switch must eager-start host_exec");
         let oauth_pos = body
             .find("ensure_oauth_running")
             .expect("switch must eager-start oauth");
@@ -385,7 +376,7 @@ mod tests {
             .find("render_and_save_compose")
             .expect("switch must render compose");
         assert!(
-            host_exec_pos < render_pos && oauth_pos < render_pos,
+            oauth_pos < render_pos,
             "host workers must start before compose render"
         );
     }
@@ -413,14 +404,11 @@ mod tests {
             .find("pending_teardown {")
             .expect("success-path teardown block must exist");
         // The PREVIOUS project's workers retire only in the success block...
-        let prev_teardown = body
-            .rfind("teardown_host_exec_for_project")
-            .expect("host_exec teardown must exist");
         let prev_oauth = body
             .rfind("teardown_oauth_for_project")
             .expect("oauth teardown must exist");
         assert!(
-            prev_teardown > success_marker && prev_oauth > success_marker,
+            prev_oauth > success_marker,
             "previous-project worker teardown must live in the success path"
         );
         // ...while the rebind-failure block retires the DESTINATION's
@@ -431,8 +419,7 @@ mod tests {
             .expect("rebind-failure block must exist");
         let fail_window = &body[rebind_fail..success_marker];
         assert!(
-            fail_window.contains("teardown_host_exec_for_project")
-                && fail_window.contains("teardown_oauth_for_project"),
+            fail_window.contains("teardown_oauth_for_project"),
             "rebind failure must retire the destination's host workers"
         );
     }

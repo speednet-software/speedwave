@@ -67,7 +67,7 @@ export async function loadToken(tokenPath: string): Promise<string> {
 /**
  * Core allowlist of env var names safe to pass to child processes — the
  * identical 14-key set shared by every worker that spawns a child. Workers
- * with extra needs (host_exec build tooling) spread this and append.
+ * with extra needs spread this and append.
  * Anything carrying a secret (`MCP_*_AUTH_TOKEN`, API keys) is never here.
  */
 export const BASE_SAFE_ENV_KEYS: readonly string[] = [

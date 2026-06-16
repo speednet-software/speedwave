@@ -82,8 +82,7 @@ pub(crate) use workers::{
 };
 #[cfg(test)]
 use workers::{
-    apply_worker_auth_tokens_with_dir, host_exec_gateway_url, mcp_os_gateway_url,
-    read_host_exec_port, read_lock_port, remove_env_from,
+    apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
 
 // Test-only override for the bundle build root, so `render_compose_in` resolves
@@ -309,9 +308,6 @@ pub fn render_compose_in(
 
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config_in(data_dir, &yaml)?;
-
-    // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
-    yaml = apply_host_exec_config_in(data_dir, &yaml, project_name)?;
 
     // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
     // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
@@ -746,36 +742,6 @@ fn apply_mcp_os_config_with_path(
         crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
         "os-auth-token",
-    )
-}
-
-/// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
-/// Resolves the host_exec state paths under an explicit data dir.
-fn apply_host_exec_config_in(
-    data_dir: &std::path::Path,
-    yaml: &str,
-    project: &str,
-) -> anyhow::Result<String> {
-    let state_dir = crate::host_exec::host_exec_project_dir(data_dir, project);
-    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
-    let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
-    apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
-}
-
-/// Test-only alias preserved so existing fixtures keep working.
-fn apply_host_exec_config_with_paths(
-    yaml: &str,
-    token_mount_path: &std::path::Path,
-    lock_path: &std::path::Path,
-) -> anyhow::Result<String> {
-    apply_worker_config(
-        yaml,
-        "host_exec",
-        token_mount_path,
-        lock_path,
-        crate::host_mcp_process::lock::LockService::HostExec,
-        "WORKER_HOST_EXEC_URL",
-        "host_exec-auth-token",
     )
 }
 
@@ -2633,13 +2599,12 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
-                    // WORKER_OS_URL and WORKER_HOST_EXEC_URL are host-side
-                    // gateways (host.docker.internal) with dynamically assigned
-                    // ports — the workers run on the host, not in the compose
-                    // network. ADR-038's "every WORKER_*_URL points at
-                    // :PORT_WORKER" rule applies only to in-cluster (containerized)
-                    // workers.
-                    if key == "WORKER_OS_URL" || key == "WORKER_HOST_EXEC_URL" {
+                    // WORKER_OS_URL is a host-side gateway (host.docker.internal)
+                    // with a dynamically assigned port — the worker runs on the
+                    // host, not in the compose network. ADR-038's "every
+                    // WORKER_*_URL points at :PORT_WORKER" rule applies only to
+                    // in-cluster (containerized) workers.
+                    if key == "WORKER_OS_URL" {
                         continue;
                     }
                     assert!(
@@ -4366,12 +4331,6 @@ services:
         (token_path, lock_path)
     }
 
-    /// Legacy shim — kept under the old name to minimize churn in tests
-    /// that don't care about the service tag (host_exec by default).
-    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-        write_lock_and_token_mount(tmp, crate::host_mcp_process::lock::LockService::HostExec)
-    }
-
     fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         doc["services"][service]["extra_hosts"]
@@ -4407,21 +4366,6 @@ services:
         );
     }
 
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn apply_host_exec_config_adds_host_gateway_to_hub() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (token_path, port_path) = write_token_and_port(tmp.path());
-        let yaml = render_substituted_template();
-        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &port_path).unwrap();
-        let entries = extra_hosts_for(&result, "mcp-hub");
-        assert_eq!(
-            count_canonical_entries(&entries),
-            1,
-            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
-        );
-    }
-
     /// Like the live helper but reaps a real child for a deterministically-dead
     /// PID, so apply_worker_config's liveness gate treats the lock as absent.
     fn write_dead_lock_and_token_mount(
@@ -4449,24 +4393,6 @@ services:
         )
         .unwrap();
         (token_path, lock_path)
-    }
-
-    /// A stale host_exec lock (dead PID, Desktop hard-kill) must not inject a
-    /// dead WORKER_HOST_EXEC_URL.
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn apply_host_exec_config_skipped_when_worker_pid_is_dead() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (token_path, lock_path) = write_dead_lock_and_token_mount(
-            tmp.path(),
-            crate::host_mcp_process::lock::LockService::HostExec,
-        );
-        let yaml = render_substituted_template();
-        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &lock_path).unwrap();
-        assert_eq!(
-            result, yaml,
-            "stale host_exec lock with a dead PID must be treated as absent — no injection"
-        );
     }
 
     /// Same regression guard for the mcp-os entry point (also routes through
@@ -5210,142 +5136,6 @@ services:
         assert!(!has_mcp_os, "MCP_OS_* must NOT be in claude container env");
     }
 
-    // -- host_exec compose wiring (ADR-054) ----------------------------------
-
-    #[test]
-    fn test_host_exec_config_skipped_when_no_token_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = apply_host_exec_config_with_paths(
-            VALID_COMPOSE,
-            &tmp.path().join("no-such-token"),
-            &tmp.path().join("port"),
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE,
-            "yaml unchanged when the host_exec token file is absent (worker not running)"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_skipped_when_token_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        std::fs::write(&token_path, "   \n").unwrap();
-        let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &tmp.path().join("port"))
-                .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE,
-            "yaml unchanged when the token is empty/whitespace"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_skipped_when_port_missing_or_invalid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        std::fs::write(&token_path, "tok-abc").unwrap();
-        // port file absent
-        let r1 = apply_host_exec_config_with_paths(
-            VALID_COMPOSE,
-            &token_path,
-            &tmp.path().join("no-port"),
-        )
-        .unwrap();
-        assert!(
-            !r1.contains("WORKER_HOST_EXEC_URL"),
-            "no port file → no injection"
-        );
-        // port file present but garbage
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "not-a-port").unwrap();
-        let r2 = apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
-        assert!(
-            !r2.contains("WORKER_HOST_EXEC_URL"),
-            "invalid port → no injection"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_injects_url_and_mounts_token() {
-        use crate::host_mcp_process::lock::{self, LockFile, LockService};
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
-        lock::write(
-            &lock_path,
-            &LockFile::new(
-                LockService::HostExec,
-                std::process::id(),
-                49215,
-                "host-exec-uuid-token".into(),
-            ),
-        )
-        .unwrap();
-
-        let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &lock_path).unwrap();
-
-        // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
-        // host-gateway hostname (never 0.0.0.0).
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let hub_env = get_hub_env_seq(&doc);
-        let url = find_env_value(&hub_env, "WORKER_HOST_EXEC_URL=")
-            .expect("WORKER_HOST_EXEC_URL must be injected into mcp-hub");
-        assert!(
-            url.ends_with(":49215"),
-            "URL must use the port file's port: {url}"
-        );
-        assert!(
-            !url.contains("0.0.0.0"),
-            "URL must not be the bind address: {url}"
-        );
-
-        // The token is bind-mounted into the hub as a file (never an env var),
-        // at `/secrets/host_exec-auth-token` (underscore — matching the service
-        // id, which is how the hub's `auth-tokens.ts` derives the path).
-        let expected_mount = format!("{}:/secrets/host_exec-auth-token:ro", token_path.display());
-        assert!(
-            result.contains(&expected_mount),
-            "token must be mounted into the hub.\nexpected: {expected_mount}\ngot:\n{result}"
-        );
-        // And NEVER as an env var on either the hub or claude.
-        assert!(
-            !hub_env.iter().any(|e| e.contains("HOST_EXEC_AUTH_TOKEN")),
-            "the host_exec token must not be an env var on the hub"
-        );
-        let claude_env: Vec<String> = doc
-            .get("services")
-            .and_then(|s| s.get("claude"))
-            .and_then(|c| c.get("environment"))
-            .and_then(|e| e.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            !claude_env.iter().any(|e| e.contains("HOST_EXEC")),
-            "no HOST_EXEC* on the claude container — it only sees the hub"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_gateway_url_uses_host_gateway_not_bind_addr() {
-        let url = host_exec_gateway_url(49215);
-        assert!(url.ends_with(":49215"));
-        assert!(
-            !url.contains("0.0.0.0"),
-            "must be a routable host-gateway address, not the bind addr"
-        );
-        assert_eq!(url, format!("http://{}:49215", consts::HOST_GATEWAY_ALIAS));
-        // Same alias scheme as mcp-os — only the port differs.
-        assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
-    }
-
     // -- oauth compose wiring (ADR-060) --------------------------------------
 
     /// Compose fixture with a mcp-sharepoint service that has the standard
@@ -5868,22 +5658,6 @@ services:
             .unwrap_or_default()
     }
 
-    #[test]
-    fn test_read_host_exec_port() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("port");
-        std::fs::write(&p, "  49215\n").unwrap();
-        assert_eq!(read_host_exec_port(&p), Some(49215));
-        std::fs::write(&p, "nope").unwrap();
-        assert_eq!(read_host_exec_port(&p), None);
-        assert_eq!(read_host_exec_port(&tmp.path().join("missing")), None);
-        // 0 / out-of-range
-        std::fs::write(&p, "0").unwrap();
-        assert_eq!(read_host_exec_port(&p), Some(0)); // a worker never picks 0; parsing is lenient
-        std::fs::write(&p, "70000").unwrap();
-        assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
-    }
-
     // ── read_lock_port legacy fallback ──────────────────────────────────
 
     #[test]
@@ -5893,14 +5667,11 @@ services:
         let lock_path = tmp.path().join("lock.json");
         lock::write(
             &lock_path,
-            &LockFile::new(LockService::HostExec, 12345, 49215, "tok".into()),
+            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
         )
         .unwrap();
 
-        assert_eq!(
-            read_lock_port(&lock_path, LockService::HostExec),
-            Some(49215)
-        );
+        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), Some(49215));
     }
 
     #[test]
@@ -5909,7 +5680,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json"); // absent
 
-        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), None);
     }
 
     #[test]
@@ -5925,86 +5696,7 @@ services:
         )
         .unwrap();
 
-        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
-    }
-
-    #[test]
-    fn test_apply_integrations_filter_enabled_services_includes_host_exec_when_on() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.host_exec = true;
-        let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
-                .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
-        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
-            .expect("ENABLED_SERVICES must be injected");
-        assert!(
-            enabled.split(',').any(|s| s == "host_exec"),
-            "ENABLED_SERVICES must contain host_exec when the project has it enabled: {enabled}"
-        );
-    }
-
-    #[test]
-    fn test_apply_integrations_filter_omits_host_exec_when_off() {
-        // host_exec disabled (the default) — must NOT appear in ENABLED_SERVICES,
-        // and there is no compose service to remove (host_exec has none).
-        let integrations = ResolvedIntegrationsConfig::default();
-        let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
-                .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
-        let enabled =
-            find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=").unwrap_or_default();
-        assert!(
-            !enabled.split(',').any(|s| s == "host_exec"),
-            "ENABLED_SERVICES must not contain host_exec when disabled: {enabled}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
-        let data_dir = tempfile::tempdir().unwrap();
-        // End-to-end: render_compose with host_exec enabled puts it in
-        // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
-        // no worker is running in a test — that's correct: the hub still knows
-        // to expect host_exec; apply_host_exec_config fills the URL once the
-        // Desktop side has spawned the worker and recreated the hub container.)
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig::default(),
-        };
-        let mut integrations = all_enabled_integrations();
-        integrations.host_exec = true;
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &integrations,
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
-            .expect("ENABLED_SERVICES must be present");
-        assert!(
-            enabled.split(',').any(|s| s == "host_exec"),
-            "render_compose should list host_exec in ENABLED_SERVICES when enabled: {enabled}"
-        );
-        // No host_exec compose service (it's a host process).
-        assert!(
-            doc.get("services")
-                .and_then(|s| s.get("mcp-host_exec"))
-                .is_none()
-                && doc
-                    .get("services")
-                    .and_then(|s| s.get("host_exec"))
-                    .is_none(),
-            "host_exec must not be a compose service"
-        );
+        assert_eq!(read_lock_port(&lock_path, LockService::McpOs), None);
     }
 
     #[test]
@@ -6825,13 +6517,11 @@ services:
     fn test_enabled_hub_service_ids() {
         let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
         assert!(default_ids.is_empty());
-        assert!(!default_ids.contains(&"host_exec".to_string()));
 
         let mut cfg = ResolvedIntegrationsConfig {
             slack: true,
             gitlab: true,
             os_calendar: true,
-            host_exec: true,
             ..ResolvedIntegrationsConfig::default()
         };
         cfg.plugins.insert("example-plugin".to_string(), true);
@@ -6840,7 +6530,6 @@ services:
         assert!(ids.contains(&"slack".to_string()));
         assert!(ids.contains(&"gitlab".to_string()));
         assert!(ids.contains(&"os".to_string()));
-        assert!(ids.contains(&"host_exec".to_string()));
         assert!(ids.contains(&"example-plugin".to_string()));
         assert!(!ids.contains(&"redmine".to_string()));
         assert!(!ids.contains(&"disabled-one".to_string()));

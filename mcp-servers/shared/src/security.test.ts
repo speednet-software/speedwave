@@ -688,7 +688,6 @@ describe('security', () => {
     it('carries no secret-bearing keys', () => {
       for (const key of BASE_SAFE_ENV_KEYS) {
         expect(key).not.toMatch(/AUTH_TOKEN|API_KEY|SECRET|PASSWORD/i);
-        expect(key.startsWith('HOST_EXEC_')).toBe(false);
         expect(key.startsWith('MCP_')).toBe(false);
       }
     });

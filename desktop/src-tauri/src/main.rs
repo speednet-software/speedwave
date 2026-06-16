@@ -21,8 +21,6 @@ mod health;
 mod health_cmd;
 mod history;
 mod history_cmd;
-mod host_exec_cmd;
-mod host_path;
 mod http_util;
 #[cfg(test)]
 mod installer_hooks;
@@ -78,15 +76,12 @@ use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
 use reconcile::{
-    ExitCleanupContext, SharedAutoCheckHandle, SharedHostExec, SharedIdeBridge, SharedMcpOs,
-    SharedOauth, SharedPluginBridges,
+    ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs, SharedOauth,
+    SharedPluginBridges,
 };
 
 // Re-export project-switch helpers consumed via `crate::` from containers_cmd.
 pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
-
-pub(crate) use host_path::recovered_host_path;
-use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -150,11 +145,8 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Stop flag for the `host_exec` watchdog (set during exit cleanup).
+/// Stop flag for the `oauth` watchdog (set during exit cleanup).
 static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-static HOST_EXEC_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 // Chat / history / project / health / IDE-bridge commands now live in their
@@ -406,100 +398,9 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     }
 }
 
-/// Spawn the project's `host_exec` worker if enabled and not running.
-/// Writes the chmod-600 config snapshot first. Returns `true` on fresh spawn.
-pub(crate) fn ensure_host_exec_running(host_exec: &SharedHostExec, project: &str) -> bool {
-    firewall::ensure_firewall_rule();
-    let mut map = match host_exec.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            log::error!("ensure_host_exec_running: map mutex poisoned: {e}");
-            return false;
-        }
-    };
-    if let Some(proc) = map.get(project) {
-        if proc.is_alive() {
-            return false; // already running and healthy
-        }
-        // A dead-but-still-mapped worker — drop it; we'll respawn below.
-        log::warn!("host_exec[{project}]: stale worker in the map — replacing");
-        if let Some(mut dead) = map.remove(project) {
-            let _ = dead.stop();
-            dead.cleanup_files();
-        }
-    }
-
-    // Resolve project dir + config (user-config only).
-    let user_config = match config::load_user_config() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("ensure_host_exec_running: cannot load user config: {e}");
-            return false;
-        }
-    };
-    let project_dir = match user_config.find_project(project) {
-        Some(p) => std::path::PathBuf::from(&p.dir),
-        None => {
-            log::warn!("ensure_host_exec_running: unknown project '{project}'");
-            return false;
-        }
-    };
-    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
-    if !resolved.host_exec {
-        log::debug!("ensure_host_exec_running: host_exec disabled for '{project}' — not spawning");
-        return false;
-    }
-
-    // Write chmod-600 config snapshot (may hold env-value secrets, ADR-054).
-    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(
-        speedwave_runtime::consts::data_dir(),
-        project,
-    );
-    if let Err(e) = std::fs::create_dir_all(&state_dir) {
-        log::warn!("ensure_host_exec_running: cannot create state dir for '{project}': {e}");
-        return false;
-    }
-    let snapshot = config::host_exec_config_snapshot(&project_dir, &resolved.host_exec_commands);
-    let config_path = state_dir.join(speedwave_runtime::consts::HOST_EXEC_CONFIG_FILE);
-    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
-        log::warn!("ensure_host_exec_running: cannot write config snapshot for '{project}': {e}");
-        return false;
-    }
-
-    let script = match speedwave_runtime::build::resolve_host_exec_script() {
-        Some(s) => s.to_string_lossy().to_string(),
-        None => {
-            log::warn!(
-                "ensure_host_exec_running: host_exec worker script not found — \
-                 host_exec will be unavailable for '{project}'"
-            );
-            return false;
-        }
-    };
-    match HostExecProcess::spawn_in(
-        project,
-        &project_dir,
-        &script,
-        recovered_host_path(),
-        speedwave_runtime::consts::data_dir(),
-    ) {
-        Ok(proc) => {
-            log::info!("host_exec[{project}]: started (port {})", proc.port());
-            map.insert(project.to_string(), proc);
-            drop(map); // release before touching the watchdog flag
-            HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
-            true
-        }
-        Err(e) => {
-            log::error!("host_exec[{project}]: spawn failed: {e}");
-            false
-        }
-    }
-}
-
 // (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
 // `speedwave-runtime::config` so the match arms stay in one place. The CLI no
-// longer spawns oauth/host_exec workers — Desktop is the sole supervisor; see
+// longer spawns oauth workers — Desktop is the sole supervisor; see
 // the dual-supervisor exit-137 note in `speedwave-cli::main`.)
 
 /// What to do with a running oauth worker given current vs. desired consumers.
@@ -635,8 +536,8 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
 /// Decide which per-project workers in the map are unhealthy, respawn them,
 /// and return the names of those that should have their consumer containers
 /// recreated. Generic over [`WatchdogWorker`] so the same selection logic
-/// drives both the oauth and host_exec watchdogs (and is unit-testable with
-/// a fake worker — see `FakeWorker` in this file's tests).
+/// drives the oauth watchdog (and is unit-testable with a fake worker —
+/// see `FakeWorker` in this file's tests).
 fn sweep_per_project_workers<P>(
     workers: &mut std::collections::HashMap<String, P>,
     log_prefix: &str,
@@ -672,8 +573,7 @@ where
 
 /// Trait abstracting the watchdog's view of a managed worker. Implemented by
 /// every host-side worker manager that is supervised by a watchdog —
-/// `OauthProcess` and `HostExecProcess` are the per-project ones today.
-///
+/// `OauthProcess` is the per-project one today.
 pub(crate) trait WatchdogWorker {
     fn is_alive(&self) -> bool;
     fn respawn(&mut self) -> anyhow::Result<u16>;
@@ -688,20 +588,11 @@ impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
     }
 }
 
-impl WatchdogWorker for speedwave_runtime::host_exec_process::HostExecProcess {
-    fn is_alive(&self) -> bool {
-        speedwave_runtime::host_exec_process::HostExecProcess::is_alive(self)
-    }
-    fn respawn(&mut self) -> anyhow::Result<u16> {
-        speedwave_runtime::host_exec_process::HostExecProcess::respawn(self)
-    }
-}
-
-/// Shared watchdog loop for per-project host-side workers (oauth, host_exec).
+/// Shared watchdog loop for per-project host-side workers (oauth).
 /// Polls every 30 s; under the map mutex, calls [`sweep_per_project_workers`]
 /// to respawn dead workers; releases the lock; then recreates each respawned
 /// project's hub containers so they observe the new worker port (e.g. a fresh
-/// `WORKER_OAUTH_URL` or `WORKER_HOST_EXEC_URL`).
+/// `WORKER_OAUTH_URL`).
 ///
 /// Stops cleanly when `stop_flag` is set (used by app exit cleanup). Catches
 /// panics from `recreate_project_containers_if_running` so a single bad
@@ -738,7 +629,7 @@ fn start_per_project_watchdog<P>(
             for name in respawned {
                 let n = name.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    host_exec_cmd::recreate_project_containers_if_running(&n);
+                    containers_cmd::recreate_project_containers_if_running(&n);
                 }));
                 if let Err(payload) = result {
                     let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
@@ -750,14 +641,9 @@ fn start_per_project_watchdog<P>(
     });
 }
 
-/// Per-project `oauth` watchdog — 30s checks, shared loop with host_exec.
+/// Per-project `oauth` watchdog — 30s checks.
 fn start_oauth_watchdog(oauth_arc: SharedOauth) {
     start_per_project_watchdog(oauth_arc, &OAUTH_WATCHDOG_STOP, "oauth watchdog");
-}
-
-/// Per-project `host_exec` watchdog — 30s checks, shared loop with oauth.
-fn start_host_exec_watchdog(host_exec: SharedHostExec) {
-    start_per_project_watchdog(host_exec, &HOST_EXEC_WATCHDOG_STOP, "host_exec watchdog");
 }
 
 /// Shows the audit-failure dialog and terminates the process. Returns
@@ -862,13 +748,12 @@ fn main() {
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
-    // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project host_exec
-    // workers, per-project oauth workers, auto-check handle.
+    // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project oauth
+    // workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
-    let host_exec: SharedHostExec = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
@@ -886,7 +771,6 @@ fn main() {
         ide_bridge: ide_bridge.clone(),
         plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
-        host_exec: host_exec.clone(),
         oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
@@ -989,7 +873,6 @@ fn main() {
         .manage(ide_bridge.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
-        .manage(host_exec.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(transcript_store.clone())
@@ -1037,13 +920,6 @@ fn main() {
 
             // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` —
             // tauri-plugin-log prunes on every rotation. No separate timer needed.
-
-            // Recover the user's login-shell PATH once, on a background thread
-            // so a slow shell rc doesn't delay `setup()`. The `host_exec`
-            // worker (and its recipes) need this — a GUI-launched app has only
-            // a stunted PATH. Idempotent; `recovered_host_path()` returns the
-            // cached value (or computes it lazily) afterwards. ADR-054 §PATH.
-            std::thread::spawn(host_path::init_recovered_host_path);
 
             if setup_started {
                 // Sanitise any v1 SharePoint secrets still in the worker-mounted
@@ -1098,17 +974,13 @@ fn main() {
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
-                // Start the per-project host_exec watchdog. No worker is
-                // spawned here — host_exec is per-project and spawned on
-                // demand (ensure_host_exec_running), e.g. when a chat starts
-                // for a project that has it enabled (ADR-054). The watchdog
-                // simply respawns any that die.
-                HOST_EXEC_WATCHDOG_STOP.store(false, Ordering::Relaxed);
-                start_host_exec_watchdog(host_exec.clone());
+                // Start the per-project oauth watchdog. No worker is spawned
+                // here — oauth workers are per-project and spawned on demand;
+                // the watchdog simply respawns any that die.
                 OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_oauth_watchdog(oauth.clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / host_exec / oauth / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / oauth / link_cli until setup completes");
             }
 
             // Start background auto-update check (store handle for cancellation)
@@ -1449,14 +1321,6 @@ fn main() {
             // Redmine API proxy
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
-            // host_exec (ADR-054): Integrations-tab settings commands
-            // (status / toggle / edit the whitelist / resolve an executable for
-            // the "browse…" picker). No per-call confirmation — enabling
-            // host_exec is the consent.
-            host_exec_cmd::get_host_exec,
-            host_exec_cmd::set_host_exec_enabled,
-            host_exec_cmd::host_exec_save_settings,
-            host_exec_cmd::host_exec_resolve_executable,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::peek_plugin_manifest,
@@ -1726,7 +1590,7 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
     // sweep_per_project_workers — covers the watchdog selection logic without
     // spawning real subprocesses. The fake implements WatchdogWorker; the
-    // helper is reused by both oauth and host_exec watchdogs in production.
+    // helper is reused by the oauth watchdog in production.
     // ────────────────────────────────────────────────────────────────────
 
     struct FakeWorker {

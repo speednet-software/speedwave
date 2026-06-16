@@ -6,7 +6,7 @@
 
 use speedwave_runtime::config;
 
-use crate::reconcile::{SharedHostExec, SharedIdeBridge, SharedMcpOs, SharedOauth};
+use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse, LlmConfigUpdate};
 
@@ -498,7 +498,6 @@ pub async fn add_project(
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
     use tauri::Manager;
-    let host_exec_arc = app.state::<SharedHostExec>().inner().clone();
     let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     // Pre-flight: detect CloudStorage TCC denial before adding project.
@@ -563,7 +562,6 @@ pub async fn add_project(
             }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
-            crate::ensure_host_exec_running(&host_exec_arc, proj);
             crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("add_project: starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
@@ -622,15 +620,10 @@ pub(crate) fn remove_project_core(
     remove_fn(name)
 }
 
-/// Tears down a project's containers, host_exec drain, and unregisters it.
+/// Tears down a project's containers and unregisters it.
 /// Runtime layer rejects the active project (sentinel-prefixed error for the UI).
 #[tauri::command]
-pub async fn remove_project(
-    name: String,
-    host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
-) -> Result<(), String> {
-    crate::reconcile::teardown_host_exec_for_project(host_exec.inner(), &name);
-
+pub async fn remove_project(name: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let rt = speedwave_runtime::runtime::detect_runtime();
         remove_project_core(&name, &rt, &|n| {
@@ -676,7 +669,6 @@ pub async fn start_containers(
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
     use tauri::Manager;
-    let host_exec_arc = app.state::<SharedHostExec>().inner().clone();
     let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     tokio::task::spawn_blocking(move || {
@@ -684,7 +676,6 @@ pub async fn start_containers(
         check_project(&project)?;
         // Eager-start host workers before compose render — live WORKER_*_URLs
         // prevent the first-message container recreate.
-        crate::ensure_host_exec_running(&host_exec_arc, &project);
         crate::ensure_oauth_running(&oauth_arc, &project);
         // Pre-flight: detect CloudStorage TCC denial before attempting container start.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
@@ -734,6 +725,70 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Re-render compose and recreate running containers so the hub re-discovers a
+/// host-side worker. Best-effort — failures are logged, not fatal. Called on
+/// oauth respawn and by the per-project worker watchdog.
+pub(crate) fn recreate_project_containers_if_running(project: &str) {
+    // Only the ACTIVE project may be resurrected — the watchdog fires for a
+    // project the user already switched away from while its background
+    // teardown runs (compose_ps TOCTOU would bring it back from the dead).
+    let active = speedwave_runtime::config::load_user_config()
+        .ok()
+        .and_then(|c| c.active_project);
+    if active.as_deref() != Some(project) {
+        log::debug!(
+            "recreate_project_containers_if_running: '{project}' is not the active project — skipping"
+        );
+        return;
+    }
+    // Bundle reconcile may be rebuilding images. compose_up_recreate against a
+    // missing image tag emits "image not available" to the user. Wait first.
+    if let Err(e) = ensure_images_ready() {
+        log::warn!("recreate_project_containers_if_running: images not ready for '{project}': {e}");
+        return;
+    }
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    if !rt.is_available() {
+        log::debug!("recreate_project_containers_if_running: runtime not available — skipping");
+        return;
+    }
+    let running = match rt.compose_ps(project) {
+        Ok(c) => !c.is_empty(),
+        Err(e) => {
+            log::debug!(
+                "recreate_project_containers_if_running: compose_ps failed ({e}) — skipping"
+            );
+            return;
+        }
+    };
+    if !running {
+        log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
+        return;
+    }
+    // Build OUTSIDE the compose lock (ADR-066).
+    if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
+        log::warn!(
+            "recreate_project_containers_if_running: pre-build failed for '{project}': {sanitized}"
+        );
+        return;
+    }
+    use crate::types::IntoAnyhow;
+    let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
+        render_and_save_compose(project).into_anyhow()?;
+        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
+        rt.compose_up_recreate(project)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            log::info!("recreated containers for '{project}' so the hub re-discovers");
+        }
+        Err(e) => {
+            log::warn!("recreate_project_containers_if_running: failed for '{project}': {e}");
+        }
+    }
 }
 
 /// Recreate containers for a project with freshly generated compose.
@@ -2258,7 +2313,12 @@ mod tests {
 
     // -- background teardown registry tests --
 
+    // Serialized: these exercise the shared on-disk teardown-intents file
+    // (`teardown_intents_path()`); running in parallel races the .tmp create/
+    // remove between write and assert. `serial(teardown_intents)` keeps them
+    // mutually exclusive without affecting unrelated tests.
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_runs_down_and_wait_joins_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
@@ -2277,6 +2337,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_failure_does_not_panic_wait() {
         spawn_background_teardown_with("bg-fail-proj".to_string(), |_p| {
             Err("compose down failed".to_string())
@@ -2287,6 +2348,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_recorded_and_cleared_on_success() {
         let project = format!("intent-ok-{}", std::process::id());
         spawn_background_teardown_with(project.clone(), |_p| Ok(()));
@@ -2296,6 +2358,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_survives_failed_teardown_for_next_launch() {
         let project = format!("intent-fail-{}", std::process::id());
         spawn_background_teardown_with(project.clone(), |_p| Err("down failed".to_string()));
@@ -2312,6 +2375,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn crashed_teardown_intents_removes_stale_tmp_file() {
         let path = teardown_intents_path();
         let tmp = path.with_extension("tmp");
@@ -2323,6 +2387,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_replaces_stale_entry_for_same_project() {
         spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
         spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
@@ -2545,9 +2610,6 @@ mod tests {
                 .map(|i| i + 1)
                 .unwrap_or(fn_body.len());
             let fn_body = &fn_body[..next_fn];
-            let host_exec = fn_body
-                .find("ensure_host_exec_running(")
-                .unwrap_or_else(|| panic!("{cmd} must call ensure_host_exec_running"));
             let oauth = fn_body
                 .find("ensure_oauth_running(")
                 .unwrap_or_else(|| panic!("{cmd} must call ensure_oauth_running"));
@@ -2555,7 +2617,7 @@ mod tests {
                 .find("setup_wizard::start_containers(")
                 .unwrap_or_else(|| panic!("{cmd} must call setup_wizard::start_containers"));
             assert!(
-                host_exec < compose_start && oauth < compose_start,
+                oauth < compose_start,
                 "{cmd}: host workers must start before setup_wizard::start_containers"
             );
         }
@@ -2742,5 +2804,75 @@ mod tests {
             0,
             "runtime project removal must not run after compose_down failure"
         );
+    }
+
+    #[test]
+    fn recreate_guard_checks_active_project_before_anything_else() {
+        // The watchdog can fire for a project the user switched away from;
+        // without this first-line guard it resurrects the torn-down project.
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+        let active_pos = fn_body
+            .find("active_project")
+            .expect("must read active_project from config");
+        let images_pos = fn_body
+            .find("ensure_images_ready")
+            .expect("readiness gate must exist");
+        assert!(
+            active_pos < images_pos,
+            "active-project guard must come before any side-effecting step"
+        );
+    }
+
+    #[test]
+    fn recreate_project_containers_if_running_waits_for_image_readiness() {
+        // Race guard: this best-effort helper runs on oauth respawn and on
+        // watchdog ticks, both of which can fire while bundle reconcile is
+        // rebuilding images. Without the gate, nerdctl emits
+        // image-not-available through the UI.
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready(")
+            .expect("recreate_project_containers_if_running must call ensure_images_ready");
+        let up_pos = fn_body
+            .find("compose_up_recreate(")
+            .expect("compose_up_recreate must exist in recreate_project_containers_if_running");
+        assert!(
+            ensure_pos < up_pos,
+            "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    /// Returns the body of a function by signature: locates the signature,
+    /// then walks brace depth from the next `{` to its matching `}`.
+    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let sig_pos = source
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let after = &source[sig_pos..];
+        let open = after.find('{').expect("opening brace not found");
+        let bytes = after.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("closing brace not found for {fn_signature}")
     }
 }
