@@ -14,7 +14,7 @@ jobs:
   claude-review:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
+      contains(fromJSON('["slawomir-it", "kamilparczewski", "Alwox"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
