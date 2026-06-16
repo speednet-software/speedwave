@@ -2313,7 +2313,12 @@ mod tests {
 
     // -- background teardown registry tests --
 
+    // Serialized: these exercise the shared on-disk teardown-intents file
+    // (`teardown_intents_path()`); running in parallel races the .tmp create/
+    // remove between write and assert. `serial(teardown_intents)` keeps them
+    // mutually exclusive without affecting unrelated tests.
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_runs_down_and_wait_joins_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
@@ -2332,6 +2337,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_failure_does_not_panic_wait() {
         spawn_background_teardown_with("bg-fail-proj".to_string(), |_p| {
             Err("compose down failed".to_string())
@@ -2342,6 +2348,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_recorded_and_cleared_on_success() {
         let project = format!("intent-ok-{}", std::process::id());
         spawn_background_teardown_with(project.clone(), |_p| Ok(()));
@@ -2351,6 +2358,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_survives_failed_teardown_for_next_launch() {
         let project = format!("intent-fail-{}", std::process::id());
         spawn_background_teardown_with(project.clone(), |_p| Err("down failed".to_string()));
@@ -2367,6 +2375,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn crashed_teardown_intents_removes_stale_tmp_file() {
         let path = teardown_intents_path();
         let tmp = path.with_extension("tmp");
@@ -2378,6 +2387,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(teardown_intents)]
     fn background_teardown_replaces_stale_entry_for_same_project() {
         spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
         spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));

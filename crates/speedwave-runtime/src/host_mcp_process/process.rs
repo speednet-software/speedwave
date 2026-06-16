@@ -38,12 +38,6 @@ pub trait WorkerSpec: Send + 'static {
     /// the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
-    /// Worker-specific PATH substitution. `None` → inherit parent PATH
-    /// (mcp-os, oauth); `Some(path)` → a caller-recovered PATH.
-    fn path_override(&self) -> Option<&str> {
-        None
-    }
-
     /// Hook invoked after `state_dir` is created and stale-PID cleanup
     /// has run but BEFORE the Node child is spawned. Worker writes
     /// anything it needs in the worker's environment view of the disk
@@ -193,7 +187,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
-        apply_child_env(&mut cmd, spec.path_override(), &CurrentProcessEnv);
+        apply_child_env(&mut cmd, &CurrentProcessEnv);
         // SSOT: macOS 127.0.0.1, Windows WSL adapter IP — must match host_gateway_ip
         // so container reaches the worker via extra_hosts: host.docker.internal:<gateway>.
         cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
@@ -437,12 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_spec_default_path_override_is_none() {
-        let spec = FakeSpec::new(LockService::Oauth, "fake");
-        assert!(spec.path_override().is_none());
-    }
-
-    #[test]
     fn worker_spec_default_extra_cleanup_files_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
@@ -524,7 +512,7 @@ mod tests {
     fn spec_apply_env_runs_on_top_of_base_policy() {
         let env = FakeEnv::empty().with("PATH", "/usr/bin").with("HOME", "/h");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
