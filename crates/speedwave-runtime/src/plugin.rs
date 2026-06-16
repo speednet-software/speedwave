@@ -499,7 +499,7 @@ pub const BRIDGE_TOKEN_FILENAME: &str = "bridge-token";
 
 /// Read a plugin's persisted host-bridge token from
 /// `plugin-state/<slug>/bridge-token`. Returns the trimmed UUID, or `None`
-/// if absent/empty/non-UUID — no malformed value reaches compose (ADR-073).
+/// if absent/empty/non-UUID — no malformed value reaches compose (ADR-074).
 pub(crate) fn read_persistent_bridge_token_from(plugins_dir: &Path, slug: &str) -> Option<String> {
     read_bridge_token_at(&plugin_state_dir_for(plugins_dir, slug).join(BRIDGE_TOKEN_FILENAME))
 }

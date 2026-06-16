@@ -2124,6 +2124,17 @@ mod tests {
             !fn_body[..render_pos].contains(&empty_default),
             "main() must not pass an empty HostBridgesInfo to render_compose"
         );
+        // The default-needle check only scans before the call; also assert the
+        // call site actually receives &host_bridges as its argument (guards a
+        // refactor that passes a default *inside* the render_compose(...) args).
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
     }
 
     #[test]

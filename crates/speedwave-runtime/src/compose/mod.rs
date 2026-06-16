@@ -195,9 +195,10 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
         }
     };
     collect_host_bridges(plugins.iter().map(|p| {
+        let m = p.manifest();
         (
-            p.manifest(),
-            plugin::read_persistent_bridge_token_from(plugins_dir, &p.manifest().slug),
+            m,
+            plugin::read_persistent_bridge_token_from(plugins_dir, &m.slug),
         )
     }))
 }
