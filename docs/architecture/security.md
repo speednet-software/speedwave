@@ -83,7 +83,7 @@ Speedwave's threat model includes a non-privileged process running as the same u
 `~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
 
 - Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
-- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
+- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker or the `bridge-token` does not invalidate the digest.
 - `signing::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
 - Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
 - Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
@@ -274,6 +274,7 @@ Sensitive files must be `0o600` (owner rw only):
 
 - `~/.speedwave/secrets/<project>/*` — service auth tokens. Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
 - `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
+- `~/.speedwave/plugin-state/<slug>/bridge-token` — persisted host-bridge auth token (written `0o600` by Desktop's `HostBridge` when the manifest opts into `persistent_token`; read back — symlink-rejected, UUID-validated — by off-Desktop compose renders, ADR-074)
 - `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
 - `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens
 - `~/.speedwave/bundle-state.json` — bundle reconciliation state

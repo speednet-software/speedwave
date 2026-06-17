@@ -492,6 +492,51 @@ pub fn plugin_state_dir(slug: &str) -> PathBuf {
     }
 }
 
+/// Filename of a plugin's persisted host-bridge auth token under
+/// `plugin-state/<slug>/`. SSOT: Desktop's `HostBridge` writes it, the CLI
+/// compose builder reads it back. See ADR-063 and ADR-074.
+pub const BRIDGE_TOKEN_FILENAME: &str = "bridge-token";
+
+/// Read a plugin's persisted host-bridge token from
+/// `plugin-state/<slug>/bridge-token`. Returns the trimmed UUID, or `None`
+/// if absent/empty/non-UUID — no malformed value reaches compose (ADR-074).
+pub(crate) fn read_persistent_bridge_token_from(plugins_dir: &Path, slug: &str) -> Option<String> {
+    read_bridge_token_at(&plugin_state_dir_for(plugins_dir, slug).join(BRIDGE_TOKEN_FILENAME))
+}
+
+fn read_bridge_token_at(path: &Path) -> Option<String> {
+    // Reject symlinks (`read_to_string` follows them); warn-and-ignore only —
+    // the file is Desktop-owned state, so this passive reader never removes it.
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        log::warn!("bridge token at {} is a symlink; ignoring", path.display());
+        return None;
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Absent file is the expected "Desktop has not minted it yet" path.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // Anything else is unexpected — leave a breadcrumb, don't degrade silently.
+        Err(e) => {
+            log::warn!("bridge token unreadable at {}: {e}", path.display());
+            return None;
+        }
+    };
+    let token = raw.trim();
+    if token.is_empty() {
+        // Present-but-empty is anomalous: the writer mints a UUID or nothing.
+        log::warn!("bridge token at {} is empty; ignoring", path.display());
+        return None;
+    }
+    if uuid::Uuid::parse_str(token).is_err() {
+        log::warn!("bridge token at {} is not a UUID; ignoring", path.display());
+        return None;
+    }
+    Some(token.to_string())
+}
+
 fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
     plugin_state_dir_for(plugins_dir, slug).join("image_pending")
 }
@@ -2852,6 +2897,86 @@ fn warn_legacy_addons() {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    const FIXTURE_UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn bridge_token_filename_is_stable_on_disk_contract() {
+        // Writer (Desktop) and reader (CLI) address the same on-disk file; a
+        // rename would compile cleanly but orphan every persisted token. Pin
+        // the literal so renaming stays a deliberate change. See ADR-074.
+        assert_eq!(BRIDGE_TOKEN_FILENAME, "bridge-token");
+    }
+
+    #[test]
+    fn bridge_token_reader_validates_and_resolves_plugin_state_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let slug = "example-plugin";
+
+        // Missing file → None.
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // A token in the WRONG (in-signed-tree) location must be ignored: the
+        // reader resolves under plugin-state/<slug>/, never plugins/<slug>/.
+        let wrong = plugins_dir.join(slug);
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join(BRIDGE_TOKEN_FILENAME), FIXTURE_UUID).unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // Correct location, valid UUID with trailing newline → trimmed token.
+        let state = plugin_state_dir_for(&plugins_dir, slug);
+        std::fs::create_dir_all(&state).unwrap();
+        let token_path = state.join(BRIDGE_TOKEN_FILENAME);
+        std::fs::write(&token_path, format!("{FIXTURE_UUID}\n")).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, slug).as_deref(),
+            Some(FIXTURE_UUID)
+        );
+
+        // Empty / whitespace-only → None.
+        std::fs::write(&token_path, "   \n").unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // Non-UUID content → None; also blocks a crafted multi-line value
+        // from reaching compose env injection.
+        std::fs::write(&token_path, "not-a-uuid\ninjected: value").unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+    }
+
+    #[test]
+    fn bridge_token_reader_returns_none_on_non_notfound_error() {
+        // A directory sitting at the token path is an unexpected (non-NotFound)
+        // error; the reader degrades to None (and warns) rather than panicking.
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(state.join(BRIDGE_TOKEN_FILENAME)).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, "example-plugin"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_token_reader_rejects_symlink() {
+        // A symlink at the token path is ignored even when its target holds a
+        // valid UUID.
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(&state).unwrap();
+        let target = dir.path().join("real-token");
+        std::fs::write(&target, FIXTURE_UUID).unwrap();
+        std::os::unix::fs::symlink(&target, state.join(BRIDGE_TOKEN_FILENAME)).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, "example-plugin"),
+            None
+        );
+        // Same content read directly stays valid — the rejection targets the symlink.
+        assert_eq!(read_bridge_token_at(&target).as_deref(), Some(FIXTURE_UUID));
+    }
 
     #[test]
     fn test_manifest_serde_roundtrip() {

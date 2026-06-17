@@ -209,13 +209,16 @@ fn add_project_with_validated_dir(
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
     let rt = runtime::detect_runtime();
     let rt_ref: Option<&runtime::LockedRuntime> = if rt.is_available() { Some(&rt) } else { None };
+    // Reconstruct host-bridge env from disk (ADR-074) so project-add never
+    // renders a worker without an already-configured bridge's env vars.
+    let host_bridges = compose::host_bridges_from_disk();
     let yaml = compose::render_compose(
         name,
         &canonical_str,
         &resolved,
         &integrations,
         rt_ref,
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     // ── Phase 2: commit (all writes) ─────────────────────────────────────
@@ -280,6 +283,42 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
 mod tests {
     use super::*;
     use crate::config::{save_user_config_to, SpeedwaveUserConfig};
+
+    #[test]
+    fn add_project_reconstructs_host_bridges() {
+        // Structural guard (ADR-074): project-add must feed disk-reconstructed
+        // host bridges into render_compose, not an empty list.
+        let source = include_str!("project.rs");
+        // Anchor on the inner fn that holds the calls, not the outer wrapper,
+        // else the slice passes by file-order accident and misses a regression.
+        let fn_start = source
+            .find("fn add_project_with_validated_dir(")
+            .expect("add_project_with_validated_dir must exist in project.rs");
+        let fn_body = &source[fn_start..];
+        let build_pos = fn_body.find("host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("render_compose(")
+            .expect("render_compose call must exist in add_project_with_validated_dir");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "add_project_with_validated_dir must build host_bridges_from_disk() before render_compose"
+        );
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "add_project_with_validated_dir must not pass an empty HostBridgesInfo to render_compose"
+        );
+        // Also assert the call site actually receives &host_bridges as its
+        // argument (guards a default passed *inside* the render_compose args).
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
+    }
 
     #[test]
     fn rejects_invalid_project_name() {

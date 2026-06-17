@@ -130,7 +130,7 @@ const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
 /// worker. The plugin manifest's `host_bridge` declaration drives both
 /// `slug` (which plugin to match) and the env-var names; the Desktop
 /// process supplies the runtime values (`port`, `auth_token`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostBridgeRegistration {
     /// Plugin slug — matched against `PluginManifest.slug` during
     /// `apply_plugins_from_verified` to decide which worker receives
@@ -146,13 +146,96 @@ pub struct HostBridgeRegistration {
     pub token_env: String,
 }
 
-/// Snapshot of every host-side bridge currently active. CLI builds and
-/// early Desktop startup pass an empty list — affected plugins log
-/// `BRIDGE_NOT_CONFIGURED` and degrade gracefully.
+// Manual impl so `auth_token` (a bearer secret) never reaches Debug/log output.
+impl std::fmt::Debug for HostBridgeRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostBridgeRegistration")
+            .field("plugin_slug", &self.plugin_slug)
+            .field("port", &self.port)
+            .field("auth_token", &"***REDACTED***")
+            .field("url_env", &self.url_env)
+            .field("token_env", &self.token_env)
+            .finish()
+    }
+}
+
+/// Snapshot of every host-side bridge to advertise to container workers.
+/// Desktop fills it from live bridges; off-Desktop callers (CLI, `update`,
+/// project-add) use [`host_bridges_from_disk`]. Empty = `BRIDGE_NOT_CONFIGURED`.
 #[derive(Clone, Debug, Default)]
 pub struct HostBridgesInfo {
     /// All currently active host-side bridge registrations.
     pub bridges: Vec<HostBridgeRegistration>,
+}
+
+/// Build [`HostBridgesInfo`] for an off-Desktop context from each verified
+/// plugin's persisted bridge token + manifest port (`plugin-state/<slug>/`,
+/// ADR-063); tokenless plugins degrade to `BRIDGE_NOT_CONFIGURED`. See ADR-074.
+pub fn host_bridges_from_disk() -> HostBridgesInfo {
+    match plugin::plugins_base_dir() {
+        Ok(dir) => host_bridges_from_disk_in(&dir),
+        Err(e) => {
+            log::warn!("host_bridges_from_disk: cannot resolve plugins dir: {e}");
+            HostBridgesInfo::default()
+        }
+    }
+}
+
+/// Env-free core of [`host_bridges_from_disk`]: every path is derived from
+/// the explicit `plugins_dir`, so tests exercise both the zero-plugins and
+/// the list-error branch against a tempdir.
+fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
+    // Manifests come from signature-verified plugins only (ADR-051); the
+    // token lives outside the signed tree, so reading it keeps that gate.
+    let plugins = match plugin::list_verified_from_dir(plugins_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("host_bridges_from_disk: cannot list verified plugins: {e}");
+            return HostBridgesInfo::default();
+        }
+    };
+    collect_host_bridges(plugins.iter().map(|p| {
+        let m = p.manifest();
+        (
+            m,
+            plugin::read_persistent_bridge_token_from(plugins_dir, &m.slug),
+        )
+    }))
+}
+
+/// Assemble [`HostBridgesInfo`] from `(manifest, persisted-token)` pairs —
+/// split from the disk walk so it is unit-testable without signed fixtures.
+fn collect_host_bridges<'a>(
+    entries: impl IntoIterator<Item = (&'a plugin::PluginManifest, Option<String>)>,
+) -> HostBridgesInfo {
+    HostBridgesInfo {
+        bridges: entries
+            .into_iter()
+            .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
+            .collect(),
+    }
+}
+
+/// Pure mapping from a manifest (+ persisted token, if any) to a
+/// [`HostBridgeRegistration`]. Eligible only with both reconstructable knobs
+/// (`persistent_token` + fixed `preferred_port`); the token arrives pre-validated.
+fn build_host_bridge_registration(
+    manifest: &plugin::PluginManifest,
+    token: Option<String>,
+) -> Option<HostBridgeRegistration> {
+    let bridge = manifest.host_bridge.as_ref()?;
+    if !bridge.persistent_token {
+        return None;
+    }
+    let port = bridge.preferred_port?;
+    let auth_token = token?;
+    Some(HostBridgeRegistration {
+        plugin_slug: manifest.slug.clone(),
+        port,
+        auth_token,
+        url_env: bridge.url_env.clone(),
+        token_env: bridge.token_env.clone(),
+    })
 }
 
 /// Renders a compose.yml for a given project by substituting template variables.
@@ -10427,6 +10510,139 @@ services:
             preferred_port: None,
             persistent_token: false,
         }
+    }
+
+    /// Plain manifest fixture for the `host_bridges_from_disk` unit tests —
+    /// no on-disk plugin dir, no signature, just the fields the
+    /// reconstruction logic reads.
+    fn manifest_for_bridge_tests(
+        slug: &str,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::PluginManifest {
+        plugin::PluginManifest {
+            name: slug.into(),
+            service_id: Some(slug.into()),
+            slug: slug.into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge,
+            instructions: None,
+            oauth: None,
+        }
+    }
+
+    fn manifest_with_bridge_knobs(
+        persistent_token: bool,
+        preferred_port: Option<u16>,
+    ) -> plugin::PluginManifest {
+        let mut host_bridge = fixture_host_bridge_manifest(
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
+        );
+        host_bridge.persistent_token = persistent_token;
+        host_bridge.preferred_port = preferred_port;
+        manifest_for_bridge_tests("example-plugin", Some(host_bridge))
+    }
+
+    #[test]
+    fn build_host_bridge_registration_happy_path_mirrors_manifest() {
+        let m = manifest_with_bridge_knobs(true, Some(60123));
+        let reg = build_host_bridge_registration(&m, Some("tok-123".to_string()))
+            .expect("eligible manifest + token must produce a registration");
+        assert_eq!(reg.plugin_slug, "example-plugin");
+        assert_eq!(reg.port, 60123);
+        assert_eq!(reg.auth_token, "tok-123");
+        assert_eq!(reg.url_env, "EXAMPLE_PLUGIN_BRIDGE_URL");
+        assert_eq!(reg.token_env, "EXAMPLE_PLUGIN_BRIDGE_TOKEN");
+    }
+
+    #[test]
+    fn build_host_bridge_registration_skips_ineligible_cases() {
+        let eligible = manifest_with_bridge_knobs(true, Some(60123));
+
+        // No token on disk (Desktop never minted it) → skipped.
+        assert!(build_host_bridge_registration(&eligible, None).is_none());
+
+        // persistent_token = false → not reconstructable off-process → skipped.
+        let no_persist = manifest_with_bridge_knobs(false, Some(60123));
+        assert!(build_host_bridge_registration(&no_persist, Some("tok".to_string())).is_none());
+
+        // preferred_port = None → no stable port to address → skipped.
+        let no_port = manifest_with_bridge_knobs(true, None);
+        assert!(build_host_bridge_registration(&no_port, Some("tok".to_string())).is_none());
+
+        // No host_bridge block at all → skipped.
+        let no_bridge = manifest_for_bridge_tests("example-plugin", None);
+        assert!(build_host_bridge_registration(&no_bridge, Some("tok".to_string())).is_none());
+    }
+
+    #[test]
+    fn collect_host_bridges_keeps_all_eligible_with_token() {
+        let first = manifest_with_bridge_knobs(true, Some(60123));
+        let mut second = manifest_with_bridge_knobs(true, Some(60200));
+        second.slug = "second-plugin".into();
+        let ineligible = manifest_with_bridge_knobs(false, Some(60300));
+        let no_token = manifest_with_bridge_knobs(true, Some(60400));
+
+        // Two eligible plugins with an ineligible one interleaved — all
+        // eligible registrations must survive, in input order.
+        let info = collect_host_bridges([
+            (&first, Some("tok-a".to_string())),
+            (&ineligible, Some("tok-x".to_string())),
+            (&second, Some("tok-b".to_string())),
+            (&no_token, None),
+        ]);
+        assert_eq!(info.bridges.len(), 2);
+        assert_eq!(info.bridges[0].plugin_slug, "example-plugin");
+        assert_eq!(info.bridges[0].port, 60123);
+        assert_eq!(info.bridges[1].plugin_slug, "second-plugin");
+        assert_eq!(info.bridges[1].port, 60200);
+    }
+
+    #[test]
+    fn host_bridges_from_disk_in_returns_empty_when_plugins_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = host_bridges_from_disk_in(&tmp.path().join("plugins"));
+        assert!(info.bridges.is_empty());
+    }
+
+    #[test]
+    fn host_bridges_from_disk_in_degrades_to_empty_on_list_error() {
+        // A file at the plugins-dir path makes read_dir fail — the
+        // orchestrator must warn and degrade to an empty list, not propagate.
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("plugins");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let info = host_bridges_from_disk_in(&not_a_dir);
+        assert!(info.bridges.is_empty());
+    }
+
+    #[test]
+    fn host_bridge_registration_debug_redacts_auth_token() {
+        let m = manifest_with_bridge_knobs(true, Some(60123));
+        let token = "11111111-2222-3333-4444-555555555555";
+        let reg = build_host_bridge_registration(&m, Some(token.to_string()))
+            .expect("eligible manifest + token must produce a registration");
+        let dbg = format!("{reg:?}");
+        assert!(
+            !dbg.contains(token),
+            "auth token must not appear in Debug output: {dbg}"
+        );
+        assert!(dbg.contains("REDACTED"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(dbg.contains("example-plugin"));
+        assert!(dbg.contains("60123"));
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
