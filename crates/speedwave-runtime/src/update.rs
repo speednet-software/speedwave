@@ -1046,8 +1046,8 @@ mod tests {
     fn test_no_buildkit_prune_in_routine_prune_paths() {
         // Structural test (ADR-072): prune_buildkit_cache must NOT be called in
         // the routine prune paths — apt/npm cache layers are reused across
-        // updates. The sole cache-prune site is the disk-full recovery ladder
-        // in build_images_for_bundle_in (pinned by test_retry_on_disk_full_error in build.rs).
+        // updates. Cache is pruned only by the with_build_recovery ladder
+        // (disk-full + snapshotter recovery), never on routine updates.
         let source = include_str!("build.rs");
 
         for fn_name in [

@@ -157,8 +157,8 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     }
 
     /// Removes BuildKit build cache (`nerdctl builder prune --all --force`).
-    /// Called ONLY from the disk-full recovery ladder — routine prunes keep
-    /// the cache (ADR-072).
+    /// Called only from the `with_build_recovery` ladder (disk-full or
+    /// snapshotter corruption) — routine prunes keep the cache (ADR-072).
     fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
         log::debug!("prune_buildkit_cache: not implemented for this runtime, skipping");
         Ok(())

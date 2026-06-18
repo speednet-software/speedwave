@@ -10,7 +10,7 @@ Apply a four-layer strategy so image builds survive nested-virt I/O degradation:
 ## Why
 
 - The `apt-get install` phase in the claude image calls `dpkg`, which uses `fsync()` heavily for crash-safe installs. Under nested virt those calls time out, failing the build with "Input/output error". `--force-unsafe-io` skips the fsync — safe here because image layers are disposable (a crashed build just rebuilds).
-- Transient I/O and boot-time DNS-fallback hiccups are usually one-off; a short backed-off retry clears them without user action. The retry path also covers disk-full (prune + retry) and containerd snapshotter corruption (`system_prune` + retry).
+- Transient I/O and boot-time DNS-fallback hiccups are usually one-off; a short backed-off retry clears them without user action. The same recovery ladder (`with_build_recovery`, shared by bundle and plugin builds) also covers disk-full and containerd snapshotter corruption — each prunes the relevant cache (`builder prune` for the BuildKit cache, plus `system prune` for snapshotter) and retries.
 - Detecting a VM host up front lets `speedwave check` warn the user before a long build fails.
 - Parallel builds cut wall-clock setup time, but the pool is **bounded** to avoid amplifying disk-I/O contention and the BuildKit overlayfs snapshotter race window on VM hosts.
 
@@ -24,7 +24,7 @@ Apply a four-layer strategy so image builds survive nested-virt I/O degradation:
 
 ## Where it lives in code
 
-- Build retry + worker pool + classifier — `crates/speedwave-runtime/src/build.rs` (`build_images_for_bundle_in`, `try_build_images`, `is_transient_build_error`, `is_snapshotter_error`, `is_disk_full_error`; constants `TRANSIENT_BUILD_RETRIES`, `TRANSIENT_BUILD_RETRY_BASE_DELAY`, `DEFAULT_BUILD_WORKER_FALLBACK`, `IMAGES`)
+- Build retry + worker pool + classifier — `crates/speedwave-runtime/src/build.rs` (`with_build_recovery` (recovery ladder, shared by bundle + plugin builds), `build_images_for_bundle_in`, `try_build_images`, `is_transient_build_error`, `is_snapshotter_error`, `is_disk_full_error`; constants `TRANSIENT_BUILD_RETRIES`, `TRANSIENT_BUILD_RETRY_BASE_DELAY`, `DEFAULT_BUILD_WORKER_FALLBACK`, `IMAGES`)
 - VM-host warning — `crates/speedwave-runtime/src/os_prereqs.rs` (`check_os_warnings`, `parse_vm_info`), surfaced by `crates/speedwave-cli/src/main.rs` on `speedwave check`
 - apt hardening — `containers/Containerfile.claude`
 
