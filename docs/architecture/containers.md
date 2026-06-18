@@ -123,7 +123,7 @@ Disk space is reclaimed **after** the full restore succeeds (atomicity: the prev
 1. **Per-image diff prune** (`prune_replaced_images`): for every image whose applied hash differs from the manifest's, removes `name:old_hash`. Unchanged images keep their tag — nothing to reclaim.
 2. **One-time legacy prune** on migration from the pre-ADR-072 single-id format (state without a per-image map): removes every catalogue tag for the old `bundle_id`.
 
-BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. The sole cache-prune site is the disk-full recovery ladder in `build_images_for_bundle_in` (`nerdctl system prune` does not clear cache mounts, so the ladder calls `builder prune` explicitly).
+BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. Cache is pruned only by the recovery ladder in `with_build_recovery` (shared by bundle and plugin builds), on disk-full or containerd snapshotter corruption — `nerdctl system prune` does not clear cache mounts, so those branches call `builder prune` explicitly.
 
 Both update paths share this pruning: **Desktop** (`reconcile_bundle_update_inner`) after `ProjectsRestored`, **CLI** (`update_containers` → `maybe_prune_previous_bundle`) after containers are confirmed running. The CLI never writes `bundle-state.json` (single-writer rule, test-pinned); Desktop reconcile and the setup wizard are the only writers of `applied_image_hashes`/`applied_bundle_id`.
 

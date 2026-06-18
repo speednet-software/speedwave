@@ -2529,7 +2529,10 @@ fn build_single_plugin_image_locked(
         tag,
         plugin_dir.display()
     );
-    runtime.build_image(&tag, root_str.trim_end_matches('/'), &containerfile, &[])?;
+    let build_target = root_str.trim_end_matches('/');
+    crate::build::with_build_recovery(runtime, || {
+        runtime.build_image(&tag, build_target, &containerfile, &[])
+    })?;
 
     // Remove the pending marker on success — both the new state-dir
     // location and the legacy in-tree marker, so a plugin installed by an older release
@@ -8014,6 +8017,45 @@ mod tests {
         assert!(
             source[outer..body_end].contains("with_build_lock"),
             "plugin build+prune must be serialised by build.lock (ADR-072)"
+        );
+    }
+
+    #[test]
+    fn plugin_build_recovers_from_corrupted_snapshot() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+
+        // First build hits the corrupted-snapshot signature; recovery prunes and
+        // the retry succeeds — parity with bundle builds.
+        let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(tmp.path().join("example-plugin"))
+            .with_build_error_for_attempt(
+                &tag,
+                1,
+                "failed to compute cache key: failed to stat parent: \
+                 stat /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/7/fs: \
+                 no such file or directory",
+            )
+            .build();
+
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path())
+            .expect("plugin build must recover from a corrupted containerd snapshot");
+
+        let builds = handle
+            .build_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.tag == tag)
+            .count();
+        assert_eq!(builds, 2, "build retried once after prune");
+        let prunes = handle.prune_calls.lock().unwrap();
+        assert!(prunes.iter().any(|p| *p == "system"), "system_prune ran");
+        assert!(
+            prunes.iter().any(|p| *p == "buildkit"),
+            "BuildKit cache pruned"
         );
     }
 
