@@ -1,0 +1,60 @@
+name: Release Please — Regenerate npm lockfiles
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "mcp-servers/*/package.json"
+      - "mcp-servers/playwright/package.json"
+      - "desktop/src/package.json"
+
+permissions: {}
+
+jobs:
+  regenerate-lockfile:
+    if: >-
+      startsWith(github.head_ref, 'release-please--') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Install Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: .nvmrc
+
+      # `--package-lock-only --ignore-scripts` rewrites only the workspace
+      # self-entry versions to match each package.json — no transitive bumps
+      # on a version-only release PR. See SPEED-190.
+      - name: Regenerate npm lockfiles
+        run: |
+          set -e
+          for dir in . mcp-servers mcp-servers/playwright desktop/src; do
+            echo "Regenerating $dir/package-lock.json"
+            (cd "$dir" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          done
+
+      - name: Commit updated lockfiles
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json mcp-servers/package-lock.json \
+            mcp-servers/playwright/package-lock.json desktop/src/package-lock.json
+          if git diff --cached --quiet; then
+            echo "Lockfiles already up to date"
+          else
+            git commit -m "regenerate npm lockfiles"
+            git push origin "HEAD:$HEAD_REF"
+          fi

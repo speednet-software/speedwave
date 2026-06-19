@@ -73,6 +73,7 @@ _static_version_files() {
         CHANGELOG.md
         package-lock.json
         mcp-servers/package-lock.json
+        mcp-servers/playwright/package-lock.json
         Cargo.lock
         desktop/src-tauri/Cargo.lock
     )
