@@ -2,12 +2,14 @@ import {
   ChangeDetectionStrategy,
   Component,
   OnDestroy,
+  OnInit,
   ViewChild,
   computed,
   effect,
   inject,
   signal,
 } from '@angular/core';
+import { RouterLink } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
@@ -20,12 +22,13 @@ import { SessionListComponent } from './session-list/session-list.component';
  * Meeting transcription tab (beta-gated by the route guard). Left pane =
  * recordings list; right pane = recording controls + the live transcript. Audio
  * is transcribed locally; the speech model is downloaded in Settings. "Send to
- * Claude" uses the network — the banner says so.
+ * Claude" uses the network — the banner says so. When no model is downloaded
+ * yet, a gate (like the Claude auth gate) points the user to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',
   standalone: true,
-  imports: [RecordingControlsComponent, LiveTranscriptComponent, SessionListComponent],
+  imports: [RouterLink, RecordingControlsComponent, LiveTranscriptComponent, SessionListComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
@@ -61,33 +64,57 @@ import { SessionListComponent } from './session-list/session-list.component';
           }
         </div>
       }
-      <div class="flex flex-1 gap-4 overflow-hidden p-6">
-        <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
-          <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
-        </aside>
-        <main class="flex flex-1 flex-col gap-4 overflow-hidden">
-          <app-recording-controls
-            (started)="onStarted($event)"
-            (stopped)="onStopped($event)"
-            (errorOccurred)="onError($event)"
-          />
-          <div
-            class="flex-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-3"
-          >
-            <app-live-transcript [session]="active()" (errorOccurred)="onError($event)" />
+      @if (modelReady() === false) {
+        <section
+          class="flex flex-1 flex-col items-center justify-center bg-[var(--bg)] p-8"
+          data-testid="model-required-gate"
+        >
+          <div class="mono max-w-md text-center text-[12.5px] text-[var(--ink-dim)]">
+            <p class="text-[var(--amber)]">⬇ model required</p>
+            <p class="mt-2">
+              Download the local speech-recognition model to start transcribing. It runs entirely on
+              this machine.
+            </p>
+            <a
+              routerLink="/settings"
+              fragment="section-transcription"
+              class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
+              data-testid="download-model-link"
+              >download model in settings →</a
+            >
           </div>
-        </main>
-      </div>
+        </section>
+      } @else {
+        <div class="flex flex-1 gap-4 overflow-hidden p-6">
+          <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+            <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
+          </aside>
+          <main class="flex flex-1 flex-col gap-4 overflow-hidden">
+            <app-recording-controls
+              (started)="onStarted($event)"
+              (stopped)="onStopped($event)"
+              (errorOccurred)="onError($event)"
+            />
+            <div
+              class="flex-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-3"
+            >
+              <app-live-transcript [session]="active()" (errorOccurred)="onError($event)" />
+            </div>
+          </main>
+        </div>
+      }
     </section>
   `,
   host: { class: 'flex h-full flex-1' },
 })
-export class MeetingTranscriptionComponent implements OnDestroy {
+export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Left pane's recordings list (refreshed after start/stop/delete). */
   @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
 
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
+  /** `null` while loading, `true` if the model is downloaded, `false` shows the gate. */
+  readonly modelReady = signal<boolean | null>(null);
 
   private readonly transcription = inject(TranscriptionService);
   private readonly log = inject(LoggerService);
@@ -110,6 +137,17 @@ export class MeetingTranscriptionComponent implements OnDestroy {
       }
       last = state;
     });
+  }
+
+  /** Checks whether the speech model is downloaded; if not, the gate shows. */
+  async ngOnInit(): Promise<void> {
+    try {
+      this.modelReady.set((await this.transcription.recommendedModel()).downloaded);
+    } catch (err) {
+      // Don't trap the user behind the gate on a transient read error.
+      this.log.warn(`recommended-model check failed: ${String(err)}`);
+      this.modelReady.set(true);
+    }
   }
 
   /** Detaches the live-stream listener when the tab is destroyed. */

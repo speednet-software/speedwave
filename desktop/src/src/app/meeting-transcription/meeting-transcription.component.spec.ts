@@ -13,6 +13,7 @@ describe('MeetingTranscriptionComponent', () => {
     active: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
     subscribeToTranscript: ReturnType<typeof vi.fn>;
+    recommendedModel: ReturnType<typeof vi.fn>;
     // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
@@ -23,12 +24,21 @@ describe('MeetingTranscriptionComponent', () => {
   };
   const activeSig = signal<TranscriptSession | null>(null);
 
+  const recommended = (downloaded: boolean) => ({
+    key: 'large-v3',
+    display_name: 'Large v3',
+    size_bytes: 3_100_000_000,
+    downloaded,
+    accel_label: 'CPU',
+  });
+
   beforeEach(async () => {
     activeSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
       subscribeToTranscript: vi.fn(async () => ({ event_name: 'e', snapshot: {} as never })),
+      recommendedModel: vi.fn(async () => recommended(true)),
       getCapabilities: vi.fn(async () => ({
         capabilities: {
           supports_per_process: true,
@@ -56,12 +66,39 @@ describe('MeetingTranscriptionComponent', () => {
     fixture.detectChanges();
   });
 
-  it('always shows the recording panes (no enable toggle)', () => {
+  it('shows the recording panes when a model is downloaded', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-recording-controls')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-live-transcript')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-session-list')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
     // The model manager moved to Settings — no model UI in the tab.
     expect(fixture.nativeElement.querySelector('app-model-manager')).toBeNull();
+  });
+
+  it('shows the model-required gate (and hides the panes) when no model is downloaded', async () => {
+    svc.recommendedModel.mockResolvedValueOnce(recommended(false));
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
+    expect(gate).not.toBeNull();
+    expect(gate.textContent.toLowerCase()).toContain('model required');
+    // The link points at the transcription section in Settings.
+    const link = fixture.nativeElement.querySelector('[data-testid="download-model-link"]');
+    expect(link).not.toBeNull();
+    expect(link.getAttribute('href')).toContain('/settings');
+    // Panes are not rendered behind the gate.
+    expect(fixture.nativeElement.querySelector('app-recording-controls')).toBeNull();
+  });
+
+  it('fails open (shows the panes) if the model check errors', async () => {
+    svc.recommendedModel.mockRejectedValueOnce(new Error('boom'));
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.modelReady()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-recording-controls')).not.toBeNull();
   });
 
   it('shows the "audio local, send uses network" banner text', () => {
