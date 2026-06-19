@@ -119,8 +119,6 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           (errorOccurred)="error = $event"
         />
 
-        <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
-
         @if (beta.enabled()) {
           <app-transcription-section (errorOccurred)="error = $event" />
         }
@@ -187,6 +185,8 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
             }
           </div>
         </section>
+
+        <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 
         <app-advanced-section
           (errorOccurred)="error = $event"
