@@ -91,11 +91,14 @@ images (`node:24-*` etc.) remain external and mutable, exactly as before
 ### BuildKit cache is no longer pruned on update
 
 The unconditional `prune_buildkit_cache` call is removed from the prune path.
-The **sole** cache-prune site is the disk-full recovery ladder in
-`build_images_for_bundle_in` (`nerdctl system prune` does not clear BuildKit
-cache mounts, so the ladder calls `builder prune` explicitly). Bounded cache
-growth is accepted: nerdctl exposes no `--keep-storage` budget for `builder
-prune` (only `--all`/`--force`)[^2], so a threshold-based prune is deferred.
+Cache is pruned only by the recovery ladder in `with_build_recovery` (shared by
+bundle and plugin builds), in two unrecoverable states — disk-full and
+containerd snapshotter corruption (`failed to stat parent`) — where cache reuse
+is impossible anyway; `nerdctl system prune` does not clear BuildKit cache
+mounts, so both branches call `builder prune` explicitly. Routine updates never
+prune the cache. Bounded cache growth is accepted: nerdctl exposes no
+`--keep-storage` budget for `builder prune` (only `--all`/`--force`)[^2], so a
+threshold-based prune is deferred.
 
 ### Cross-process build lock
 

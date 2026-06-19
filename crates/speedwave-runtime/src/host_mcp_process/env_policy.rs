@@ -51,10 +51,8 @@ impl EnvSource for CurrentProcessEnv {
 /// Clears the inherited environment then re-adds only PATH,
 /// HOME/USERPROFILE, optional Windows CSPRNG vars, and
 /// `SPEEDWAVE_RESOURCES_DIR`/`SPEEDWAVE_PROD` when the parent is a
-/// bundled .app. `path_override` lets callers (notably `host_exec`)
-/// substitute the recovered login-shell PATH; pass `None` to forward
-/// the inherited PATH instead.
-pub fn apply_child_env(cmd: &mut Command, path_override: Option<&str>, env: &dyn EnvSource) {
+/// bundled .app. The inherited PATH is forwarded as-is.
+pub fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env_clear();
 
     #[cfg(target_os = "windows")]
@@ -66,11 +64,7 @@ pub fn apply_child_env(cmd: &mut Command, path_override: Option<&str>, env: &dyn
         }
     }
 
-    let path = match path_override {
-        Some(p) => p.to_string(),
-        None => env.var("PATH").unwrap_or_default(),
-    };
-    cmd.env("PATH", path);
+    cmd.env("PATH", env.var("PATH").unwrap_or_default());
 
     #[cfg(not(target_os = "windows"))]
     if let Some(home) = env.var("HOME") {
@@ -131,7 +125,7 @@ mod tests {
             .with("HOME", "/home/u");
         let mut cmd = Command::new("true");
         cmd.env("LEAK_KEY", "should-be-cleared");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let envs: Vec<_> = cmd.get_envs().collect();
         for (k, v) in envs {
             let k = k.to_string_lossy();
@@ -142,10 +136,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_child_env_forwards_path_when_no_override() {
+    fn apply_child_env_forwards_inherited_path() {
         let env = FakeEnv::empty().with("PATH", "/inherited/path");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let path = cmd
             .get_envs()
             .find(|(k, _)| k.to_string_lossy() == "PATH")
@@ -154,22 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_child_env_uses_path_override_when_present() {
-        let env = FakeEnv::empty().with("PATH", "/inherited");
-        let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, Some("/recovered/login-shell"), &env);
-        let path = cmd
-            .get_envs()
-            .find(|(k, _)| k.to_string_lossy() == "PATH")
-            .and_then(|(_, v)| v.map(|s| s.to_string_lossy().to_string()));
-        assert_eq!(path.as_deref(), Some("/recovered/login-shell"));
-    }
-
-    #[test]
     fn apply_child_env_defaults_path_to_empty_when_unset() {
         let env = FakeEnv::empty();
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let path = cmd
             .get_envs()
             .find(|(k, _)| k.to_string_lossy() == "PATH")
@@ -182,7 +164,7 @@ mod tests {
     fn apply_child_env_forwards_home_on_unix() {
         let env = FakeEnv::empty().with("HOME", "/home/u");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let home = cmd
             .get_envs()
             .find(|(k, _)| k.to_string_lossy() == "HOME")
@@ -195,7 +177,7 @@ mod tests {
     fn apply_child_env_omits_home_when_unset() {
         let env = FakeEnv::empty();
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let has_home = cmd
             .get_envs()
             .any(|(k, v)| k.to_string_lossy() == "HOME" && v.is_some());
@@ -209,7 +191,7 @@ mod tests {
             "/Apps/Speedwave.app/Contents/Resources",
         );
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let res = cmd
             .get_envs()
             .find(|(k, _)| k.to_string_lossy() == consts::BUNDLE_RESOURCES_ENV)
@@ -229,7 +211,7 @@ mod tests {
     fn apply_child_env_treats_empty_resources_as_unset() {
         let env = FakeEnv::empty().with(consts::BUNDLE_RESOURCES_ENV, "");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let has_prod = cmd
             .get_envs()
             .any(|(k, v)| k.to_string_lossy() == "SPEEDWAVE_PROD" && v.is_some());
@@ -243,7 +225,7 @@ mod tests {
             .with("SystemRoot", "C:\\Windows")
             .with("APPDATA", "C:\\Users\\u\\AppData\\Roaming");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let has_sysroot = cmd.get_envs().any(|(k, v)| {
             k.to_string_lossy() == "SystemRoot"
                 && v.is_some_and(|s| s.to_string_lossy() == "C:\\Windows")

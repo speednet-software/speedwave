@@ -7,7 +7,6 @@
       "build-context/mcp-servers/": "build-context/mcp-servers/",
       "nodejs/node.exe": "nodejs/node.exe",
       "mcp-os/": "mcp-os/",
-      "host_exec/": "host_exec/",
       "oauth/": "oauth/",
       "cli/speedwave.exe": "cli/speedwave.exe",
       "windows/sweep.ps1": "windows/sweep.ps1",

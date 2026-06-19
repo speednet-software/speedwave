@@ -38,7 +38,7 @@ Use a **dev + main** branching model with **release-please** for automated versi
 
 ## Version synchronization
 
-29 files stay in sync per release. `release-please-config.json` lists 27 `extra-files` entries — 19 JSON files (root `package.json`, `desktop/src/package.json`, `desktop/src/package-lock.json`, `desktop/src-tauri/tauri.conf.json`, `desktop/src-tauri/oauth/shared/package.json`, plus the 14 MCP server `package.json` files: hub, shared, slack, sharepoint, redmine, gitlab, github, atlassian, office, os, host_exec, oauth, context7, playwright), 3 TOML `Cargo.toml` files, and 5 generic `native/macos/*/Resources/Info.plist` files. The 2 `Cargo.lock` files (root + `desktop/src-tauri/Cargo.lock`) cannot be text-bumped by release-please and are regenerated separately on the release PR.
+27 files stay in sync per release. `release-please-config.json` lists 25 `extra-files` entries — 17 JSON files (root `package.json`, `desktop/src/package.json`, `desktop/src/package-lock.json`, `desktop/src-tauri/tauri.conf.json`, plus the 13 MCP server `package.json` files: hub, shared, slack, sharepoint, redmine, gitlab, github, atlassian, office, os, oauth, context7, playwright), 3 TOML `Cargo.toml` files, and 5 generic `native/macos/*/Resources/Info.plist` files. The 2 `Cargo.lock` files (root + `desktop/src-tauri/Cargo.lock`) cannot be text-bumped by release-please and are regenerated separately on the release PR.
 
 ## Hotfix strategy
 

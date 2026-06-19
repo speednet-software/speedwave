@@ -328,13 +328,16 @@ pub fn update_containers(
         config::resolve_project_config(&project_path, &user_config, project);
 
     // 2. Re-render compose.yml with current template (includes plugin image rebuild)
+    // Reconstruct host-bridge env from disk (ADR-074) — otherwise the re-render
+    // recreates the worker without bridge env, breaking an active Desktop bridge.
+    let host_bridges = compose::host_bridges_from_disk();
     let compose_yml = compose::render_compose(
         project,
         &project_dir,
         &resolved,
         &integrations,
         Some(runtime),
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     // 3a. OS prerequisite check
@@ -977,6 +980,41 @@ mod tests {
     }
 
     #[test]
+    fn test_update_containers_reconstructs_host_bridges() {
+        // Structural guard (ADR-074): update must feed disk-reconstructed
+        // host bridges into render_compose, not an empty list.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let build_pos = fn_body.find("host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("render_compose(")
+            .expect("render_compose call must exist in update_containers");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "update_containers must build host_bridges_from_disk() before render_compose"
+        );
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "update_containers must not pass an empty HostBridgesInfo to render_compose"
+        );
+        // Also assert the call site actually receives &host_bridges as its
+        // argument (guards a default passed *inside* the render_compose args).
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
+    }
+
+    #[test]
     fn test_update_containers_plugin_rebuild_via_render_compose() {
         // Cross-file structural test: verifies the full path
         // update_containers → render_compose(Some(runtime)) → ensure_plugin_images.
@@ -1008,8 +1046,8 @@ mod tests {
     fn test_no_buildkit_prune_in_routine_prune_paths() {
         // Structural test (ADR-072): prune_buildkit_cache must NOT be called in
         // the routine prune paths — apt/npm cache layers are reused across
-        // updates. The sole cache-prune site is the disk-full recovery ladder
-        // in build_images_for_bundle_in (pinned by test_retry_on_disk_full_error in build.rs).
+        // updates. Cache is pruned only by the with_build_recovery ladder
+        // (disk-full + snapshotter recovery), never on routine updates.
         let source = include_str!("build.rs");
 
         for fn_name in [

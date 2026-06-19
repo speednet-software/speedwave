@@ -70,37 +70,8 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `host_exec` worker (ADR-054) — a host process like `mcp-os` (not a
-    // container, not in `build::IMAGES`), bundled the same way: its built JS
-    // + the `@speedwave/mcp-shared` dependency tree, resolved by
-    // `build::resolve_host_exec_script` at `host_exec/host_exec/dist/index.js`.
-    // No Mach-O of its own → no `sign-bundled-binaries.sh` entry (same as
-    // `mcp-os/os/dist`).
-    BundledAssetSpec {
-        path: "host_exec/host_exec/dist/index.js",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/dist",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/package.json",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/package-lock.json",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/node_modules",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "host_exec/host_exec/node_modules/@speedwave/mcp-shared",
-        kind: BundledAssetKind::Directory,
-    },
-    // `oauth` worker (ADR-060) — same bundling shape as `host_exec`. Resolved
+    // `oauth` worker (ADR-060) — a host process like `mcp-os` (not a
+    // container, not in `build::IMAGES`), bundled the same way. Resolved
     // by `build::resolve_oauth_script` at `oauth/oauth/dist/index.js`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
@@ -841,29 +812,6 @@ mod tests {
         std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
 
-        // host_exec worker — staged the same way as mcp-os (ADR-054).
-        std::fs::create_dir_all(root.join("host_exec/host_exec/dist")).unwrap();
-        std::fs::create_dir_all(root.join("host_exec/shared/dist")).unwrap();
-        std::fs::create_dir_all(root.join("host_exec/shared/node_modules/pkg")).unwrap();
-        std::fs::write(
-            root.join("host_exec/host_exec/dist/index.js"),
-            "console.log('ok');",
-        )
-        .unwrap();
-        std::fs::write(root.join("host_exec/shared/dist/index.js"), "export {};").unwrap();
-        std::fs::write(root.join("host_exec/shared/package.json"), "{}").unwrap();
-        std::fs::write(root.join("host_exec/shared/package-lock.json"), "{}").unwrap();
-        std::fs::write(
-            root.join("host_exec/shared/node_modules/pkg/index.js"),
-            "module.exports = {};",
-        )
-        .unwrap();
-        let he_shared_dest = root.join("host_exec/host_exec/node_modules/@speedwave/mcp-shared");
-        std::fs::create_dir_all(he_shared_dest.join("dist")).unwrap();
-        std::fs::write(he_shared_dest.join("dist/index.js"), "export {};").unwrap();
-        std::fs::write(he_shared_dest.join("package.json"), "{}").unwrap();
-        std::fs::write(he_shared_dest.join("package-lock.json"), "{}").unwrap();
-
         // oauth worker — staged the same way as mcp-os (ADR-060).
         std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/dist")).unwrap();
@@ -1260,14 +1208,6 @@ mod tests {
                 .join("mcp-os/os/node_modules/@speedwave/mcp-shared"),
         )
         .unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/host_exec/dist")).unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/shared/dist")).unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/shared/node_modules")).unwrap();
-        std::fs::create_dir_all(
-            temp.path()
-                .join("host_exec/host_exec/node_modules/@speedwave/mcp-shared"),
-        )
-        .unwrap();
         std::fs::create_dir_all(temp.path().join("lima/bin")).unwrap();
         std::fs::create_dir_all(temp.path().join("lima/share")).unwrap();
         std::fs::create_dir_all(temp.path().join("nodejs/bin")).unwrap();
@@ -1275,9 +1215,6 @@ mod tests {
         std::fs::write(temp.path().join("mcp-os/os/dist/index.js"), "").unwrap();
         std::fs::write(temp.path().join("mcp-os/shared/package.json"), "").unwrap();
         std::fs::write(temp.path().join("mcp-os/shared/package-lock.json"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/host_exec/dist/index.js"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/shared/package.json"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/shared/package-lock.json"), "").unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/shared/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/shared/node_modules")).unwrap();

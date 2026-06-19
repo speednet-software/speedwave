@@ -82,8 +82,7 @@ pub(crate) use workers::{
 };
 #[cfg(test)]
 use workers::{
-    apply_worker_auth_tokens_with_dir, host_exec_gateway_url, mcp_os_gateway_url,
-    read_host_exec_port, read_lock_port, remove_env_from,
+    apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
 
 // Test-only override for the bundle build root, so `render_compose_in` resolves
@@ -131,7 +130,7 @@ const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
 /// worker. The plugin manifest's `host_bridge` declaration drives both
 /// `slug` (which plugin to match) and the env-var names; the Desktop
 /// process supplies the runtime values (`port`, `auth_token`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostBridgeRegistration {
     /// Plugin slug — matched against `PluginManifest.slug` during
     /// `apply_plugins_from_verified` to decide which worker receives
@@ -147,13 +146,96 @@ pub struct HostBridgeRegistration {
     pub token_env: String,
 }
 
-/// Snapshot of every host-side bridge currently active. CLI builds and
-/// early Desktop startup pass an empty list — affected plugins log
-/// `BRIDGE_NOT_CONFIGURED` and degrade gracefully.
+// Manual impl so `auth_token` (a bearer secret) never reaches Debug/log output.
+impl std::fmt::Debug for HostBridgeRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostBridgeRegistration")
+            .field("plugin_slug", &self.plugin_slug)
+            .field("port", &self.port)
+            .field("auth_token", &"***REDACTED***")
+            .field("url_env", &self.url_env)
+            .field("token_env", &self.token_env)
+            .finish()
+    }
+}
+
+/// Snapshot of every host-side bridge to advertise to container workers.
+/// Desktop fills it from live bridges; off-Desktop callers (CLI, `update`,
+/// project-add) use [`host_bridges_from_disk`]. Empty = `BRIDGE_NOT_CONFIGURED`.
 #[derive(Clone, Debug, Default)]
 pub struct HostBridgesInfo {
     /// All currently active host-side bridge registrations.
     pub bridges: Vec<HostBridgeRegistration>,
+}
+
+/// Build [`HostBridgesInfo`] for an off-Desktop context from each verified
+/// plugin's persisted bridge token + manifest port (`plugin-state/<slug>/`,
+/// ADR-063); tokenless plugins degrade to `BRIDGE_NOT_CONFIGURED`. See ADR-074.
+pub fn host_bridges_from_disk() -> HostBridgesInfo {
+    match plugin::plugins_base_dir() {
+        Ok(dir) => host_bridges_from_disk_in(&dir),
+        Err(e) => {
+            log::warn!("host_bridges_from_disk: cannot resolve plugins dir: {e}");
+            HostBridgesInfo::default()
+        }
+    }
+}
+
+/// Env-free core of [`host_bridges_from_disk`]: every path is derived from
+/// the explicit `plugins_dir`, so tests exercise both the zero-plugins and
+/// the list-error branch against a tempdir.
+fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
+    // Manifests come from signature-verified plugins only (ADR-051); the
+    // token lives outside the signed tree, so reading it keeps that gate.
+    let plugins = match plugin::list_verified_from_dir(plugins_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("host_bridges_from_disk: cannot list verified plugins: {e}");
+            return HostBridgesInfo::default();
+        }
+    };
+    collect_host_bridges(plugins.iter().map(|p| {
+        let m = p.manifest();
+        (
+            m,
+            plugin::read_persistent_bridge_token_from(plugins_dir, &m.slug),
+        )
+    }))
+}
+
+/// Assemble [`HostBridgesInfo`] from `(manifest, persisted-token)` pairs —
+/// split from the disk walk so it is unit-testable without signed fixtures.
+fn collect_host_bridges<'a>(
+    entries: impl IntoIterator<Item = (&'a plugin::PluginManifest, Option<String>)>,
+) -> HostBridgesInfo {
+    HostBridgesInfo {
+        bridges: entries
+            .into_iter()
+            .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
+            .collect(),
+    }
+}
+
+/// Pure mapping from a manifest (+ persisted token, if any) to a
+/// [`HostBridgeRegistration`]. Eligible only with both reconstructable knobs
+/// (`persistent_token` + fixed `preferred_port`); the token arrives pre-validated.
+fn build_host_bridge_registration(
+    manifest: &plugin::PluginManifest,
+    token: Option<String>,
+) -> Option<HostBridgeRegistration> {
+    let bridge = manifest.host_bridge.as_ref()?;
+    if !bridge.persistent_token {
+        return None;
+    }
+    let port = bridge.preferred_port?;
+    let auth_token = token?;
+    Some(HostBridgeRegistration {
+        plugin_slug: manifest.slug.clone(),
+        port,
+        auth_token,
+        url_env: bridge.url_env.clone(),
+        token_env: bridge.token_env.clone(),
+    })
 }
 
 /// Renders a compose.yml for a given project by substituting template variables.
@@ -309,9 +391,6 @@ pub fn render_compose_in(
 
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config_in(data_dir, &yaml)?;
-
-    // Inject host_exec WORKER URL + token if the worker is running (ADR-054). No-op otherwise.
-    yaml = apply_host_exec_config_in(data_dir, &yaml, project_name)?;
 
     // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
     // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
@@ -746,36 +825,6 @@ fn apply_mcp_os_config_with_path(
         crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
         "os-auth-token",
-    )
-}
-
-/// Injects `WORKER_HOST_EXEC_URL` + bearer-token mount into the hub if the worker is up.
-/// Resolves the host_exec state paths under an explicit data dir.
-fn apply_host_exec_config_in(
-    data_dir: &std::path::Path,
-    yaml: &str,
-    project: &str,
-) -> anyhow::Result<String> {
-    let state_dir = crate::host_exec::host_exec_project_dir(data_dir, project);
-    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
-    let token_mount_path = state_dir.join(consts::HOST_EXEC_AUTH_TOKEN_FILE);
-    apply_host_exec_config_with_paths(yaml, &token_mount_path, &lock_path)
-}
-
-/// Test-only alias preserved so existing fixtures keep working.
-fn apply_host_exec_config_with_paths(
-    yaml: &str,
-    token_mount_path: &std::path::Path,
-    lock_path: &std::path::Path,
-) -> anyhow::Result<String> {
-    apply_worker_config(
-        yaml,
-        "host_exec",
-        token_mount_path,
-        lock_path,
-        crate::host_mcp_process::lock::LockService::HostExec,
-        "WORKER_HOST_EXEC_URL",
-        "host_exec-auth-token",
     )
 }
 
@@ -2633,13 +2682,12 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
-                    // WORKER_OS_URL and WORKER_HOST_EXEC_URL are host-side
-                    // gateways (host.docker.internal) with dynamically assigned
-                    // ports — the workers run on the host, not in the compose
-                    // network. ADR-038's "every WORKER_*_URL points at
-                    // :PORT_WORKER" rule applies only to in-cluster (containerized)
-                    // workers.
-                    if key == "WORKER_OS_URL" || key == "WORKER_HOST_EXEC_URL" {
+                    // WORKER_OS_URL is a host-side gateway (host.docker.internal)
+                    // with a dynamically assigned port — the worker runs on the
+                    // host, not in the compose network. ADR-038's "every
+                    // WORKER_*_URL points at :PORT_WORKER" rule applies only to
+                    // in-cluster (containerized) workers.
+                    if key == "WORKER_OS_URL" {
                         continue;
                     }
                     assert!(
@@ -4366,12 +4414,6 @@ services:
         (token_path, lock_path)
     }
 
-    /// Legacy shim — kept under the old name to minimize churn in tests
-    /// that don't care about the service tag (host_exec by default).
-    fn write_token_and_port(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-        write_lock_and_token_mount(tmp, crate::host_mcp_process::lock::LockService::HostExec)
-    }
-
     fn extra_hosts_for(yaml: &str, service: &str) -> Vec<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         doc["services"][service]["extra_hosts"]
@@ -4407,21 +4449,6 @@ services:
         );
     }
 
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn apply_host_exec_config_adds_host_gateway_to_hub() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (token_path, port_path) = write_token_and_port(tmp.path());
-        let yaml = render_substituted_template();
-        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &port_path).unwrap();
-        let entries = extra_hosts_for(&result, "mcp-hub");
-        assert_eq!(
-            count_canonical_entries(&entries),
-            1,
-            "mcp-hub must have exactly 1 host.docker.internal entry, got: {entries:?}"
-        );
-    }
-
     /// Like the live helper but reaps a real child for a deterministically-dead
     /// PID, so apply_worker_config's liveness gate treats the lock as absent.
     fn write_dead_lock_and_token_mount(
@@ -4449,24 +4476,6 @@ services:
         )
         .unwrap();
         (token_path, lock_path)
-    }
-
-    /// A stale host_exec lock (dead PID, Desktop hard-kill) must not inject a
-    /// dead WORKER_HOST_EXEC_URL.
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn apply_host_exec_config_skipped_when_worker_pid_is_dead() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (token_path, lock_path) = write_dead_lock_and_token_mount(
-            tmp.path(),
-            crate::host_mcp_process::lock::LockService::HostExec,
-        );
-        let yaml = render_substituted_template();
-        let result = apply_host_exec_config_with_paths(&yaml, &token_path, &lock_path).unwrap();
-        assert_eq!(
-            result, yaml,
-            "stale host_exec lock with a dead PID must be treated as absent — no injection"
-        );
     }
 
     /// Same regression guard for the mcp-os entry point (also routes through
@@ -5210,142 +5219,6 @@ services:
         assert!(!has_mcp_os, "MCP_OS_* must NOT be in claude container env");
     }
 
-    // -- host_exec compose wiring (ADR-054) ----------------------------------
-
-    #[test]
-    fn test_host_exec_config_skipped_when_no_token_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = apply_host_exec_config_with_paths(
-            VALID_COMPOSE,
-            &tmp.path().join("no-such-token"),
-            &tmp.path().join("port"),
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE,
-            "yaml unchanged when the host_exec token file is absent (worker not running)"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_skipped_when_token_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        std::fs::write(&token_path, "   \n").unwrap();
-        let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &tmp.path().join("port"))
-                .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE,
-            "yaml unchanged when the token is empty/whitespace"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_skipped_when_port_missing_or_invalid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        std::fs::write(&token_path, "tok-abc").unwrap();
-        // port file absent
-        let r1 = apply_host_exec_config_with_paths(
-            VALID_COMPOSE,
-            &token_path,
-            &tmp.path().join("no-port"),
-        )
-        .unwrap();
-        assert!(
-            !r1.contains("WORKER_HOST_EXEC_URL"),
-            "no port file → no injection"
-        );
-        // port file present but garbage
-        let port_path = tmp.path().join("port");
-        std::fs::write(&port_path, "not-a-port").unwrap();
-        let r2 = apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &port_path).unwrap();
-        assert!(
-            !r2.contains("WORKER_HOST_EXEC_URL"),
-            "invalid port → no injection"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_config_injects_url_and_mounts_token() {
-        use crate::host_mcp_process::lock::{self, LockFile, LockService};
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("auth-token");
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        std::fs::write(&token_path, "host-exec-uuid-token").unwrap();
-        lock::write(
-            &lock_path,
-            &LockFile::new(
-                LockService::HostExec,
-                std::process::id(),
-                49215,
-                "host-exec-uuid-token".into(),
-            ),
-        )
-        .unwrap();
-
-        let result =
-            apply_host_exec_config_with_paths(VALID_COMPOSE, &token_path, &lock_path).unwrap();
-
-        // WORKER_HOST_EXEC_URL injected into mcp-hub with the dynamic port and a
-        // host-gateway hostname (never 0.0.0.0).
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let hub_env = get_hub_env_seq(&doc);
-        let url = find_env_value(&hub_env, "WORKER_HOST_EXEC_URL=")
-            .expect("WORKER_HOST_EXEC_URL must be injected into mcp-hub");
-        assert!(
-            url.ends_with(":49215"),
-            "URL must use the port file's port: {url}"
-        );
-        assert!(
-            !url.contains("0.0.0.0"),
-            "URL must not be the bind address: {url}"
-        );
-
-        // The token is bind-mounted into the hub as a file (never an env var),
-        // at `/secrets/host_exec-auth-token` (underscore — matching the service
-        // id, which is how the hub's `auth-tokens.ts` derives the path).
-        let expected_mount = format!("{}:/secrets/host_exec-auth-token:ro", token_path.display());
-        assert!(
-            result.contains(&expected_mount),
-            "token must be mounted into the hub.\nexpected: {expected_mount}\ngot:\n{result}"
-        );
-        // And NEVER as an env var on either the hub or claude.
-        assert!(
-            !hub_env.iter().any(|e| e.contains("HOST_EXEC_AUTH_TOKEN")),
-            "the host_exec token must not be an env var on the hub"
-        );
-        let claude_env: Vec<String> = doc
-            .get("services")
-            .and_then(|s| s.get("claude"))
-            .and_then(|c| c.get("environment"))
-            .and_then(|e| e.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            !claude_env.iter().any(|e| e.contains("HOST_EXEC")),
-            "no HOST_EXEC* on the claude container — it only sees the hub"
-        );
-    }
-
-    #[test]
-    fn test_host_exec_gateway_url_uses_host_gateway_not_bind_addr() {
-        let url = host_exec_gateway_url(49215);
-        assert!(url.ends_with(":49215"));
-        assert!(
-            !url.contains("0.0.0.0"),
-            "must be a routable host-gateway address, not the bind addr"
-        );
-        assert_eq!(url, format!("http://{}:49215", consts::HOST_GATEWAY_ALIAS));
-        // Same alias scheme as mcp-os — only the port differs.
-        assert_eq!(host_exec_gateway_url(1), mcp_os_gateway_url(1));
-    }
-
     // -- oauth compose wiring (ADR-060) --------------------------------------
 
     /// Compose fixture with a mcp-sharepoint service that has the standard
@@ -5868,22 +5741,6 @@ services:
             .unwrap_or_default()
     }
 
-    #[test]
-    fn test_read_host_exec_port() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("port");
-        std::fs::write(&p, "  49215\n").unwrap();
-        assert_eq!(read_host_exec_port(&p), Some(49215));
-        std::fs::write(&p, "nope").unwrap();
-        assert_eq!(read_host_exec_port(&p), None);
-        assert_eq!(read_host_exec_port(&tmp.path().join("missing")), None);
-        // 0 / out-of-range
-        std::fs::write(&p, "0").unwrap();
-        assert_eq!(read_host_exec_port(&p), Some(0)); // a worker never picks 0; parsing is lenient
-        std::fs::write(&p, "70000").unwrap();
-        assert_eq!(read_host_exec_port(&p), None, "out of u16 range");
-    }
-
     // ── read_lock_port legacy fallback ──────────────────────────────────
 
     #[test]
@@ -5893,14 +5750,11 @@ services:
         let lock_path = tmp.path().join("lock.json");
         lock::write(
             &lock_path,
-            &LockFile::new(LockService::HostExec, 12345, 49215, "tok".into()),
+            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
         )
         .unwrap();
 
-        assert_eq!(
-            read_lock_port(&lock_path, LockService::HostExec),
-            Some(49215)
-        );
+        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), Some(49215));
     }
 
     #[test]
@@ -5909,7 +5763,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json"); // absent
 
-        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
+        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), None);
     }
 
     #[test]
@@ -5925,86 +5779,7 @@ services:
         )
         .unwrap();
 
-        assert_eq!(read_lock_port(&lock_path, LockService::HostExec), None);
-    }
-
-    #[test]
-    fn test_apply_integrations_filter_enabled_services_includes_host_exec_when_on() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.host_exec = true;
-        let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
-                .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
-        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
-            .expect("ENABLED_SERVICES must be injected");
-        assert!(
-            enabled.split(',').any(|s| s == "host_exec"),
-            "ENABLED_SERVICES must contain host_exec when the project has it enabled: {enabled}"
-        );
-    }
-
-    #[test]
-    fn test_apply_integrations_filter_omits_host_exec_when_off() {
-        // host_exec disabled (the default) — must NOT appear in ENABLED_SERVICES,
-        // and there is no compose service to remove (host_exec has none).
-        let integrations = ResolvedIntegrationsConfig::default();
-        let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
-                .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
-        let enabled =
-            find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=").unwrap_or_default();
-        assert!(
-            !enabled.split(',').any(|s| s == "host_exec"),
-            "ENABLED_SERVICES must not contain host_exec when disabled: {enabled}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_render_compose_enables_host_exec_in_hub_when_project_has_it() {
-        let data_dir = tempfile::tempdir().unwrap();
-        // End-to-end: render_compose with host_exec enabled puts it in
-        // ENABLED_SERVICES. (WORKER_HOST_EXEC_URL is NOT injected here because
-        // no worker is running in a test — that's correct: the hub still knows
-        // to expect host_exec; apply_host_exec_config fills the URL once the
-        // Desktop side has spawned the worker and recreated the hub container.)
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig::default(),
-        };
-        let mut integrations = all_enabled_integrations();
-        integrations.host_exec = true;
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &integrations,
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let enabled = find_env_value(&get_hub_env_seq(&doc), "ENABLED_SERVICES=")
-            .expect("ENABLED_SERVICES must be present");
-        assert!(
-            enabled.split(',').any(|s| s == "host_exec"),
-            "render_compose should list host_exec in ENABLED_SERVICES when enabled: {enabled}"
-        );
-        // No host_exec compose service (it's a host process).
-        assert!(
-            doc.get("services")
-                .and_then(|s| s.get("mcp-host_exec"))
-                .is_none()
-                && doc
-                    .get("services")
-                    .and_then(|s| s.get("host_exec"))
-                    .is_none(),
-            "host_exec must not be a compose service"
-        );
+        assert_eq!(read_lock_port(&lock_path, LockService::McpOs), None);
     }
 
     #[test]
@@ -6825,13 +6600,11 @@ services:
     fn test_enabled_hub_service_ids() {
         let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
         assert!(default_ids.is_empty());
-        assert!(!default_ids.contains(&"host_exec".to_string()));
 
         let mut cfg = ResolvedIntegrationsConfig {
             slack: true,
             gitlab: true,
             os_calendar: true,
-            host_exec: true,
             ..ResolvedIntegrationsConfig::default()
         };
         cfg.plugins.insert("example-plugin".to_string(), true);
@@ -6840,7 +6613,6 @@ services:
         assert!(ids.contains(&"slack".to_string()));
         assert!(ids.contains(&"gitlab".to_string()));
         assert!(ids.contains(&"os".to_string()));
-        assert!(ids.contains(&"host_exec".to_string()));
         assert!(ids.contains(&"example-plugin".to_string()));
         assert!(!ids.contains(&"redmine".to_string()));
         assert!(!ids.contains(&"disabled-one".to_string()));
@@ -10738,6 +10510,139 @@ services:
             preferred_port: None,
             persistent_token: false,
         }
+    }
+
+    /// Plain manifest fixture for the `host_bridges_from_disk` unit tests —
+    /// no on-disk plugin dir, no signature, just the fields the
+    /// reconstruction logic reads.
+    fn manifest_for_bridge_tests(
+        slug: &str,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::PluginManifest {
+        plugin::PluginManifest {
+            name: slug.into(),
+            service_id: Some(slug.into()),
+            slug: slug.into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge,
+            instructions: None,
+            oauth: None,
+        }
+    }
+
+    fn manifest_with_bridge_knobs(
+        persistent_token: bool,
+        preferred_port: Option<u16>,
+    ) -> plugin::PluginManifest {
+        let mut host_bridge = fixture_host_bridge_manifest(
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
+        );
+        host_bridge.persistent_token = persistent_token;
+        host_bridge.preferred_port = preferred_port;
+        manifest_for_bridge_tests("example-plugin", Some(host_bridge))
+    }
+
+    #[test]
+    fn build_host_bridge_registration_happy_path_mirrors_manifest() {
+        let m = manifest_with_bridge_knobs(true, Some(60123));
+        let reg = build_host_bridge_registration(&m, Some("tok-123".to_string()))
+            .expect("eligible manifest + token must produce a registration");
+        assert_eq!(reg.plugin_slug, "example-plugin");
+        assert_eq!(reg.port, 60123);
+        assert_eq!(reg.auth_token, "tok-123");
+        assert_eq!(reg.url_env, "EXAMPLE_PLUGIN_BRIDGE_URL");
+        assert_eq!(reg.token_env, "EXAMPLE_PLUGIN_BRIDGE_TOKEN");
+    }
+
+    #[test]
+    fn build_host_bridge_registration_skips_ineligible_cases() {
+        let eligible = manifest_with_bridge_knobs(true, Some(60123));
+
+        // No token on disk (Desktop never minted it) → skipped.
+        assert!(build_host_bridge_registration(&eligible, None).is_none());
+
+        // persistent_token = false → not reconstructable off-process → skipped.
+        let no_persist = manifest_with_bridge_knobs(false, Some(60123));
+        assert!(build_host_bridge_registration(&no_persist, Some("tok".to_string())).is_none());
+
+        // preferred_port = None → no stable port to address → skipped.
+        let no_port = manifest_with_bridge_knobs(true, None);
+        assert!(build_host_bridge_registration(&no_port, Some("tok".to_string())).is_none());
+
+        // No host_bridge block at all → skipped.
+        let no_bridge = manifest_for_bridge_tests("example-plugin", None);
+        assert!(build_host_bridge_registration(&no_bridge, Some("tok".to_string())).is_none());
+    }
+
+    #[test]
+    fn collect_host_bridges_keeps_all_eligible_with_token() {
+        let first = manifest_with_bridge_knobs(true, Some(60123));
+        let mut second = manifest_with_bridge_knobs(true, Some(60200));
+        second.slug = "second-plugin".into();
+        let ineligible = manifest_with_bridge_knobs(false, Some(60300));
+        let no_token = manifest_with_bridge_knobs(true, Some(60400));
+
+        // Two eligible plugins with an ineligible one interleaved — all
+        // eligible registrations must survive, in input order.
+        let info = collect_host_bridges([
+            (&first, Some("tok-a".to_string())),
+            (&ineligible, Some("tok-x".to_string())),
+            (&second, Some("tok-b".to_string())),
+            (&no_token, None),
+        ]);
+        assert_eq!(info.bridges.len(), 2);
+        assert_eq!(info.bridges[0].plugin_slug, "example-plugin");
+        assert_eq!(info.bridges[0].port, 60123);
+        assert_eq!(info.bridges[1].plugin_slug, "second-plugin");
+        assert_eq!(info.bridges[1].port, 60200);
+    }
+
+    #[test]
+    fn host_bridges_from_disk_in_returns_empty_when_plugins_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = host_bridges_from_disk_in(&tmp.path().join("plugins"));
+        assert!(info.bridges.is_empty());
+    }
+
+    #[test]
+    fn host_bridges_from_disk_in_degrades_to_empty_on_list_error() {
+        // A file at the plugins-dir path makes read_dir fail — the
+        // orchestrator must warn and degrade to an empty list, not propagate.
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("plugins");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let info = host_bridges_from_disk_in(&not_a_dir);
+        assert!(info.bridges.is_empty());
+    }
+
+    #[test]
+    fn host_bridge_registration_debug_redacts_auth_token() {
+        let m = manifest_with_bridge_knobs(true, Some(60123));
+        let token = "11111111-2222-3333-4444-555555555555";
+        let reg = build_host_bridge_registration(&m, Some(token.to_string()))
+            .expect("eligible manifest + token must produce a registration");
+        let dbg = format!("{reg:?}");
+        assert!(
+            !dbg.contains(token),
+            "auth token must not appear in Debug output: {dbg}"
+        );
+        assert!(dbg.contains("REDACTED"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(dbg.contains("example-plugin"));
+        assert!(dbg.contains("60123"));
     }
 
     /// `apply_plugins` re-runs `validate_manifest` so a manifest whose

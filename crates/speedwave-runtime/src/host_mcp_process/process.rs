@@ -1,7 +1,7 @@
 //! Generic [`HostMcpProcess<S>`] — the SSOT spawn/stop/respawn/cleanup
-//! lifecycle three host MCP worker managers (mcp-os, host_exec, oauth)
-//! share. Each manager keeps only its worker-specific data and protocol
-//! in a [`WorkerSpec`] impl; the generic struct handles everything else.
+//! lifecycle the host MCP worker managers (mcp-os, oauth) share. Each
+//! manager keeps only its worker-specific data and protocol in a
+//! [`WorkerSpec`] impl; the generic struct handles everything else.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -38,26 +38,18 @@ pub trait WorkerSpec: Send + 'static {
     /// the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
-    /// Worker-specific PATH substitution. `None` → inherit parent PATH
-    /// (mcp-os, oauth); `Some(path)` → recovered login-shell PATH
-    /// (host_exec).
-    fn path_override(&self) -> Option<&str> {
-        None
-    }
-
     /// Hook invoked after `state_dir` is created and stale-PID cleanup
     /// has run but BEFORE the Node child is spawned. Worker writes
     /// anything it needs in the worker's environment view of the disk
-    /// here (host_exec config snapshot, oauth bearer map + per-service
-    /// bearer files).
+    /// here (oauth bearer map + per-service bearer files).
     fn pre_spawn(&self, _ctx: &SpawnContext) -> anyhow::Result<()> {
         Ok(())
     }
 
     /// Liveness probe variant. mcp_os does pid+TCP via
-    /// `is_mcp_os_alive_in`; host_exec is single-attempt TCP; oauth is
-    /// 3-attempt TCP with backoff (a flake on the probe cascades into
-    /// a container recreate so the retry matters — ADR-060).
+    /// `is_mcp_os_alive_in`; oauth is 3-attempt TCP with backoff (a flake
+    /// on the probe cascades into a container recreate so the retry
+    /// matters — ADR-060).
     fn probe(&self) -> LivenessProbe;
 
     /// Extra files removed alongside `lock.json` on
@@ -72,7 +64,7 @@ pub trait WorkerSpec: Send + 'static {
 /// Liveness probe variants.
 #[derive(Clone, Copy, Debug)]
 pub enum LivenessProbe {
-    /// Single TCP connect to `127.0.0.1:port`. host_exec default.
+    /// Single TCP connect to `127.0.0.1:port`.
     TcpSingle,
     /// `attempts` TCP connects with `backoff` between them. oauth
     /// uses {3, 100 ms} to absorb transient stalls.
@@ -119,8 +111,8 @@ pub struct SpawnContext<'a> {
     pub data_dir: &'a Path,
 }
 
-/// Generic host MCP worker process manager. Three real managers
-/// (mcp_os, host_exec, oauth) are type aliases over this struct with a
+/// Generic host MCP worker process manager. The real managers
+/// (mcp_os, oauth) are type aliases over this struct with a
 /// concrete `WorkerSpec`.
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
@@ -147,7 +139,7 @@ pub struct HostMcpProcess<S: WorkerSpec> {
 impl<S: WorkerSpec> HostMcpProcess<S> {
     /// Spawn the worker. `state_dir` is whatever the per-manager wrapper
     /// computes (e.g. `<data_dir>` for mcp-os singleton,
-    /// `<data_dir>/host-exec/<project>` for host_exec). Blocks up to
+    /// `<data_dir>/oauth/<project>` for oauth). Blocks up to
     /// 10 s waiting for the `{"port":N}` handshake on stdout.
     ///
     /// Sequence:
@@ -195,7 +187,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
-        apply_child_env(&mut cmd, spec.path_override(), &CurrentProcessEnv);
+        apply_child_env(&mut cmd, &CurrentProcessEnv);
         // SSOT: macOS 127.0.0.1, Windows WSL adapter IP — must match host_gateway_ip
         // so container reaches the worker via extra_hosts: host.docker.internal:<gateway>.
         cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
@@ -439,12 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_spec_default_path_override_is_none() {
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
-        assert!(spec.path_override().is_none());
-    }
-
-    #[test]
     fn worker_spec_default_extra_cleanup_files_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
@@ -456,7 +442,7 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         assert!(spec.extra_cleanup_files(&ctx).is_empty());
     }
 
@@ -472,7 +458,7 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         assert!(spec.pre_spawn(&ctx).is_ok());
     }
 
@@ -482,7 +468,7 @@ mod tests {
         // Without a real node binary we can't test the full sequence
         // end-to-end, but we can prove the order pre_spawn → apply_env
         // by invoking them directly the way `spawn_in` would.
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
@@ -526,7 +512,7 @@ mod tests {
     fn spec_apply_env_runs_on_top_of_base_policy() {
         let env = FakeEnv::empty().with("PATH", "/usr/bin").with("HOME", "/h");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
@@ -537,7 +523,7 @@ mod tests {
             auth_token: "abc",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         spec.apply_env(&mut cmd, &ctx);
 
         let envs: std::collections::HashMap<_, _> = cmd

@@ -60,7 +60,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-051](ADR-051-plugin-signature-runtime-verification.md)            | Plugin Signature as a Runtime Invariant                                                  | Accepted                      |
 | [ADR-052](ADR-052-anthropic-oauth-login-flow.md)                       | Claude Code Login Surface + Clipboard Bridge                                             | Accepted                      |
 | [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server               | Accepted                      |
-| [ADR-054](ADR-054-host-exec-worker.md)                                 | `host_exec` — Per-Project Host-Side MCP Worker for the Project Toolchain                 | Accepted                      |
+| [ADR-054](ADR-054-host-exec-worker.md)                                 | `host_exec` — Per-Project Host-Side MCP Worker for the Project Toolchain                 | Reverted                      |
 | [ADR-055](ADR-055-built-in-office-document-worker.md)                  | Built-in `office` MCP Worker — Word/Excel/PowerPoint/PDF Read · Write · Convert · Charts | Accepted                      |
 | [ADR-056](ADR-056-host-side-audio-transcription.md)                    | Host-Side Audio Capture and Local Meeting Transcription                                  | Proposed                      |
 | [ADR-057](ADR-057-lazy-build-of-enabled-worker-images.md)              | Lazy Build of Enabled Worker Container Images                                            | Accepted                      |
@@ -80,6 +80,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                          | Accepted                      |
 | [ADR-072](ADR-072-per-image-build-input-hash-tags.md)                  | Per-image build-input hash tags + BuildKit cache retention — rebuild only changed images | Accepted                      |
 | [ADR-073](ADR-073-embedded-per-project-litellm-proxy.md)               | Embedded per-project LiteLLM proxy — multi-provider routing + usage accounting           | Accepted                      |
+| [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)                   | Reconstruct host-bridge env from disk for off-Desktop compose renders                    | Accepted                      |
 
 ## Creating a New ADR
 

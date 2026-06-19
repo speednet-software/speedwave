@@ -379,29 +379,6 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
     resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
-/// Resolves the `host_exec` worker `index.js` (bundle → CARGO source → marker).
-/// Mirrors [`resolve_mcp_os_script`]; ADR-054.
-pub fn resolve_host_exec_script() -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
-        dev,
-    )
-}
-
-#[cfg(test)]
-fn resolve_host_exec_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/host_exec/dist/index.js");
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        home,
-        dev,
-    )
-}
-
 /// Resolves the `oauth` worker `index.js` (bundle → CARGO source → marker).
 /// Mirrors [`resolve_mcp_os_script`]; ADR-060.
 pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
@@ -436,22 +413,8 @@ fn resolve_mcp_os_script_inner(
     )
 }
 
-/// Test-only alias — implementation is `resolve_worker_script_inner`.
-#[cfg(test)]
-fn resolve_host_exec_script_inner(
-    home: Option<PathBuf>,
-    dev_path: Option<PathBuf>,
-) -> Option<std::path::PathBuf> {
-    resolve_worker_script_inner(
-        "host_exec",
-        &["host_exec", "host_exec", "dist", "index.js"],
-        home,
-        dev_path,
-    )
-}
-
 /// Resolve a host-side worker script via the three-tier fallback shared by all
-/// bundled workers (`mcp-os`, `host_exec`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
+/// bundled workers (`mcp-os`, `oauth`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
 /// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
 /// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
 fn resolve_worker_script_inner(
@@ -577,16 +540,14 @@ fn write_resources_marker_to(
 
 /// Containerd overlayfs snapshotter corruption that survived a prune attempt.
 ///
-/// Returned by [`build_images_for_bundle`] when:
-/// 1. First build fails with a snapshotter error (e.g. "failed to rename: file exists")
-/// 2. `system_prune` + retry also fails
-///
-/// The `Display` impl includes platform-specific restart commands so callers
-/// can interpolate `{e}` directly without adding their own diagnostic hints.
+/// Produced by [`with_build_recovery`] (bundle and plugin builds) when a
+/// snapshotter error persists after `system_prune` + `prune_buildkit_cache` and
+/// a retry. Bundle-build callers (setup wizard, reconcile) downcast it to
+/// restart the container engine; other callers surface its `Display` hint.
 #[derive(Debug)]
 pub struct SnapshotterRecoveryFailed {
     /// The underlying build error after prune-and-retry also failed.
-    pub inner: anyhow::Error,
+    inner: anyhow::Error,
 }
 
 impl std::fmt::Display for SnapshotterRecoveryFailed {
@@ -607,21 +568,27 @@ impl std::error::Error for SnapshotterRecoveryFailed {
     }
 }
 
-fn platform_restart_hint() -> &'static str {
+fn platform_restart_hint() -> String {
     #[cfg(target_os = "macos")]
     {
-        "limactl shell speedwave -- sudo systemctl restart containerd && \
-         limactl shell speedwave -- sudo systemctl restart buildkit; \
-         limactl shell speedwave -- sudo buildctl debug workers"
+        let vm = crate::consts::lima_vm_name();
+        format!(
+            "limactl shell {vm} -- sudo systemctl restart containerd && \
+             limactl shell {vm} -- sudo systemctl restart buildkit; \
+             limactl shell {vm} -- sudo buildctl debug workers"
+        )
     }
     #[cfg(target_os = "windows")]
     {
-        "wsl.exe -d Speedwave -- systemctl restart containerd && \
-         wsl.exe -d Speedwave -- systemctl restart buildkit"
+        let distro = crate::consts::wsl_distro_name();
+        format!(
+            "wsl.exe -d {distro} -- systemctl restart containerd && \
+             wsl.exe -d {distro} -- systemctl restart buildkit"
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        "restart containerd and buildkit manually"
+        "restart containerd and buildkit manually".to_string()
     }
 }
 
@@ -818,51 +785,8 @@ pub fn build_images_for_bundle_in(
     let vm_root = runtime.prepare_build_context(root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_images(runtime, images, &vm_root, manifest).or_else(|first_err| {
-        if is_disk_full_error(&first_err) {
-            log::warn!(
-                "build failed with disk-full error, pruning unused images and retrying: {first_err}"
-            );
-            if let Err(prune_err) = runtime.prune_unused_images() {
-                log::warn!("prune_unused_images failed: {prune_err}");
-            }
-            // `nerdctl system prune` does not clear BuildKit cache-mounts; under
-            // disk pressure the cache must go too (ADR-072 — sole cache-prune site).
-            if let Err(prune_err) = runtime.prune_buildkit_cache() {
-                log::warn!("prune_buildkit_cache failed: {prune_err}");
-            }
-            try_build_images(runtime, images, &vm_root, manifest)
-        } else if is_snapshotter_error(&first_err) {
-            log::warn!(
-                "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
-            );
-            if let Err(prune_err) = runtime.system_prune() {
-                log::warn!("system prune failed: {prune_err}");
-            }
-            try_build_images(runtime, images, &vm_root, manifest).map_err(|second_err| {
-                anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
-            })
-        } else if is_transient_build_error(&first_err) {
-            // Transient — usually the boot-time DNS-fallback race (see
-            // `is_transient_build_error`). A few seconds' wait lets the resolver
-            // settle; two backed-off attempts cover a slow fallback.
-            let mut last_err = first_err;
-            for attempt in 1..=TRANSIENT_BUILD_RETRIES {
-                let delay = TRANSIENT_BUILD_RETRY_BASE_DELAY * attempt;
-                log::warn!(
-                    "build failed with transient error, retrying in {}s (attempt {attempt}/{TRANSIENT_BUILD_RETRIES}): {last_err}",
-                    delay.as_secs()
-                );
-                std::thread::sleep(delay);
-                match try_build_images(runtime, images, &vm_root, manifest) {
-                    Ok(n) => return Ok(n),
-                    Err(e) => last_err = e,
-                }
-            }
-            Err(last_err)
-        } else {
-            Err(first_err)
-        }
+    let result = with_build_recovery(runtime, || {
+        try_build_images(runtime, images, &vm_root, manifest)
     });
 
     // Enrich final error with actionable guidance
@@ -904,9 +828,70 @@ pub fn build_images_for_bundle_in(
     result
 }
 
-/// Builds `images` using a bounded worker pool. Extracted so the retry logic in
-/// [`build_images_for_bundle`] can re-call it. Worker count bounded by CPU + image
-/// count (ADR-032). Errors collected; propagate by priority: snapshotter > transient > first.
+/// Runs `attempt`; on a recoverable failure (disk-full, snapshotter corruption,
+/// transient I/O/DNS) prunes the matching cache and retries. Snapshotter
+/// corruption surviving the retry becomes [`SnapshotterRecoveryFailed`] — bundle
+/// callers downcast it to restart the engine; plugin builds surface its hint.
+pub(crate) fn with_build_recovery<T>(
+    runtime: &crate::runtime::LockedRuntime,
+    mut attempt: impl FnMut() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    attempt().or_else(|first_err| {
+        if is_disk_full_error(&first_err) {
+            log::warn!(
+                "build failed with disk-full error, pruning unused images and retrying: {first_err}"
+            );
+            if let Err(prune_err) = runtime.prune_unused_images() {
+                log::warn!("prune_unused_images failed: {prune_err}");
+            }
+            // `nerdctl system prune` does not clear BuildKit cache-mounts; under
+            // disk pressure the cache must go too (ADR-072).
+            if let Err(prune_err) = runtime.prune_buildkit_cache() {
+                log::warn!("prune_buildkit_cache failed: {prune_err}");
+            }
+            attempt()
+        } else if is_snapshotter_error(&first_err) {
+            log::warn!(
+                "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
+            );
+            if let Err(prune_err) = runtime.system_prune() {
+                log::warn!("system prune failed: {prune_err}");
+            }
+            // A poisoned BuildKit cache key can pin a vanished snapshot
+            // ("failed to stat parent"); system prune leaves cache-mounts.
+            if let Err(prune_err) = runtime.prune_buildkit_cache() {
+                log::warn!("prune_buildkit_cache failed: {prune_err}");
+            }
+            attempt().map_err(|second_err| {
+                anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
+            })
+        } else if is_transient_build_error(&first_err) {
+            // Transient — usually the boot-time DNS-fallback race (see
+            // `is_transient_build_error`). A few seconds' wait lets the resolver
+            // settle; two backed-off attempts cover a slow fallback.
+            let mut last_err = first_err;
+            for attempt_no in 1..=TRANSIENT_BUILD_RETRIES {
+                let delay = TRANSIENT_BUILD_RETRY_BASE_DELAY * attempt_no;
+                log::warn!(
+                    "build failed with transient error, retrying in {}s (attempt {attempt_no}/{TRANSIENT_BUILD_RETRIES}): {last_err}",
+                    delay.as_secs()
+                );
+                std::thread::sleep(delay);
+                match attempt() {
+                    Ok(n) => return Ok(n),
+                    Err(e) => last_err = e,
+                }
+            }
+            Err(last_err)
+        } else {
+            Err(first_err)
+        }
+    })
+}
+
+/// Builds `images` using a bounded worker pool, re-invoked per attempt by
+/// [`with_build_recovery`]. Worker count bounded by CPU + image count (ADR-032).
+/// Errors collected; propagate by priority: snapshotter > transient > first.
 fn try_build_images(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
@@ -1096,12 +1081,14 @@ fn is_disk_full_error(err: &anyhow::Error) -> bool {
 /// - `"apply layer error"` — wrapper from containerd's differ
 /// - `"failed to prepare extraction snapshot"` — from snapshotter.Prepare()
 /// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
+/// - `"failed to stat parent"` + `"snapshots/"` — overlayfs parent snapshot dir gone
 fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
         if msg.contains("apply layer error")
             || msg.contains("failed to prepare extraction snapshot")
             || (msg.contains("failed to rename") && msg.contains("file exists"))
+            || (msg.contains("failed to stat parent") && msg.contains("snapshots/"))
         {
             return true;
         }
@@ -1879,102 +1866,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_host_exec_script_dev_mode() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
-        // The worker dist may or may not exist depending on whether host_exec
-        // was built; just verify it doesn't panic.
-        let result = resolve_host_exec_script_with_home(None);
-        let _ = result;
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_from_env() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let script_path = tmp
-            .path()
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        std::fs::write(&script_path, "// stub").unwrap();
-        std::env::set_var(
-            crate::consts::BUNDLE_RESOURCES_ENV,
-            tmp.path().to_string_lossy().as_ref(),
-        );
-        let result = resolve_host_exec_script_inner(None, None);
-        assert_eq!(result, Some(script_path));
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_from_marker() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        let fake_resources = tmp.path().join("fake-resources");
-
-        let script_path = fake_resources
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        std::fs::write(&script_path, "// stub").unwrap();
-
-        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
-
-        // Pass None as dev_path to test marker fallback in isolation
-        let result = resolve_host_exec_script_inner(Some(fake_home), None);
-        assert_eq!(result, Some(script_path));
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_dev_path_beats_marker() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        let fake_resources = tmp.path().join("fake-resources");
-        let fake_dev = tmp.path().join("dev-repo");
-
-        let marker_script = fake_resources
-            .join("host_exec")
-            .join("host_exec")
-            .join("dist")
-            .join("index.js");
-        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
-        std::fs::write(&marker_script, "// marker").unwrap();
-        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
-
-        let dev_script = fake_dev.join("mcp-servers/host_exec/dist/index.js");
-        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
-        std::fs::write(&dev_script, "// dev").unwrap();
-
-        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_script.clone()));
-        assert_eq!(result, Some(dev_script), "dev path should win over marker");
-    }
-
-    #[test]
-    fn test_resolve_host_exec_script_none_when_nothing_present() {
-        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
-        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home"); // no marker file
-        let dev_path = tmp.path().join("dev/mcp-servers/host_exec/dist/index.js"); // does not exist
-
-        let result = resolve_host_exec_script_inner(Some(fake_home), Some(dev_path));
-        assert_eq!(result, None);
-    }
-
-    #[test]
     fn test_images_count() {
         // Catalogue size, not build behaviour — the build set is filtered per
         // project by `enabled_images`. Bump this when adding a built-in worker.
@@ -2128,6 +2019,37 @@ mod tests {
     }
 
     #[test]
+    fn test_is_snapshotter_error_matches_failed_stat_parent() {
+        let err = anyhow::anyhow!(
+            "failed to solve: failed to compute cache key: failed to stat parent: \
+             stat /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/721/fs: \
+             no such file or directory"
+        );
+        assert!(is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_rejects_missing_copy_source() {
+        // A missing build-context file is a real user error — fail fast, never
+        // prune-and-retry on it.
+        let err = anyhow::anyhow!(
+            "failed to compute cache key: failed to calculate checksum of ref: \
+             \"/app/missing.txt\": not found"
+        );
+        assert!(!is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_rejects_stat_parent_outside_snapshotter() {
+        // "failed to stat parent" without a snapshots/ path is not our corruption
+        // signature (e.g. user RUN output) — must not prune-and-retry.
+        let err = anyhow::anyhow!(
+            "failed to stat parent: stat /home/user/app: no such file or directory"
+        );
+        assert!(!is_snapshotter_error(&err));
+    }
+
+    #[test]
     fn test_build_all_images_calls_prepare_build_context() {
         use crate::runtime::mock_runtime::MockRuntimeBuilder;
         use std::sync::atomic::Ordering;
@@ -2253,6 +2175,17 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|p| **p == "unused")
+            .count()
+    }
+
+    /// Number of `prune_buildkit_cache` calls recorded on the handles.
+    fn count_buildkit_prunes(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles
+            .prune_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| **p == "buildkit")
             .count()
     }
 
@@ -2398,6 +2331,11 @@ mod tests {
             1,
             "system_prune should be called once"
         );
+        assert_eq!(
+            count_buildkit_prunes(&handles),
+            1,
+            "snapshotter recovery must also prune the BuildKit cache"
+        );
 
         let build_count = count_builds(&handles);
         assert_eq!(
@@ -2447,7 +2385,7 @@ mod tests {
         assert_eq!(
             count_buildkit_prunes(&handles),
             1,
-            "disk-full recovery is the sole BuildKit cache-prune site (ADR-072) — \
+            "disk-full recovery prunes the BuildKit cache (ADR-072) — \
              `nerdctl system prune` does not clear cache-mounts"
         );
         assert_eq!(
@@ -2745,6 +2683,141 @@ mod tests {
             err.to_string().contains("network timeout"),
             "original error should propagate unchanged"
         );
+    }
+
+    #[test]
+    fn with_build_recovery_returns_ok_without_pruning_on_success() {
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result = with_build_recovery(&rt, || {
+            calls += 1;
+            Ok(42u32)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 1, "no retry on first-try success");
+        assert_eq!(count_prunes(&handles), 0);
+        assert_eq!(count_buildkit_prunes(&handles), 0);
+    }
+
+    #[test]
+    fn with_build_recovery_snapshotter_prunes_system_and_buildkit_then_retries() {
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result = with_build_recovery(&rt, || {
+            calls += 1;
+            if calls == 1 {
+                anyhow::bail!(
+                    "failed to compute cache key: failed to stat parent: \
+                     stat /var/lib/containerd/...snapshots/721/fs: no such file or directory"
+                );
+            }
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 2, "one retry after prune");
+        assert_eq!(count_prunes(&handles), 1, "system_prune once");
+        assert_eq!(
+            count_buildkit_prunes(&handles),
+            1,
+            "snapshotter recovery must also clear the BuildKit cache key"
+        );
+    }
+
+    #[test]
+    fn with_build_recovery_snapshotter_unrecovered_wraps_as_recovery_failed() {
+        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let result: anyhow::Result<()> = with_build_recovery(&rt, || {
+            anyhow::bail!(
+                "failed to stat parent: stat /.../snapshots/9/fs: no such file or directory"
+            )
+        });
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<SnapshotterRecoveryFailed>().is_some(),
+            "snapshotter error surviving retry must become SnapshotterRecoveryFailed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn with_build_recovery_unrelated_error_is_not_retried() {
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result: anyhow::Result<()> = with_build_recovery(&rt, || {
+            calls += 1;
+            anyhow::bail!("permission denied");
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "non-recoverable error must fail fast");
+        assert_eq!(count_prunes(&handles), 0);
+        assert_eq!(count_buildkit_prunes(&handles), 0);
+    }
+
+    #[test]
+    fn with_build_recovery_disk_full_prunes_unused_and_buildkit_then_retries() {
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result = with_build_recovery(&rt, || {
+            calls += 1;
+            if calls == 1 {
+                anyhow::bail!(
+                    "failed to extract layer: write /var/lib/containerd: no space left on device"
+                );
+            }
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 2, "one retry after prune");
+        assert_eq!(count_unused_prunes(&handles), 1, "prune_unused_images once");
+        assert_eq!(
+            count_buildkit_prunes(&handles),
+            1,
+            "BuildKit cache pruned under disk pressure"
+        );
+        assert_eq!(
+            count_prunes(&handles),
+            0,
+            "system_prune is the snapshotter path, not disk-full"
+        );
+    }
+
+    #[test]
+    fn with_build_recovery_transient_retries_until_success() {
+        // cfg(test) backoff is 1ms, so the retry loop is effectively instant.
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result = with_build_recovery(&rt, || {
+            calls += 1;
+            if calls < 3 {
+                anyhow::bail!("dial tcp: i/o timeout");
+            }
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 3, "initial + 2 transient retries");
+        assert_eq!(
+            count_prunes(&handles)
+                + count_unused_prunes(&handles)
+                + count_buildkit_prunes(&handles),
+            0,
+            "transient retries must not prune"
+        );
+    }
+
+    #[test]
+    fn with_build_recovery_transient_exhausted_returns_last_error() {
+        let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut calls = 0u32;
+        let result: anyhow::Result<()> = with_build_recovery(&rt, || {
+            calls += 1;
+            anyhow::bail!("connection reset by peer");
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            1 + TRANSIENT_BUILD_RETRIES,
+            "initial attempt + all transient retries"
+        );
+        assert!(result.unwrap_err().to_string().contains("connection reset"));
     }
 
     // ── images_exist tests ─────────────────────────────────────────────
@@ -3125,17 +3198,6 @@ mod tests {
             .collect()
     }
 
-    /// Number of `prune_buildkit_cache` calls recorded on the handles.
-    fn count_buildkit_prunes(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
-        handles
-            .prune_calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| **p == "buildkit")
-            .count()
-    }
-
     #[test]
     fn test_prune_old_bundle_images_generates_correct_tags() {
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
@@ -3210,8 +3272,8 @@ mod tests {
     #[test]
     fn test_prune_old_bundle_images_keeps_buildkit_cache() {
         // ADR-072: routine pruning must NOT clear the BuildKit cache — apt/npm
-        // layers are reused across updates. Cache is pruned only under disk
-        // pressure (see test_retry_on_disk_full_error).
+        // layers are reused across updates. Cache is pruned only on disk
+        // pressure or snapshotter recovery (see with_build_recovery).
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "abc123").unwrap();
 

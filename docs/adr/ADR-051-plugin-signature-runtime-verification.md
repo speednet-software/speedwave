@@ -53,7 +53,7 @@ The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPl
 
 ### Mutable state outside the signed tree
 
-Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under `~/.speedwave/plugins/<slug>/`. The only state today is `image_pending` (signal that the next launch should retry an image build). Reads tolerate the legacy in-tree marker during a migration window so plugins installed before this ADR keep building; new writes always go to `plugin-state/`.
+Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under `~/.speedwave/plugins/<slug>/`. State today: `image_pending` (signal that the next launch should retry an image build) and the host-bridge `bridge-token` (persisted auth token that off-Desktop compose renders read back — [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)). Reads tolerate the legacy in-tree marker during a migration window so plugins installed before this ADR keep building; new writes always go to `plugin-state/`.
 
 ### Atomic install
 

@@ -855,7 +855,7 @@ fn main() -> anyhow::Result<()> {
     // It logs its own summary; do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Host workers (oauth, host_exec) are owned by the Desktop app. The CLI must
+    // Host workers (oauth, mcp-os) are owned by the Desktop app. The CLI must
     // NOT spawn its own — two supervisors for one worker kill each other's
     // process via `kill_stale_node`, cycling every ~20s and crashing the
     // interactive Claude exec (exit 137). render_compose reads the Desktop-held
@@ -867,13 +867,18 @@ fn main() -> anyhow::Result<()> {
     // VM lingers, the oauth worker (a Desktop child) is dead and nothing
     // respawns it, so SharePoint OAuth refresh silently stops for this session.
     // A clean Desktop quit stops the VM, so the gate then correctly refuses.
+    // Reconstruct host-bridge registrations from disk (ADR-074) so a
+    // terminal-launched worker reaches the Desktop-hosted bridge; without a
+    // minted token the worker degrades to BRIDGE_NOT_CONFIGURED.
+    let host_bridges = compose::host_bridges_from_disk();
+
     let compose_yml = compose::render_compose(
         &project_name,
         &project_dir.to_string_lossy(),
         &resolved,
         &integrations,
         Some(&runtime),
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -1212,9 +1217,7 @@ mod tests {
         // type-prefix catches any spawn variant (spawn / spawn_in).
         let forbidden = [
             (concat!("maybe_", "spawn_oauth_worker"), "oauth"),
-            (concat!("maybe_", "spawn_host_exec_worker"), "host_exec"),
             (concat!("OauthProcess::", "spawn"), "oauth"),
-            (concat!("HostExecProcess::", "spawn"), "host_exec"),
             (concat!("McpOsProcess::", "spawn"), "mcp-os"),
         ];
         for (needle, worker) in forbidden {
@@ -2099,6 +2102,39 @@ mod tests {
             .map(|i| i + 1)
             .unwrap_or(after_start.len());
         &after_start[..fn_end]
+    }
+
+    #[test]
+    fn host_bridges_are_reconstructed_and_passed_to_render_compose() {
+        // Structural guard (ADR-074): the CLI must feed disk-reconstructed
+        // host bridges into render_compose, not an empty list.
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn main(");
+        let build_pos = fn_body.find("compose::host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("compose::render_compose(")
+            .expect("main() must call render_compose");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "main() must build host_bridges_from_disk() before render_compose"
+        );
+        // Split needle so this assertion does not match its own source text.
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "main() must not pass an empty HostBridgesInfo to render_compose"
+        );
+        // The default-needle check only scans before the call; also assert the
+        // call site actually receives &host_bridges as its argument (guards a
+        // refactor that passes a default *inside* the render_compose(...) args).
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
     }
 
     #[test]

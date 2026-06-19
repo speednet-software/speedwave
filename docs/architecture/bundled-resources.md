@@ -168,7 +168,7 @@ Checklist for contributors:
 
 1. Add the file or directory to `containers/claude-resources/`:
    - **Core resource** — place it at `containers/claude-resources/<type>/<name>/`. It will be linked into `~/.claude/<type>/<name>` unconditionally.
-   - **Per-integration resource** — place it at `containers/claude-resources/<type>/integrations/<config_key>/` (see [Integrations Guide](../guides/integrations.md#per-integration-claude-resources)). `<config_key>` must match an entry in `TOGGLEABLE_MCP_SERVICES` or `TOGGLEABLE_OS_SERVICES`, or be `host_exec`. An MCP-service resource links when its key is in `ENABLED_SERVICES`; an OS sub-service (`calendar`, `mail`, `notes`, `reminders`) links when `os` is enabled and the sub-service is not in `DISABLED_OS_SERVICES`.
+   - **Per-integration resource** — place it at `containers/claude-resources/<type>/integrations/<config_key>/` (see [Integrations Guide](../guides/integrations.md#per-integration-claude-resources)). `<config_key>` must match an entry in `TOGGLEABLE_MCP_SERVICES` or `TOGGLEABLE_OS_SERVICES`. An MCP-service resource links when its key is in `ENABLED_SERVICES`; an OS sub-service (`calendar`, `mail`, `notes`, `reminders`) links when `os` is enabled and the sub-service is not in `DISABLED_OS_SERVICES`.
    - **New top-level file** (e.g. a sibling of `statusline.sh`) — add the symlink line in `containers/entrypoint.sh` using `ln -sf`.
 2. Add BATS tests in `_tests/entrypoint/` covering the new resource:
    - For per-entry symlinks: assert `[ -d ~/.claude/<type> ]`, `[ ! -L ~/.claude/<type> ]`, `[ -L ~/.claude/<type>/<entry> ]`, and verify the symlink target with `readlink`.

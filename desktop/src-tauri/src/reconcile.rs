@@ -4,7 +4,6 @@ use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
-use speedwave_runtime::host_exec_process::HostExecProcess;
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
@@ -68,9 +67,6 @@ pub(crate) fn current_bridges_info() -> HostBridgesInfo {
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
-/// Per-project `host_exec` workers, keyed by project name (ADR-054).
-pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, HostExecProcess>>>;
-
 /// Per-project `oauth` workers, keyed by project name (ADR-060).
 pub(crate) type SharedOauth = Arc<Mutex<HashMap<String, OauthProcess>>>;
 
@@ -83,8 +79,6 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) plugin_bridges: SharedPluginBridges,
     pub(crate) mcp_os: SharedMcpOs,
-    /// Per-project `host_exec` workers — stopped + files cleaned on exit.
-    pub(crate) host_exec: SharedHostExec,
     /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
     pub(crate) oauth: SharedOauth,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
@@ -114,11 +108,7 @@ fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpe
     }
 }
 
-pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
-    teardown_worker_for_project(host_exec, project, "host_exec");
-}
-
-/// ADR-060 oauth worker variant of [`teardown_host_exec_for_project`].
+/// ADR-060 oauth worker variant of [`teardown_worker_for_project`].
 pub(crate) fn teardown_oauth_for_project(oauth: &SharedOauth, project: &str) {
     teardown_worker_for_project(oauth, project, "oauth");
 }
@@ -984,7 +974,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     }
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-    crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     // A graceful exit must not race an in-flight background teardown —
     // join them all before the container cleanup below.
@@ -993,7 +982,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
     let mcp_os = ctx.mcp_os.clone();
-    let host_exec = ctx.host_exec.clone();
     let oauth = ctx.oauth.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
@@ -1041,17 +1029,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
-        }
-        match host_exec.lock() {
-            Ok(mut map) => {
-                for (project, mut proc) in map.drain() {
-                    if let Err(e) = proc.stop() {
-                        log::warn!("host_exec[{project}] stop error: {e}");
-                    }
-                    proc.cleanup_files();
-                }
-            }
-            Err(e) => log::warn!("host_exec cleanup skipped: map mutex poisoned: {e}"),
         }
         match oauth.lock() {
             Ok(mut map) => {
@@ -1258,10 +1235,10 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn teardown_host_exec_for_project_is_noop_when_absent() {
-        let map: SharedHostExec = SharedHostExec::default();
+    fn teardown_oauth_for_project_is_noop_when_absent() {
+        let map: SharedOauth = SharedOauth::default();
         // No worker registered for "ghost" — must not panic.
-        teardown_host_exec_for_project(&map, "ghost");
+        teardown_oauth_for_project(&map, "ghost");
         assert!(map.lock().unwrap().is_empty());
     }
 
@@ -2131,7 +2108,6 @@ mod tests {
             ide_bridge: SharedIdeBridge::default(),
             plugin_bridges: SharedPluginBridges::default(),
             mcp_os: SharedMcpOs::default(),
-            host_exec: SharedHostExec::default(),
             oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
         };

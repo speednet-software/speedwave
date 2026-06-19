@@ -1,6 +1,6 @@
 //! Shared log-file utilities — chmod-600 append handles, timestamped lines,
-//! size-bounded rotation. Used by Desktop's claude-session log, the mcp-os
-//! drain, and the host_exec drain.
+//! size-bounded rotation. Used by Desktop's claude-session log and the
+//! mcp-os drain.
 
 use std::path::Path;
 

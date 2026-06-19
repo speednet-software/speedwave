@@ -4,7 +4,7 @@
 //! per-process `is_alive()` accessors and the singleton mcp-os
 //! health endpoint. `probe_tcp` provides a TCP connect with optional
 //! retry+backoff — oauth needs the retry (compose cascades on a
-//! flaky probe); host_exec uses a single attempt.
+//! flaky probe); a single attempt suffices elsewhere.
 
 use std::net::{IpAddr, SocketAddr, TcpStream};
 #[cfg(unix)]

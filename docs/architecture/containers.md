@@ -123,7 +123,7 @@ Disk space is reclaimed **after** the full restore succeeds (atomicity: the prev
 1. **Per-image diff prune** (`prune_replaced_images`): for every image whose applied hash differs from the manifest's, removes `name:old_hash`. Unchanged images keep their tag — nothing to reclaim.
 2. **One-time legacy prune** on migration from the pre-ADR-072 single-id format (state without a per-image map): removes every catalogue tag for the old `bundle_id`.
 
-BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. The sole cache-prune site is the disk-full recovery ladder in `build_images_for_bundle_in` (`nerdctl system prune` does not clear cache mounts, so the ladder calls `builder prune` explicitly).
+BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. Cache is pruned only by the recovery ladder in `with_build_recovery` (shared by bundle and plugin builds), on disk-full or containerd snapshotter corruption — `nerdctl system prune` does not clear cache mounts, so those branches call `builder prune` explicitly.
 
 Both update paths share this pruning: **Desktop** (`reconcile_bundle_update_inner`) after `ProjectsRestored`, **CLI** (`update_containers` → `maybe_prune_previous_bundle`) after containers are confirmed running. The CLI never writes `bundle-state.json` (single-writer rule, test-pinned); Desktop reconcile and the setup wizard are the only writers of `applied_image_hashes`/`applied_bundle_id`.
 
@@ -149,7 +149,7 @@ When the watchdog respawns the oauth worker it:
 
 1. Stops and re-runs `OauthProcess::spawn_in`, getting a new port.
 2. Adds the project to a `respawned` list (built under the worker map's mutex, then drained outside it).
-3. Calls `host_exec_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
+3. Calls `containers_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
 4. `recreate_project_containers_if_running` regenerates the compose YAML via `render_compose()`, runs the security check, and recreates the project's containers — they pick up the new `WORKER_OAUTH_URL` in env.
 
 The `is_oauth_alive` TCP probe retries 3 × with a 200 ms backoff before declaring a worker dead, because every false-positive respawn cascades into a full container recreate of every OAuth consumer.

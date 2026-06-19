@@ -6,8 +6,7 @@
 //!
 //! mcp-os has users on the pre-PR3 layout, so its `spawn_with_data_dir`
 //! calls [`migrate_legacy_with_target`] before the generic spawn writes
-//! the lock; host_exec and oauth had no released users and skip the
-//! migration entirely.
+//! the lock; oauth had no released users and skips the migration entirely.
 
 use std::path::Path;
 
@@ -21,8 +20,6 @@ use crate::fs_perms::write_restricted_file;
 pub enum LockService {
     /// The mcp-os host process.
     McpOs,
-    /// The host_exec host process.
-    HostExec,
     /// The OAuth host process.
     Oauth,
 }
@@ -32,7 +29,6 @@ impl LockService {
     pub fn tag(self) -> &'static str {
         match self {
             LockService::McpOs => "mcp-os",
-            LockService::HostExec => "host-exec",
             LockService::Oauth => "oauth",
         }
     }
@@ -190,7 +186,6 @@ mod tests {
     #[test]
     fn lockservice_tags_are_stable() {
         assert_eq!(LockService::McpOs.tag(), "mcp-os");
-        assert_eq!(LockService::HostExec.tag(), "host-exec");
         assert_eq!(LockService::Oauth.tag(), "oauth");
     }
 
@@ -245,16 +240,10 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "uuid-token").unwrap();
 
-        let lock = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        )
-        .expect("3 legacy files must produce a lock");
+        let lock = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token")
+            .expect("3 legacy files must produce a lock");
 
-        assert_eq!(lock.service, "host-exec");
+        assert_eq!(lock.service, "oauth");
         assert_eq!(lock.port, 60123);
         assert_eq!(lock.pid, 12345);
         assert_eq!(lock.auth_token, "uuid-token");
@@ -279,30 +268,18 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "uuid-token").unwrap();
 
-        let first = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        )
-        .expect("first call must migrate");
+        let first = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token")
+            .expect("first call must migrate");
         assert_eq!(first.port, 60123);
 
-        let second = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        );
+        let second = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
         assert!(
             second.is_none(),
             "second call must short-circuit (legacy already migrated)"
         );
 
         // lock.json still on disk with the migrated payload.
-        let on_disk = read(&dir.path().join("lock.json"), LockService::HostExec)
+        let on_disk = read(&dir.path().join("lock.json"), LockService::Oauth)
             .expect("lock.json must still be readable");
         assert_eq!(on_disk, first);
     }
@@ -335,13 +312,7 @@ mod tests {
         std::fs::write(dir.path().join("port"), "60123").unwrap();
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
 
-        let result = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        );
+        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
         assert!(
             result.is_none(),
             "partial legacy state must not produce a lock"
@@ -355,13 +326,7 @@ mod tests {
     #[test]
     fn migrate_returns_none_when_no_files_present() {
         let dir = tempfile::tempdir().unwrap();
-        let result = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        );
+        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
         assert!(result.is_none());
     }
 
@@ -372,13 +337,7 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "x").unwrap();
 
-        let result = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        );
+        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
         assert!(result.is_none(), "port 0 must reject migration");
     }
 
@@ -399,7 +358,7 @@ mod tests {
         std::fs::write(dir.join("port"), port_bytes).unwrap();
         std::fs::write(dir.join("pid"), pid_bytes).unwrap();
         std::fs::write(dir.join("auth-token"), token_bytes).unwrap();
-        migrate_legacy(dir, LockService::HostExec, "port", "pid", "auth-token")
+        migrate_legacy(dir, LockService::Oauth, "port", "pid", "auth-token")
     }
 
     #[test]
@@ -526,8 +485,8 @@ mod tests {
     //   5. Mode is 0o600 on Unix (no leak)
     //   6. A second `migrate_legacy(...)` returns the same lock (idempotent)
     //
-    // Cross-service to cover all three (`McpOs`/`HostExec`/`Oauth`) with
-    // their distinct legacy filenames.
+    // Cross-service to cover both (`McpOs`/`Oauth`) with their distinct
+    // legacy filenames.
 
     /// End-to-end: legacy → migrate → read-back for the McpOs service,
     /// with the singleton's actual legacy filenames (`mcp-os-*`).
@@ -578,7 +537,7 @@ mod tests {
     }
 
     /// End-to-end: legacy → migrate → read-back for the Oauth service.
-    /// Per-project oauth uses `port`/`pid`/`auth-token` filenames (same as host_exec).
+    /// Per-project oauth uses `port`/`pid`/`auth-token` filenames.
     #[test]
     fn end_to_end_migration_oauth_legacy_to_lock_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -610,29 +569,17 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "999").unwrap();
         std::fs::write(dir.path().join("auth-token"), "tok").unwrap();
 
-        let first = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        )
-        .unwrap();
+        let first =
+            migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token").unwrap();
 
-        let from_disk = read(&dir.path().join("lock.json"), LockService::HostExec).unwrap();
+        let from_disk = read(&dir.path().join("lock.json"), LockService::Oauth).unwrap();
         assert_eq!(from_disk, first);
 
         // Second call short-circuits because legacy port+pid are gone;
         // the on-disk lock.json is unchanged.
-        let second = migrate_legacy(
-            dir.path(),
-            LockService::HostExec,
-            "port",
-            "pid",
-            "auth-token",
-        );
+        let second = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
         assert!(second.is_none(), "no legacy left to migrate");
-        let after_second = read(&dir.path().join("lock.json"), LockService::HostExec).unwrap();
+        let after_second = read(&dir.path().join("lock.json"), LockService::Oauth).unwrap();
         assert_eq!(after_second, first, "lock.json untouched by second call");
     }
 
@@ -670,13 +617,13 @@ mod tests {
     #[test]
     fn migrate_does_not_clobber_other_services_lock_in_same_dir() {
         let dir = tempfile::tempdir().unwrap();
-        // Pre-existing HostExec lock.json in the dir (legitimate per-project state).
-        let host_exec_lock = LockFile::new(LockService::HostExec, 1, 1111, "host-exec-tok".into());
-        write(&dir.path().join("lock.json"), &host_exec_lock).unwrap();
+        // Pre-existing McpOs lock.json in the dir (legitimate per-project state).
+        let mcp_os_lock = LockFile::new(LockService::McpOs, 1, 1111, "mcp-os-tok".into());
+        write(&dir.path().join("lock.json"), &mcp_os_lock).unwrap();
 
         // Now attempt to migrate as if for `Oauth` with the same filenames
         // (port/pid/auth-token). Because the existing lock.json has
-        // `service: "host-exec"`, `read(..., Oauth)` returns None and the
+        // `service: "mcp-os"`, `read(..., Oauth)` returns None and the
         // migration overwrites it. Document this so a future caller knows
         // mixing services in one state_dir is not supported.
         std::fs::write(dir.path().join("port"), "2222").unwrap();
@@ -688,11 +635,11 @@ mod tests {
         assert_eq!(migrated.service, "oauth");
         assert_eq!(migrated.port, 2222);
 
-        // Confirm: HostExec lock is now overwritten — services cannot share a state_dir.
+        // Confirm: McpOs lock is now overwritten — services cannot share a state_dir.
         // In production, each service has its own state_dir
-        // (`<data_dir>/host-exec/<project>/`, `<data_dir>/oauth/<project>/`,
-        // `<data_dir>/mcp-os.lock.json` directly) so collision is impossible.
-        assert!(read(&dir.path().join("lock.json"), LockService::HostExec).is_none());
+        // (`<data_dir>/oauth/<project>/`, `<data_dir>/mcp-os.lock.json`
+        // directly) so collision is impossible.
+        assert!(read(&dir.path().join("lock.json"), LockService::McpOs).is_none());
     }
 
     /// `migrate_legacy` must never return a lock whose `service` tag
@@ -702,7 +649,6 @@ mod tests {
     fn migrate_result_service_tag_matches_request() {
         for (service, expected_tag) in [
             (LockService::McpOs, "mcp-os"),
-            (LockService::HostExec, "host-exec"),
             (LockService::Oauth, "oauth"),
         ] {
             let dir = tempfile::tempdir().unwrap();

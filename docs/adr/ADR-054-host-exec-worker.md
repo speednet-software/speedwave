@@ -1,6 +1,6 @@
 # ADR-054: `host_exec` — Per-Project Host-Side MCP Worker for the Project Toolchain
 
-> **Status:** Accepted (implemented)
+> **Status:** Reverted — `host_exec` was removed in full. The team decided not to weaken container isolation, even gated behind an enable-time danger modal and a whitelist: an opt-in host code-execution channel that a prompt-injected Claude can drive over a repo it can edit erodes the unconditional isolation guarantee Speedwave offers, and a warning does not change the fact that the capability exists. The runtime modules, Tauri commands, Angular UI, TypeScript worker, config schema, and bundle/CI glue were all removed; this ADR is kept as the historical record of why the worker existed and how it was bounded. The decision below was implemented and is no longer in effect.
 > **Context:** Claude runs in a token-free container with only Node + git. It cannot use the user's real toolchain (JDK, Gradle, Go, .NET, Python, the host's Docker stack) to build/test/run the project — the most-requested gap, and one users were already filling unsafely with hand-rolled agents on `0.0.0.0` with tokens committed to the repo.
 
 ## Decision

@@ -11,8 +11,6 @@ pub(crate) struct DiagnosticsInput {
     pub container_logs: Option<String>,
     /// Path to the mcp-os dedicated log file.
     pub mcp_os_log: Option<std::path::PathBuf>,
-    /// Path to the per-project host-exec worker log.
-    pub host_exec_log: Option<std::path::PathBuf>,
     /// Path to the project's `compose.yml`.
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
@@ -88,7 +86,6 @@ pub(crate) fn build_diagnostics_zip(
     let single_files = [
         (&input.serial_log, "lima"),
         (&input.mcp_os_log, "mcp-os"),
-        (&input.host_exec_log, "host-exec"),
         (&input.claude_session_log, "claude"),
         (&input.compose_path, "compose-yml"),
     ];
@@ -143,7 +140,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
         let container_logs = rt.compose_logs(&project, 5000).ok();
 
         // File-source paths resolved from the SSOT registry (platform-gated), so
-        // /logs and the ZIP can't drift and host-exec is no longer dropped.
+        // /logs and the ZIP can't drift.
         let data_dir = speedwave_runtime::consts::data_dir();
         let resolve = |key: &str| {
             speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
@@ -154,7 +151,6 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             serial_log: resolve("lima"),
             container_logs,
             mcp_os_log: resolve("mcp-os"),
-            host_exec_log: resolve("host-exec"),
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
         };
@@ -255,7 +251,6 @@ mod tests {
             serial_log: None,
             container_logs: Some("container output here".into()),
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
         };
@@ -324,7 +319,6 @@ mod tests {
                 "JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123\n".into(),
             ),
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -369,7 +363,6 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
         };
@@ -410,7 +403,6 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -441,7 +433,6 @@ mod tests {
             serial_log: Some(serial_log),
             container_logs: None,
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -469,7 +460,6 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -497,7 +487,6 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: Some(mcp_os_log),
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: None,
         };
@@ -531,7 +520,6 @@ mod tests {
             serial_log: None,
             container_logs: None,
             mcp_os_log: None,
-            host_exec_log: None,
             compose_path: None,
             claude_session_log: Some(session_log),
         };
@@ -547,31 +535,6 @@ mod tests {
         let content = read_zip_entry(&zip_path, "claude/claude-session.log").unwrap();
         assert!(content.contains("SESSION: started"), "content: {content}");
         assert!(content.contains("TOOL: start"), "content: {content}");
-    }
-
-    #[test]
-    fn diagnostics_zip_includes_host_exec_log() {
-        let tmp = tempfile::tempdir().unwrap();
-        let zip_path = tmp.path().join("diag-hostexec.zip");
-        let host_exec = tmp.path().join("host-exec-log");
-        std::fs::write(&host_exec, "host_exec ran npm test").unwrap();
-
-        let input = DiagnosticsInput {
-            log_dir: None,
-            serial_log: None,
-            container_logs: None,
-            mcp_os_log: None,
-            host_exec_log: Some(host_exec),
-            compose_path: None,
-            claude_session_log: None,
-        };
-        build_diagnostics_zip(&zip_path, &input).unwrap();
-
-        let names = zip_entry_names(&zip_path);
-        assert!(
-            names.contains(&"host-exec/log".to_string()),
-            "ZIP must contain host-exec log (was missing before the registry fix): {names:?}"
-        );
     }
 
     /// Matrix guard: a secret planted in EVERY textual source must be redacted
@@ -605,9 +568,10 @@ mod tests {
             serial_log: Some(mk("serial.log", secrets[1])),
             container_logs: Some(secrets[2].into()),
             mcp_os_log: Some(mk("mcp.log", secrets[3])),
-            host_exec_log: Some(mk("he.log", secrets[4])),
             compose_path: Some(mk("compose.yml", secrets[0])),
-            claude_session_log: Some(mk("claude.log", secrets[1])),
+            // Carries the Bearer token (secrets[4]) so the redaction matrix
+            // still exercises all five secret patterns across the sources.
+            claude_session_log: Some(mk("claude.log", secrets[4])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -645,7 +609,6 @@ mod tests {
             serial_log: Some(mk("serial.log")),
             container_logs: Some("x".into()),
             mcp_os_log: Some(mk("mcp.log")),
-            host_exec_log: Some(mk("he.log")),
             compose_path: Some(mk("compose.yml")),
             claude_session_log: Some(mk("claude.log")),
         };
