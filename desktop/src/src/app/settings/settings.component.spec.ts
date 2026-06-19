@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
@@ -120,6 +120,27 @@ describe('SettingsComponent', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
+  });
+
+  it('smooth-scrolls a section into view for a matching URL fragment', () => {
+    fixture.detectChanges();
+    const section = fixture.nativeElement.querySelector('#section-transcription') as Element;
+    expect(section).not.toBeNull();
+    // jsdom doesn't implement scrollIntoView — stub it so we can assert the call.
+    const spy = vi.fn();
+    (section as unknown as { scrollIntoView: () => void }).scrollIntoView = spy;
+    (component as unknown as { scrollToFragment(id: string): void }).scrollToFragment(
+      'section-transcription'
+    );
+    expect(spy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+  });
+
+  it('ignores a null/empty fragment without scrolling', () => {
+    fixture.detectChanges();
+    const scroll = (component as unknown as { scrollToFragment(id: string | null): void })
+      .scrollToFragment;
+    // Should not throw and should be a no-op for null.
+    expect(() => scroll.call(component, null)).not.toThrow();
   });
 
   it('reloads project info on project_switch_succeeded event', async () => {

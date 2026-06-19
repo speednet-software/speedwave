@@ -2,11 +2,14 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
+  ElementRef,
   OnDestroy,
   OnInit,
   inject,
 } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
@@ -213,6 +216,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly beta = inject(BetaService);
 
   private router = inject(Router);
+  private route = inject(ActivatedRoute);
+  private host = inject(ElementRef<HTMLElement>);
+  private destroyRef = inject(DestroyRef);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
@@ -225,6 +231,30 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.unsubProjectReady = this.projectState.onProjectReady(() => {
       this.loadProjectInfo();
     });
+
+    // Smooth-scroll to the URL fragment (native anchorScrolling can't reach our
+    // nested scroll container). See ADR-056.
+    this.route.fragment
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((fragment) => this.scrollToFragment(fragment));
+  }
+
+  /**
+   * Smooth-scrolls the section with `id` into view, retrying while a deferred
+   * (beta-gated) section mounts.
+   * @param id - the section anchor id; null/empty does nothing.
+   * @param attempt - internal retry counter.
+   */
+  private scrollToFragment(id: string | null, attempt = 0): void {
+    if (!id) return;
+    const el = this.host.nativeElement.querySelector(`#${id}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    if (attempt < 20) {
+      setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
+    }
   }
 
   /** Unsubscribes from the project ready listener. */
