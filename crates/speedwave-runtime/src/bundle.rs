@@ -641,6 +641,12 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
+        // node_modules is gitignored and never copied into the build context
+        // (only `--from=builder` stage copies), so its internal `.bin/*`
+        // symlinks are not image content — skip it to keep the hash honest.
+        if child.is_dir() && child.file_name().is_some_and(|n| n == "node_modules") {
+            continue;
+        }
         // Fail loud: the build-context copier dereferences symlinks, so a
         // silently-skipped link would change image content WITHOUT changing
         // the hash — users would keep the stale tag after an update.
@@ -722,6 +728,89 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_node_modules_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/index.ts"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("node_modules/pkg/index.js"), "dep").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/index.ts")), "{rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.contains("node_modules")),
+            "node_modules must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
+        // The exact CI failure: npm creates node_modules/.bin/<tool> symlinks.
+        // The walk must skip node_modules entirely rather than bail on them.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+        let real = dir.join("node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("node_modules/.bin/vitest")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        let mut out = Vec::new();
+        let res = collect_directory_entries(&dir, "p", &mut out);
+        assert!(
+            res.is_ok(),
+            "must not bail on node_modules symlinks: {res:?}"
+        );
+        assert!(out.iter().any(|(r, _)| r.ends_with("package.json")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_nested_node_modules() {
+        // The skip applies at every recursion depth, not just the top level.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        let nested = dir.join("packages/pkg/node_modules/.bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let real = dir.join("packages/pkg/node_modules/tool/tool.js");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nested.join("tool")).unwrap();
+        std::fs::write(dir.join("packages/pkg/index.ts"), "real").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        assert!(out.iter().any(|(r, _)| r.ends_with("pkg/index.ts")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn node_modules_changes_do_not_alter_manifest_hash() {
+        // ADR-072: node_modules is not image content, so adding it (symlinks
+        // and all) under a hash input must leave every image hash unchanged.
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        let nm = tmp.path().join("mcp-servers/hub/node_modules/.bin");
+        std::fs::create_dir_all(&nm).unwrap();
+        let real = tmp
+            .path()
+            .join("mcp-servers/hub/node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nm.join("vitest")).unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(
+            before.image_hashes, after.image_hashes,
+            "node_modules must not affect image hashes"
+        );
     }
 
     fn write_resource_tree(root: &Path) {
