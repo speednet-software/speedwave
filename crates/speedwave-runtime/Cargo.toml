@@ -58,7 +58,7 @@ whisper-rs = { version = "0.16", optional = true }
 # Speaker diarization. Exact pin: prebuilt static-lib tarball name encodes the
 # version, and Windows CI overrides SHERPA_ONNX_LIB_DIR with the MD-Release
 # variant matching this exact version (see ADR-061, .sherpa-onnx-version SSOT).
-sherpa-onnx = { version = "=1.13.2", optional = true }
+sherpa-onnx = { version = "=1.13.3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS, build whisper.cpp with the Metal backend (the Metal shader library
