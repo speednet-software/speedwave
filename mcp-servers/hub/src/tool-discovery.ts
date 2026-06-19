@@ -74,9 +74,12 @@ export async function initializeWorker(
     redirect: 'error',
   });
 
+  // A non-2xx here means the worker rejected a protocol notification — a spec
+  // violation worth an error, not a warning. Include a capped body for triage.
   if (!notifResponse.ok) {
-    console.warn(
-      `${ts()} [tool-discovery] notifications/initialized returned ${notifResponse.status} for ${workerUrl}`
+    const body = (await notifResponse.text().catch(() => '')).slice(0, 512);
+    console.error(
+      `${ts()} [tool-discovery] notifications/initialized returned ${notifResponse.status} for ${workerUrl}${body ? `: ${body}` : ''}`
     );
   }
 
