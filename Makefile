@@ -63,7 +63,7 @@ guard-not-prod-data-dir:
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes \
-        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all setup-e2e-vms \
+        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -682,6 +682,11 @@ _e2e-windows:
 # Run E2E on all platforms via SSH to dedicated test machines
 test-e2e-all:
 	@bash scripts/e2e-vm.sh all
+
+# Audio-transcription pipeline E2E on the Windows host (ADR-056/ADR-075):
+# wasapi capture + whisper transcription, verified natively (MSVC toolchain).
+test-e2e-audio:
+	@bash scripts/e2e-vm.sh windows-audio
 
 # Provision test machines for E2E testing (one-time setup)
 setup-e2e-vms:

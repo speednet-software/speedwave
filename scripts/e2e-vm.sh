@@ -601,6 +601,44 @@ SCRIPT
     return "$exit_code"
 }
 
+# Audio-transcription pipeline E2E on Windows-native (ADR-056/ADR-075). Syncs
+# the runtime source, ensures the `small` Whisper model is downloaded, then runs
+# the gated `transcription_pipeline_e2e` integration test (capture → live →
+# finalize → markdown) plus the audio_windows wasapi unit tests. Native cargo
+# (MSVC) — the wasapi/whisper deps don't build under WSL.
+run_windows_audio() {
+    windows_wait_ssh
+    ensure_provisioned_windows
+    echo "[windows-audio] Syncing repo to WSL staging..."
+    windows_rsync_to "$HOST_REPO_DIR/" "$WINDOWS_WSL_STAGING/"
+    echo "[windows-audio] Copying to native dir, ensuring model, running tests..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = "Stop"
+function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "exit $LASTEXITCODE"; exit $LASTEXITCODE } }
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+$dst = "C:\spw-audio-e2e"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst
+New-Item -ItemType Directory -Path $dst -Force | Out-Null
+Write-Host "── Copying repo WSL2 → $dst ..."
+wsl.exe -d $WINDOWS_WSL_DISTRO -- tar -C /home/windows/speedwave-e2e -cf - . 2>$null | tar -C $dst -xf -
+Set-Location $dst
+
+Write-Host "── wasapi/audio_windows unit tests + audio-transcription clippy ..."
+cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
+Assert-ExitCode
+cargo test -p speedwave-runtime --features audio-transcription --lib transcription
+Assert-ExitCode
+
+Write-Host "── Full pipeline E2E (downloads the small model if absent) ..."
+$env:RUN_STT_E2E = "1"
+$env:STT_E2E_MODEL = "small"
+cargo test -p speedwave-runtime --features audio-transcription --test transcription_pipeline_e2e -- --nocapture
+Assert-ExitCode
+Write-Host "── Windows audio E2E OK"
+SCRIPT
+}
+
 # Runs the Speedwave desktop app and executes wdio tests on Windows via SSH.
 # Expects the app to be installed at C:\Speedwave and E2E suite at C:\speedwave-e2e.
 run_windows_e2e() {
@@ -933,6 +971,7 @@ TARGET="${1:-all}"
 
 case "$TARGET" in
     windows|win)    run_windows ;;
+    windows-audio|win-audio) run_windows_audio ;;
     macos|mac)      run_macos ;;
     all)
         PIDS=()
