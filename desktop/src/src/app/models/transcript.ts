@@ -9,19 +9,14 @@ export type Backend = 'cpu' | 'metal' | 'cuda' | 'vulkan';
 
 /** What the host's capture backend can do. */
 export interface CaptureCapabilities {
-  supports_per_process: boolean;
   supports_system_audio: boolean;
   supports_microphone: boolean;
   note: string | null;
 }
 
-/** How a process to capture is identified. */
-export type ProcessSelector = { by: 'pid'; pid: number } | { by: 'node_id'; id: string };
-
 /** What to capture. */
 export type AudioSource =
   | { kind: 'system_wide' }
-  | { kind: 'process'; selector: ProcessSelector }
   | { kind: 'microphone'; device: string | null }
   | { kind: 'mixed'; system: AudioSource; mic: string | null };
 

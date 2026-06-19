@@ -1,6 +1,5 @@
 //! Windows audio capture (ADR-056): system audio via the `wasapi` crate
 //! (cpal's loopback is unreliable — RustAudio/cpal#476), microphone via cpal.
-//! Per-process loopback needs build 20348+, else falls back to the full mix.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -9,7 +8,6 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::audio::ProcessSelector;
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
@@ -27,25 +25,12 @@ const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const CHANNEL_DEPTH: usize = 32;
 
 /// Windows capture backend. Stateless; `start()` opens a fresh cpal stream.
-pub struct WasapiAudioCapture {
-    /// OS build number (`RtlGetVersion`-ish via cpal-independent probe). Drives
-    /// the per-process capability flag. `None` if we couldn't read it.
-    os_build: Option<u32>,
-}
+pub struct WasapiAudioCapture;
 
 impl WasapiAudioCapture {
-    /// Constructs the backend and reads the Windows build number.
+    /// Constructs the backend.
     pub fn new() -> Self {
-        Self {
-            os_build: detect_windows_build(),
-        }
-    }
-
-    /// `true` if this Windows build supports per-process loopback (≥ 20348).
-    /// (We still don't *implement* it in v1 — see the module docs — but the
-    /// flag lets a later iteration light it up without a capability change.)
-    fn build_supports_per_process(&self) -> bool {
-        self.os_build.map(|b| b >= 20_348).unwrap_or(false)
+        Self
     }
 }
 
@@ -53,23 +38,6 @@ impl Default for WasapiAudioCapture {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Reads the Windows build number from the registry-equivalent
-/// `cmd /c ver` output (`Microsoft Windows [Version 10.0.22631.xxxx]`). Cheap
-/// and dependency-free; `None` on any parse failure.
-fn detect_windows_build() -> Option<u32> {
-    // system_command applies CREATE_NO_WINDOW so this probe (run on audio/
-    // transcription init) does not flash a console over the Desktop UI.
-    let out = crate::binary::system_command("cmd")
-        .args(["/c", "ver"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    // Find `10.0.<build>.<rev>` and take the third dotted component.
-    let version = text.split_whitespace().find(|t| t.starts_with("10.0."))?;
-    let build_str = version.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-    build_str.split('.').nth(2)?.parse().ok()
 }
 
 impl AudioCapture for WasapiAudioCapture {
@@ -80,20 +48,10 @@ impl AudioCapture for WasapiAudioCapture {
         // endpoint?" without opening a wasapi client here.
         let has_output = host.default_output_device().is_some();
         let has_input = host.default_input_device().is_some();
-        let per_process = self.build_supports_per_process();
-        let note = if per_process {
-            Some("WASAPI loopback (system-wide + per-app).".to_string())
-        } else {
-            Some(
-                "WASAPI loopback (system-wide). Per-app capture requires Windows 10 build 20348+."
-                    .to_string(),
-            )
-        };
         CaptureCapabilities {
-            supports_per_process: per_process,
             supports_system_audio: has_output,
             supports_microphone: has_input,
-            note,
+            note: Some("WASAPI loopback (system-wide).".to_string()),
         }
     }
 
@@ -150,8 +108,8 @@ impl AudioCapture for WasapiAudioCapture {
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         let host = cpal::default_host();
         match &source {
-            // System audio (whole system or a single process) → wasapi loopback.
-            AudioSource::SystemWide | AudioSource::Process { .. } => {
+            // System audio → wasapi loopback.
+            AudioSource::SystemWide => {
                 let target = self.system_target(&source)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
                 let stop = Arc::new(AtomicBool::new(false));
@@ -203,29 +161,12 @@ impl AudioCapture for WasapiAudioCapture {
 }
 
 impl WasapiAudioCapture {
-    /// Resolves the system side of a source to a [`LoopbackTarget`]. `Process`
-    /// needs per-process support (else falls back to the full mix); a mic or
-    /// nested mix as the "system" side is rejected.
+    /// Resolves the system side of a source to a [`LoopbackTarget`]:
+    /// `SystemWide` maps to the full-mix target; a mic or nested mix as the
+    /// "system" side is rejected.
     fn system_target(&self, src: &AudioSource) -> Result<LoopbackTarget, CaptureError> {
         match src {
             AudioSource::SystemWide => Ok(LoopbackTarget::System),
-            AudioSource::Process { selector } => {
-                let pid = pid_of(selector)?;
-                if self.build_supports_per_process() {
-                    Ok(LoopbackTarget::Process {
-                        pid,
-                        include_tree: true,
-                    })
-                } else {
-                    // Below build 20348 the per-process API isn't reliable; fall
-                    // back to a full-mix capture so the user still gets audio.
-                    log::warn!(
-                        target: "transcription::capture",
-                        "per-process loopback needs Windows build 20348+; capturing full system mix instead"
-                    );
-                    Ok(LoopbackTarget::System)
-                }
-            }
             other => Err(CaptureError::Unsupported(format!(
                 "unsupported system source on Windows: {other:?}"
             ))),
@@ -233,19 +174,11 @@ impl WasapiAudioCapture {
     }
 }
 
-/// What a wasapi loopback capture targets: the whole render endpoint, or one
-/// process (by PID, optionally including its child process tree).
+/// What a wasapi loopback capture targets: the whole render endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopbackTarget {
     /// The default render endpoint's full mix (all system audio).
     System,
-    /// A single process's audio via `new_application_loopback_client`.
-    Process {
-        /// Target process id.
-        pid: i32,
-        /// Include the process's child tree (`include_tree`).
-        include_tree: bool,
-    },
 }
 
 /// Builds the cpal input stream for the given sample format, wiring its data
@@ -392,7 +325,7 @@ fn run_wasapi_loopback(
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     use std::collections::VecDeque;
-    use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+    use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode};
 
     // COM must be initialised on the capturing thread (MTA so the realtime
     // capture isn't bound to a UI message pump).
@@ -402,15 +335,11 @@ fn run_wasapi_loopback(
     }
 
     // Open the AudioClient for the target. System loopback uses the default
-    // *render* endpoint captured in loopback; per-process uses the dedicated
-    // application-loopback constructor.
+    // *render* endpoint captured in loopback.
     let client_res = match target {
         LoopbackTarget::System => DeviceEnumerator::new()
             .and_then(|e| e.get_default_device(&Direction::Render))
             .and_then(|d| d.get_iaudioclient()),
-        LoopbackTarget::Process { pid, include_tree } => {
-            AudioClient::new_application_loopback_client(pid as u32, include_tree)
-        }
     };
     let mut client = match client_res {
         Ok(c) => c,
@@ -420,9 +349,7 @@ fn run_wasapi_loopback(
         }
     };
 
-    // For the system endpoint the device mix format is authoritative; in
-    // process-loopback mode `get_mixformat` is unreliable, so request an
-    // explicit shared-mode format (32-bit float, 48 kHz, stereo).
+    // For the system endpoint the device mix format is authoritative.
     let format = match target {
         LoopbackTarget::System => match client.get_mixformat() {
             Ok(f) => f,
@@ -431,9 +358,6 @@ fn run_wasapi_loopback(
                 return;
             }
         },
-        LoopbackTarget::Process { .. } => {
-            WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None)
-        }
     };
     let src_rate = format.get_samplespersec();
     let src_channels = format.get_nchannels() as usize;
@@ -702,9 +626,9 @@ impl AudioStream for CpalAudioStream {
     }
 }
 
-/// `AudioStream` for a system-audio capture (whole system or one process): the
-/// wasapi capture thread pushes chunks through the channel. The held
-/// `WasapiCaptureHandle` stops + joins the thread on drop.
+/// `AudioStream` for a system-audio capture: the wasapi capture thread pushes
+/// chunks through the channel. The held `WasapiCaptureHandle` stops + joins the
+/// thread on drop.
 struct WasapiLoopbackStream {
     rx: Receiver<AudioChunk>,
     /// Held to keep the capture thread alive; its `Drop` winds the thread down.
@@ -752,103 +676,22 @@ impl Drop for MixedWasapiAudioStream {
     }
 }
 
-/// Extracts a PID from a `ProcessSelector`. Per-process loopback (PR-3) needs a
-/// real PID; a `NodeId` selector (reserved for non-PID backends) is rejected.
-fn pid_of(selector: &ProcessSelector) -> Result<i32, CaptureError> {
-    match selector {
-        ProcessSelector::Pid { pid } => Ok(*pid),
-        ProcessSelector::NodeId { id } => Err(CaptureError::Unsupported(format!(
-            "Windows capture needs a PID, got node id {id:?}"
-        ))),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn build_gate_thresholds_at_20348() {
-        let old = WasapiAudioCapture {
-            os_build: Some(19_045),
-        };
-        assert!(!old.build_supports_per_process());
-        let new = WasapiAudioCapture {
-            os_build: Some(22_631),
-        };
-        assert!(new.build_supports_per_process());
-        let exactly = WasapiAudioCapture {
-            os_build: Some(20_348),
-        };
-        assert!(exactly.build_supports_per_process());
-        let unknown = WasapiAudioCapture { os_build: None };
-        assert!(!unknown.build_supports_per_process());
-    }
-
-    #[test]
-    fn capabilities_advertise_per_process_iff_build_supports_it() {
-        // On a build ≥ 20348 the per-process loopback API is available.
-        let cap = WasapiAudioCapture {
-            os_build: Some(22_631),
-        };
-        assert!(cap.capabilities().supports_per_process);
-        assert!(cap.capabilities().note.unwrap().contains("per-app"));
-        // Below 20348 it's off, and the note cites the build requirement.
-        let old = WasapiAudioCapture {
-            os_build: Some(19_045),
-        };
-        assert!(!old.capabilities().supports_per_process);
-        assert!(old.capabilities().note.unwrap().contains("20348"));
-        // Unknown build → conservatively off.
-        let unknown = WasapiAudioCapture { os_build: None };
-        assert!(!unknown.capabilities().supports_per_process);
-    }
-
-    #[test]
     fn system_target_maps_sources_to_loopback_targets() {
         // SystemWide → whole-system loopback.
-        let cap = WasapiAudioCapture {
-            os_build: Some(22_631),
-        };
+        let cap = WasapiAudioCapture::new();
         assert_eq!(
             cap.system_target(&AudioSource::SystemWide).unwrap(),
-            LoopbackTarget::System
-        );
-        // Process on a supported build → per-process loopback with that PID.
-        assert_eq!(
-            cap.system_target(&AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 4321 }
-            })
-            .unwrap(),
-            LoopbackTarget::Process {
-                pid: 4321,
-                include_tree: true
-            }
-        );
-        // Process on an OLD build → falls back to the full system mix.
-        let old = WasapiAudioCapture {
-            os_build: Some(19_045),
-        };
-        assert_eq!(
-            old.system_target(&AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 4321 }
-            })
-            .unwrap(),
             LoopbackTarget::System
         );
         // A mic (or anything non-system) as the system side is rejected.
         assert!(matches!(
             cap.system_target(&AudioSource::Microphone { device: None }),
-            Err(CaptureError::Unsupported(_))
-        ));
-        // A NodeId process selector is rejected (needs a real PID).
-        assert!(matches!(
-            cap.system_target(&AudioSource::Process {
-                selector: ProcessSelector::NodeId {
-                    id: "x".to_string()
-                }
-            }),
             Err(CaptureError::Unsupported(_))
         ));
     }
@@ -878,16 +721,6 @@ mod tests {
         assert!((gi[2] + 1.0).abs() < 1e-3);
         // Zero bytes-per-sample is a safe no-op.
         assert!(decode_pcm_to_f32(&[0, 1, 2, 3], 0, true).is_empty());
-    }
-
-    #[test]
-    fn pid_helper_rejects_node_id() {
-        let err = pid_of(&ProcessSelector::NodeId {
-            id: "x".to_string(),
-        })
-        .unwrap_err();
-        assert!(matches!(err, CaptureError::Unsupported(_)));
-        assert_eq!(pid_of(&ProcessSelector::Pid { pid: 7 }).unwrap(), 7);
     }
 
     /// Drains a channel sink into a flat sample vector (test helper).
@@ -984,22 +817,6 @@ mod tests {
         assert!(
             chunk.iter().all(|&s| (s - 1.0).abs() < 1e-4),
             "system 1.0 + mic 1.0, each ×0.5, summed = 1.0"
-        );
-    }
-
-    #[test]
-    fn detect_windows_build_parses_a_version_string() {
-        // We can't run `cmd /c ver` here, but exercise the parsing logic by
-        // factoring it the same way (string → third dotted component).
-        let sample = "Microsoft Windows [Version 10.0.22631.4317]";
-        let version = sample.split_whitespace().find(|t| t.starts_with("10.0."));
-        assert!(version.is_some());
-        let build_str = version
-            .unwrap()
-            .trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-        assert_eq!(
-            build_str.split('.').nth(2).unwrap().parse::<u32>().unwrap(),
-            22_631
         );
     }
 }

@@ -7,9 +7,9 @@ import type { AudioSourceInfo, CapabilitiesAck, StartAck } from '../../models/tr
 const SOURCES: AudioSourceInfo[] = [
   { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
   {
-    source: { kind: 'process', selector: { by: 'pid', pid: 42 } },
-    label: 'teams2',
-    app_id: 'com.microsoft.teams2',
+    source: { kind: 'microphone', device: null },
+    label: 'Microphone (default input)',
+    app_id: null,
   },
 ];
 
@@ -60,7 +60,6 @@ describe('RecordingControlsComponent', () => {
 
   const caps: CapabilitiesAck = {
     capabilities: {
-      supports_per_process: true,
       supports_system_audio: true,
       supports_microphone: false,
       note: 'Requires macOS 14.4+',
@@ -224,22 +223,6 @@ describe('RecordingControlsComponent', () => {
       fixture.nativeElement.querySelector('[data-testid="accel-badge"]').textContent
     ).toContain('Metal');
     expect(fixture.nativeElement.querySelector('[data-testid="language-select"]')).not.toBeNull();
-  });
-
-  it('hides the per-app note when per-process is supported', async () => {
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="per-app-note"]')).toBeNull();
-  });
-
-  it('shows the per-app note when per-process is NOT supported', async () => {
-    svc.getCapabilities.mockResolvedValueOnce({
-      ...caps,
-      capabilities: { ...caps.capabilities, supports_per_process: false },
-    });
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="per-app-note"]')).not.toBeNull();
   });
 
   it('starts recording the chosen source + language and emits started', async () => {

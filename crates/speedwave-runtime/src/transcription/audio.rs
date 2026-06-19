@@ -31,15 +31,6 @@ pub const DEFAULT_MIXED_SOURCE_LABEL: &str = "Whole meeting (system audio + your
 pub enum AudioSource {
     /// All system audio output (the "everything" loopback). Always available.
     SystemWide,
-    /// A specific process's audio (e.g. just Teams). Requires per-process
-    /// capture support — `CaptureCapabilities::supports_per_process` (Windows
-    /// build 20348+, macOS 14.4+).
-    Process {
-        /// Process selector — a PID on Windows/macOS. `ProcessSelector::NodeId`
-        /// is reserved for non-PID backends; both current backends reject it
-        /// as `Unsupported`.
-        selector: ProcessSelector,
-    },
     /// A specific microphone input device (the user's own voice).
     Microphone {
         /// Device id (`None` = system default input).
@@ -49,28 +40,10 @@ pub enum AudioSource {
     /// captured together — the "meeting transcription" default. The backend
     /// mixes the two streams into one mono buffer for the transcriber.
     Mixed {
-        /// What to capture for the "other side" (typically `SystemWide` or a
-        /// `Process`).
+        /// What to capture for the "other side" (`SystemWide`).
         system: Box<AudioSource>,
         /// The microphone device for "your side" (`None` = default input).
         mic: Option<String>,
-    },
-}
-
-/// How a process to capture is identified. Boxed inside `AudioSource::Process`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", tag = "by")]
-pub enum ProcessSelector {
-    /// Operating-system process id (Windows/macOS).
-    Pid {
-        /// The PID.
-        pid: i32,
-    },
-    /// An opaque backend-specific node/stream id. Reserved variant — no current
-    /// backend accepts it; both reject it as `Unsupported`.
-    NodeId {
-        /// The node id, stringified.
-        id: String,
     },
 }
 
@@ -80,30 +53,21 @@ pub enum ProcessSelector {
 pub struct AudioSourceInfo {
     /// The source to pass to `start()` if the user picks this entry.
     pub source: AudioSource,
-    /// Human-readable label (e.g. `"Microsoft Teams"`, `"System (everything)"`,
-    /// `"Built-in Microphone"`).
+    /// Human-readable label (e.g. `"System (everything)"`, `"Microphone: …"`).
     pub label: String,
-    /// Best-effort bundle/app identifier when this is a process source
-    /// (e.g. `"com.microsoft.teams2"`), else `None`.
+    /// Reserved for a best-effort app identifier; currently always `None`.
     pub app_id: Option<String>,
 }
 
-/// What a capture backend on this host can do — surfaced to the UI so it knows
-/// e.g. whether to offer a process picker.
+/// What a capture backend on this host can do — surfaced to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureCapabilities {
-    /// `true` if the backend can capture a single process's audio (Windows
-    /// build 20348+, macOS 14.4+). When `false`, only `SystemWide`
-    /// (+ `Microphone`) is offered, with a tooltip explaining the OS
-    /// requirement.
-    pub supports_per_process: bool,
     /// `true` if capturing the system loopback at all is possible on this host
     /// (e.g. `false` on macOS < 14.2).
     pub supports_system_audio: bool,
     /// `true` if a microphone input is available.
     pub supports_microphone: bool,
-    /// Short human-readable note for the UI when something is limited
-    /// (e.g. `"Per-app capture requires macOS 14.4+"`), else `None`.
+    /// Short human-readable note for the UI when something is limited, else `None`.
     pub note: Option<String>,
 }
 
@@ -112,7 +76,6 @@ impl CaptureCapabilities {
     /// "capture" from a file path only; nothing real.
     pub fn file_only() -> Self {
         Self {
-            supports_per_process: false,
             supports_system_audio: false,
             supports_microphone: false,
             note: Some("File input only (no live capture backend on this build/OS)".to_string()),
@@ -561,22 +524,12 @@ mod tests {
     fn audio_source_round_trips_through_serde() {
         let cases = [
             AudioSource::SystemWide,
-            AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1234 },
-            },
-            AudioSource::Process {
-                selector: ProcessSelector::NodeId {
-                    id: "node-42".into(),
-                },
-            },
             AudioSource::Microphone { device: None },
             AudioSource::Microphone {
                 device: Some("/tmp/x.wav".into()),
             },
             AudioSource::Mixed {
-                system: Box::new(AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: 9 },
-                }),
+                system: Box::new(AudioSource::SystemWide),
                 mic: Some("default".into()),
             },
         ];
@@ -586,19 +539,13 @@ mod tests {
             assert_eq!(back, c, "round-trip failed for {c:?} (json: {j})");
         }
         // Spot-check the wire shape so a frontend mirroring this type knows it.
-        let j = serde_json::to_value(AudioSource::Process {
-            selector: ProcessSelector::Pid { pid: 7 },
-        })
-        .unwrap();
-        assert_eq!(j["kind"], "process");
-        assert_eq!(j["selector"]["by"], "pid");
-        assert_eq!(j["selector"]["pid"], 7);
+        let j = serde_json::to_value(AudioSource::Microphone { device: None }).unwrap();
+        assert_eq!(j["kind"], "microphone");
     }
 
     #[test]
     fn capabilities_round_trip_through_serde() {
         let c = CaptureCapabilities {
-            supports_per_process: true,
             supports_system_audio: true,
             supports_microphone: false,
             note: Some("x".into()),
@@ -606,6 +553,6 @@ mod tests {
         let back: CaptureCapabilities =
             serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
-        assert!(!CaptureCapabilities::file_only().supports_per_process);
+        assert!(!CaptureCapabilities::file_only().supports_system_audio);
     }
 }

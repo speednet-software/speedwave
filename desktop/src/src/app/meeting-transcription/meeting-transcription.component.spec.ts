@@ -41,7 +41,6 @@ describe('MeetingTranscriptionComponent', () => {
       recommendedModel: vi.fn(async () => recommended(true)),
       getCapabilities: vi.fn(async () => ({
         capabilities: {
-          supports_per_process: true,
           supports_system_audio: true,
           supports_microphone: false,
           note: null,

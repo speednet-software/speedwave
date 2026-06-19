@@ -22,8 +22,7 @@ pub use accel::{
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL,
-    SAMPLE_RATE_HZ,
+    CaptureError, FileAudioCapture, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
 pub use mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{
@@ -101,16 +100,14 @@ mod tests {
     #[test]
     fn detect_audio_capture_picks_the_host_backend() {
         let caps = detect_audio_capture().capabilities();
-        // Windows flags are host-dependent (output device, build 20348+) and
-        // pinned precisely in audio_windows tests; other OSes use FileAudioCapture.
+        // Windows flags are host-dependent (output device); other OSes use
+        // FileAudioCapture.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
-            assert!(caps.supports_per_process);
         } else if cfg!(windows) {
             assert!(caps.note.is_some());
         } else {
             assert!(!caps.supports_system_audio);
-            assert!(!caps.supports_per_process);
         }
         // Every backend annotates a UI note.
         assert!(caps.note.is_some());

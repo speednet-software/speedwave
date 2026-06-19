@@ -10,13 +10,7 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type {
-  AudioSource,
-  AudioSourceInfo,
-  Backend,
-  CaptureCapabilities,
-  Language,
-} from '../../models/transcript';
+import type { AudioSource, AudioSourceInfo, Backend, Language } from '../../models/transcript';
 
 /** A named input device for the microphone dropdown. */
 interface MicChoice {
@@ -53,9 +47,9 @@ function accelLabel(backends: Backend[]): string {
 
 /**
  * Recording controls: language toggle (PL/EN — never auto-detected), audio
- * source picker (per-app entries only when the host backend supports it), an
- * acceleration badge, and Start/Stop. Emits `started`/`stopped` so the parent
- * can subscribe to / detach from the session's live stream.
+ * source picker (Whole meeting / System / Microphone), an acceleration badge,
+ * and Start/Stop. Emits `started`/`stopped` so the parent can subscribe to /
+ * detach from the session's live stream.
  */
 @Component({
   selector: 'app-recording-controls',
@@ -122,12 +116,6 @@ function accelLabel(backends: Backend[]): string {
         </span>
       </div>
 
-      @if (capabilities() && !capabilities()!.supports_per_process) {
-        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="per-app-note">
-          {{ capabilities()!.note ?? 'Per-app capture isn’t available on this host.' }}
-        </p>
-      }
-
       @if (mixedSourceSelected()) {
         <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
           Recording the whole meeting captures system audio (the other participants) and your
@@ -182,8 +170,6 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Host capture capabilities (drives the per-app note). */
-  readonly capabilities = signal<CaptureCapabilities | null>(null);
   /** Compiled whisper.cpp backends for this build. */
   readonly backends = signal<Backend[]>([]);
   /** Derived acceleration label. */
@@ -221,11 +207,10 @@ export class RecordingControlsComponent implements OnInit {
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
 
-  /** Loads capabilities + source list + model availability on first paint. */
+  /** Loads backends + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
-      this.capabilities.set(caps.capabilities);
       this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);

@@ -13,27 +13,14 @@ final class AudioCaptureTests: XCTestCase {
         if case .defaultDevice = opts!.mic {} else { XCTFail("expected default mic") }
     }
 
-    func testParseRecordOptionsPid() {
-        let opts = parseRecordOptions(["--source", "pid:12345", "--mic", "none"])
-        XCTAssertNotNil(opts)
-        if case .pid(let p) = opts!.source { XCTAssertEqual(p, 12345) } else { XCTFail() }
-        if case .none = opts!.mic {} else { XCTFail("expected none mic") }
-    }
-
-    func testParseRecordOptionsAllExcept() {
-        let opts = parseRecordOptions(["--source", "all-except:999", "--mic", "none"])
-        XCTAssertNotNil(opts)
-        if case .allExcept(let p) = opts!.source { XCTAssertEqual(p, 999) } else { XCTFail() }
-    }
-
     func testParseRecordOptionsRejectsMissingSource() {
         XCTAssertNil(parseRecordOptions(["--mic", "default"]))
     }
 
     func testParseRecordOptionsRejectsBadSource() {
-        XCTAssertNil(parseRecordOptions(["--source", "pid:not-a-number", "--mic", "none"]))
         XCTAssertNil(parseRecordOptions(["--source", "everything", "--mic", "none"]))
-        XCTAssertNil(parseRecordOptions(["--source", "all-except:abc", "--mic", "none"]))
+        // Per-process sources were removed — `pid:` is no longer a valid source.
+        XCTAssertNil(parseRecordOptions(["--source", "pid:12345", "--mic", "none"]))
     }
 
     func testParseRecordOptionsRejectsDanglingFlag() {
@@ -122,14 +109,13 @@ final class AudioCaptureTests: XCTestCase {
     // MARK: - Source enum mapping
 
     func testAudioSourceCases() {
-        let pid: pid_t = 42
-        let cases: [AudioSource] = [.all, .pid(pid), .allExcept(pid), .micOnly(nil), .micOnly("UID-1")]
-        XCTAssertEqual(cases.count, 5)
+        let cases: [AudioSource] = [.all, .micOnly(nil), .micOnly("UID-1")]
+        XCTAssertEqual(cases.count, 3)
         // Compile-time exhaustiveness — if a new variant lands the parser must
         // learn it before this test will pass again.
         for c in cases {
             switch c {
-            case .all, .pid(_), .allExcept(_), .micOnly(_): break
+            case .all, .micOnly: break
             }
         }
     }

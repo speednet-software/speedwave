@@ -335,37 +335,31 @@ pub async fn stop_transcription(
 }
 
 /// Validates a requested `AudioSource` against the host's `CaptureCapabilities`.
-/// Per-process needs `supports_per_process` (including when it's the system side
-/// of a `Mixed`); a `Mixed` source needs a microphone.
+/// A `Mixed` source needs a microphone and a `SystemWide` system side.
 fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
 ) -> Result<(), String> {
     // Exhaustive (no `_` arm) so a new `AudioSource` variant forces a conscious
     // validation decision here.
-    let (needs_per_process, needs_microphone): (bool, bool) = match src {
-        AudioSource::SystemWide => (false, false),
-        AudioSource::Process { .. } => (true, false),
-        AudioSource::Microphone { .. } => (false, true),
+    let needs_microphone: bool = match src {
+        AudioSource::SystemWide => false,
+        AudioSource::Microphone { .. } => true,
         AudioSource::Mixed { system, mic: _ } => {
-            // The system side of a mix must itself be capturable — System or a
-            // process, not a microphone or another mix. Reject the bad shape
-            // here so the error comes from the boundary, not a deep backend.
+            // The system side of a mix must be System — not a microphone or
+            // another mix. Reject the bad shape here so the error comes from the
+            // boundary, not a deep backend.
             match system.as_ref() {
                 AudioSource::SystemWide => {}
-                AudioSource::Process { .. } => {}
                 other => {
                     return Err(format!(
-                        "the system side of a mixed source must be System or a process, not {other:?}"
+                        "the system side of a mixed source must be System, not {other:?}"
                     ));
                 }
             }
-            (matches!(**system, AudioSource::Process { .. }), true)
+            true
         }
     };
-    if needs_per_process && !caps.supports_per_process {
-        return Err("per-app capture isn't supported on this host — use System audio".to_string());
-    }
     if needs_microphone && !caps.supports_microphone {
         return Err(if matches!(src, AudioSource::Mixed { .. }) {
             "this host has no microphone — pick System audio instead of the mixed source"
@@ -391,10 +385,8 @@ fn source_label(
     fn generic(src: &AudioSource) -> String {
         match src {
             AudioSource::SystemWide => "System (everything)".to_string(),
-            AudioSource::Process { .. } => "App audio".to_string(),
             AudioSource::Microphone { .. } => "Microphone".to_string(),
-            // A Mixed not in the picker (e.g. an explicit process + mic via the
-            // API): "<system> + microphone".
+            // A Mixed not in the picker: "<system> + microphone".
             AudioSource::Mixed { system, .. } => format!("{} + microphone", generic(system)),
         }
     }
@@ -839,7 +831,7 @@ mod tests {
 
     #[test]
     fn source_label_for_a_mixed_source_falls_back_to_system_plus_microphone() {
-        use speedwave_runtime::transcription::{AudioSource, FileAudioCapture, ProcessSelector};
+        use speedwave_runtime::transcription::{AudioSource, FileAudioCapture};
         let cap = FileAudioCapture::new();
         // SystemWide + mic → "System (everything) + microphone".
         assert_eq!(
@@ -852,63 +844,31 @@ mod tests {
             ),
             "System (everything) + microphone"
         );
-        // A process + mic → "App audio + microphone".
-        assert_eq!(
-            source_label(
-                &cap,
-                &AudioSource::Mixed {
-                    system: Box::new(AudioSource::Process {
-                        selector: ProcessSelector::Pid { pid: 1 }
-                    }),
-                    mic: None,
-                }
-            ),
-            "App audio + microphone"
-        );
     }
 
     #[test]
-    fn validate_source_against_caps_gates_per_process_and_mixed() {
-        use speedwave_runtime::transcription::{AudioSource, CaptureCapabilities, ProcessSelector};
-        let no_per_process = CaptureCapabilities {
-            supports_per_process: false,
+    fn validate_source_against_caps_gates_microphone_and_mixed() {
+        use speedwave_runtime::transcription::{AudioSource, CaptureCapabilities};
+        let full = CaptureCapabilities {
             supports_system_audio: true,
             supports_microphone: true,
             note: None,
         };
-        // Plain SystemWide is always fine.
-        assert!(validate_source_against_caps(&AudioSource::SystemWide, &no_per_process).is_ok());
-        // A Process source is rejected when per-process isn't supported…
-        assert!(validate_source_against_caps(
-            &AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1 }
-            },
-            &no_per_process
-        )
-        .is_err());
-        // …and so is a Mixed whose system side is a Process.
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: 1 }
-                }),
-                mic: None,
-            },
-            &no_per_process
-        )
-        .is_err());
-        // A Mixed with a SystemWide system side is fine on this host.
+        // SystemWide, a bare Microphone, and a SystemWide-backed Mixed are fine.
+        assert!(validate_source_against_caps(&AudioSource::SystemWide, &full).is_ok());
+        assert!(
+            validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
+        );
         assert!(validate_source_against_caps(
             &AudioSource::Mixed {
                 system: Box::new(AudioSource::SystemWide),
                 mic: None,
             },
-            &no_per_process
+            &full
         )
         .is_ok());
-        // …but not if the host has no microphone.
+        // A Mixed (or bare mic) is rejected on a host with no microphone.
         let no_mic = CaptureCapabilities {
-            supports_per_process: true,
             supports_system_audio: true,
             supports_microphone: false,
             note: None,
@@ -921,19 +881,12 @@ mod tests {
             &no_mic
         )
         .is_err());
-        // A bare Microphone is rejected on a host with no mic.
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
         );
         // A structurally-invalid Mixed (mic-as-system, or nested Mixed) is
         // rejected at the boundary regardless of capabilities.
-        let full = CaptureCapabilities {
-            supports_per_process: true,
-            supports_system_audio: true,
-            supports_microphone: true,
-            note: None,
-        };
         assert!(validate_source_against_caps(
             &AudioSource::Mixed {
                 system: Box::new(AudioSource::Microphone { device: None }),
@@ -953,25 +906,5 @@ mod tests {
             &full
         )
         .is_err());
-        // A per-process source is fine when the host supports it.
-        assert!(validate_source_against_caps(
-            &AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1 }
-            },
-            &full
-        )
-        .is_ok());
-        // A bare Microphone and a SystemWide-backed Mixed are fine.
-        assert!(
-            validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
-        );
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &full
-        )
-        .is_ok());
     }
 }
