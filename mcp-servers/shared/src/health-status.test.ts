@@ -138,8 +138,7 @@ describe('makeStandardHealthCheck', () => {
     const t = new ConnectionStatusTracker();
     t.setFailed('');
     const hc = makeStandardHealthCheck(t, 'TestService');
-    // setFailed with empty string still sets _error to ''; the factory uses
-    // `??` so falsy strings DO appear in the message — verify exact behaviour.
+    // empty-string error appears in the message (`??` keeps falsy strings).
     await expect(hc()).rejects.toThrow('TestService connection failed:');
   });
 });

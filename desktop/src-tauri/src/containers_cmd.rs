@@ -1,8 +1,6 @@
 // Container lifecycle and setup wizard Tauri commands.
-//
-// Extracted from main.rs — thin #[tauri::command] wrappers that delegate to
-// `setup_wizard` and `speedwave_runtime` functions, converting errors to
-// `Result<T, String>` for Tauri's serialization boundary.
+// Thin #[tauri::command] wrappers delegating to `setup_wizard` and
+// `speedwave_runtime`, mapping errors to `Result<T, String>`.
 
 use speedwave_runtime::config;
 
@@ -45,10 +43,7 @@ pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    // A bare `Bearer` (no token after it) reaches `strip_bearer_prefix` only
-    // when the trailing space survives the trim — but `trimmed` already
-    // removed it. Detect the prefix-only case explicitly so the user sees
-    // the actionable error instead of having the stripper return `Some("Bearer")`.
+    // Reject a bare `Bearer` (no token) with an actionable error.
     if trimmed.eq_ignore_ascii_case("bearer") {
         return Err("api_key must not be empty after stripping the 'Bearer ' prefix".to_string());
     }
@@ -238,10 +233,7 @@ fn spawn_background_teardown_with(
         }
     });
     if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
-        // Finished by construction: PROJECT_TRANSITION_LOCK serialises
-        // switches and wait_for_pending_teardown precedes every restart of
-        // this project — so an entry can only be replaced after its thread
-        // ran to completion. join() is then a no-op cleanup.
+        // Replaced entry already finished; join() is a no-op cleanup.
         let _ = old.join();
     }
 }
@@ -966,15 +958,9 @@ pub fn get_default_anthropic_model_label() -> Option<&'static str> {
     speedwave_runtime::defaults::default_anthropic_family_label()
 }
 
-/// Applies LLM config to the active project in-memory. Extracted for
-/// testability and reused by `update_llm_config`.
-///
-/// Cross-field invariants are enforced here, not just in `update_llm_config`:
-/// internal callers that build a `LlmConfig` directly (setup wizard, future
-/// migration paths) must not be able to persist `provider=<local>, model=None`.
-/// The Tauri command performs the same checks earlier so the user gets a
-/// human-readable error before the save attempt; the duplicated guard here is
-/// the safety net.
+/// Applies LLM config to the active project in-memory. Enforces the
+/// cross-field invariant (a local provider must have a model) for all
+/// callers, including those bypassing `update_llm_config`.
 fn apply_llm_config(
     user_config: &mut config::SpeedwaveUserConfig,
     update: config::LlmConfig,
@@ -1434,14 +1420,8 @@ mod tests {
         }
     }
 
-    /// Builds a `LlmConfig` for tests. `context_tokens` is always `None` —
-    /// every test in this module covers the boundary either via a real
-    /// provider (where context is discovered, not hand-set) or via the
-    /// model/url validation guards that run before context is consulted.
-    /// Centralising the literal so adding a future `LlmConfig` field
-    /// touches one helper, not 14 inline struct expressions.
-    /// Test helper: returns the legacy `LlmConfig` for callers that exercise
-    /// the lower-level `apply_llm_config` (the in-memory mutator).
+    /// Test helper: builds a `LlmConfig` (`context_tokens` always `None`)
+    /// for the lower-level `apply_llm_config`.
     fn llm(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfig {
         LlmConfig {
             provider: Some(provider.to_string()),

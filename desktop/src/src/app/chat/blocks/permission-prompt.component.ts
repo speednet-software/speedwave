@@ -4,14 +4,7 @@ import { IconComponent } from '../../shared/icon.component';
 /** Decision emitted by the permission prompt. */
 export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
 
-/**
- * Amber callout asking the user to authorise a tool invocation.
- *
- * Matches the terminal-minimal mockup (lines 796–808): rounded amber-bordered
- * box with a 4% amber wash, mono header (warning glyph + label + tool name),
- * monospaced command preview, and three action buttons (allow-once primary
- * accent, allow-always neutral bordered, deny red bordered).
- */
+/** Amber callout asking the user to authorise a tool invocation. */
 @Component({
   selector: 'app-permission-prompt',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -89,12 +82,7 @@ export class PermissionPromptComponent {
   /** Parent receives the user's typed decision. */
   readonly decided = output<PermissionDecision>();
 
-  /**
-   * Stable DOM id for `aria-labelledby` on the dialog wrapper. Generated once
-   * at construction so re-renders don't break the ARIA pairing — uses an
-   * incrementing counter rather than `Math.random` so test fixtures get
-   * deterministic ids.
-   */
+  /** Stable per-instance DOM id base for `aria-labelledby` on the dialog wrapper. */
   private static instanceCounter = 0;
   private readonly instanceId = ++PermissionPromptComponent.instanceCounter;
   readonly headerId = `permission-header-${this.instanceId}`;

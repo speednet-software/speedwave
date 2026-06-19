@@ -22,8 +22,7 @@ describe('parsePositiveInt', () => {
 });
 
 describe('paths', () => {
-  // Canary: several test mock factories hardcode `/workspace/.speedwave/office`. If this
-  // shape ever changes, those mocks (and the SKILL.md doc) must be updated alongside.
+  // Canary: test mocks + SKILL.md hardcode `/workspace/.speedwave/office` — sync if changed.
   it('OUTPUT_DIR is `<WORKSPACE_ROOT>/.speedwave/office`', () => {
     expect(WORKSPACE_ROOT).toBe('/workspace');
     expect(OUTPUT_DIR).toBe('/workspace/.speedwave/office');

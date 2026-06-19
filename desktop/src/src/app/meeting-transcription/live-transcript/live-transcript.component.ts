@@ -13,9 +13,8 @@ import { TranscriptionService } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 /**
- * Seconds → `MM:SS`. (Segment timestamps are serde `Duration` `{secs,nanos}`;
- * the caller passes `.secs` — sub-second precision isn't shown.)
- * @param secs - whole seconds since the recording started.
+ * Seconds → `MM:SS`.
+ * @param secs - whole seconds since recording started.
  */
 function fmtTs(secs: number): string {
   return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
@@ -28,14 +27,7 @@ interface SpeakerRun {
   text: string;
 }
 
-/**
- * The live transcript view (right pane): renders the active session's segments
- * (the offline `final_segments` if the pass ran, else `live_segments`), groups
- * consecutive segments by speaker, lets the user rename a speaker (the chip is
- * marked "provisional" — labels can change after the offline pass), shows the
- * finalize progress bar, and has a "Send to Claude" button behind a confirm
- * dialog (the markdown leaves the machine).
- */
+/** Live transcript view: segments grouped by speaker, rename, finalize progress, Send-to-Claude. */
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
@@ -147,8 +139,7 @@ export class LiveTranscriptComponent {
   private readonly cdr = inject(ChangeDetectorRef);
 
   /**
-   * Display label for a speaker id — the user-supplied name if any, else
-   * `Speaker N` (1-indexed), or `Speaker ?` when unassigned.
+   * Display label: user name, or `Speaker N` (1-indexed), or `Speaker ?` if unassigned.
    * @param id - speaker id or `null`.
    */
   speakerLabel(id: number | null): string {
@@ -158,8 +149,8 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Prompts for a new name for a speaker and persists it.
-   * @param id - speaker id (`null` is ignored — can't rename "unknown").
+   * Prompt to rename speaker and persist.
+   * @param id - speaker id (`null` is ignored).
    */
   async rename(id: number | null): Promise<void> {
     const s = this.session();

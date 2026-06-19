@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// The worker entry delegates to the shared bootWorker; mock it so we can assert
-// the declarative options (fail-fast policy, health-check wiring) without
-// opening a socket. bootWorker's own behaviour is covered in shared/boot.test.ts.
 const { bootWorkerMock } = vi.hoisted(() => ({ bootWorkerMock: vi.fn() }));
 
 vi.mock('@speedwave/mcp-shared', async () => {

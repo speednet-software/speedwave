@@ -258,8 +258,7 @@ async function main() {
     console.log(`${ts()}    2. execute_code     - JavaScript execution in sandbox`);
   });
 
-  // Graceful shutdown handler — only reachable via OS signals at runtime, not in unit tests.
-  // The lambdas registered with process.on() are also only invoked by OS signals, never in tests.
+  // Graceful shutdown handler.
   /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
@@ -314,8 +313,6 @@ export function createSessionRateLimiter() {
 
 /**
  * Create the Hub Express app with MCP transport endpoints.
- * Extracted for testability — callers can exercise routes without starting
- * the full server (health check, bridges, registry).
  * @param rpcHandler - JSON-RPC handler to process incoming requests
  * @returns Configured Express app
  */

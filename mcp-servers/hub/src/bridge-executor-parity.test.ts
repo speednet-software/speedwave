@@ -1,15 +1,5 @@
 /**
- * Bridge-Executor Parity Tests (SSOT Architecture)
- *
- * With the Single Source of Truth (SSOT) refactoring:
- * - Both http-bridge and executor are generated from TOOL_REGISTRY
- * - Parity is GUARANTEED BY DESIGN
- * - No more manual sync needed between files
- *
- * These tests verify:
- * 1. Registry contains all expected methods
- * 2. Bridges are correctly generated from registry
- * 3. Registry consistency with tool files
+ * Bridge-Executor Parity Tests: bridges and registry stay consistent.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';

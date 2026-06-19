@@ -1,14 +1,4 @@
-// LLM model discovery — Tauri command for probing local LLM servers.
-//
-// When a user configures a local-LLM provider in Settings (ollama, lmstudio,
-// llamacpp) the Desktop can hit the server's `/v1/models` or `/api/tags`
-// endpoint and present the advertised models as a `<select>`.
-// The same SSRF-safe validation path (`validate_llm_base_url`) is reused by
-// `containers_cmd::update_llm_config` so both discover and save reject
-// link-local, metadata, and other dangerous URLs.
-//
-// See docs/adr/ADR-041-local-llm-model-discovery.md for the threat model and
-// the RFC1918/loopback/public-domain policy rationale.
+// LLM model discovery via HTTP probes (see ADR-041 for the threat model).
 
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -28,14 +18,7 @@ const DISCOVERY_TIMEOUT_SECS: u64 = 5;
 // Public DTO surfaced through Tauri to the frontend
 // ---------------------------------------------------------------------------
 
-/// One discovered model from a local LLM server.
-///
-/// `context_tokens` is `None` when the provider's listing endpoint did not
-/// expose the model's context window — the frontend then leaves the chat
-/// footer's `used / max` ratio derived from the stream-level
-/// `context_window_size` (when available) or falls back to the global
-/// default. We deliberately do not invent a value: silent guesses
-/// undermine the SSOT goal.
+/// One discovered model; `context_tokens` is `None` when unavailable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoveredModel {
     pub id: String,
@@ -43,11 +26,7 @@ pub struct DiscoveredModel {
     pub context_tokens: Option<u32>,
 }
 
-/// Result of a `provider="local"` discovery probe. Pairs the model list with
-/// a chat-endpoint sanity flag so the UI can warn when a server advertises
-/// models via `/v1/models` but does not implement the Anthropic Messages
-/// API (`/v1/messages`). `None` for the flag means "could not determine"
-/// (timeout, transport error) — UI treats it as unknown rather than failure.
+/// Discovery result: model list + optional messages-endpoint flag (`None` = undetermined).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverResult {
     pub models: Vec<DiscoveredModel>,
@@ -59,14 +38,8 @@ pub struct DiscoverResult {
 // Pure parsers (tested in isolation, no HTTP)
 // ---------------------------------------------------------------------------
 
-/// Parses the JSON returned by `POST /api/show` and locates the model's
-/// context window. The key is dynamic: `model_info["<arch>.context_length"]`
-/// where `<arch>` is the value of `model_info["general.architecture"]`
-/// (`"llama"`, `"qwen2"`, `"mistral"`…). When the architecture key is
-/// absent we still scan for any key ending in `.context_length` so we
-/// degrade gracefully against future Ollama schema tweaks. Returns `None`
-/// when no context length is found — caller persists `context_tokens: None`
-/// and the chat fallback chain takes over.
+/// Parses `POST /api/show` response; extracts context window from the
+/// architecture-specific `*.context_length` key.
 fn parse_ollama_show(body: &[u8]) -> Option<u32> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let model_info = v.get("model_info")?.as_object()?;
@@ -90,10 +63,8 @@ fn parse_ollama_show(body: &[u8]) -> Option<u32> {
     None
 }
 
-/// Convert a server-reported context-length to `u32`, treating both overflow
-/// and a literal `0` as "unknown". A zero would otherwise propagate through
-/// to `update_llm_config` and surface as a misleading "context_tokens must
-/// be greater than 0" error at save time.
+/// Converts a server-reported context-length to `u32`, treating overflow and
+/// `0` as "unknown".
 fn non_zero_u32(n: u64) -> Option<u32> {
     u32::try_from(n).ok().filter(|&v| v > 0)
 }
@@ -102,21 +73,9 @@ fn non_zero_u32(n: u64) -> Option<u32> {
 // URL validation (shared between discover and save paths)
 // ---------------------------------------------------------------------------
 
-/// Validates a base URL for a local LLM provider.
-///
-/// Policy (see ADR-041):
-/// - Loopback (127.0.0.0/8, ::1, IPv6-mapped loopback) — allowed with `warn!`.
-/// - RFC 1918 private + IPv6 ULA (fc00::/7) — allowed with `warn!`.
-/// - Link-local / metadata / reserved — rejected via `validate_url`.
-/// - Public IP / public domain — allowed with `warn!` (user-written URL; same
-///   threat model as Redmine's `validate_redmine_host_url`).
-/// - `http://` scheme warns about cleartext transmission.
-///
-/// Rejects embedded credentials, backslashes, query strings, fragments, and
-/// non-HTTP schemes in all cases.
-///
-/// Returns the parsed `url::Url` so callers (the discover pipeline) can reuse
-/// the parse result without re-parsing.
+/// Validates a base URL for a local LLM provider (policy: ADR-041). Allows
+/// loopback/private/public with `warn!`, rejects link-local/metadata/reserved,
+/// credentials, backslashes, query, fragment, and non-HTTP schemes.
 pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
@@ -133,12 +92,7 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
         return Err("URL must not contain a fragment".to_string());
     }
 
-    // If the host is a private on-premise address (loopback, RFC1918, ULA) OR
-    // the literal hostname `localhost` (which `validate_url` otherwise blocks),
-    // skip the base validator and check scheme/host ourselves. Otherwise
-    // delegate to `validate_url` which handles link-local rejection, IPv6-mapped
-    // IPv4 bypass prevention, decimal IP bypass, and the full RFC 5737 / 2544 /
-    // 6666 / 3849 reserved-range set.
+    // On-premise/localhost: validate scheme/host here; else delegate to validate_url.
     let host_is_localhost = matches!(
         candidate.host(),
         Some(url::Host::Domain(d)) if d.eq_ignore_ascii_case("localhost")
@@ -154,13 +108,7 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
                     ))
                 }
             }
-            // Host is guaranteed present here: host_is_localhost requires
-            // Some(Domain("localhost")); is_private_on_premise returns true
-            // only for Some(Ipv4) or Some(Ipv6). The `<bug:no-host>` token
-            // is a deliberate giveaway in the warning log: if it ever
-            // appears, the upstream guard regressed and host classification
-            // was bypassed — making it impossible to confuse with a real
-            // hostname.
+            // Host guaranteed present here by the on-premise/localhost classifier.
             let host = candidate.host_str().unwrap_or("<bug:no-host>");
             if host_is_localhost || is_loopback_host(&candidate) {
                 log::warn!("Allowing loopback address for local LLM: {}", host);
@@ -170,8 +118,7 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             candidate
         } else {
             let v = validate_url(url)?;
-            // Same invariant as above: `validate_url` rejects schemes / IP
-            // classes that lack a host, so `Ok` guarantees `Some` here.
+            // Host guaranteed present: `validate_url` Ok implies `Some`.
             let host = v.host_str().unwrap_or("<bug:no-host>");
             log::warn!("Allowing public address for local LLM: {}", host);
             v
@@ -182,8 +129,7 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
         return Err("URL must not contain embedded credentials".to_string());
     }
 
-    // Warn about cleartext HTTP (credentials are not transmitted, but an
-    // on-path attacker can still read LLM traffic content).
+    // Warn about cleartext HTTP.
     if parsed.scheme() == "http" {
         log::warn!("LLM traffic will be transmitted in cleartext over HTTP");
     }
@@ -218,11 +164,8 @@ fn build_llm_probe_client() -> Result<reqwest::Client, String> {
     build_llm_probe_client_with_auth(None, None)
 }
 
-/// Builds an HTTP client with optional `Authorization: Bearer <token>` and
-/// optional custom headers (`Name: Value` per line). Custom headers are
-/// applied as **default headers** (sent on every request from the client).
-/// `Authorization` in `custom_headers` is rejected defensively — it would
-/// collide with the Bearer token added separately.
+/// Builds an HTTP client with optional Bearer auth and custom default headers.
+/// Rejects `Authorization` in `custom_headers`.
 fn build_llm_probe_client_with_auth(
     bearer: Option<&str>,
     custom_headers: Option<&str>,
@@ -248,9 +191,7 @@ fn build_llm_probe_client_with_auth(
             let name = name.trim();
             let value = rest.trim();
             if name.eq_ignore_ascii_case("authorization") {
-                // Defense-in-depth: validation should have rejected on save,
-                // but we double-check here so a stale config can't smuggle
-                // Authorization back in via the headers blob.
+                // Guard against stale config smuggling Authorization.
                 return Err(
                     "custom_headers must not contain Authorization (use api_key)".to_string(),
                 );
@@ -282,9 +223,7 @@ fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, Stri
         .parse()
         .map_err(|e: url::ParseError| format!("Invalid base_url: {e}"))?;
 
-    // 3. Rewrite container-side host aliases (host.docker.internal etc.) to
-    //    loopback. On the Desktop host process, those aliases are not in
-    //    /etc/hosts — we need to hit the server on 127.0.0.1 directly.
+    // 3. Rewrite container-side host aliases (host.docker.internal etc.) to loopback.
     if let Some(host_str) = parsed.host_str() {
         if let Some(loopback) = crate::http_util::rewrite_container_alias_to_loopback(host_str) {
             parsed
@@ -303,10 +242,8 @@ fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, Stri
 // cannot route to but the VM (via Apple VZ NAT / WSL2 mirrored) can.
 // ---------------------------------------------------------------------------
 
-/// Minimal HTTP transport for the discovery probe. Returned `body` is capped
-/// at [`MAX_RESPONSE_BODY_BYTES`]; callers parse it as JSON. Auth headers
-/// (`Authorization: Bearer …`, custom headers) are pre-configured on the
-/// implementation; calls supply only URL + optional JSON body.
+/// Minimal HTTP transport for the discovery probe; `body` capped at
+/// [`MAX_RESPONSE_BODY_BYTES`]. Auth headers are pre-configured on the impl.
 #[async_trait::async_trait]
 pub(crate) trait ProbeTransport: Send + Sync {
     /// `GET url` with `Accept: application/json`. Returns `(status, body)`.
@@ -401,11 +338,8 @@ impl ProbeTransport for HostProbe {
     }
 }
 
-/// VM-side probe via `vm_exec` + `curl`. Used when the host cannot reach the
-/// target URL but the VM can (Apple VZ NAT inherits macOS VPN routing;
-/// WSL2 mirrored mode inherits Windows VPN routing). Falls back to
-/// `HostProbe` automatically in `discover_llm_models` if the VM is not
-/// available (fresh install).
+/// VM-side probe via `vm_exec` + `curl`; reaches corporate-VPN endpoints
+/// (Apple VZ / WSL2 inherit host routing).
 pub(crate) struct VmProbe {
     bearer: Option<String>,
     custom_headers: Option<String>,
@@ -516,9 +450,7 @@ fn run_vm_curl_blocking(
             if line.is_empty() {
                 continue;
             }
-            // Mirror the HostProbe / save-path guard: a stale custom_headers
-            // file must not smuggle an `Authorization` header that collides
-            // with the Bearer added separately.
+            // Reject `Authorization` in custom_headers (mirrors HostProbe/save guard).
             if line
                 .split_once(':')
                 .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
@@ -600,24 +532,11 @@ fn run_vm_curl_blocking(
 // Core logic (parameterized timeout for testing)
 // ---------------------------------------------------------------------------
 
-/// Issues a GET against `<base>/<path>` with shared status / content-type /
-/// body-size guards. Returns the validated body bytes ready for parsing.
-/// Bounded fan-out for `/api/show` probes. Higher floods Ollama; lower
-/// stretches wall-clock for users with large model libraries.
+/// Bounded fan-out concurrency for `/api/show` probes.
 const MAX_OLLAMA_PROBE_CONCURRENCY: usize = 8;
 
-/// Per-entry context detection for the `provider="local"` path.
-///
-/// Reads `/v1/models` and for each entry tries to extract a context window
-/// from inline metadata in this order:
-/// 1. `meta.n_ctx_train` (llama.cpp / Unsloth / vLLM)
-/// 2. `max_context_length` (LM Studio 0.4.1+)
-///
-/// Entries that lack inline context fall back to Ollama's `POST /api/show`
-/// path — one **sanity** call on the first missing entry decides whether to
-/// fan out: 200 → fan out for the rest; 404/error → all remaining missing
-/// stay `None`. This bounds the worst-case call count for unknown servers
-/// (generic OpenAI gateway = 2 + 1 sanity = 3 calls, never N×404).
+/// Extracts per-entry context from inline `/v1/models` metadata, falling back
+/// to Ollama `/api/show` (one sanity call bounds the fan-out).
 async fn discover_local(
     base: &url::Url,
     transport: &dyn ProbeTransport,
@@ -718,10 +637,9 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Parses an OpenAI-shape `/v1/models` response, extracting `id` plus an
-/// inline context window from either `meta.n_ctx_train` (llama.cpp shape) or
-/// `max_context_length` (LM Studio shape) on a per-entry basis. Servers that
-/// expose neither return `context_tokens: None` for every entry.
+/// Parses an OpenAI-shape `/v1/models` response, extracting `id` plus a
+/// per-entry inline context window from `meta.n_ctx_train` or
+/// `max_context_length` (`None` when neither is present).
 fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("failed to parse /v1/models response: {e}"))?;
@@ -805,10 +723,7 @@ async fn discover_openrouter(
 }
 
 /// Strips a leading `Bearer ` (case-insensitive) and trims whitespace.
-/// Returns `None` when the result is empty. Shared between save-time
-/// validation (`containers_cmd::validate_api_key`) and the discovery
-/// resolver so a user who pastes `Bearer sk-…` from a curl example sees
-/// the same normalisation everywhere.
+/// Returns `None` when the result is empty.
 pub(crate) fn strip_bearer_prefix(s: &str) -> Option<String> {
     let trimmed = s.trim();
     let stripped = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("Bearer ") {
@@ -823,10 +738,8 @@ pub(crate) fn strip_bearer_prefix(s: &str) -> Option<String> {
     }
 }
 
-/// Tri-state credential resolver for discovery. Transient UI value wins over
-/// stored on-disk; `Some(None)` / `Some(Some(""))` means "no auth" (ignore
-/// stored). `active_project` is passed in so the caller can load it once
-/// when both `api_key` and `custom_headers` need to be resolved.
+/// Tri-state credential resolver: transient UI value wins over stored on-disk;
+/// `Some(None)` / `Some(Some(""))` means "no auth".
 fn resolve_transient_credential(
     field: Option<&Option<String>>,
     active_project: Option<&str>,
@@ -854,10 +767,7 @@ async fn probe_messages_endpoint(base: &url::Url, transport: &dyn ProbeTransport
     match resp {
         Ok(r) => {
             let status = r.status;
-            // 200/4xx (other than 404/405) → endpoint exists.
-            // 404/405 → endpoint missing.
-            // Anything else → unknown (5xx is also "unknown" because it
-            // could be a transient overload; the model probe was cheap).
+            // 2xx/4xx (not 404/405) = ok; 404/405 = missing; else = unknown.
             match status {
                 404 | 405 => Some(false),
                 s if (200..500).contains(&s) => Some(true),
@@ -868,16 +778,8 @@ async fn probe_messages_endpoint(base: &url::Url, transport: &dyn ProbeTransport
     }
 }
 
-/// Discovers available models from a local LLM server.
-///
-/// `timeout` controls the reqwest-level request timeout for every
-/// individual HTTP call (Ollama issues `1 + N` calls, others `1`).
-/// Production uses `DISCOVERY_TIMEOUT_SECS` via the Tauri wrapper; tests
-/// pass shorter durations to keep the suite fast.
-///
-/// Returns `Err("empty")` when the server responds OK but with no models (a
-/// server up without any model loaded). The UI treats this the same as an
-/// offline server and falls back to the free-text input.
+/// Discovers models from a local LLM server; `timeout` applies per HTTP call.
+/// Returns `Err("empty")` when the server responds OK but lists no models.
 pub(crate) async fn do_discover_llm_models(
     provider: &str,
     base_url: &str,
@@ -901,11 +803,7 @@ pub(crate) async fn do_discover_llm_models(
 
     let validated = normalize_and_validate_discovery_url(base_url)?;
 
-    // All non-anthropic providers route through the unified `discover_local`
-    // path (per-entry inline context detection + Anthropic Messages sanity
-    // probe). Legacy provider names (`ollama`/`lmstudio`/`llamacpp`) are
-    // accepted on read for two release cycles — the Settings UI auto-migrates
-    // them to `local` on the next Save (ADR-040 §"Supported Providers").
+    // Non-anthropic providers route through `discover_local`; legacy names accepted on read.
     let (raw_models, messages_endpoint_ok) = match provider {
         "local" | "ollama" | "lmstudio" | "llamacpp" => {
             let (models, sanity) = futures_util::future::join(
@@ -943,12 +841,9 @@ pub(crate) async fn do_discover_llm_models(
 // Tauri command (thin wrapper)
 // ---------------------------------------------------------------------------
 
-/// Tri-state credential params for discovery.
-///
-/// `api_key == None` (field omitted) — use the stored token file (if any).
-/// `api_key == Some(None)` or `Some(Some(""))` — probe **without** Bearer
-/// even if a token exists on disk. `api_key == Some(Some(value))` — use the
-/// transient value, ignore stored. Same semantics for `custom_headers`.
+/// Tri-state credential params for discovery: `None` = use stored token;
+/// `Some(None)`/`Some(Some(""))` = probe without auth; `Some(Some(v))` =
+/// use transient value. Same semantics for `custom_headers`.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverLlmModelsArgs {
@@ -979,11 +874,7 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
         "custom_headers",
     );
     let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
-    // Try VM-routed probe first when a VM is available — that gives access to
-    // VPN-only servers (Lima vzNAT + WSL2 mirrored inherit host routing).
-    // Fall back to the host-side reqwest client when the VM is missing
-    // (fresh install) or the VM probe fails. The fallback is silent: users
-    // shouldn't have to choose a probe path.
+    // Try VM probe first (reaches VPN servers); fall back to host probe silently.
     let runtime = speedwave_runtime::runtime::detect_runtime();
     let vm_available = runtime.is_available();
     let result = if vm_available {
@@ -1099,8 +990,7 @@ mod tests {
 
     #[test]
     fn parse_ollama_show_resolves_arch_specific_context_length() {
-        // Real /api/show response shape (truncated): `general.architecture`
-        // selects which `<arch>.context_length` key carries the window.
+        // Real /api/show shape: `general.architecture` selects the `<arch>.context_length` key.
         let body = br#"{
             "license": "...",
             "modelfile": "...",
@@ -1115,9 +1005,7 @@ mod tests {
 
     #[test]
     fn parse_ollama_show_falls_back_to_any_context_length_key() {
-        // If the `general.architecture` key is missing we still grab any
-        // `<X>.context_length` we can find. Future Ollama schema tweaks
-        // shouldn't silently drop us back to 200k.
+        // Missing `general.architecture`: still grab any `<X>.context_length`.
         let body = br#"{
             "model_info": {
                 "llama.context_length": 8192
@@ -1143,15 +1031,7 @@ mod tests {
     }
 
     // ── zero-context_tokens guard ───────────────────────────────────────
-    //
-    // A literal `0` from the server (or an overflow on `u32::try_from`)
-    // would otherwise propagate to `update_llm_config`, which rejects it
-    // with a misleading "context_tokens must be greater than 0" error
-    // — confusing because it's an internal invariant, not a user mistake.
-    // `non_zero_u32` flips zero to `None` so the chat fallback chain
-    // takes over instead. The unified `parse_openai_models_with_context`
-    // path is covered by separate tests; legacy LM Studio / llama.cpp
-    // specific parsers have been removed alongside their helpers.
+    // `non_zero_u32` flips a server-reported `0` (or overflow) to `None`.
 
     #[test]
     fn parse_ollama_show_treats_zero_context_length_as_unknown() {
@@ -1185,16 +1065,11 @@ mod tests {
     }
 
     // ── validate_llm_base_url: branch coverage ──────────────────────────
-    //
-    // `url_validation::validate_url` already has 50+ tests covering every
-    // RFC-reserved range and IPv6-mapped IPv4 bypass. These tests cover the
-    // LLM-specific delta: branch selection (on-premise arm vs. delegation
-    // arm) and the policy difference (loopback allowed).
+    // LLM-specific delta: branch selection and policy (loopback allowed).
 
     #[test]
     fn validate_allows_localhost_hostname() {
-        // The `localhost` hostname is special-cased via host_is_localhost in
-        // validate_llm_base_url — must be allowed under the LLM policy.
+        // `localhost` is special-cased and allowed under the LLM policy.
         assert!(validate_llm_base_url("http://localhost:11434").is_ok());
     }
 
@@ -1326,9 +1201,7 @@ mod tests {
     }
 
     // ── Log capture tests ───────────────────────────────────────────────
-    //
-    // Uses a process-global TestLogger behind `serial_test::serial` to avoid
-    // interference from tauri-plugin-log or parallel tests.
+    // Process-global TestLogger behind `serial_test::serial`.
 
     struct TestLogger {
         records: Mutex<Vec<(log::Level, String)>>,
@@ -1363,8 +1236,7 @@ mod tests {
     fn test_logger() -> &'static TestLogger {
         static LOGGER: OnceLock<TestLogger> = OnceLock::new();
         let logger = LOGGER.get_or_init(TestLogger::new);
-        // Safe to call multiple times — only the first succeeds; subsequent
-        // calls return Err which we ignore.
+        // Only the first `set_logger` succeeds; later calls Err (ignored).
         let _ = log::set_logger(logger);
         log::set_max_level(log::LevelFilter::Trace);
         logger
@@ -1464,12 +1336,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_discover_rewrites_docker_internal_via_mockito() {
-        // Start a local mockito server on a dynamic 127.0.0.1 port, then call
-        // do_discover with base_url = host.docker.internal:{port}. The rewrite
-        // helper must substitute 127.0.0.1 so the request actually lands on
-        // our mock (rather than failing DNS resolution for host.docker.internal
-        // on the host). Uses `/v1/models` since legacy provider names route
-        // through `discover_local`.
+        // host.docker.internal:{port} must rewrite to 127.0.0.1 to reach the mock.
         let mut server = mockito::Server::new_async().await;
         let port = server.host_with_port();
         let port = port.split(':').nth(1).unwrap();
@@ -1499,9 +1366,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_legacy_ollama_alias_routes_to_unified_path() {
-        // Legacy `provider="ollama"` continues to work for 2 release cycles.
-        // Backend routes it through `discover_local` (which hits `/v1/models`
-        // since Ollama 0.14+), not the obsolete `/api/tags`.
+        // Legacy `provider="ollama"` routes through `discover_local` (`/v1/models`).
         let mut server = mockito::Server::new_async().await;
         let _models_mock = server
             .mock("GET", "/v1/models")
@@ -1532,8 +1397,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_legacy_lmstudio_alias_routes_to_unified_path() {
-        // Legacy `provider="lmstudio"` continues to work — context window is
-        // extracted inline from `/v1/models` (LM Studio 0.4.1+ shape).
+        // Legacy `provider="lmstudio"`: context extracted inline from `/v1/models`.
         let mut server = mockito::Server::new_async().await;
         let _models_mock = server
             .mock("GET", "/v1/models")
@@ -1585,11 +1449,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_rejects_custom_provider_after_removal() {
-        // Regression guard: `custom` was removed as a first-class provider. Any
-        // lingering config that still passes it through the Tauri command must
-        // now land on the generic unknown-provider path (`Err("unsupported")`),
-        // not a bespoke `custom` branch that routes to `/v1/models`. The client
-        // is unused because the rejection happens before any HTTP call.
+        // Regression guard: removed `custom` provider now returns `Err("unsupported")`.
         let client = build_llm_probe_client().unwrap();
         let err = do_discover_llm_models(
             "custom",
@@ -1602,10 +1462,7 @@ mod tests {
         assert_eq!(err, "unsupported");
     }
 
-    // Generic HTTP-layer integration tests use llama.cpp because it shares the
-    // OpenAI-compatible `/v1/models` endpoint exercised by mockito. They cover
-    // status / content-type / size / timeout / redirect behaviour of
-    // `fetch_json` and apply equally to LM Studio's `/api/v0/models` path.
+    // Generic HTTP-layer tests via llama.cpp; cover status/content-type/timeout/redirect.
     #[tokio::test]
     async fn integration_returns_err_on_500() {
         let mut server = mockito::Server::new_async().await;
@@ -1675,8 +1532,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_accepts_mixed_case_json_content_type() {
-        // Regression guard: the content-type sanity check must NOT reject
-        // `application/json; charset=utf-8` with unusual casing.
+        // Content-type check must accept `application/json; charset=utf-8` (any casing).
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1759,8 +1615,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_redirect_not_followed() {
-        // First server returns 302 → second server. Second server must never
-        // be hit because Policy::none() blocks redirect following.
+        // 302 → second server must never be hit (`Policy::none()` blocks redirects).
         let mut target = mockito::Server::new_async().await;
         let never_hit = target
             .mock("GET", "/v1/models")
@@ -1793,10 +1648,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_redirect_to_metadata_ip_not_followed() {
-        // 302 → http://169.254.169.254/latest/meta-data/. If we were following
-        // redirects, this would turn into a real (slow / refused) network
-        // fetch. Assertion (b): wrap the whole operation in a 500ms timeout —
-        // if we blew through it, something fetched the metadata URL.
+        // 302 → metadata IP; 500ms timeout asserts the URL was never fetched.
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1876,8 +1728,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_with_inline_meta_skips_fallback_calls() {
-        // llama.cpp-shape inline context → exactly 2 calls total:
-        // `/v1/models` and `/v1/messages` sanity. No `/api/show`.
+        // Inline context → exactly 2 calls (`/v1/models` + `/v1/messages`), no `/api/show`.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1917,9 +1768,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_warns_when_messages_endpoint_missing() {
-        // Server has `/v1/models` but returns 404 on `/v1/messages` — UI
-        // should get `messages_endpoint_ok: Some(false)` so it can warn.
-        // Inline `meta.n_ctx_train` → no `/api/show` fallback fires.
+        // 404 on `/v1/messages` → `messages_endpoint_ok: Some(false)`; inline meta, no `/api/show`.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1956,9 +1805,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_falls_back_to_ollama_show_when_no_inline_meta() {
-        // Generic `/v1/models` without inline meta + Ollama `/api/show` works.
-        // Expected exact call counts: /v1/models = 1, /api/show = N (one
-        // sanity + N-1 fan-out = 2 for 2 models), /v1/messages = 1.
+        // No inline meta: expect 1 + N `/api/show` calls (sanity + fan-out).
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -2003,9 +1850,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_generic_openai_gateway_stays_under_three_calls_for_context() {
-        // Server has `/v1/models` but neither inline meta NOR /api/show.
-        // Expected exact: 1 /v1/models + 1 sanity /api/show (404) + 1
-        // /v1/messages = 3 calls. Critical: must NOT fire N×/api/show.
+        // Generic gateway: 1 `/v1/models` + 1 sanity `/api/show` (404) + 1 `/v1/messages` = 3.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -2120,8 +1965,7 @@ mod tests {
         // Empty / whitespace-only → None.
         assert_eq!(strip_bearer_prefix(""), None);
         assert_eq!(strip_bearer_prefix("   "), None);
-        // `Bearer` alone (no trailing token) is NOT a prefix — trims to the
-        // literal word; caller's validation logic decides what to do with it.
+        // `Bearer` alone is not a prefix; trims to the literal word.
         assert_eq!(strip_bearer_prefix("Bearer"), Some("Bearer".to_string()));
     }
 

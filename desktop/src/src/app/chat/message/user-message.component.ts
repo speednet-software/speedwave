@@ -7,12 +7,7 @@ import type { MessageBlock } from '../../models/chat';
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex justify-end' },
   template: `
-    <!-- Right-aligned bubble (max 80% column width) so user turns sit on the
-         opposite side of assistant turns — standard chat orientation. The
-         "user · HH:MM" header was removed: identity is conveyed by alignment
-         and the bubble background, and the timestamp duplicated info that
-         already lived in the assistant's per-turn metadata row. The "edited"
-         badge survives because it carries non-redundant signal. -->
+    <!-- Right-aligned bubble, max 80% column width. -->
     <div data-testid="user-message" class="max-w-[80%]">
       @if (editedAt() !== undefined) {
         <div

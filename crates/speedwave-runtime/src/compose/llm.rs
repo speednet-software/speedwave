@@ -8,9 +8,7 @@ use crate::consts;
 use std::path::Path;
 
 /// Applies LLM provider switching. Local-LLM token reads resolve under the
-/// explicit `data_dir` so callers (and tests) never touch the production
-/// `~/.speedwave/tokens`. The only caller is `render_compose_in`, which
-/// already threads the data dir.
+/// explicit `data_dir`.
 pub(crate) fn apply_llm_config_in(
     data_dir: &Path,
     yaml: &str,
@@ -19,9 +17,7 @@ pub(crate) fn apply_llm_config_in(
 ) -> anyhow::Result<String> {
     if llm.proxy_enabled.unwrap_or(true) {
         if let Some(entry) = llm.active_provider() {
-            // Local custom headers are addressed to the LLM server itself;
-            // LiteLLM would consume rather than forward them. Those setups
-            // stay on the direct path until the proxy learns to relay them.
+            // Local custom headers are unsupported by the proxy — stay on direct path.
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
                 return apply_llm_config_proxy(yaml, llm);
@@ -34,19 +30,6 @@ pub(crate) fn apply_llm_config_in(
 
 /// ADR-073 proxy path: every session talks to the litellm service; the
 /// provider kind picks the route and model prefix.
-///
-/// Auth rules (validated in the Phase 0 spike):
-/// - `AnthropicOauth`: passthrough route, and **no** `ANTHROPIC_AUTH_TOKEN` /
-///   `ANTHROPIC_API_KEY` may be injected — any of them disables Claude
-///   Code's OAuth. The OAuth `Authorization` header transits LiteLLM
-///   untouched because the proxy holds no canonical Anthropic credential.
-/// - `AnthropicApiKey`: same passthrough route; the key keeps riding the
-///   claude env (`apply_auth_config_in`) as `x-api-key`, which the
-///   passthrough forwards. This keeps `/model` aliases and the `[1m]`
-///   suffix semantics identical to the direct path.
-/// - Everything else: the unified `/v1/messages` root with a dummy Bearer
-///   (OAuth intentionally disabled) and a `<provider_id>/<model>` name that
-///   matches the wildcard route in the rendered litellm config.
 fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let entry = llm
         .active_provider()
@@ -78,9 +61,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                     entry.id
                 );
             }
-            // `<id>/<model>` matches the per-provider wildcard route in the
-            // rendered litellm config (OpenRouter models already carry the
-            // `openrouter/` prefix as their provider id by convention).
+            // `<id>/<model>` matches the per-provider wildcard route in the litellm config.
             let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
                 model.to_string()
             } else {
@@ -91,16 +72,13 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                     "ANTHROPIC_BASE_URL".to_string(),
                     super::LITELLM_BASE_URL.to_string(),
                 ),
-                // Dummy Bearer: disables OAuth (intended — these sessions
-                // never reach Anthropic) and satisfies servers that demand a
-                // non-empty Authorization.
+                // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
                 (
                     "ANTHROPIC_AUTH_TOKEN".to_string(),
                     "sk-no-key-required".to_string(),
                 ),
                 ("ANTHROPIC_MODEL".to_string(), routed_model.clone()),
-                // Subagents / background tasks default to a haiku alias no
-                // non-Anthropic backend knows — pin them to the same model.
+                // Pin the subagent/background haiku alias to the same model.
                 (
                     "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
                     routed_model.clone(),
@@ -148,12 +126,7 @@ fn apply_llm_config_legacy_in(
     }
     match provider {
         "anthropic" => {
-            // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pin each alias to the
-            // SSOT-latest model id with a `[1m]` suffix where the model
-            // supports a 1M-token context window. Without this, Max/Team
-            // subscribers see their 1M models capped at the 200k base spec
-            // (anthropics/claude-code#34083). Generated dynamically so a SSOT
-            // bump (Opus 4.8 etc.) propagates without touching this branch.
+            // Pins each ANTHROPIC_DEFAULT_*_MODEL alias to the SSOT-latest id with `[1m]` where supported.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
             if !model.is_empty() {
@@ -161,9 +134,7 @@ fn apply_llm_config_legacy_in(
             }
             inject_claude_env(yaml, &extra_env)
         }
-        // All local providers (legacy aliases + `local`) share the same env
-        // injection. `LOCAL_PROVIDERS` is the SSOT — adding a new local name
-        // there propagates here automatically.
+        // All `LOCAL_PROVIDERS` (SSOT) share the same env injection.
         local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
                 .base_url
@@ -180,10 +151,7 @@ fn apply_llm_config_legacy_in(
                 )
             })?;
 
-            // Resolve Bearer auth token. If a per-project key file exists, use
-            // it; otherwise inject the documented `sk-no-key-required` dummy so
-            // Claude Code keeps the Authorization header present (some local
-            // servers expect *any* non-empty Bearer).
+            // Resolve Bearer auth token: per-project key file, else dummy.
             const DUMMY_TOKEN: &str = "sk-no-key-required";
             let auth_token = if llm.has_api_key {
                 read_local_llm_token_opt_in(data_dir, project, "api_key").unwrap_or_else(|| {
@@ -220,12 +188,7 @@ fn apply_llm_config_legacy_in(
                 ),
             ]);
 
-            // Custom HTTP headers — stored as `Name: Value` per line for
-            // human-friendly editing, flattened to a comma-separated single
-            // line here because nerdctl-compose rejects YAML block literals
-            // inside an `environment:` sequence. `Authorization` is rejected
-            // defensively (a stale token file must not smuggle a header that
-            // would collide with the `ANTHROPIC_AUTH_TOKEN` Bearer).
+            // Flatten `Name: Value` header lines to one comma-separated line; drop `Authorization`.
             if llm.has_custom_headers {
                 if let Some(headers) =
                     read_local_llm_token_opt_in(data_dir, project, "custom_headers")
@@ -251,8 +214,7 @@ fn apply_llm_config_legacy_in(
 
             inject_claude_env(yaml, &extra_env)
         }
-        // Unreachable: the early guard above filters all non-LOCAL_PROVIDERS
-        // and non-"anthropic" values before this match.
+        // Unreachable: provider filtered by the early guard above.
         _ => unreachable!("provider validated by early guard"),
     }
 }
@@ -289,9 +251,7 @@ pub fn strip_trailing_v1(url: &str) -> String {
 }
 
 /// Returns the default base URL for a known local model provider.
-/// Used by the frontend to show a placeholder without duplicating the URL logic.
-/// `"local"` defaults to the Ollama port — the most common starting point;
-/// users typically replace it when pointing at a different server.
+/// `"local"` defaults to the Ollama port.
 pub fn default_base_url(provider: &str) -> Option<String> {
     let host = consts::HOST_GATEWAY_ALIAS;
     match provider {
@@ -303,11 +263,6 @@ pub fn default_base_url(provider: &str) -> Option<String> {
 }
 
 /// Human-readable label for a local LLM provider.
-///
-/// Invariant: the only callers (`custom_model_display_name` and
-/// `custom_model_description`) are reached only after `apply_llm_config`
-/// narrows the provider to one of the local values below. Any other
-/// value at this point indicates a programmer error in `apply_llm_config`.
 pub(crate) fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         "ollama" => "Ollama",
@@ -327,15 +282,9 @@ fn custom_model_description(provider: &str) -> String {
 }
 
 /// Validates a base URL for local model providers. Rejects non-HTTP schemes,
-/// credentials, query strings, and fragments.
-///
-/// Path policy: accepts `/` (or empty), or a single-segment prefix matching
-/// `^/[A-Za-z0-9_-]+$` (e.g. LiteLLM's `/anthropic`, AWS gateway's `/v1`).
-/// Multi-segment paths, `..`, and trailing slashes on segments are rejected.
+/// credentials, query strings, fragments, and multi-segment paths.
 pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
-    // Reject `..` / `.` segments in the *raw* input before url::Url parses, as
-    // the URL crate normalizes them away (`http://host/..` parses to path `/`).
-    // Without this, a malicious URL could slip through traversal checks.
+    // Reject `..` / `.` segments before url::Url parses, as it normalizes them away.
     if raw.contains("/..") || raw.contains("/./") || raw.ends_with("/.") {
         anyhow::bail!("base_url must not contain '..' or '.' path segments");
     }
@@ -350,9 +299,7 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
     }
     let path = parsed.path();
     if path != "/" && !path.is_empty() {
-        // Allow a single-segment path prefix (LiteLLM `/anthropic`,
-        // AWS-style `/v1`). Anything multi-segment, traversal, or trailing
-        // slash on the segment is rejected.
+        // Allow only a single-segment path prefix.
         if !path.starts_with('/') {
             anyhow::bail!("base_url path must start with '/', got '{}'", path);
         }

@@ -185,8 +185,7 @@ export async function fillPdfForm(
   if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
     throw new ValidationError('fillPdfForm: fields must be an object of name → value');
   }
-  // Coerce values to strings up front (the contract is name→string). A non-string value
-  // (number, boolean) is rejected rather than silently `String()`-ified at the Python boundary.
+  // Contract is name→string; non-string values are rejected, not coerced.
   const strFields: Record<string, string> = {};
   for (const [k, v] of Object.entries(fields)) {
     if (typeof v !== 'string') {

@@ -15,9 +15,8 @@ import {
 const DEFAULT_AUTH_FAILURE_STATUSES = [401];
 
 /**
- * Serializes refreshes so concurrent failures trigger one refresh, not N. The
- * `generation` counter lets callers detect "someone already refreshed" without
- * relying on the new token differing from the old one.
+ * Serializes refreshes so concurrent failures trigger one refresh, not N.
+ * The `generation` counter lets callers detect "someone already refreshed".
  */
 export class RefreshLock {
   private tail: Promise<void> = Promise.resolve();
@@ -87,10 +86,8 @@ async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
   const outcome = await refreshAccessToken({ service: ctx.service });
   const dir = ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
   let fresh = await loadToken(join(dir, 'access_token'));
-  // A real refresh rewrites the file with a new value; a rate-limited noop
-  // does not. If the worker says it refreshed but we still read the old token,
-  // poll briefly — host-write → guest-read lag through the mount is a
-  // documented phenomenon (ADR-066) — then proceed with whatever is there.
+  // A real refresh rewrites the file; a rate-limited noop does not. Poll
+  // briefly for host-write → guest-read mount lag (ADR-066).
   if (!outcome.rateLimited) {
     for (let i = 0; i < STALE_READ_POLL_ATTEMPTS && fresh === before; i += 1) {
       await new Promise((r) => setTimeout(r, STALE_READ_POLL_DELAY_MS));
@@ -122,8 +119,7 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
     );
   }
 
-  // Proactive refresh is an optimization: on failure fall through to the
-  // reactive path with the current token. A scope mismatch can't self-heal.
+  // Proactive refresh failure falls through to the reactive path.
   if (
     typeof opts.proactiveWithinSeconds === 'number' &&
     accessTokenExpiresWithin(opts.state.accessToken, opts.proactiveWithinSeconds)

@@ -3,10 +3,8 @@ import CoreServices
 import Foundation
 
 /// Permission gate for AppleEvents-based integrations (Mail, Notes).
-/// Two-stage authorization (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc)
-/// avoids the `procNotFound (-600)` bundle-id bug; optional AppleScript probe
-/// preserves the v1 real-data-access invariant. Rationale + OSStatus mapping:
-/// see docs/adr/ADR-070-appleevents-kernel-process-id-gate.md.
+/// Two-stage authorization (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc).
+/// See docs/adr/ADR-070-appleevents-kernel-process-id-gate.md.
 public struct AppleEventsGate: PermissionGate {
     public let targetBundleId: String
     public let dataAccessScript: String?
@@ -14,9 +12,8 @@ public struct AppleEventsGate: PermissionGate {
     let pidResolver: PidResolver
     let appLauncher: AppLauncher
 
-    /// Public init. CLI callers pass `appLauncher: NeverLaunchAppLauncher()` to
-    /// disable auto-launch in passive (validate-startup) flows; the default
-    /// `NSWorkspaceAppLauncher` enables auto-launch for active toggle clicks.
+    /// Pass `NeverLaunchAppLauncher()` to disable auto-launch in passive flows;
+    /// the default `NSWorkspaceAppLauncher` auto-launches on toggle clicks.
     public init(
         targetBundleId: String,
         dataAccessScript: String? = nil,
@@ -36,9 +33,7 @@ public struct AppleEventsGate: PermissionGate {
     }
 
     public func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
-        // Re-call AE with askUserIfNeeded=true to actually trigger the TCC consent dialog.
-        // performCheckPermission will then re-query with askUserIfNeeded=false to read
-        // the post-prompt status.
+        // askUserIfNeeded=true triggers the TCC consent dialog.
         DispatchQueue.global().async {
             let status = self.determineStatus(askUserIfNeeded: true)
             completion(status == .granted, nil)
@@ -75,8 +70,7 @@ public struct AppleEventsGate: PermissionGate {
         }
         logTrace("AEDETERMINE host-pid target=\(targetBundleId) pid=\(pid)")
 
-        // Stage 2: AEAddressDesc with typeKernelProcessID (4-byte pid_t),
-        // bypassing LaunchServices bundle-id resolution.
+        // Stage 2: AEAddressDesc with typeKernelProcessID (4-byte pid_t).
         var pidValue: pid_t = pid
         var target = AEAddressDesc()
         let createStatus: OSStatus = withUnsafePointer(to: &pidValue) { ptr in
@@ -130,9 +124,7 @@ public struct AppleEventsGate: PermissionGate {
 // MARK: - PID resolver (LaunchServices abstraction)
 
 /// Resolves a bundle identifier to the running process's PID, or `nil` when
-/// the target app is not currently running. Abstracted as a protocol so tests
-/// can inject deterministic fakes without spawning real macOS apps. Production
-/// uses `NSWorkspacePidResolver`.
+/// the target app is not currently running.
 public protocol PidResolver {
     func pid(for bundleId: String) -> pid_t?
 }
@@ -192,10 +184,8 @@ public struct NSWorkspaceAppLauncher: AppLauncher {
     }
 }
 
-/// Passive-mode launcher: declines launch by design (used in CLI's
-/// `check_permission` without `--launch`, and in tests). Returns
-/// `.notSupported` so logs read "AELAUNCH not supported" — clearer than
-/// `.failed` which would suggest an attempted launch went wrong.
+/// Passive-mode launcher: declines launch by design, returning `.notSupported`
+/// (used in CLI's `check_permission` without `--launch`, and in tests).
 public struct NeverLaunchAppLauncher: AppLauncher {
     public init() {}
     public func launch(bundleId _: String) -> AppLaunchOutcome {
@@ -205,10 +195,8 @@ public struct NeverLaunchAppLauncher: AppLauncher {
 
 // MARK: - stderr trace + RawAuthorizationStatus debug helpers
 
-/// Writes a structured trace line to stderr. Picked up by the Rust parent's
-/// `check_os_permission` stderr collector and forwarded to the unified log
-/// (tauri-plugin-log → file + webview + stdout) under the `info` level.
-/// Prefix `[SHARED]` makes the lines easy to grep in a user-supplied ZIP.
+/// Writes a `[SHARED]`-prefixed trace line to stderr, collected by the Rust
+/// parent's `check_os_permission` and forwarded to the unified log.
 public func logTrace(_ message: String) {
     let line = "[SHARED] \(message)\n"
     FileHandle.standardError.write(Data(line.utf8))
@@ -229,17 +217,10 @@ private func describeRaw(_ raw: RawAuthorizationStatus) -> String {
 // MARK: - OSStatus mapping
 
 /// SSOT mapping for AEDeterminePermissionToAutomateTarget OSStatus → RawAuthorizationStatus.
-/// Pulled out as a free function so tests can verify the mapping without instantiating
-/// a real AEAddressDesc against a live target.
-///
-/// OSStatus values per Apple's CoreServices headers (verified against developer docs):
 /// - `noErr (0)`: granted
-/// - `errAEEventNotPermitted (-1743)`: denied (also returned for "previously denied" — same value)
-/// - `errAEEventWouldRequireUserConsent (-1744)`: not yet prompted (only with askUserIfNeeded=false)
-/// - `procNotFound (-600)`: target app not running. With the `typeKernelProcessID`
-///    addressing scheme this should not occur in practice (we already verified
-///    the PID via NSWorkspace), but the case is preserved as a safety net for
-///    a process that exits between the NSWorkspace lookup and the AE call.
+/// - `errAEEventNotPermitted (-1743)`: denied
+/// - `errAEEventWouldRequireUserConsent (-1744)`: not yet prompted (askUserIfNeeded=false)
+/// - `procNotFound (-600)`: target app not running
 public func mapAEStatusToRaw(_ status: OSStatus, targetBundleId: String) -> RawAuthorizationStatus {
     switch Int(status) {
     case 0:                                       // noErr

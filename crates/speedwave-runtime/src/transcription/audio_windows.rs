@@ -1,18 +1,6 @@
-//! Windows audio capture: WASAPI loopback via `cpal` (ADR-056). cpal turns a
-//! `build_input_stream` on an *output* device into a loopback capture of that
-//! device — that's our "System (everything)" source, available on Windows 7+.
-//!
-//! Per-process loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) needs
-//! Windows 10 build 20348+. cpal 0.17 doesn't expose it, so v1 ships
-//! system-wide-only: `capabilities().supports_per_process` is `false` and a
-//! `Process` source is rejected with a clear "use System audio" error. (A
-//! future iteration can add a `windows-sys` shim — see ADR-056.)
-//!
-//! cpal callbacks deliver samples in the device's native rate (typically
-//! 48 kHz, stereo); we down-mix to mono and linear-resample to 16 kHz on the
-//! capture thread. A single-source capture pushes chunks through a channel; a
-//! `Mixed` (system loopback + mic) capture runs two cpal streams that sum into
-//! one shared `MixBuffer` (ADR-056 decision 15).
+//! Windows audio capture: WASAPI loopback via `cpal` (ADR-056). System-wide
+//! only in v1; per-process loopback requires Windows 10 build 20348+ and an
+//! unshipped `windows-sys` shim, so a `Process` source is rejected.
 
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -66,8 +54,7 @@ impl Default for WasapiAudioCapture {
 /// `cmd /c ver` output (`Microsoft Windows [Version 10.0.22631.xxxx]`). Cheap
 /// and dependency-free; `None` on any parse failure.
 fn detect_windows_build() -> Option<u32> {
-    // system_command applies CREATE_NO_WINDOW so this probe (run on audio/
-    // transcription init) does not flash a console over the Desktop UI.
+    // Avoid console flash over Desktop UI.
     let out = crate::binary::system_command("cmd")
         .args(["/c", "ver"])
         .output()
@@ -84,8 +71,7 @@ impl AudioCapture for WasapiAudioCapture {
         let host = cpal::default_host();
         let has_output = host.default_output_device().is_some();
         let has_input = host.default_input_device().is_some();
-        // v1: per-process is gated by the OS build *and* the (not-yet-shipped)
-        // shim — so it's always false here, but the note tells the truth.
+        // v1 gates per-process by OS build + unshipped shim.
         let per_process_possible = self.build_supports_per_process();
         let note = if per_process_possible {
             Some("WASAPI loopback (system-wide). Per-app capture is planned.".to_string())
@@ -106,8 +92,7 @@ impl AudioCapture for WasapiAudioCapture {
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
         let host = cpal::default_host();
         let mut sources = Vec::new();
-        // "Whole meeting" (system loopback + default mic) first — the product
-        // default for meeting transcription.
+        // Product default: system loopback + default mic ("Whole meeting").
         if host.default_output_device().is_some() && host.default_input_device().is_some() {
             sources.push(AudioSourceInfo {
                 source: AudioSource::Mixed {
@@ -130,8 +115,7 @@ impl AudioCapture for WasapiAudioCapture {
                 app_id: None,
             });
         } else {
-            // No output device — still offer the abstract SystemWide so the UI
-            // can show a clear error if the user picks it.
+            // Still offer SystemWide so UI shows a clear error if user picks it.
             sources.push(AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label: "System (everything)".to_string(),
@@ -179,8 +163,7 @@ impl AudioCapture for WasapiAudioCapture {
                 "per-app capture isn't available on Windows yet — use System audio".to_string(),
             )),
             AudioSource::Mixed { system, mic } => {
-                // Two concurrent cpal streams (system loopback + mic) summed in
-                // one shared MixBuffer; next_chunk pops mixed chunks from it.
+                // Two cpal streams (system + mic) sum into one MixBuffer.
                 let sys_dev = resolve_system(&host, system)?;
                 let mic_dev = resolve_mic(&host, mic)?;
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
@@ -245,9 +228,8 @@ fn build_stream(
 }
 
 /// A resolved capture device tagged with which config API selects its stream
-/// format — a loopback capture inherits the device's *output* (render) config; a
-/// mic uses its *input* config. Carrying the kind in the type means the caller
-/// can't pick the wrong API.
+/// format: a loopback inherits the device's *output* (render) config; a mic
+/// uses its *input* config.
 enum DeviceKind {
     /// An output device captured as a loopback (system audio).
     Loopback(cpal::Device),
@@ -294,10 +276,9 @@ fn open_capture_stream(
     Ok(stream)
 }
 
-/// Resolves the *system* side of a source (a plain `SystemWide` or the inner
-/// `system` of a `Mixed`) to a loopback-captured output device. Windows v1
-/// doesn't ship per-process loopback, so a `Process` (or anything else) is
-/// rejected with a clear error — including when nested inside `Mixed`.
+/// Resolves the *system* side of a source (`SystemWide` or the inner `system`
+/// of a `Mixed`) to a loopback-captured output device; rejects `Process` or any
+/// other source with an error.
 fn resolve_system(host: &cpal::Host, src: &AudioSource) -> Result<DeviceKind, CaptureError> {
     match src {
         AudioSource::SystemWide => host
@@ -350,8 +331,7 @@ impl ResamplerSink {
     fn deliver(&self, samples: Vec<f32>, offset_ns: u64) {
         match self {
             ResamplerSink::Channel(tx) => {
-                // try_send: never block the cpal callback (a full channel means
-                // the consumer fell behind — drop rather than glitch the audio).
+                // try_send: never block the cpal callback; drop on full channel.
                 let _ = tx.try_send(AudioChunk {
                     samples,
                     offset: Duration::from_nanos(offset_ns),
@@ -410,8 +390,7 @@ impl Resampler {
         if nmono == 0 {
             return;
         }
-        // Mono down-mix via averaging. A free function (not a closure) so it
-        // doesn't borrow `self` — `feed` needs `&mut self` for `flush`.
+        // Mono down-mix by averaging; free function to avoid borrowing `self`.
         fn mono(buf: &[f32], channels: usize, i: usize) -> f32 {
             let base = i * channels;
             let mut acc = 0.0f32;
@@ -421,8 +400,7 @@ impl Resampler {
             acc / channels as f32
         }
 
-        // `pos` is measured from the start of *this* buffer, but interpolation
-        // at pos < 0 uses `self.last` (the previous buffer's final sample).
+        // pos measured from this buffer; idx < 0 uses self.last for interpolation.
         while self.pos < nmono as f64 {
             let idx = self.pos.floor() as isize;
             let frac = (self.pos - self.pos.floor()) as f32;
@@ -434,8 +412,7 @@ impl Resampler {
             let b = if (idx + 1) < nmono as isize {
                 mono(interleaved, channels, (idx + 1) as usize)
             } else {
-                // Need the first sample of the next buffer; approximate with
-                // the current one (negligible error at these ratios).
+                // Approximate next sample with current (negligible error at these ratios).
                 mono(
                     interleaved,
                     channels,
@@ -450,8 +427,7 @@ impl Resampler {
             }
             self.pos += step;
         }
-        // Carry state across buffers: shift `pos` back by this buffer's length
-        // and remember the last mono sample.
+        // Carry state: shift pos by buffer length, remember last mono sample.
         self.pos -= nmono as f64;
         self.last = mono(interleaved, channels, nmono - 1);
     }
@@ -464,9 +440,7 @@ impl Resampler {
         }
         let samples = std::mem::take(&mut self.out);
         let n = samples.len() as u64;
-        // `emitted` is incremented before each push, so it's ≥ n in normal
-        // operation; `saturating_sub` keeps a directly-poked `out` (tests)
-        // from underflowing.
+        // emitted is incremented before each push; saturating_sub guards directly-poked out.
         let offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
         sink.deliver(samples, offset_ns);
         self.out = Vec::with_capacity(CHUNK_SAMPLES);
@@ -483,8 +457,7 @@ struct CpalAudioStream {
 
 impl AudioStream for CpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // Block for the next chunk. A disconnected channel = the stream was
-        // dropped or the callback stopped — treat as clean end of stream.
+        // Recv blocks; closed channel = stream dropped or callback stopped (clean EOF).
         match self.rx.recv() {
             Ok(chunk) => Ok(Some(chunk)),
             Err(_) => Ok(None),
@@ -492,10 +465,9 @@ impl AudioStream for CpalAudioStream {
     }
 }
 
-/// `AudioStream` for a mixed capture: two cpal streams (system loopback + mic)
-/// feed one shared `MixBuffer`; `next_chunk` polls it via `mix::poll_mixed_chunk`
-/// (which handles the stall/poison/EOF cases). The driver also stops by dropping
-/// this, which stops both cpal streams.
+/// `AudioStream` for a mixed capture: two cpal streams (system + mic) feed one
+/// shared `MixBuffer`; `next_chunk` polls it via `mix::poll_mixed_chunk`.
+/// Dropping this stops both cpal streams.
 struct MixedCpalAudioStream {
     /// Held to keep both cpal streams alive (system + mic).
     _streams: Vec<cpal::Stream>,
@@ -509,11 +481,8 @@ impl AudioStream for MixedCpalAudioStream {
     }
 }
 
-/// Extracts a PID from a `ProcessSelector`. Windows v1 rejects `Process`
-/// sources before this would be reached (per-process loopback isn't wired
-/// yet), so it currently only exercises the selector contract in tests; gated
-/// behind `cfg(test)` to keep production code dead-code-free. A future
-/// per-process implementation lifts the gate.
+/// Extracts a PID from a `ProcessSelector`. Gated behind `cfg(test)`: Windows
+/// v1 rejects `Process` sources before this would be reached.
 #[cfg(test)]
 fn pid_of(selector: &ProcessSelector) -> Result<i32, CaptureError> {
     match selector {
@@ -642,8 +611,7 @@ mod tests {
 
     #[test]
     fn resampler_mixed_sink_pushes_into_the_shared_buffer() {
-        // Two resamplers (system + mic) feeding one MixBuffer; the buffer sums
-        // them. Same rate, mono → 1:1, easy to reason about.
+        // Two resamplers (system + mic) feeding one MixBuffer that sums them.
         let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         let sys_sink = ResamplerSink::Mixed {
             buf: std::sync::Arc::clone(&buf),
@@ -671,8 +639,7 @@ mod tests {
 
     #[test]
     fn mixed_cpal_audio_stream_polls_the_shared_buffer_for_a_full_chunk() {
-        // No real cpal streams needed: feed the buffer directly, then verify
-        // next_chunk delivers (this exercises the poll_mixed_chunk path).
+        // Feed buffer directly, verify next_chunk delivers (exercises poll_mixed_chunk).
         let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         {
             let mut b = buf.lock().unwrap();
@@ -694,8 +661,7 @@ mod tests {
 
     #[test]
     fn resolve_system_rejects_process_and_other_non_system_sources() {
-        // A Process (per-app loopback not shipped) or a Microphone-as-system is
-        // rejected before any device is touched.
+        // Process (per-app loopback not shipped) or Microphone-as-system rejected without device touch.
         let host = cpal::default_host();
         assert!(matches!(
             resolve_system(
@@ -710,8 +676,7 @@ mod tests {
             resolve_system(&host, &AudioSource::Microphone { device: None }),
             Err(CaptureError::Unsupported(_))
         ));
-        // SystemWide either resolves to the default output device or errors
-        // NoDevice if there isn't one — never Unsupported.
+        // SystemWide resolves to default output or errs NoDevice, never Unsupported.
         match resolve_system(&host, &AudioSource::SystemWide) {
             Ok(_) | Err(CaptureError::NoDevice(_)) => {}
             other => panic!("unexpected: {other:?}"),
@@ -720,8 +685,7 @@ mod tests {
 
     #[test]
     fn detect_windows_build_parses_a_version_string() {
-        // We can't run `cmd /c ver` here, but exercise the parsing logic by
-        // factoring it the same way (string → third dotted component).
+        // Exercise parsing: string → third dotted component (build number).
         let sample = "Microsoft Windows [Version 10.0.22631.4317]";
         let version = sample.split_whitespace().find(|t| t.starts_with("10.0."));
         assert!(version.is_some());

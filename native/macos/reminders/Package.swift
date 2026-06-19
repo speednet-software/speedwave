@@ -1,11 +1,9 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Embeds Resources/Info.plist into Mach-O `__TEXT,__info_plist` section so the
-// CLI binary carries `CFBundleIdentifier` (`pl.speedwave.desktop.reminders`) and
-// `NSRemindersFullAccessUsageDescription` directly — required by TCC for
-// EventKit's `requestFullAccessToReminders` on macOS 14+. See calendar/Package.swift
-// for the full rationale (parent .app's Info.plist is not inherited across spawn).
+// Embeds Resources/Info.plist into the Mach-O `__TEXT,__info_plist` section so the
+// CLI binary carries `CFBundleIdentifier` + `NSRemindersFullAccessUsageDescription`
+// (required by TCC for EventKit on macOS 14+).
 let package = Package(
     name: "reminders-cli",
     platforms: [.macOS(.v13)],

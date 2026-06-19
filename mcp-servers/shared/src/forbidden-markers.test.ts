@@ -130,19 +130,16 @@ function gatherMarkerViolations(): string[] {
 
 describe('forbidden-markers — mcp-servers comment scan', () => {
   it('locates the mcp-servers root and finds source files to scan', () => {
-    // Guards the anchor: a broken root-finder would scan nothing and pass
-    // vacuously, hiding real markers.
+    // Guards the anchor: a broken root-finder scans nothing and hides markers.
     expect(walkTsSources(MCP_ROOT, false).length).toBeGreaterThan(0);
   });
 
   it('extracts comments but not string-literal contents', () => {
-    // The github/gitlab example inputs are the exact false-positive this guard
-    // must tolerate: `query: 'TODO'` is data, not a marker comment.
+    // A marker word inside a string literal is data, not a marker comment.
     expect(extractComments(`const x = { query: 'TODO' };`)).toEqual([]);
     expect(extractComments(`foo(); // real TODO marker`)).toEqual([' real TODO marker']);
     expect(extractComments(`/* block FIXME */`)).toEqual([' block FIXME ']);
-    // A marker word inside a string that also has a trailing comment: only the
-    // comment is extracted.
+    // Only the trailing comment is extracted, not the string-literal marker.
     expect(extractComments(`const s = 'TODO'; // and HACK here`)).toEqual([' and HACK here']);
   });
 

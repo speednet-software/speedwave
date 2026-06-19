@@ -20,12 +20,7 @@ export type ModalBorderColor = 'default' | 'red';
 
 /**
  * Generic modal-overlay shell — backdrop + centered card + title/body/actions.
- *
- * Used by the shell to surface the restart-required, update-available, and
- * system-check-failed dialogs from the mockup (lines 1904-1952). All copy and
- * action handlers come from the parent via inputs/outputs; this component
- * delegates positioning, backdrop, focus trap, and Esc handling to the CDK
- * `Dialog` service so we never re-implement those primitives ourselves.
+ * Delegates positioning, backdrop, focus trap, and Esc handling to CDK `Dialog`.
  */
 @Component({
   selector: 'app-modal-overlay',
@@ -106,11 +101,7 @@ export class ModalOverlayComponent {
   readonly kicker = input.required<string>();
   /** Color family applied to the kicker — picks one of the semantic palette tokens. */
   readonly kickerColor = input<ModalKickerColor>('accent');
-  /**
-   * Title rendered with the view-title font/spacing. Renamed from `title` to
-   * avoid the HTML `title` attribute collision (which would surface as a
-   * native browser tooltip on the host element).
-   */
+  /** Title text; named `modalTitle` to avoid the HTML `title` attribute collision. */
   readonly modalTitle = input.required<string>();
   /** Body paragraph; pass an empty string to hide the paragraph entirely. */
   readonly body = input<string>('');
@@ -147,12 +138,7 @@ export class ModalOverlayComponent {
   private readonly dialog = inject(Dialog);
   private dialogRef: DialogRef<unknown, unknown> | null = null;
 
-  /**
-   * True while the host is closing the dialog because `open()` flipped
-   * to false. Used to suppress the `closed` output that the dialog's own
-   * `closed` subscription would otherwise fire (which would echo right back
-   * to the parent that already knows).
-   */
+  /** True while the host closes the dialog because `open()` flipped to false. */
   private closingProgrammatically = false;
 
   /** CSS classes for the kicker text — picks a semantic color from the palette. */
@@ -195,16 +181,14 @@ export class ModalOverlayComponent {
    * CDK dialog as the input toggles, and tears down on host destroy.
    */
   constructor() {
-    // Sync dialog open/closed state with the `open()` input. CDK Dialog handles
-    // the backdrop click, Esc key, and focus trap entirely on its own.
+    // Sync dialog open/closed state with the `open()` input.
     effect(() => {
       const isOpen = this.open();
       if (isOpen) this.openDialog();
       else this.closeDialog();
     });
 
-    // Ensure the dialog is torn down if the host component is destroyed
-    // mid-flight (e.g. parent collapses the surrounding `@if`).
+    // Tear down the dialog if the host component is destroyed mid-flight.
     inject(DestroyRef).onDestroy(() => this.closeDialog());
   }
 

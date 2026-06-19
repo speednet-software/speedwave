@@ -81,13 +81,7 @@ export interface TranscriptSession {
   last_seq: number;
 }
 
-/**
- * `speaker_names` on the wire inside a `TranscriptEvent` — a list of
- * `[speaker_id, name]` pairs. (The Rust side serializes the map this way for
- * events because serde_json's "numeric map key from string" shortcut doesn't
- * fire through the internally-tagged enum's `Content` buffer. The reducer
- * converts it to the `Record<number, string>` shape used on `TranscriptSession`.)
- */
+/** `speaker_names` on the wire inside a `TranscriptEvent` — `[speaker_id, name]` pairs. */
 export type SpeakerNamePairs = readonly (readonly [number, string])[];
 
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
@@ -148,9 +142,8 @@ export interface DownloadProgress {
 }
 
 /**
- * Meeting-transcription preferences (top-level user config, ADR-056 §13 —
- * repo `.speedwave.json` cannot set these). All fields optional; `null`/absent
- * means "use the default".
+ * Meeting-transcription preferences (top-level user config only, ADR-056 §13).
+ * All fields optional; `null`/absent means "use the default".
  */
 export interface TranscriptionConfig {
   enabled: boolean | null;

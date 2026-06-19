@@ -165,9 +165,7 @@ export class SetupWizardComponent {
   get steps(): SetupStep[] {
     return this.stepsSig();
   }
-  /**
-   * Replaces the step list — kept as a setter for tests that mutate it directly.
-   */
+  /** Replaces the step list. */
   set steps(next: SetupStep[]) {
     this.stepsSig.set(next);
   }
@@ -248,10 +246,7 @@ export class SetupWizardComponent {
   }
 
   /**
-   * Resumes the setup pipeline after `<app-create-project-modal>` has
-   * successfully created the project on the backend. The modal owns the
-   * `create_project` invocation + inline error handling; this handler only
-   * marks step 3 as done and continues with the remaining auto-steps.
+   * Marks step 3 done and continues auto-steps after the project is created.
    * @param payload - Name and directory of the freshly created project.
    */
   async onProjectCreated(payload: CreatedProject): Promise<void> {

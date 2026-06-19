@@ -4,7 +4,6 @@ import { sanitize, RULE_COUNT } from './sanitizer';
 describe('sanitize', () => {
   it('rule count matches Rust SSOT EXPECTED_RULE_COUNT', () => {
     // Mirrors `EXPECTED_RULE_COUNT` in crates/speedwave-runtime/src/log_sanitizer.rs.
-    // Bump both together when adding a rule.
     expect(RULE_COUNT).toBe(22);
   });
 

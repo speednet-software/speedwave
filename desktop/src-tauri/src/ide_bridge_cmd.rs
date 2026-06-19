@@ -1,9 +1,4 @@
-// IDE-bridge Tauri commands.
-//
-// Lets the UI list detected IDE locks, connect to a chosen window, read the
-// persisted selection, and disconnect. The live bridge + its on-demand
-// starter (`ensure_ide_bridge_running`) live in `main.rs`; this module is the
-// command surface plus config persistence.
+// IDE-bridge Tauri commands for IDE lock detection, connection, and config persistence.
 
 use crate::health;
 use crate::reconcile::SharedIdeBridge;
@@ -21,9 +16,7 @@ pub(crate) fn select_ide(
     state: tauri::State<SharedIdeBridge>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Validate against the raw live-port list (pre-dedupe): UI may pick
-    // an older-window port that `list_available_ides` collapsed away, but
-    // we still want the user to be able to connect to that specific window.
+    // Validate against the raw live-port list (pre-dedupe).
     if !health::is_ide_port_alive(port) {
         log::warn!(
             target: "ide_bridge",
@@ -47,8 +40,7 @@ pub(crate) fn select_ide(
     })
     .map_err(|e| e.to_string())?;
 
-    // Start IDE Bridge on-demand if it wasn't started at startup (e.g. after
-    // factory reset when setup_started was false during the initial launch).
+    // Start IDE Bridge on-demand if it wasn't started at startup.
     crate::ensure_ide_bridge_running(&state, &app);
 
     // Update the live Bridge so new connections are proxied immediately

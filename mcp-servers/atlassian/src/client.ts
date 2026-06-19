@@ -119,8 +119,7 @@ export class AtlassianClient {
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      // Never follow redirects automatically; Atlassian Cloud doesn't need it
-      // and it avoids leaking the Authorization header cross-host.
+      // No redirects; avoids leaking the Authorization header cross-host.
       maxRedirects: 0,
     });
   }
@@ -161,8 +160,7 @@ export class AtlassianClient {
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
         const isRateLimited = status === 429;
         const isTransient5xx = typeof status === 'number' && status >= 500 && status <= 599;
-        // 429 is always safe to retry (the request was rejected, not processed).
-        // 5xx is only retried for explicitly-idempotent requests.
+        // 429 always retried; 5xx only when retryable (idempotent).
         if (!isRateLimited && !(retryable && isTransient5xx)) break;
 
         const retryAfter =
@@ -287,8 +285,7 @@ export class AtlassianClient {
       if (typeof status === 'number' && status >= 500) {
         return 'Atlassian server error. Try again later.';
       }
-      // No response (network/timeout) — use the code, never the config (it
-      // carries the Authorization header).
+      // No response: use the code, never the config (carries Authorization).
       const code = error.code ? ` (${error.code})` : '';
       return `Atlassian request failed${code}: unable to reach ${this.safeHost(error.config?.baseURL)}`;
     }

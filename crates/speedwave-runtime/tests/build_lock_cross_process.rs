@@ -2,6 +2,8 @@
 //! parent+child per `tests/compose_lock_cross_process.rs` pattern, asserts the
 //! second process blocks on `<data_dir>/build.lock` until the first releases.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+
 use std::process::Command;
 use std::time::Duration;
 
@@ -36,8 +38,7 @@ fn second_process_blocks_until_first_releases() {
         .spawn()
         .expect("spawn holder");
 
-    // File-based handshake: wait until holder writes the sentinel — proves
-    // it has acquired the lock before we spawn the waiter.
+    // Wait until holder writes the sentinel before spawning the waiter.
     let deadline = std::time::Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
     while !sentinel.exists() {
         if std::time::Instant::now() >= deadline {

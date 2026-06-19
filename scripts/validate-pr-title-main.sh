@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Validates PR title for PRs targeting `main`.
-#
-# `chore(...)` is rejected here because release-please does not include
-# `chore` in its changelog-sections (release-please-config.json), so a
-# `chore` squash merge to main collapses feat/fix commits into an invisible
-# release — no version bump, no release PR. See issue #371.
+# Validates PR title for PRs targeting `main`. `chore(...)` is rejected (#371).
 #
 # Env vars:
 #   PR_TITLE — the PR title to validate
@@ -31,8 +26,7 @@ if [[ "$HEAD_REF" == chore/backmerge-* ]]; then
     exit 0
 fi
 
-# Conventional commit types allowed on `dev → main` squash merges.
-# `chore` is intentionally absent — see header comment and issue #371.
+# Conventional commit types allowed on `dev → main` squash merges (no `chore`).
 if [[ "$PR_TITLE" =~ ^(feat|fix|perf|refactor|docs|ci|test|build|style|revert)(\(.+\))?\!?:\ .+ ]]; then
     echo "PR title follows conventional commits: $PR_TITLE"
     exit 0

@@ -1,8 +1,6 @@
 //! SSOT registry of diagnostic sources. The `/logs` view and the diagnostics
-//! ZIP both derive their content from `DIAGNOSTIC_SOURCES`, so they cannot drift
-//! (see the parity tests). The only allowed divergence: a non-`displayable`
-//! source (an artifact the line-oriented `/logs` view can't render, e.g.
-//! `compose.yml`) is ZIP-only.
+//! ZIP both derive their content from `DIAGNOSTIC_SOURCES`. Allowed divergence:
+//! a non-`displayable` source is ZIP-only.
 
 use std::path::{Path, PathBuf};
 
@@ -131,9 +129,8 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
 pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml"];
 
 /// Resolves a `SourceKind::File` source's path by key, gated to the current
-/// platform. Shared by both consumers (/logs + ZIP) so neither hand-rolls the
-/// find + platform-gate + File-extraction chain. Returns `None` for unknown
-/// keys, unavailable platforms, or non-File kinds.
+/// platform. Returns `None` for unknown keys, unavailable platforms, or
+/// non-File kinds.
 pub fn resolve_file_path(key: &str, data_dir: &Path, project: &str) -> Option<PathBuf> {
     DIAGNOSTIC_SOURCES
         .iter()
@@ -202,9 +199,8 @@ mod tests {
         assert_eq!(mac_only, vec!["lima"]);
     }
 
-    /// `zip_entry` literals embed const-owned filenames (the slice needs
-    /// `&'static str`, so they can't be `format!`-ed). Guard against drift if a
-    /// const filename changes.
+    /// Guards against drift if a const filename embedded in a `zip_entry`
+    /// changes.
     #[test]
     fn zip_entries_match_owning_consts() {
         let entry = |key: &str| {
@@ -216,7 +212,6 @@ mod tests {
         };
         assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
-        // `lima`/`compose-yml` filenames are Lima's / compose's own conventions,
-        // not Speedwave consts, so there's nothing to drift against.
+        // `lima`/`compose-yml` filenames aren't Speedwave consts, nothing to drift against.
     }
 }

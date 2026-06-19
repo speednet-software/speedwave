@@ -1,16 +1,10 @@
 //! Conversation state-tree shapes (ADR-042) mirrored by the Angular
 //! frontend (`models/state-tree.ts`, `models/chat.ts::MessageBlock`).
-//! The frontend rebuilds this tree from its legacy fields after every
-//! mutation; AskUser/queue types here also ride `chat_stream` chunks.
 
 use serde::{Deserialize, Serialize};
 
 /// Root conversation state held by the UI as a single signal (ADR-042).
-///
-/// Manual `Debug` is implemented below to redact `session_id`; per
-/// `.claude/rules/logging.md`, structs containing per-session identifiers
-/// must redact them in `Debug` output so accidental `format!("{state:?}")`
-/// calls cannot leak them to logs.
+/// Manual `Debug` redacts `session_id` per `.claude/rules/logging.md`.
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct ConversationState {
     /// Claude Code session identifier. `None` before the first `SystemInit`.
@@ -100,9 +94,7 @@ pub enum UuidStatus {
 }
 
 /// Per-turn metadata attached to assistant entries (Feature 3 / ADR-042).
-///
-/// All fields are optional so the frontend degrades gracefully when the
-/// stream does not carry usage data (older session resumes, edge cases).
+/// All fields optional; the frontend degrades when usage data is absent.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct EntryMeta {
     /// Model id used for this turn (e.g. `claude-opus-4-7-20260501`).
@@ -168,12 +160,9 @@ pub struct QueuedMessage {
     pub queued_at: u64,
 }
 
-/// One block inside a conversation entry. Matches the union shape of the
-/// desktop `StreamChunk` event family (`desktop/src-tauri/src/chat.rs`) but
-/// represents the aggregated state after delta application — not the event.
-///
-/// Tagged enum: serde serializes as `{"kind":"text","content":"..."}` —
-/// mirrored by `models/chat.ts::MessageBlock` (CLAUDE.md SSOT alignment).
+/// One block inside a conversation entry — aggregated state after delta
+/// application, not the raw event. Tagged enum mirrored by
+/// `models/chat.ts::MessageBlock` (CLAUDE.md SSOT alignment).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageBlock {
@@ -204,31 +193,19 @@ pub enum MessageBlock {
         #[serde(default)]
         is_error: bool,
     },
-    /// Interactive question(s) from Claude (the `AskUserQuestion` tool variant).
-    ///
-    /// The Claude Agent SDK can deliver up to 4 questions in a single
-    /// `control_request`. We render them sequentially: only
-    /// `current_index` is interactive; earlier indices are locked with their
-    /// chosen-label badge stored in `answers`.
+    /// Interactive question(s) from Claude (the `AskUserQuestion` tool).
+    /// Up to `MAX_ASK_USER_QUESTIONS`; rendered sequentially, only
+    /// `current_index` interactive.
     AskUser {
         /// Tool-use id from the stream event.
         tool_id: String,
-        /// All questions in this `control_request`, in order. `len() <=
-        /// MAX_ASK_USER_QUESTIONS`; callers must truncate (see Tauri host
-        /// `StreamParser::parse_ask_user_questions`) and emit a warn log
-        /// when the SDK exceeds the cap.
+        /// All questions in order. `len() <= MAX_ASK_USER_QUESTIONS`.
         questions: Vec<AskUserQuestionItem>,
-        /// Index of the currently-active (interactive) question. The
-        /// frontend reducer advances it to `questions.len()` once every
-        /// `answers` slot is `Some(_)` — the host removes its
-        /// `PartialAnswers` from `pending_requests` at the same moment, so
-        /// this terminal state is only ever observable in the persisted
-        /// state-tree.
+        /// Index of the currently-active question; reaches `questions.len()`
+        /// once every `answers` slot is `Some(_)`.
         current_index: usize,
-        /// Per-question chosen value; `len() == questions.len()`. `None` until
-        /// the user answers slot `i`. Populated optimistically by the frontend
-        /// reducer; the host writes one `control_response` once every slot is
-        /// `Some`.
+        /// Per-question chosen value; `len() == questions.len()`, `None`
+        /// until slot `i` is answered.
         #[serde(default)]
         answers: Vec<Option<String>>,
     },
@@ -247,30 +224,17 @@ pub enum MessageBlock {
     },
 }
 
-/// Maximum number of questions accepted in a single `AskUserQuestion`
-/// control_request. Matches the Claude Agent SDK contract (up to 4
-/// questions; the host tolerates 0 by dropping the request). Anything
-/// beyond the cap is truncated with a `log::warn!` (count only). Per-entry
-/// filtering may further drop malformed items — see
-/// `StreamParser::parse_ask_user_question`.
+/// Maximum questions per `AskUserQuestion` control_request; excess is
+/// truncated with a warn log.
 pub const MAX_ASK_USER_QUESTIONS: usize = 4;
 
-/// Maximum size, in bytes, of the serialized `control_response` written to
-/// Claude's stdin in answer to an `AskUserQuestion`. Defence-in-depth against
-/// adversarial fan-out (4 questions × pathological labels). The host fails
-/// closed if a constructed response exceeds this cap.
+/// Maximum bytes of the serialized `control_response` written to Claude's
+/// stdin for an `AskUserQuestion`; the host fails closed above this cap.
 pub const MAX_ASK_USER_WIRE_BYTES: usize = 64 * 1024;
 
-/// One question inside an `AskUser` block.
-///
-/// The Agent SDK control_request `input.questions[i]` ships
-/// `{ question, header, multiSelect, options[] }` (camelCase). The Tauri
-/// host translates the camelCase boundary at parse time
-/// (`StreamParser::parse_ask_user_question`); fields here use snake_case
-/// because that's the convention for everything we persist or send to the
-/// Angular frontend. **If you add a field here,
-/// update the manual extraction in the parser too** — the type does not
-/// auto-deserialize from SDK input.
+/// One question inside an `AskUser` block. SDK ships camelCase; the host
+/// translates to snake_case in `StreamParser::parse_ask_user_question`.
+/// Adding a field here requires updating that manual parser.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AskUserQuestionItem {
     /// Full question text shown to the user. Also doubles as the key in the
@@ -504,12 +468,8 @@ mod tests {
         assert!(meta.cost.is_none());
     }
 
-    /// `Debug` for `ConversationState` must redact `session_id` so
-    /// accidental `format!("{state:?}")` (e.g. from `dbg!`, `panic!`, or
-    /// `tracing::debug!`) cannot leak the per-session identifier. Per
-    /// `.claude/rules/logging.md`, structs carrying per-session identifiers
-    /// must redact them in `Debug` output. Other diagnostic fields stay
-    /// visible — only the identifier is hidden.
+    /// `Debug` must redact `session_id` (`dbg!`/`panic!`/`tracing`) per
+    /// `.claude/rules/logging.md`; other fields stay visible.
     #[test]
     fn debug_redacts_session_id() {
         let state = ConversationState {

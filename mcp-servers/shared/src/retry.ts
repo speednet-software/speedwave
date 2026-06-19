@@ -26,8 +26,6 @@ export interface RetryOptions {
  * increasing delay.
  *
  * Exceptions from `fn` are caught and logged — they do **not** propagate.
- * This is critical because `initializeGitLabClient()` can throw on DNS
- * resolution failures (`TypeError` from fetch) rather than returning `null`.
  * @param fn - Async function to retry. Must return `T` on success or `null` on failure.
  * @param options - Retry configuration
  * @returns The result of `fn`, or `null` if all attempts failed
@@ -43,8 +41,7 @@ export async function retryAsync<T>(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
-    // Jitter is additive (0–30% of base delay). maxDelayMs caps only the base
-    // component, so totalDelay can exceed maxDelayMs by up to 30%.
+    // Jitter is additive (0–30% of base); maxDelayMs caps only base, so total may exceed it.
     const jitter = Math.floor(Math.random() * delay * 0.3);
     const totalDelay = delay + jitter;
 

@@ -167,9 +167,7 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('preserves multi-line backend error formatting via whitespace-pre-wrap', async () => {
-      // Backend errors like `wsl_other_distro_msg` are multi-line with \n separating
-      // numbered options. The error pane must render them as multiple visible lines,
-      // not collapse them into a wall of text.
+      // Backend errors use \n; error pane must preserve via whitespace-pre-wrap.
       const multiLineError =
         "Project is in WSL distribution 'Ubuntu'.\n\n" +
         '1. Copy the project into Speedwave\n' +
@@ -190,8 +188,7 @@ describe('CreateProjectModalComponent', () => {
       expect(err?.textContent).toContain('1. Copy the project');
       expect(err?.textContent).toContain('2. Move to /mnt/c/');
       expect(err?.textContent).toContain('3. Use Claude Code');
-      // The whitespace-pre-wrap class must be on the error pane so the browser
-      // honours `\n` in textContent at render time.
+      // whitespace-pre-wrap on the error pane makes the browser honour \n.
       const classes = (err as HTMLElement | null)?.className ?? '';
       expect(classes).toContain('whitespace-pre-wrap');
     });

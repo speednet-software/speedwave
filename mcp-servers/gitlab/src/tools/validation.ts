@@ -1,10 +1,5 @@
 /**
- * Validation Helpers for GitLab Tool Parameters
- *
- * `withValidation` delegates to the shared Family-B wrapper
- * ({@link withClientValidation}): not-configured gate + error mapping. The
- * unexpected-error hook logs anything that isn't a GitBeaker-style error (a
- * programming bug in a handler) so it doesn't masquerade as a "GitLab API error".
+ * Validation helpers for GitLab tool parameters; delegates to {@link withClientValidation}.
  */
 
 import {

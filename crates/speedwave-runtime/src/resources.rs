@@ -6,16 +6,11 @@
 //! external manifest) and the WSL2 VM (user-owned) stay outside by design.
 use std::process::ExitStatus;
 
-/// Fixed Claude container memory ceiling in GiB. Claude Code needs 4 GB+
-/// officially (the process itself uses ~200–400 MB — heavy compute is
-/// server-side), so a fixed 6 GiB cap is generous and, unlike the old
-/// `VM − overhead` formula, immune to drift when workers are added. See ADR-068.
+/// Fixed Claude container memory ceiling in GiB. See ADR-068.
 pub const CLAUDE_MEMORY_GIB: u32 = 6;
 
-/// Resource limits for one container: hard memory cap, CPU shares, tmpfs `/tmp`
-/// size, and (Chromium only) shared-memory size. `shm_mib` is `None` unless the
-/// container needs `shm_size` above the 64 MiB default. Sizes in MiB, except
-/// `cpus` which is fractional cores.
+/// Resource limits for one container. Sizes in MiB, except `cpus` (fractional
+/// cores); `shm_mib` is `None` unless above the 64 MiB default.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContainerResources {
     /// Hard memory cap, MiB.
@@ -46,10 +41,7 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// LiteLLM proxy (ADR-073): on every inference request's path, but the work is
-/// I/O-bound forwarding/translation — 1 core is plenty. 512 MiB covers the
-/// Python runtime + litellm with headroom for concurrent streams (a bare proxy
-/// idles at ~200-300 MiB; no DB, no Admin UI).
+/// LiteLLM proxy (ADR-073): 512 MiB, 1 core, 64 MiB /tmp.
 pub const LITELLM_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 512,
     cpus: 1.0,
@@ -71,21 +63,14 @@ pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
 // Host RAM detection
 // ---------------------------------------------------------------------------
 
-/// Converts raw bytes to GiB using floor division.
-///
-/// Floor is intentionally safer than rounding (never over-reports host RAM): a
-/// 32 GB MacBook with ~31.x GiB usable returns 31, so `host/2` = 15 → a 15 GiB
-/// VM rather than rounding up to 16. At the 16 GiB minimum host the 8 GiB clamp
-/// floor in `desired_vm_memory_gib` guarantees the always-on set still fits.
+/// Converts raw bytes to GiB using floor division (never over-reports host RAM).
 #[cfg(any(target_os = "macos", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
 
-/// Returns total physical RAM in GiB (floor).
-///
-/// Falls back to 16 on detection failure — produces 8 GiB VM via the
-/// adaptive formula (`host/2`).
+/// Returns total physical RAM in GiB (floor); falls back to 16 on detection
+/// failure.
 pub fn host_total_memory_gib() -> u32 {
     host_total_memory_gib_impl().unwrap_or(16)
 }
@@ -112,7 +97,6 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 #[cfg(target_os = "windows")]
 fn host_total_memory_gib_impl() -> Option<u32> {
     // Windows: RAM detection not implemented — falls back to 16 GiB.
-    // The Claude container cap is fixed (6 GiB), so only VM sizing uses this.
     None
 }
 
@@ -120,20 +104,11 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 // Scaling formulas (pure functions — testable on any platform)
 // ---------------------------------------------------------------------------
 
-/// Minimum supported host RAM. At 16 GiB the VM is sized to 8 GiB (`host/2`),
-/// which fits the always-on set (Claude's 6 GiB cap + hub + tmpfs) without
-/// overcommit. A smaller host would size the VM below Claude's cap and risk the
-/// OOM this SSOT exists to prevent — so 16 GiB is the floor, not a soft warn.
-/// SSOT for the `check_low_memory` warn threshold and the always-on fit test.
+/// Minimum supported host RAM; SSOT for the `check_low_memory` warn threshold
+/// and the always-on fit test. See ADR-068.
 pub const MIN_SUPPORTED_HOST_GIB: u32 = 16;
 
-/// Desired Lima VM memory in GiB based on host RAM.
-///
-/// Half of host RAM, clamped 8–32. At/above the 16 GiB minimum host
-/// (`MIN_SUPPORTED_HOST_GIB`) this is ≤50% of host RAM; the 8 GiB floor is the
-/// VM size for that minimum host and is what makes the always-on set fit (a
-/// sub-minimum, unsupported host would exceed 50% — it is warned about by
-/// `check_low_memory`). Cap 32 GiB preserves behaviour on large machines (64+ GiB).
+/// Desired Lima VM memory in GiB based on host RAM: half of host, clamped 8–32.
 pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
     (host_ram_gib / 2).clamp(8, 32)
 }
@@ -153,14 +128,8 @@ pub fn desired_vm_cpus(host_cores: u32) -> u32 {
     (host_cores / 2).clamp(4, 8)
 }
 
-/// Memory the always-on containers (Claude + hub) request inside the VM,
-/// counting hard limit + RAM-backed tmpfs. These start on every project, so
-/// this is the hard floor that must fit the smallest supported VM. Toggleable
-/// workers and plugins are excluded — they oversubscribe by design (hard
-/// limits are ceilings, not reservations; see ADR-068).
-///
-/// `#[cfg(test)]`: this expresses the always-on-fit invariant for
-/// `always_on_fits_smallest_supported_vm`; no production path consumes it.
+/// Memory the always-on containers (Claude + hub) request: hard limit +
+/// RAM-backed tmpfs. Excludes toggleable workers and plugins. See ADR-068.
 #[cfg(test)]
 fn always_on_memory_mib() -> u32 {
     let one = |r: &ContainerResources| r.mem_mib + r.tmpfs_mib + r.shm_mib.unwrap_or(0);
@@ -171,20 +140,8 @@ fn always_on_memory_mib() -> u32 {
 // OOM detection
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the exit status likely indicates an OOM kill.
-///
-/// Process chain: `Rust Command → limactl/wsl → nerdctl exec → Claude`.
-/// When the OOM killer sends SIGKILL to Claude inside the container, nerdctl
-/// translates it to exit code 137 (128 + 9, shell convention) and the host-side
-/// driver (`limactl`/`wsl`) propagates that code, so `ExitStatus::code()`
-/// returns `Some(137)`. On Unix we additionally check `signal() == Some(9)` to
-/// catch host-side raw-signal teardown that bypasses the driver.
-///
-/// This is a heuristic, NOT a confirmation: 137 / signal 9 is also produced by
-/// a host-side `kill -9` (a racing worker restart), OS shutdown, or sandbox
-/// enforcement. Confirming true OOM needs `nerdctl inspect`'s `OOMKilled=true`,
-/// which this signature-only check does not consult — [`OOM_MESSAGE`] is worded
-/// to reflect that uncertainty and to point at the worker-restart alternative.
+/// Returns `true` if the exit status likely indicates an OOM kill: code 137 or
+/// signal 9. Heuristic only (also from host-side `kill -9`); see ADR-068.
 pub fn is_oom_exit(status: &ExitStatus) -> bool {
     if status.code() == Some(137) {
         return true;
@@ -200,9 +157,6 @@ pub fn is_oom_exit(status: &ExitStatus) -> bool {
 }
 
 /// User-facing message for exit 137 / SIGKILL, shared between CLI and Desktop.
-/// 137 is SIGKILL — usually the container OOM killer, but a host-side `kill -9`
-/// (e.g. a worker restart racing the session) produces the same code, so the
-/// wording must not assert OOM as certain.
 pub const OOM_MESSAGE: &str = "\
     The Claude session was killed (exit code 137 / SIGKILL).\n\n\
     The most common cause is the container running out of memory, but a \
@@ -255,9 +209,7 @@ mod tests {
 
     #[test]
     fn vm_memory_small_hosts() {
-        // floor at 8 GiB — (host/2).clamp(8, 32). Below the 16 GiB minimum host
-        // the VM is floored at 8 GiB so the always-on set still fits; such hosts
-        // are warned about by check_low_memory but not blocked.
+        // Floor at 8 GiB — (host/2).clamp(8, 32).
         assert_eq!(desired_vm_memory_gib(16), 8);
         assert_eq!(desired_vm_memory_gib(8), 8); // floor
         assert_eq!(desired_vm_memory_gib(6), 8); // floor
@@ -321,9 +273,7 @@ mod tests {
 
     #[test]
     fn builtin_resources_stay_within_plugin_caps() {
-        // Built-in worker limits aren't validated like plugin manifests; assert
-        // every descriptor stays within the same envelope so a fat-fingered
-        // mem_mib (e.g. 20480) is caught in review, not at runtime.
+        // Built-in worker limits must stay within the plugin envelope.
         let cap_mib = crate::consts::PLUGIN_MEM_LIMIT_MAX_MIB as u32;
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert!(
@@ -338,8 +288,7 @@ mod tests {
                 svc.config_key,
                 svc.resources.cpus
             );
-            // tmpfs is RAM-backed, so tmpfs > the worker's own mem limit is
-            // always a fat-finger (no dedicated cap constant exists).
+            // tmpfs is RAM-backed, so it must not exceed the worker's mem limit.
             assert!(
                 svc.resources.tmpfs_mib <= svc.resources.mem_mib,
                 "{}: tmpfs {} MiB exceeds the worker's own mem limit {} MiB",
@@ -352,14 +301,10 @@ mod tests {
 
     #[test]
     fn all_resources_are_positive() {
-        // `ContainerResources` is a plain data bag with no constructor, so a
-        // zeroed mem/cpus/tmpfs on a new descriptor would render `memory: 0m` /
-        // `cpus: 0.0` into compose and fail at container-create. Guard the lower
-        // bound across every Speedwave-owned resource (always-on + workers).
+        // A zeroed mem/cpus/tmpfs renders invalid compose and fails at create.
         let check = |r: &ContainerResources, who: &str| {
             assert!(r.mem_mib > 0, "{who}: mem_mib must be > 0");
-            // `is_finite()` first: NaN > 0.0 is false (so NaN would slip past a
-            // bare `> 0.0`) yet `format!("{:.1}", NAN)` renders "NaN" into YAML.
+            // NaN slips past a bare `> 0.0` yet renders "NaN" into YAML.
             assert!(
                 r.cpus.is_finite() && r.cpus > 0.0,
                 "{who}: cpus must be finite and > 0"
@@ -380,13 +325,7 @@ mod tests {
 
     #[test]
     fn always_on_fits_smallest_supported_vm() {
-        // The real start-time invariant: Claude + hub start on every project, so
-        // their combined hard limit + tmpfs MUST fit the VM of the SMALLEST
-        // supported host (MIN_SUPPORTED_HOST_GIB → host/2 VM) with room for the
-        // kernel. Toggleable workers oversubscribe on top — fine (ceilings, not
-        // reservations). This is tied to MIN_SUPPORTED_HOST_GIB (not a literal)
-        // so lowering the minimum or bumping CLAUDE_RESOURCES past the fit trips
-        // here — the exact drift the 6 GiB cap and this SSOT exist to prevent.
+        // Always-on (claude+hub) must fit the smallest supported VM.
         let vm_mib = desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB) * 1024;
         assert!(
             always_on_memory_mib() < vm_mib,
@@ -422,9 +361,7 @@ mod tests {
 
     #[test]
     fn oom_message_does_not_assert_oom_as_certain() {
-        // 137 is also produced by a host-side kill -9 (racing worker restart),
-        // so the message must NOT claim OOM is the definite cause and must
-        // point the user at the worker-restart alternative.
+        // 137 also comes from a host-side kill -9, so OOM must not be asserted.
         assert!(
             !OOM_MESSAGE.contains("killed due to insufficient memory"),
             "must not assert OOM as the certain cause"
@@ -433,8 +370,7 @@ mod tests {
             OOM_MESSAGE.contains("most common cause") || OOM_MESSAGE.contains("can also"),
             "must use non-definitive wording"
         );
-        // Pin against the SSOT log marker, NOT a free literal — so the grep
-        // hint can never drift from the actual `kill_stale_node` WARN line.
+        // Pin against the SSOT log marker, not a free literal.
         assert!(
             OOM_MESSAGE.contains(crate::host_mcp_process::KILL_STALE_LOG_MARKER),
             "OOM_MESSAGE grep hint must match the real kill log marker '{}'",

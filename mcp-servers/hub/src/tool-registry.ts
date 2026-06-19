@@ -73,15 +73,8 @@ export let SERVICE_NAMES: readonly string[] = [];
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Retry backoff for initial tool discovery. Uses the longer
- * `DISCOVERY_RETRY_DELAYS_MS` schedule (~30 s total) because some workers
- * do real I/O on cold start: SharePoint resolves site_id through Graph
- * and may have to refresh an expired OAuth token via the host-side oauth
- * worker — that whole chain can run 5–15 s and the previous 7 s budget
- * left the registry empty until the 5-minute background refresh.
- *
- * Tests can override with `[0, 0, 0]` via `_setDiscoveryRetryDelaysForTesting`
- * so the suite doesn't pay the 30 s real wall-clock of the production schedule.
+ * Retry schedule for cold-start workers (SharePoint OAuth can take 5–15s).
+ * Tests override via _setDiscoveryRetryDelaysForTesting.
  */
 let discoveryRetryDelays: readonly number[] = DISCOVERY_RETRY_DELAYS_MS;
 
@@ -128,19 +121,8 @@ async function discoverWithStartupRetry(service: string): Promise<Record<string,
 }
 
 /**
- * Initialize the registry from workers.
- * Called once at startup before initializeBridges().
- *
- * For each service:
- * 1. Try to discover tools from worker (JSON-RPC tools/list)
- * 2. Retry with backoff if the first attempt returns zero tools — a
- *    slow-starting worker (e.g. `mcp-playwright` spinning up Chromium)
- *    may not be ready when the hub boots, and without the retry the
- *    service's registry stays empty until the next background refresh
- *    five minutes later.
- * 3. Merge tool data including `_meta` fields.
- * 4. If the worker is still unavailable after retries, the service gets
- *    an empty registry entry; background refresh will populate it later.
+ * Initialize the registry from workers. Called once at startup before initializeBridges().
+ * Discovers each service with startup retry; unavailable services get empty entries.
  */
 export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
@@ -191,17 +173,8 @@ export async function refreshServiceTools(service: string): Promise<void> {
 let _refreshInProgress = false;
 
 /**
- * Per-service exponential backoff for empty-registry catch-up.
- *
- * Replaces the legacy single `setInterval(10s)` that polled every empty
- * service on a fixed cadence. Now each service runs its own timer with
- * 10s → 20s → 40s → 60s (cap) backoff, reset to 10s on every successful
- * discovery. A perpetually broken worker no longer spams Graph every 10 s.
- *
- * - BASE: first retry delay (10 s).
- * - MAX: cap on backoff (60 s) — chosen so that recovery from a real
- *   restart never waits more than a minute, while a flapping worker is
- *   not retried multiple times per second.
+ * Per-service exponential backoff (10s → 60s cap) for empty-registry catch-up.
+ * Replaces legacy fixed 10s poll.
  */
 let EMPTY_REGISTRY_RECHECK_BASE_MS = 10 * 1000;
 const EMPTY_REGISTRY_RECHECK_MAX_MS = 60 * 1000;
@@ -246,16 +219,12 @@ function _startBackgroundRefresh(): void {
   }, REFRESH_MS);
 
   // Don't prevent process from exiting
-  /* c8 ignore next 3 — in Node.js setInterval always returns a Timeout with .unref();
-   * the false branch only fires in browser-like environments (setInterval returns a number) */
+  /* c8 ignore next 3 — Node.js setInterval returns Timeout with .unref(), browser returns number */
   if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
     _refreshInterval.unref();
   }
 
-  // Per-service catch-up timers for services that started with empty
-  // registries. Each service has its own setTimeout chain with exponential
-  // backoff (10s → 20s → 40s → 60s cap). On successful discovery the timer
-  // is dropped; on failure the next retry is rescheduled with a larger delay.
+  // Start catch-up timers for initially-empty services with exponential backoff.
   for (const service of SERVICE_NAMES) {
     if (Object.keys(_registry[service] ?? {}).length === 0) {
       _scheduleEmptyServiceRecheck(service, 0);
@@ -265,9 +234,6 @@ function _startBackgroundRefresh(): void {
 
 /**
  * Compute backoff delay for the n-th consecutive empty-discovery failure.
- *
- * Exported with the `_` prefix so unit tests can assert the formula without
- * the indirection of `setTimeout` mocking. Not part of the public API.
  * @param failures - 0-based count of consecutive empty discoveries.
  * @internal
  */
@@ -276,12 +242,7 @@ export function _emptyRecheckDelayMs(failures: number): number {
 }
 
 /**
- * Schedule the next catch-up discovery for an empty service.
- *
- * Idempotent: if a timer is already scheduled it is cleared first. After the
- * timer fires we call {@link refreshServiceTools} and inspect the registry —
- * non-empty drops the timer, empty schedules the next attempt with
- * `failures + 1` so the backoff grows.
+ * Schedule the next catch-up discovery for an empty service. Idempotent.
  * @param service - Service name to recheck.
  * @param failures - Number of preceding failed rechecks (drives backoff).
  */
@@ -292,13 +253,7 @@ function _scheduleEmptyServiceRecheck(service: string, failures: number): void {
   }
   const delay = _emptyRecheckDelayMs(failures);
   const timer = setTimeout(async () => {
-    // Don't run if another refresh is in flight — let it settle, then we
-    // re-check below whether we still need to schedule.
-    /* c8 ignore next 4 — race between this 1–60 s timer and the 5-min
-     * setInterval refresh that also sets _refreshInProgress. Reproducing
-     * in unit tests would require coordinating both schedulers across the
-     * same exact tick; fake-timer plumbing is disproportionate for the
-     * one-line defer-and-reschedule guard. */
+    /* c8 ignore next 4 — race with 5-min refresh; testing requires coordinating both schedulers */
     if (_refreshInProgress) {
       _scheduleEmptyServiceRecheck(service, failures);
       return;
@@ -310,8 +265,7 @@ function _scheduleEmptyServiceRecheck(service: string, failures: number): void {
       _refreshInProgress = false;
     }
     if (Object.keys(_registry[service] ?? {}).length > 0) {
-      // Success — drop the timer entirely. The 5-min background refresh
-      // covers ongoing maintenance.
+      // Success — drop timer; 5-min refresh handles maintenance.
       _emptyServiceTimers.delete(service);
       return;
     }

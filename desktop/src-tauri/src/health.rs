@@ -7,8 +7,7 @@ use speedwave_runtime::runtime;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct IdeScanState {
-    // Fingerprint built before dedupe so same-port duplicates collapse via set
-    // semantics, not via mtime tie-break.
+    // Fingerprint built pre-dedupe; duplicates collapse via set semantics.
     live: BTreeSet<(String, u16)>,
     anomalies: BTreeSet<String>,
 }
@@ -73,18 +72,9 @@ pub struct IdeBridgeHealth {
     pub port: Option<u16>,
     pub ws_url: Option<String>,
     pub detected_ides: Vec<DetectedIde>,
-    /// SSOT for "is an IDE actively connected to the bridge".
-    /// `None` in three distinct cases that callers should treat the same way
-    /// (UI shows "not connected"):
-    /// 1. No IDE has been selected via `select_ide` yet.
-    /// 2. The previously selected IDE is no longer detected (process exited
-    ///    between health polls).
-    /// 3. `load_user_config` failed (corrupt or unreadable config — see the
-    ///    `log::warn!` in `build_bridge_health`).
-    ///
-    /// Note that `port` / `ws_url` above describe the first detected IDE,
-    /// which may differ from `selected_ide`. Frontends should prefer
-    /// `selected_ide.{port, ws_url}` when both are present.
+    /// SSOT for "is an IDE actively connected to the bridge"; `None` when no
+    /// IDE is selected, the selected IDE is no longer detected, or config load
+    /// failed. Prefer `selected_ide.{port, ws_url}` over `port`/`ws_url` above.
     pub selected_ide: Option<DetectedIde>,
 }
 
@@ -244,9 +234,6 @@ impl HealthMonitor {
 
     pub fn check_ide_bridge() -> IdeBridgeHealth {
         let detected_ides = list_available_ides();
-        // Polled every 5 s — without a log entry an intermittent
-        // permission/IO error would silently degrade the bridge status to
-        // "disconnected" with no diagnostic trail.
         let selected = match speedwave_runtime::config::load_user_config() {
             Ok(cfg) => cfg.selected_ide,
             Err(e) => {
@@ -258,14 +245,9 @@ impl HealthMonitor {
     }
 }
 
-/// Pure helper: pair the live detected-IDE list with the user's selected IDE
-/// (read from config) and assemble the `IdeBridgeHealth` payload. Extracted
-/// from `check_ide_bridge` so the resolution logic is testable without
-/// touching the global config file.
-///
-/// `selected_ide` is `Some(d)` only when the user-selected entry is also
-/// currently detected — a stale config pointing at a dead IDE process
-/// resolves to `None` (UI renders "disconnected" rather than a stale port).
+/// Pairs the detected-IDE list with the selected IDE and assembles the
+/// `IdeBridgeHealth` payload. `selected_ide` resolves to `Some` only when the
+/// selected entry is also currently detected, else `None`.
 pub(crate) fn build_ide_bridge_health(
     detected_ides: Vec<DetectedIde>,
     selected: Option<&speedwave_runtime::config::SelectedIde>,
@@ -297,11 +279,9 @@ pub fn list_available_ides() -> Vec<DetectedIde> {
     lock_dir.map(|d| list_ides_in_dir(&d)).unwrap_or_default()
 }
 
-/// Returns true if `~/.claude/ide/<port>.lock` exists and points at a
-/// live (PID + TCP) IDE instance. Probes a single lock file rather than
-/// scanning the whole directory — used by `select_ide` to validate the
-/// exact port the UI sent, including older-window ports that
-/// `list_available_ides` collapses away during dedupe.
+/// Returns true if `~/.claude/ide/<port>.lock` exists and points at a live
+/// (PID + TCP) IDE instance. Probes the single lock file for `port` rather
+/// than scanning the whole directory.
 pub fn is_ide_port_alive(port: u16) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
@@ -313,11 +293,9 @@ pub fn is_ide_port_alive(port: u16) -> bool {
     is_ide_lock_alive(&lock_path)
 }
 
-/// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening ports.
-///
-/// Deduplicates by `(pid, ide_name)` — VS Code writes one lock per window,
-/// all sharing the same `pid`. Keeps the entry with the most recent mtime so
-/// the user-visible list collapses to one row per IDE instance.
+/// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening
+/// ports. Deduplicates by `(pid, ide_name)` keeping the most recent mtime, so
+/// multiple windows of one IDE (same pid) collapse to one entry.
 fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
     let Ok(entries) = std::fs::read_dir(lock_dir) else {
         return Vec::new();
@@ -401,8 +379,7 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         })
         .collect();
 
-    // Fingerprint built from the full pre-dedupe set so identical (ide, port)
-    // pairs across multiple lock files collapse via BTreeSet, not via mtime.
+    // Fingerprint from the full pre-dedupe set; duplicates collapse via BTreeSet.
     let live_fingerprint: BTreeSet<(String, u16)> =
         live.iter().map(|e| (e.ide_name.clone(), e.port)).collect();
 
@@ -422,8 +399,7 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         }
     }
 
-    // HashMap iteration is hash-randomised; sort so the frontend's
-    // detected-IDE list does not jump around between 5-second polls.
+    // Sort: HashMap iteration is hash-randomised, frontend needs stable order.
     let mut result: Vec<DetectedIde> = by_key
         .into_values()
         .map(|e| DetectedIde {
@@ -446,8 +422,7 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         *last = current;
         msgs
     };
-    // Lock released — log writes (possibly involving file rotation) cannot
-    // block a concurrent caller waiting on LAST_IDE_STATE.
+    // Log after lock release so writes do not block concurrent callers.
     for msg in messages {
         info!("{msg}");
     }
@@ -698,8 +673,7 @@ mod tests {
 
     #[test]
     fn parse_strips_runtime_project_prefix() {
-        // Build container names from the live `compose_prefix()` so the test
-        // is independent of `SPEEDWAVE_DATA_DIR`.
+        // Names from live `compose_prefix()`: independent of `SPEEDWAVE_DATA_DIR`.
         let prefix = speedwave_runtime::consts::compose_prefix();
         let json = format!(
             r#"[{{"Name":"{prefix}_my_proj_mcp_hub","State":"running"}},
@@ -824,8 +798,7 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Use an external alive PID so the entry passes the PID guard and
-        // actually reaches the TCP port liveness check — port 64999 is not listening.
+        // External alive PID passes the PID guard; port 64999 is not listening.
         let (external_pid, _child) = external_alive_pid();
         std::fs::write(
             tmp.path().join("64999.lock"),
@@ -849,8 +822,7 @@ mod tests {
         // Bind a real TCP listener so the port check passes.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        // Use an external PID so is_lock_entry_alive passes the PID liveness
-        // check without triggering the self-PID filter in list_ides_in_dir.
+        // External PID passes liveness without triggering the self-PID filter.
         let (external_pid, _child) = external_alive_pid();
         let lock_content = format!(
             r#"{{"pid":{},"port":{},"wsUrl":"ws://127.0.0.1:{}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
@@ -874,8 +846,7 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // One external "VS Code" process with two windows → two lock files,
-        // same pid + ide_name, different ports.
+        // One VS Code process, two windows: two locks, same pid+name, diff ports.
         let (external_pid, _child) = external_alive_pid();
         let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port_a = listener_a.local_addr().unwrap().port();
@@ -1068,8 +1039,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Lock file named <port>.lock with NO "port" field in JSON — simulates
-        // real IDE lock files from Cursor/VS Code that encode port only in filename.
+        // Lock named <port>.lock with no JSON port field (real Cursor/VS Code shape).
         let lock_path = tmp.path().join(format!("{port}.lock"));
         let current_pid = std::process::id();
         let content = format!(
@@ -1266,21 +1236,12 @@ mod tests {
 
     #[test]
     fn check_mcp_os_returns_false_when_no_files_exist() {
-        // check_mcp_os reads from ~/.speedwave/ which may or may not have
-        // files in a test environment. This test verifies the struct shape
-        // and that the function does not panic when files are absent.
+        // Verify no panic; cannot assert running because a real mcp-os may run.
         let health = HealthMonitor::check_mcp_os();
-        // We cannot assert running == false because a real mcp-os may be
-        // running in the developer's environment. Just verify no panic.
         let _ = health.running;
     }
 
     // ── is_mcp_os_alive tests (via check_mcp_os_alive_in) ──────────────
-    //
-    // After the unified-lock migration (PR3), `is_mcp_os_alive_in` reads
-    // `mcp-os.lock.json` instead of the three legacy `mcp-os-*` files. The
-    // tests below construct the fixture using the runtime SSOT helpers so a
-    // schema change in `LockFile` automatically fans out here.
 
     fn write_mcp_os_lock(data_dir: &std::path::Path, pid: u32, port: u16) {
         use speedwave_runtime::host_mcp_process::lock::{LockFile, LockService};
@@ -1323,9 +1284,7 @@ mod tests {
     fn is_mcp_os_alive_false_when_pid_in_lock_is_dead() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        // PID 999_999_999 is virtually guaranteed not to be alive on the
-        // host. Even if its port were somehow listening, `is_pid_alive`
-        // short-circuits before the TCP probe.
+        // PID 999_999_999 is dead; is_pid_alive short-circuits before TCP probe.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         write_mcp_os_lock(data_dir, 999_999_999, port);
@@ -1340,8 +1299,7 @@ mod tests {
     fn is_mcp_os_alive_false_when_no_lock_file() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        // No lock.json (and no legacy files either) — must return false
-        // rather than crashing on the missing file.
+        // No lock.json: must return false, not crash on the missing file.
         assert!(
             !super::check_mcp_os_alive_in(data_dir),
             "missing lock.json should return false"
@@ -1384,9 +1342,7 @@ mod tests {
 
     #[test]
     fn build_ide_bridge_health_drops_selected_ide_when_no_longer_detected() {
-        // The user previously selected an IDE that has since exited. The
-        // resolver must return None so the UI renders "disconnected" rather
-        // than a stale port.
+        // Selected IDE has since exited; resolver must return None.
         let detected_ides = vec![detected("IntelliJ", 6_901)];
         let stale = selected("VSCode", 6_900);
         let report = super::build_ide_bridge_health(detected_ides, Some(&stale));
@@ -1412,9 +1368,7 @@ mod tests {
 
     #[test]
     fn build_ide_bridge_health_distinguishes_by_port_not_just_name() {
-        // Two IDE instances of the same family on different ports — the
-        // selection key includes port specifically so users can target a
-        // specific window.
+        // Same-family IDEs on different ports; selection key includes port.
         let detected_ides = vec![detected("VSCode", 6_900), detected("VSCode", 6_902)];
         let sel = selected("VSCode", 6_902);
         let report = super::build_ide_bridge_health(detected_ides, Some(&sel));
@@ -1487,8 +1441,7 @@ mod tests {
         };
         let curr = IdeScanState::default();
         let msgs = compute_ide_state_diff(&prev, &curr);
-        // The cleared anomaly fires a "resolved" log so the appearance log has
-        // a matching close-out — operators can correlate the two.
+        // Cleared anomaly fires a "resolved" log to correlate with appearance.
         assert!(
             msgs.iter().any(|m| m.starts_with("IDE anomaly resolved")),
             "got: {msgs:?}"
@@ -1527,8 +1480,7 @@ mod tests {
         for r in [&r1, &r2, &r3] {
             assert_eq!(r.len(), 2, "two IDEs must be detected consistently");
         }
-        // Compare full Vec in input order (no post-sort) — backend MUST return
-        // a stable order so the frontend's detected-IDE list doesn't jump.
+        // Compare full Vec in input order; backend must return a stable order.
         let shape = |r: &Vec<DetectedIde>| -> Vec<(String, Option<u16>)> {
             r.iter().map(|d| (d.ide_name.clone(), d.port)).collect()
         };

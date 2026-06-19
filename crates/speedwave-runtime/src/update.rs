@@ -113,8 +113,7 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
     let path = snapshot_path_in(data_dir, project);
     let json = serde_json::to_string_pretty(&snapshot)?;
-    // Durable atomic write (fsync data + parent dir, 0o600) — bare write+rename
-    // was the torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    // Durable atomic write (fsync data + parent dir, 0o600).
     crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
     Ok(())
 }
@@ -135,8 +134,7 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_yml = match std::fs::read_to_string(&compose_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // First-time restart (compose.yml never rendered yet) — proceed
-            // without a rollback snapshot rather than blocking the restart.
+            // First-time restart: no compose.yml yet, proceed without a snapshot.
             log::warn!(
                 "save_snapshot: no compose.yml at {} — rollback will be unavailable for this restart",
                 compose_path.display()
@@ -172,8 +170,7 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    // Durable atomic write: fsync data + parent dir, owner-only (0o600) before
-    // rename so no TOCTOU window and no torn write on APFS/virtiofs.
+    // Durable atomic write: fsync data + parent dir, owner-only (0o600).
     crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
 
     Ok(())
@@ -328,8 +325,7 @@ pub fn update_containers(
         config::resolve_project_config(&project_path, &user_config, project);
 
     // 2. Re-render compose.yml with current template (includes plugin image rebuild)
-    // Reconstruct host-bridge env from disk (ADR-074) — otherwise the re-render
-    // recreates the worker without bridge env, breaking an active Desktop bridge.
+    // Reconstruct host-bridge env from disk (ADR-074).
     let host_bridges = compose::host_bridges_from_disk();
     let compose_yml = compose::render_compose(
         project,
@@ -376,8 +372,7 @@ pub fn update_containers(
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
 
-    // Build OUTSIDE the compose lock (ADR-066), missing-only per image
-    // (ADR-072). On failure no snapshot is written, containers untouched.
+    // Build OUTSIDE the compose lock (ADR-066), missing-only per image (ADR-072).
     let images_rebuilt = build::build_missing_images_locked(
         runtime,
         &build::enabled_images(&integrations),
@@ -389,10 +384,7 @@ pub fn update_containers(
         )
     })?;
 
-    // CLI-only users get fresh claude-resources — synced AFTER the build and
-    // right before the recreate that picks it up. The swap is skipped when
-    // any OTHER project is running: it would yank that project's live bind
-    // mount (only Desktop reconcile stops-and-restores across projects).
+    // Sync claude-resources after the build, before recreate; skip if another project runs.
     if other_projects_running(runtime, project) {
         log::warn!(
             "claude-resources sync skipped: another project is running; \
@@ -407,7 +399,6 @@ pub fn update_containers(
     apply_update_transaction(runtime, project, &compose_yml)?;
 
     // 9. Wait for containers to stabilize before health check.
-    //    A crash-looping container may briefly show state=="running".
     std::thread::sleep(std::time::Duration::from_secs(
         consts::CONTAINER_STABILIZATION_DELAY_SECS,
     ));
@@ -451,11 +442,7 @@ pub fn rollback_containers(
 
     let snapshot = load_snapshot(project)?;
 
-    // OS prerequisite check.
-    // Note: intentionally NOT using SYSTEM_CHECK_FAILED_PREFIX here — rollback
-    // is only triggered via CLI/Tauri update flow, not from the main Desktop
-    // startup path. The "Rollback aborted" prefix makes the context clearer
-    // than the generic "System check failed:" prefix.
+    // OS prerequisite check (uses a "Rollback aborted" prefix, not SYSTEM_CHECK_FAILED_PREFIX).
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
@@ -699,15 +686,11 @@ mod tests {
         }
     }
 
-    // Behavioural tests for `apply_update_transaction` and
-    // `apply_rollback_transaction` live in `tests/apply_transaction_behaviour.rs`
-    // — they need a fresh `OnceLock` for `data_dir()`, which is only possible
-    // in a separate integration-test binary.
+    // Behavioural tests for apply_update_transaction / apply_rollback_transaction live in tests/apply_transaction_behaviour.rs.
 
     #[test]
     fn test_rollback_with_empty_plugin_manifests_is_valid() {
-        // Old snapshots may have empty plugin_manifests. Security check
-        // should still pass if compose YAML has no plugin services.
+        // Old snapshots may have empty plugin_manifests; security check still passes with no plugin services.
         let snapshot = UpdateSnapshot {
             project: "test".to_string(),
             compose_yml: "version: '3'\nservices: {}\n".to_string(),
@@ -731,9 +714,7 @@ mod tests {
 
     #[test]
     fn test_update_checks_os_prereqs() {
-        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
-        // SecurityCheck in update_containers. Same approach as
-        // test_build_before_compose_down_in_update_containers.
+        // Structural test: check_os_prereqs() must run before SecurityCheck in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -757,8 +738,7 @@ mod tests {
 
     #[test]
     fn test_rollback_checks_os_prereqs() {
-        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
-        // SecurityCheck in rollback_containers.
+        // Structural test: check_os_prereqs() must run before SecurityCheck in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -782,9 +762,7 @@ mod tests {
 
     #[test]
     fn test_update_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
-        // in update_containers. Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -808,9 +786,7 @@ mod tests {
 
     #[test]
     fn test_rollback_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
-        // in rollback_containers. Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -875,9 +851,7 @@ mod tests {
 
     #[test]
     fn test_save_snapshot_sets_parent_permissions() {
-        // Structural test: verify save_snapshot() (production, not _in) delegates
-        // to secure_snapshot_dirs. Protects against accidental removal of the
-        // permission-setting call.
+        // Structural test: save_snapshot() (production, not _in) must delegate to secure_snapshot_dirs.
         let source = include_str!("update.rs");
 
         // Find the production save_snapshot function (not save_snapshot_in)
@@ -900,17 +874,14 @@ mod tests {
 
     #[test]
     fn test_snapshot_writers_use_durable_helper() {
-        // Both snapshot writers must route through the durable SSOT helper
-        // (fsync data + parent dir) — bare fs::write+rename is the torn-write
-        // pattern that corrupted compose.yml on APFS/virtiofs.
+        // Both snapshot writers must use write_restricted_file_atomic, not bare fs::write+rename.
         let source = include_str!("update.rs");
         for func in ["fn save_snapshot(", "fn save_snapshot_in("] {
             let start = source
                 .find(func)
                 .unwrap_or_else(|| panic!("{func} must exist"));
             let body = &source[start..];
-            // Slice to the next top-level fn (column-0) — the inner #[cfg(unix)]
-            // blocks must stay inside the body, so don't terminate on attributes.
+            // Slice to the next column-0 fn (not attributes) so inner #[cfg(unix)] blocks stay in the body.
             let end = ["\npub fn ", "\nfn "]
                 .iter()
                 .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
@@ -928,6 +899,8 @@ mod tests {
         }
     }
 
+    // SSOT guard: asserts CONTAINER_STABILIZATION_DELAY_SECS stays sane.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn test_stabilization_delay_is_reasonable() {
         assert!(
@@ -944,13 +917,7 @@ mod tests {
 
     #[test]
     fn test_render_compose_called_with_runtime_in_update_containers() {
-        // Structural test: render_compose in update_containers must pass Some(runtime),
-        // not None — this ensures plugin images are checked/rebuilt during CLI updates.
-        //
-        // A behavioral test is not feasible here because render_compose, build_images_for_bundle,
-        // and config::load_user_config are all free functions (not trait methods), making
-        // mocking prohibitively complex. The source-text test is the established pattern
-        // in this file — see test_build_before_compose_down_in_update_containers.
+        // Structural test: render_compose in update_containers must pass Some(runtime), not None.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -981,8 +948,7 @@ mod tests {
 
     #[test]
     fn test_update_containers_reconstructs_host_bridges() {
-        // Structural guard (ADR-074): update must feed disk-reconstructed
-        // host bridges into render_compose, not an empty list.
+        // Structural guard (ADR-074): update must feed disk-reconstructed host bridges into render_compose.
         let source = include_str!("update.rs");
         let fn_start = source
             .find("fn update_containers(")
@@ -1002,8 +968,7 @@ mod tests {
             !fn_body[..render_pos].contains(&empty_default),
             "update_containers must not pass an empty HostBridgesInfo to render_compose"
         );
-        // Also assert the call site actually receives &host_bridges as its
-        // argument (guards a default passed *inside* the render_compose args).
+        // Also assert the call site actually receives &host_bridges as its argument.
         let call = &fn_body[render_pos..];
         let call_end = call
             .find(';')
@@ -1016,18 +981,7 @@ mod tests {
 
     #[test]
     fn test_update_containers_plugin_rebuild_via_render_compose() {
-        // Cross-file structural test: verifies the full path
-        // update_containers → render_compose(Some(runtime)) → ensure_plugin_images.
-        //
-        // update_containers passes Some(runtime) to render_compose (verified by
-        // test_render_compose_called_with_runtime_in_update_containers). Here we
-        // verify that render_compose's body calls ensure_plugin_images, completing
-        // the behavioral chain.
-        //
-        // This cross-file test is justified because update_containers depends on
-        // free functions (render_compose, build_images_for_bundle, load_user_config) that
-        // cannot be mocked without major test infrastructure — the same reasoning
-        // documented in test_build_before_compose_down_in_update_containers.
+        // Cross-file structural test: render_compose's body must call ensure_plugin_images.
         let compose_source = include_str!("compose/mod.rs");
 
         let fn_start = compose_source
@@ -1044,10 +998,7 @@ mod tests {
 
     #[test]
     fn test_no_buildkit_prune_in_routine_prune_paths() {
-        // Structural test (ADR-072): prune_buildkit_cache must NOT be called in
-        // the routine prune paths — apt/npm cache layers are reused across
-        // updates. Cache is pruned only by the with_build_recovery ladder
-        // (disk-full + snapshotter recovery), never on routine updates.
+        // Structural test (ADR-072): prune_buildkit_cache must not be called in the routine prune paths.
         let source = include_str!("build.rs");
 
         for fn_name in [
@@ -1074,8 +1025,7 @@ mod tests {
 
     #[test]
     fn update_containers_never_writes_bundle_state() {
-        // ADR-072 single-writer rule: only Desktop (reconcile / setup wizard /
-        // update commands) persists bundle state; the CLI only reads it.
+        // ADR-072 single-writer rule: only Desktop persists bundle state; the CLI only reads it.
         let source = include_str!("update.rs");
         // Split literal so this assertion line isn't itself a match.
         let needle = format!("{}{}", "save_", "bundle_state");

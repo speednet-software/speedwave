@@ -21,19 +21,13 @@ fn sanitize_output_line(line: &str) -> String {
     speedwave_runtime::log_sanitizer::sanitize(line)
 }
 
-/// Redact secrets from an error before it is interpolated into user-facing
-/// output. Error chains from config/compose/OAuth handling can carry tokens;
-/// sanitizing at the interpolation site (not only in [`emit`]) keeps the
-/// diagnostic useful while guaranteeing no secret reaches the terminal.
+/// Redact secrets from an error before interpolating it into user-facing output.
 fn redact_err(e: &impl std::fmt::Display) -> String {
     sanitize_output_line(&e.to_string())
 }
 
-/// Single output sink. CLI user-facing output legitimately goes to
-/// stdout/stderr (per logging.md); routing every `out!`/`err!` through this
-/// one function localizes the print lint here instead of a crate-level allow.
-/// Every line passes through the `log_sanitizer` SSOT so a secret can never
-/// reach the terminal even if an upstream error string carries one.
+/// Single output sink for `out!`/`err!`; every line passes through the
+/// `log_sanitizer` SSOT before reaching the terminal.
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
     let line = sanitize_output_line(&args.to_string());
@@ -85,11 +79,8 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
 }
 
 /// Parses an optional `--project <value>` / `--project=<value>` flag from the
-/// argv tail that follows a subcommand. `tail` is the slice *after* the
-/// subcommand token (e.g. `args[2..]` for `login`, `args[1..]` for the leading
-/// bare-run form). The only accepted token is the project flag; any other
-/// token — a stray positional, an unknown flag, a second `--project` — is a
-/// hard error. Returns `Ok(None)` when the tail is empty.
+/// argv `tail` (slice after the subcommand token). Any other token is a hard
+/// error; returns `Ok(None)` when the tail is empty.
 fn parse_optional_project_tail(
     tail: &[String],
     subcommand: &str,
@@ -214,14 +205,8 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-/// Returns true for actions that must run even when one or more
-/// installed plugins fail signature verification. Without these
-/// skips, `speedwave plugin remove <bad>` would refuse to run while
-/// `<bad>` is the plugin causing the failure — leaving the user with
-/// no recovery path other than manually editing `~/.speedwave/`.
-///
-/// Help and self-update are handled earlier in `main` and never reach
-/// the audit; they are intentionally not listed here.
+/// Returns true for actions that must run even when an installed plugin fails
+/// signature verification (recovery actions like `plugin remove`).
 fn skip_plugin_audit(action: &CliAction) -> bool {
     matches!(
         action,
@@ -334,14 +319,8 @@ fn maybe_print_update_hint() {
     });
 }
 
-/// Re-exec the given binary with `update` arg to rebuild container images.
-/// Must re-exec because the current process has a stale `bundle_id` compiled
-/// into `env!("CARGO_PKG_VERSION")` — only the new binary knows the correct
-/// image tags.
-///
-/// CWD is intentionally inherited from the caller. If the user runs
-/// `speedwave self-update` from a non-project directory, `update` will fail
-/// to resolve a project — the error message guides them to run it manually.
+/// Re-exec the new binary with `update` to rebuild container images with the
+/// correct image tags; CWD is inherited from the caller.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
     let status = std::process::Command::new(exe)
         .arg("update")
@@ -485,10 +464,8 @@ fn main() -> anyhow::Result<()> {
         })
         .init();
 
-    // If SPEEDWAVE_RESOURCES_DIR is not set, try reading the marker file written
-    // by the Desktop app (e.g. ~/.speedwave/resources-dir → "/usr/lib/Speedwave").
-    // This lets the CLI find bundled binaries (nerdctl, node) without inheriting
-    // the Desktop's environment.
+    // If SPEEDWAVE_RESOURCES_DIR is unset, read the marker file the Desktop app
+    // writes (e.g. ~/.speedwave/resources-dir → "/usr/lib/Speedwave").
     if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
         let marker = consts::data_dir().join(consts::RESOURCES_MARKER);
         if let Ok(contents) = std::fs::read_to_string(&marker) {
@@ -507,14 +484,8 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    // `--help` / `-h` / `help` must print usage without touching the runtime
-    // so users can discover commands when Desktop isn't running (or while
-    // troubleshooting a broken setup).
-    //
-    // NOTE: `main_handles_help_before_runtime_check` in the tests below
-    // asserts that the literal string `if action == CliAction::Help` appears
-    // before any `runtime_not_available()` call site inside `fn main()`. If
-    // you rename either identifier, update the test assertion too.
+    // `--help` must print usage without touching the runtime; ordering pinned
+    // by `main_handles_help_before_runtime_check`.
     if action == CliAction::Help {
         print_help();
         std::process::exit(0);
@@ -533,10 +504,7 @@ fn main() -> anyhow::Result<()> {
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
 
-    // Hard-fail on tampered plugins. Recovery actions (remove, list,
-    // install) and project setup (init) skip the audit so a user with
-    // a bad plugin can still use the CLI to recover. Help/self-update
-    // already exited above.
+    // Hard-fail on tampered plugins, except for recovery actions.
     if !skip_plugin_audit(&action) {
         if let Err(failures) = speedwave_runtime::plugin::audit_all() {
             err!("Plugin verification failed:");
@@ -610,9 +578,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Handle `speedwave logout` — deletes Claude Code's credential files
-    // (~/.claude/.credentials.json and ~/.claude.json) from the per-project
-    // CLAUDE_HOME mount. No runtime needed.
+    // Handle `speedwave logout` — deletes Claude Code's credential files from
+    // the per-project CLAUDE_HOME mount; no runtime needed.
     if let CliAction::Logout(_) = action {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
             err!("Failed to load config: {err}", err = redact_err(&e));
@@ -658,10 +625,7 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         CliAction::PluginList => {
-            // Tolerant listing: never fails, reports a verification status
-            // per plugin so the user can see *why* a plugin was rejected
-            // (this command intentionally skips the startup audit so it
-            // stays usable as a recovery/diagnostic path).
+            // Tolerant listing: never fails, reports verification status per plugin.
             let plugins = plugin::list_for_ui();
             if plugins.is_empty() {
                 out!("No plugins installed");
@@ -699,13 +663,8 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            // Enabling requires a *verified* plugin — the same gate the
-            // Desktop `set_plugin_enabled` command enforces. The
-            // startup audit already ran (PluginEnable is not in the
-            // skip-list), but a plugin tampered between two audit runs
-            // must still be rejected here. `list_for_ui` is tolerant
-            // (other unverified plugins don't block the lookup) and
-            // exposes `verification_status` per entry.
+            // Enabling requires a verified plugin — same gate as the Desktop
+            // `set_plugin_enabled` command.
             let entries = plugin::list_for_ui();
             let entry = entries
                 .iter()
@@ -755,9 +714,8 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            // Disabling does NOT require verification — the user must
-            // always be able to turn off a bad plugin. Use the tolerant
-            // lister so an unverified plugin elsewhere doesn't block it.
+            // Disabling does NOT require verification — a bad plugin must
+            // always be turn-off-able. `list_for_ui` is tolerant.
             let entries = plugin::list_for_ui();
             let entry = entries
                 .iter()
@@ -804,9 +762,8 @@ fn main() -> anyhow::Result<()> {
         runtime_not_available();
     }
 
-    // Align the in-distro nerdctl to the pin (Windows; no-op elsewhere) —
-    // CLI-only users must not stay on a version with divergent compose-up
-    // semantics. Warn-only and Once-guarded inside.
+    // Align in-distro nerdctl to the pin (Windows; no-op elsewhere). Warn-only,
+    // Once-guarded inside.
     speedwave_runtime::provision::ensure_nerdctl_version();
 
     // Load config once — used for both project resolution and compose rendering
@@ -820,10 +777,8 @@ fn main() -> anyhow::Result<()> {
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Project dir comes from config (authoritative). resolve_action_project
-    // already rejected an explicit `--project` naming a missing project; an
-    // unresolved name here means a stale active/first entry, which we reject
-    // with a clear error rather than silently mounting the working directory.
+    // Project dir comes from config (authoritative); an unresolved name is a
+    // hard error, never a working-directory fallback.
     let project_dir = user_config
         .find_project(&project_name)
         .map(|p| std::path::PathBuf::from(&p.dir))
@@ -842,34 +797,20 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
-    // Sanitise any v1 SharePoint secrets still sitting in the worker-mounted
-    // token dir (refresh_token / client_id / tenant_id). Idempotent — no-op
-    // when no project has the legacy layout. Secrets are never migrated.
+    // Sanitise v1 SharePoint secrets from the worker-mounted token dir.
+    // Idempotent; secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
         log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
     }
 
-    // Self-heal legacy/partial oauth.json whose clientId/tenantId sit top-level
-    // instead of under providerData (ADR-060 addendum). Shape-only, idempotent.
-    // It logs its own summary; do not re-log the return value (CodeQL taints it).
+    // Self-heal legacy/partial oauth.json shape (ADR-060 addendum); idempotent.
+    // Do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Host workers (oauth, mcp-os) are owned by the Desktop app. The CLI must
-    // NOT spawn its own — two supervisors for one worker kill each other's
-    // process via `kill_stale_node`, cycling every ~20s and crashing the
-    // interactive Claude exec (exit 137). render_compose reads the Desktop-held
-    // `lock.json` + bearer-map from disk, so no CLI-side spawn is needed.
-    //
-    // NOTE: the availability gate above checks the VM/engine is Running, NOT
-    // that the Desktop *process* is alive — the Lima VM outlives a Desktop quit
-    // on the orphaned path. If Desktop was hard-killed (kill -9/crash) while the
-    // VM lingers, the oauth worker (a Desktop child) is dead and nothing
-    // respawns it, so SharePoint OAuth refresh silently stops for this session.
-    // A clean Desktop quit stops the VM, so the gate then correctly refuses.
-    // Reconstruct host-bridge registrations from disk (ADR-074) so a
-    // terminal-launched worker reaches the Desktop-hosted bridge; without a
-    // minted token the worker degrades to BRIDGE_NOT_CONFIGURED.
+    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its
+    // own. render_compose reads the Desktop-held lock + bearer-map from disk.
+    // Reconstruct host-bridge registrations from disk (ADR-074).
     let host_bridges = compose::host_bridges_from_disk();
 
     let compose_yml = compose::render_compose(
@@ -964,10 +905,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Save compose file and start containers.
-    // Build missing images first (outside the compose lock, ADR-066) —
-    // pull_policy:never would fail a CLI run made after an app update but
-    // before Desktop reconciles (ADR-072).
+    // Build missing images before compose-up, outside the compose lock (ADR-066).
     let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
     let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
     let prior_state = speedwave_runtime::bundle::load_bundle_state();
@@ -979,8 +917,7 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
     if built > 0 {
         out!("Built {built} container image(s) for this app version");
-        // Prune superseded tags — warn-only, Desktop reconcile is the authoritative GC
-        // path but CLI-only users would otherwise leak one tag generation per update.
+        // Prune superseded tags (warn-only) so CLI-only users don't leak a tag generation.
         speedwave_runtime::build::prune_superseded_images(
             &runtime,
             &prior_state.applied_image_hashes,
@@ -992,12 +929,9 @@ fn main() -> anyhow::Result<()> {
     plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
         .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
 
-    // compose_up is idempotent (no --force-recreate) — nerdctl
-    // recreates containers whose config changed. Skip the expensive compose_ps
-    // call over SSH; just call compose_up unconditionally and let the engine
-    // decide what needs recreating. Wrapped in a per-project transaction so a
-    // concurrent Desktop process restarting the same project cannot overwrite
-    // compose.yml between save and up (see ADR-066).
+    // compose_up is idempotent (no --force-recreate). Wrapped in a per-project
+    // transaction so a concurrent Desktop process can't overwrite compose.yml
+    // between save and up (ADR-066).
     runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
         compose::save_compose(&project_name, &compose_yml)?;
         speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
@@ -1010,10 +944,8 @@ fn main() -> anyhow::Result<()> {
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
     ensure_exec_healthy(&runtime, &project_name, &container_name)?;
 
-    // Handle `speedwave login` — runs `claude` interactively with the same
-    // resolved flags as a normal start (--dangerously-skip-permissions etc.).
-    // User types /login; Claude writes ~/.claude/.credentials.json to the
-    // per-project CLAUDE_HOME mount. Speedwave persists nothing itself.
+    // Handle `speedwave login` — runs `claude` interactively with the resolved
+    // flags. The user types /login; Claude writes credentials to the mount.
     if let CliAction::Login(_) = action {
         err!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
@@ -1042,18 +974,14 @@ fn main() -> anyhow::Result<()> {
     if is_oom {
         err!("{}", speedwave_runtime::resources::OOM_MESSAGE);
     }
-    // Normalize: when OOM is detected via signal()==Some(9) (Linux),
-    // code() returns None. Return 137 for consistency with macOS
-    // (where nerdctl translates SIGKILL → exit code 137).
+    // Normalize OOM-via-SIGKILL (code()==None on Linux) to 137 for macOS parity.
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
 }
 
 /// Picks the project an action operates on. An explicit `--project` override
-/// on `run`/`login`/`logout`/`update` wins and must name a real project
-/// (`require_project`); otherwise the active project (Desktop selector) is
-/// used, then the first configured project. The working directory is never
-/// consulted.
+/// wins and must name a real project; otherwise falls back to the active then
+/// first configured project. The working directory is never consulted.
 fn resolve_action_project(
     action: &CliAction,
     user_config: &config::SpeedwaveUserConfig,
@@ -1063,9 +991,7 @@ fn resolve_action_project(
         | CliAction::Login(Some(name))
         | CliAction::Logout(Some(name))
         | CliAction::Update(Some(name)) => {
-            // An explicit `--project` must name a real project. Without this
-            // guard a typo'd name passes syntactic validation and main()
-            // silently mounts the working directory instead (defect #6).
+            // An explicit `--project` must name a real project.
             user_config.require_project(name)?;
             Ok(name.clone())
         }
@@ -1073,11 +999,9 @@ fn resolve_action_project(
     }
 }
 
-/// Resolves the project to act on when no explicit `--project` was given.
-/// The active project (set by the Desktop selector) is authoritative; the
-/// first configured project is the fallback when none is active. The working
-/// directory is intentionally NOT consulted — the selector is the single
-/// source of truth.
+/// Resolves the project when no explicit `--project` was given: the active
+/// project is authoritative, else the first configured project. The working
+/// directory is never consulted.
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
     user_config
         .active_project
@@ -1183,10 +1107,7 @@ mod tests {
         assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
     }
 
-    /// Regression guard: the Help action must be reachable without touching
-    /// the runtime. If the main() ordering ever changes so that runtime
-    /// detection runs before Help is handled, users lose `--help` whenever
-    /// Desktop isn't running — defeating the purpose of the flag.
+    /// Regression guard: `main()` must handle Help before any runtime check.
     #[test]
     fn main_handles_help_before_runtime_check() {
         let source = include_str!("main.rs");
@@ -1384,9 +1305,7 @@ mod tests {
 
     #[test]
     fn parse_action_leading_flag_before_subcommand_errors() {
-        // Defect #1: `speedwave --project acme login` must NOT silently run
-        // acme and drop `login`. The leading `--project acme` is consumed as
-        // the bare-run override, then `login` is trailing garbage → error.
+        // `speedwave --project acme login` must error: `login` is trailing garbage.
         let args = argv(&["speedwave", "--project", "acme", "login"]);
         let err = parse_action(&args).unwrap_err();
         assert!(
@@ -1527,10 +1446,7 @@ mod tests {
 
     #[test]
     fn print_help_lists_login_and_logout() {
-        // Source-level check: `include_str!` embeds main.rs at compile time,
-        // then we assert at runtime that the `print_help` body mentions both
-        // subcommands. Avoids subprocess-based stdout capture while keeping
-        // user-facing help in sync with the CliAction variants.
+        // Source-level check that the `print_help` body documents both subcommands.
         let source = include_str!("main.rs");
         let help_start = source
             .find("fn print_help() {")
@@ -1558,10 +1474,8 @@ mod tests {
 
     #[test]
     fn oauth_state_migration_runs_after_cleanup_and_before_render() {
-        // Structural guard (ADR-060 addendum): the providerData self-heal must run
-        // after legacy_token_cleanup (both are best-effort startup sanitation) and
-        // before render_compose reads the oauth lock/bearer-map, so render never
-        // sees a pre-migration (malformed) oauth.json.
+        // Structural guard (ADR-060 addendum): self-heal must run after
+        // legacy_token_cleanup and before render_compose.
         let source = include_str!("main.rs");
         let cleanup_idx = source
             .find("run_legacy_token_cleanup_at_startup()")
@@ -1955,9 +1869,8 @@ mod tests {
 
     #[test]
     fn test_check_includes_os_prereqs() {
-        // Structural test: verify that `speedwave check` calls
-        // os_prereqs::check_os_prereqs() BEFORE SecurityCheck::run,
-        // and that prereq violations are printed in the expected format.
+        // Structural test: `speedwave check` runs prereqs before SecurityCheck
+        // and prints violations in the expected format.
         let source = include_str!("main.rs");
 
         // Locate the check subcommand handler
@@ -1995,10 +1908,8 @@ mod tests {
 
     #[test]
     fn test_check_does_not_autofix_permissions() {
-        // Structural test: `speedwave check` must NOT call ensure_data_dir_permissions.
-        // Check is diagnostic-only — it reports violations without fixing them.
-        // Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // `speedwave check` is diagnostic-only: must NOT call ensure_data_dir_permissions.
+        // Behavioral coverage: fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
         let source = include_str!("main.rs");
         let check_start = source
             .find("if action == CliAction::Check")
@@ -2048,15 +1959,11 @@ mod tests {
     }
 
     // ── plugin audit skip-list ────────────────────────────────────────────
-    // Pin which actions run with a tampered plugin on disk: a regression
-    // either way (extra runtime action skipped, or recovery action gated)
-    // is silent without these.
+    // Pin which actions run with a tampered plugin on disk.
 
     #[test]
     fn skip_plugin_audit_skips_recovery_actions() {
-        // These actions MUST run even when another plugin fails audit,
-        // otherwise a user with a bad plugin has no way to fix it from
-        // the CLI.
+        // Recovery actions must run even when another plugin fails audit.
         assert!(skip_plugin_audit(&CliAction::Init(None)));
         assert!(skip_plugin_audit(&CliAction::Init(Some("foo".into()))));
         assert!(skip_plugin_audit(&CliAction::PluginInstall(
@@ -2068,10 +1975,7 @@ mod tests {
 
     #[test]
     fn skip_plugin_audit_does_not_skip_runtime_actions() {
-        // These actions touch the runtime / config in ways that depend
-        // on every installed plugin being trusted. The audit must
-        // gate them — a regression that flips any of these to `true`
-        // silently disables the runtime-invariant promise.
+        // Runtime/config actions must be gated by the audit.
         assert!(!skip_plugin_audit(&CliAction::Run(None)));
         assert!(!skip_plugin_audit(&CliAction::Check));
         assert!(!skip_plugin_audit(&CliAction::Update(None)));
@@ -2088,9 +1992,7 @@ mod tests {
     // ── self-update rebuild structural tests ─────────────────────────────
 
     /// Extract the body of a top-level function from source, stopping at the
-    /// next top-level `fn ` definition. This prevents structural tests from
-    /// accidentally matching strings in test code that appears later in the
-    /// file.
+    /// next top-level `fn ` definition.
     fn extract_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
         let fn_start = source
             .find(signature)
@@ -2124,9 +2026,7 @@ mod tests {
             !fn_body[..render_pos].contains(&empty_default),
             "main() must not pass an empty HostBridgesInfo to render_compose"
         );
-        // The default-needle check only scans before the call; also assert the
-        // call site actually receives &host_bridges as its argument (guards a
-        // refactor that passes a default *inside* the render_compose(...) args).
+        // Assert the call site receives &host_bridges (not an inline default).
         let call = &fn_body[render_pos..];
         let call_end = call
             .find(';')
@@ -2139,12 +2039,8 @@ mod tests {
 
     #[test]
     fn test_self_update_captures_exe_before_update() {
-        // Structural test: verify that run_self_update() captures current_exe()
-        // BEFORE calling .update(), and calls run_rebuild inside the
-        // status.updated() branch. On Linux, current_exe() after self-replace
-        // returns a dead /proc/self/exe path, so capture must come first.
-        // This test intentionally checks source structure — update it if
-        // the function or its callees are renamed.
+        // Structural test: run_self_update() captures current_exe() BEFORE
+        // .update() and calls run_rebuild inside the status.updated() branch.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2171,11 +2067,8 @@ mod tests {
 
     #[test]
     fn test_self_update_does_not_propagate_rebuild_error() {
-        // The rebuild error must NOT propagate via `?` because the caller
-        // prints "Self-update failed: ..." which is misleading after a
-        // successful binary replacement. Verify `if let Err` pattern is used.
-        // This test intentionally checks source structure — update it if
-        // the error handling pattern changes.
+        // The rebuild error must NOT propagate via `?` (the caller's
+        // "Self-update failed" message would be misleading); verify `if let Err`.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2187,9 +2080,8 @@ mod tests {
 
     #[test]
     fn test_run_rebuild_clears_resources_env() {
-        // The subprocess must NOT inherit SPEEDWAVE_RESOURCES_DIR from the
-        // parent, so it reads the fresh marker file instead of a stale value.
-        // This test intentionally checks source structure.
+        // The subprocess must NOT inherit SPEEDWAVE_RESOURCES_DIR so it reads
+        // the fresh marker file instead of a stale value.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_rebuild(");
 
@@ -2201,9 +2093,8 @@ mod tests {
 
     #[test]
     fn test_self_update_rebuild_only_when_updated() {
-        // run_rebuild must be called inside the `status.updated()` branch,
-        // not unconditionally. Verify it appears between the updated check
-        // and the "Already up to date" branch.
+        // run_rebuild must appear between the `status.updated()` check and the
+        // "Already up to date" branch, not unconditionally.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2260,10 +2151,8 @@ mod tests {
         assert!(msg.contains("Failed to run"), "unexpected error: {msg}");
     }
 
-    // No Windows equivalent of run_rebuild_failing_command: /usr/bin/false
-    // ignores args, but Windows has no built-in that exits non-zero when
-    // given an arbitrary argument. The nonexistent-binary test covers the
-    // Windows error path.
+    // No Windows equivalent of run_rebuild_failing_command; the
+    // nonexistent-binary test covers the Windows error path.
 
     #[test]
     fn emit_output_line_redacts_secrets() {

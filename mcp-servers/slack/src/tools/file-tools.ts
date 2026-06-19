@@ -133,7 +133,7 @@ export async function handleGetFileContent(
 }
 
 /**
- * Tool factory (mirrors createChannelTools' not-configured gating).
+ * Tool factory.
  * @param clients - Slack client instances
  */
 export function createFileTools(clients: SlackClients): ToolDefinition[] {

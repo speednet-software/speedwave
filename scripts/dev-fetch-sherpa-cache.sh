@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Wrapper for `make download-sherpa-onnx`: fetches the sherpa-onnx MD-Release
-# prebuilt and writes the resulting lib dir to a cache file. Exists because
-# MSYS2 (Git Bash on Windows) breaks env export propagation when make calls
-# `sh -c '... export VAR; bash ...'` — the child bash does not inherit VAR.
-# Doing the work in a single bash invocation avoids both nesting bugs.
+# Wrapper for `make download-sherpa-onnx`: fetches sherpa-onnx MD-Release
+# prebuilt and writes the resulting lib dir to a cache file.
 set -euo pipefail
 
 FETCH_DIR="${1:?missing fetch dir arg}"

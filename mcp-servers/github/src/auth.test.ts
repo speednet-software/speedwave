@@ -1,8 +1,6 @@
 /**
- * GitHub worker auth wiring tests (SEC-035)
- *
- * Verifies that mcp-github reads MCP_GITHUB_AUTH_TOKEN and passes it to createMCPServer.
- * Middleware correctness is covered by shared/src/server.test.ts — here we test wiring only.
+ * GitHub worker auth wiring tests (SEC-035): mcp-github reads
+ * MCP_GITHUB_AUTH_TOKEN and passes it to createMCPServer.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

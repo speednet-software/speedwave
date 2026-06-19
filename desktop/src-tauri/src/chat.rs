@@ -49,10 +49,8 @@ pub enum StreamChunk {
         /// — the frontend degrades to "no retry target" for those entries.
         #[serde(skip_serializing_if = "Option::is_none")]
         assistant_uuid: Option<String>,
-        /// Per-turn usage delta since the previous turn. When the stream carries
-        /// cumulative `usage`, `turn_usage = current - previous`. When the CLI
-        /// emits per-step `usage` (current behaviour), it equals `usage` with
-        /// cache fields normalized to 0.
+        /// Per-turn usage delta since the previous turn (`current - previous`
+        /// for cumulative `usage`; the per-step `usage` otherwise).
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_usage: Option<TurnUsage>,
         /// Per-turn cost in USD. Computed as the delta of `total_cost_usd`
@@ -66,11 +64,7 @@ pub enum StreamChunk {
         model: Option<String>,
     },
     /// Interactive question(s) from Claude (AskUserQuestion tool).
-    ///
-    /// Up to 4 questions per the Agent SDK contract. The frontend
-    /// renders them sequentially; once every slot has a value it calls
-    /// `submit_question_answer` for the last one and the host writes a single
-    /// `control_response` carrying the full `answers` map.
+    /// Up to 4 questions per the Agent SDK contract.
     AskUserQuestion {
         tool_id: String,
         questions: Vec<AskUserQuestionItem>,
@@ -98,11 +92,8 @@ pub enum StreamChunk {
     QueueDrained { session_id: String, text: String },
 }
 
-/// Redacts secrets in a chunk's free-text fields. Every `chat_stream` emit must
-/// go through [`emit_sanitized_chunk`] (which calls this), so the
-/// `chat_stream` channel cannot leak. Structural
-/// fields (tool ids, model, session ids) and `partial_json` (incremental JSON —
-/// sanitizing could corrupt it) are left untouched.
+/// Redacts secrets in a chunk's free-text fields. Structural fields (tool ids,
+/// model, session ids) and `partial_json` are left untouched.
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     use speedwave_runtime::log_sanitizer::sanitize;
     match chunk {
@@ -218,9 +209,7 @@ impl TurnUsage {
     }
 
     /// Per-turn delta between a cumulative snapshot and a previous snapshot.
-    /// Saturating subtraction protects against reset/resume events where the
-    /// current snapshot could momentarily be smaller than the previous one;
-    /// in that case the turn is reported as zero tokens rather than negative.
+    /// Saturating subtraction clamps reset/resume regressions to zero.
     pub fn delta(current: &Self, previous: &Self) -> Self {
         Self {
             input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
@@ -238,8 +227,7 @@ impl TurnUsage {
 /// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
-// Stream-json protocol literals — see claude-agent-sdk-python types.py
-// (SDKControlRequest / SDKControlInterruptRequest).
+// Stream-json protocol literals (claude-agent-sdk-python types.py).
 const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
 const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
@@ -253,10 +241,8 @@ pub struct ControlRequest {
     pub tool_use_id: String,
 }
 
-/// Per-`AskUserQuestion` slot state held while the user answers each
-/// question. Created when the host receives the `control_request`, consumed
-/// when every slot in `answers` is `Some` and the host writes a single
-/// `control_response`.
+/// Per-`AskUserQuestion` slot state held while the user answers each question.
+/// Consumed once every slot in `answers` is `Some`.
 #[derive(Debug, Clone)]
 pub struct PartialAnswers {
     /// Original control_request, captured so we can reconstruct the wire
@@ -271,10 +257,8 @@ pub struct PartialAnswers {
 }
 
 impl PartialAnswers {
-    /// Create a `PartialAnswers` with one `None` slot per question. This
-    /// is the only path that should construct the struct in production —
-    /// it makes the `answers.len() == questions.len()` invariant
-    /// structurally impossible to violate.
+    /// Create a `PartialAnswers` with one `None` slot per question, upholding
+    /// the `answers.len() == questions.len()` invariant.
     pub fn new(request: ControlRequest, questions: Vec<AskUserQuestionItem>) -> Self {
         let answers = vec![None; questions.len()];
         Self {
@@ -316,10 +300,8 @@ fn validate_slot(
 /// Maximum size, in bytes, of a user-supplied chat message string.
 pub const MAX_MESSAGE_LEN: usize = 1_000_000;
 
-/// Maximum size, in bytes, of a single per-slot answer to an
-/// `AskUserQuestion`. Sized so that 4 maximally-large slots cannot exceed
-/// `MAX_ASK_USER_WIRE_BYTES` after JSON encoding overhead — preventing the
-/// "fill 3 slots cheaply, blow the wire cap on the 4th" foot-gun.
+/// Maximum size, in bytes, of a single per-slot answer to an `AskUserQuestion`.
+/// Sized so 4 maximal slots stay under `MAX_ASK_USER_WIRE_BYTES` once encoded.
 pub const MAX_ASK_USER_ANSWER_LEN: usize = 12 * 1024;
 
 /// Structured log entry returned by StreamParser for session logging.
@@ -347,15 +329,11 @@ pub struct StreamParser {
     /// events (ADR-046). Committed onto the `Result` chunk; `take`n when the
     /// result arrives so a subsequent error turn cannot reuse a stale id.
     pending_assistant_uuid: Option<String>,
-    /// UUIDs already emitted via `UserMessageCommit`, to guard against
-    /// duplicate commits when Claude Code re-emits a user message inside the
-    /// same turn (observed on retry/resume paths — the first user message
-    /// echoes back). A user prompt's UUID is committed exactly once.
+    /// UUIDs already emitted via `UserMessageCommit`, guarding against
+    /// duplicate commits when a user message is re-emitted in the same turn.
     committed_user_uuids: std::collections::HashSet<String>,
-    /// Snapshot of cumulative session usage taken at the start of the
-    /// current turn. Per-turn usage = current - previous. Kept here so
-    /// that `MessageDelta` (hypothetical cumulative event) and `Result`
-    /// both read the same baseline and compute a consistent delta.
+    /// Snapshot of cumulative session usage at the start of the current turn.
+    /// Per-turn usage = current - previous.
     previous_session_usage: TurnUsage,
     /// Cumulative session cost in USD from the previous `Result`. Per-turn
     /// cost = current total - previous total, when both are authoritative.
@@ -386,9 +364,7 @@ impl StreamParser {
     }
 
     /// Seeds the cumulative usage snapshot so the next `Result` subtracts
-    /// against the supplied baseline. Called on resume with the snapshot
-    /// computed from the existing transcript, so the first turn after a
-    /// resume reports a correct delta instead of `cumulative - 0`.
+    /// against the supplied baseline (called on resume).
     pub fn restore_session_snapshot(
         &mut self,
         usage: TurnUsage,
@@ -409,11 +385,6 @@ impl StreamParser {
 
     /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
     /// Returns (chunks for frontend in emission order, optional log entry).
-    ///
-    /// The Vec lets a single stream-json line produce multiple UI chunks — for
-    /// example a `user` line with a text-bearing prompt AND a tool_result
-    /// wrapper (rare but possible) emits both `UserMessageCommit` and
-    /// `ToolResult`. Callers iterate and emit each chunk in order.
     pub fn parse_line(
         &mut self,
         parsed: &serde_json::Value,
@@ -431,8 +402,7 @@ impl StreamParser {
             "system" => option_to_vec(self.parse_system_message(parsed)),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
             other => {
-                // Unknown types are dropped by design; log each once so a
-                // wire-format change is diagnosable from the session log.
+                // Unknown types are dropped; logged once per type.
                 let label = if other.is_empty() { "<none>" } else { other };
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
                     && self.seen_unknown_types.insert(label.to_string())
@@ -454,9 +424,8 @@ impl StreamParser {
     }
 
     /// Capture the assistant message UUID (`message.id`) into
-    /// `pending_assistant_uuid`. The UUID is committed onto the next
-    /// `Result` chunk — see `parse_result`. Silently ignores missing/empty
-    /// ids (local LLMs without API-style ids still produce valid turns).
+    /// `pending_assistant_uuid`, committed onto the next `Result` chunk.
+    /// Missing/empty ids are silently ignored.
     fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
         if let Some(id) = parsed["message"]["id"].as_str() {
             if !id.is_empty() {
@@ -472,16 +441,10 @@ impl StreamParser {
         self.active_blocks.clear();
         self.tool_input.clear();
         self.pending_assistant_uuid = None;
-        // committed_user_uuids is NOT reset: it persists across turns for the
-        // lifetime of the session so a retry on an already-committed user
-        // UUID doesn't re-emit a duplicate commit chunk.
+        // committed_user_uuids is NOT reset: it persists across the session.
     }
 
-    /// Reset all state for a fresh session (no snapshot restore). Used
-    /// when starting a brand-new conversation rather than resuming one.
-    ///
-    /// Currently used only by unit tests; a freshly constructed parser is
-    /// already in this state.
+    /// Reset all state for a fresh session (no snapshot restore).
     #[cfg(test)]
     pub fn new_session(&mut self) {
         self.reset();
@@ -528,10 +491,7 @@ impl StreamParser {
                     .collect()
             })
             .unwrap_or_default();
-        // Drop entries without question text — they would render as a
-        // blank prompt the user can't act on, and would produce an empty
-        // wire-key in the answers map. Logged at count level only (no
-        // question text — could be customer-supplied PII).
+        // Drop entries without question text; logged at count level only.
         if question.trim().is_empty() {
             log::warn!(
                 "AskUserQuestion: dropping entry with empty question text \
@@ -549,15 +509,9 @@ impl StreamParser {
         })
     }
 
-    /// Parse the questions list from a control_request input.
-    ///
-    /// The Agent SDK shape is `{ "questions": [{...}, ...] }` with up to 4
-    /// entries. Older/flat senders may pass a single question object at the
-    /// top level; we accept that as a one-element array. An empty array
-    /// returns an empty `Vec` (caller logs and drops). Truncates with a
-    /// warn (count only — never question text in logs) if the SDK exceeds
-    /// `MAX_ASK_USER_QUESTIONS`. Returns an empty `Vec` when no usable
-    /// question entry is found.
+    /// Parse the questions list from a control_request input. Accepts the SDK
+    /// `{ "questions": [...] }` array or a single top-level question object;
+    /// truncates to `MAX_ASK_USER_QUESTIONS`; empty `Vec` when none usable.
     pub fn parse_ask_user_questions(req: &ControlRequest) -> Vec<AskUserQuestionItem> {
         let parsed = &req.input;
 
@@ -586,11 +540,7 @@ impl StreamParser {
             .collect()
     }
 
-    /// Build AskUserQuestion chunk from a control_request's input.
-    ///
-    /// Test-only helper — production code calls `parse_ask_user_questions`
-    /// directly inside the chat reader thread and constructs the chunk
-    /// inline so it can also seed `pending_requests` with the parsed list.
+    /// Build AskUserQuestion chunk from a control_request's input (test-only).
     #[cfg(test)]
     pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
         let questions = Self::parse_ask_user_questions(req);
@@ -645,8 +595,7 @@ impl StreamParser {
                             message: format!("start: {} ({})", name, id),
                         });
                         self.active_blocks.insert(index, (id.clone(), name.clone()));
-                        // Suppress ToolStart for AskUserQuestion — it will be emitted
-                        // via control_request path, not from stream events.
+                        // Suppress ToolStart for AskUserQuestion (control_request path).
                         if name == ASK_USER_TOOL_NAME {
                             (None, log_entry)
                         } else {
@@ -742,8 +691,7 @@ impl StreamParser {
                             prefix: "TOOL",
                             message: format!("stop: {} ({})", tool_name, tool_id),
                         });
-                        // AskUserQuestion is handled via control_request protocol,
-                        // not via stream events — just clean up accumulated input.
+                        // AskUserQuestion uses control_request; just clean up input.
                         self.tool_input.remove(&tool_id);
                         return (None, log_entry);
                     }
@@ -781,10 +729,7 @@ impl StreamParser {
             }
         }
 
-        // A user message carrying text (a user prompt, not a tool_result
-        // wrapper) commits its UUID once per session. Tool-result wrappers
-        // reuse the prompt's UUID or carry different ids — we only want to
-        // retry-point against actual prompts.
+        // Commit a UUID once per session, only for a text-bearing user prompt.
         if has_text && !has_tool_result {
             if let Some(id) = message["id"].as_str() {
                 if !id.is_empty() && !self.committed_user_uuids.contains(id) {
@@ -802,8 +747,7 @@ impl StreamParser {
             }
         }
 
-        // One user line can carry several tool_result blocks (parallel tool
-        // batches) — each must emit a chunk or its UI block stays "running".
+        // One user line can carry several tool_result blocks; each emits a chunk.
         let mut chunks = Vec::new();
         let mut log_lines = Vec::new();
         for block in blocks {
@@ -861,15 +805,7 @@ impl StreamParser {
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
             if result_text.trim().is_empty() {
-                // An `is_error=true` message with no `result` text is a protocol
-                // anomaly observed in the wild when a local LLM provider (e.g.
-                // llama.cpp/Qwen) returns a bare error response. Previously the
-                // chunk was dropped silently, leaving the user with an empty
-                // message bubble and no indication that anything went wrong.
-                //
-                // Surface a placeholder so the user sees *something*, and log
-                // the full response at DEBUG so a later troubleshooting session
-                // has the server payload to dig into.
+                // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
                 log::warn!(
                     "parse_result: is_error=true but result text is empty; \
                      returning placeholder error chunk"
@@ -902,14 +838,9 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // modelUsage: cumulative per-model stats from the CLI. Used for
-        // contextWindow (constant per model) and for model identification.
+        // modelUsage: cumulative per-model stats; used for contextWindow + model id.
         let model_usage = parsed["modelUsage"].as_object();
-        // Pick the contextWindow from the same dominant model whose id we
-        // surface below (highest outputTokens). Using `values().next()` was
-        // non-deterministic and could surface Haiku's 200k context window
-        // in turns where Opus was the actual responder, leaving the chat
-        // footer misreporting the cap as 200k for 1M-context sessions.
+        // contextWindow from the dominant model (highest outputTokens).
         let context_window_size = model_usage
             .and_then(|mu| {
                 mu.values()
@@ -917,13 +848,7 @@ impl StreamParser {
             })
             .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Pick the model that produced the most output tokens — that's the
-        // main response model. A single turn can mix models (Opus for the
-        // user-facing answer + Haiku for background tasks like title
-        // generation), so picking `keys().next()` was non-deterministic and
-        // tended to surface Haiku (alphabetically before Opus) even when
-        // Opus did the real work. Falls back to the most recent SystemInit
-        // model captured in state when no modelUsage data is present.
+        // Model with the most output tokens; falls back to last SystemInit model.
         let model = model_usage
             .and_then(|mu| {
                 mu.iter()
@@ -931,8 +856,7 @@ impl StreamParser {
                     .map(|(k, _)| k.clone())
             })
             .or_else(|| self.last_model.clone());
-        // Keep parser state in sync so future turns without modelUsage still
-        // know the model.
+        // Keep `last_model` in sync for turns without modelUsage.
         if let Some(m) = model.as_deref() {
             self.last_model = Some(m.to_string());
         }
@@ -960,11 +884,7 @@ impl StreamParser {
             &mut self.previous_session_usage,
         );
 
-        // Per-turn cost. Use the authoritative delta of `total_cost_usd`
-        // when available (CLI aggregates across the session; our previous
-        // snapshot is the previous turn's cumulative total). For the first
-        // turn in a session without a prior snapshot, `total_cost` itself
-        // IS the first turn's cost.
+        // Per-turn cost = `total_cost_usd` delta vs snapshot, or `total_cost` on turn 1.
         let turn_cost = match (total_cost, self.previous_session_cost) {
             (Some(current), Some(prev)) if current >= prev => Some(current - prev),
             (Some(current), None) => Some(current),
@@ -1011,8 +931,7 @@ impl StreamParser {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
         let utilization = info["utilization"].as_f64();
-        // Claude Code emits the reset timestamp as camelCase `resetsAt`; older
-        // builds (and our legacy fixtures) used snake_case. Read both.
+        // Read the reset timestamp as both `resetsAt` and `resets_at`.
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
@@ -1056,13 +975,11 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         // ── Extract model from system init message ──
-        // Must be checked BEFORE the message.is_empty() early return below,
-        // because init messages may not carry a `message`/`content` field.
+        // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
-                    // Cache the model so subsequent result chunks can label
-                    // their meta line even when `modelUsage` is absent.
+                    // Cache the model for subsequent result chunks.
                     self.last_model = Some(model.to_string());
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
@@ -1076,9 +993,7 @@ impl StreamParser {
                     );
                 }
             }
-            // subtype is "init" but model is missing/empty — fall through to
-            // existing text-based logic (which will likely return (None, None)
-            // since init messages typically have no `message` field).
+            // "init" subtype but model missing/empty — fall through to text logic.
         }
 
         // System messages carry text in either `message` or `content`
@@ -1115,19 +1030,8 @@ impl StreamParser {
 }
 
 /// Extract per-turn usage from a parsed `result` message, updating the
-/// cumulative snapshot in place.
-///
-/// Two sources are possible:
-///
-///  * Flat `usage` (Claude Code CLI today) — the latest turn's full prompt
-///    usage (`input_tokens` is the uncached remainder, `cache_read` is the
-///    re-sent history); emitted as the turn, snapshot accumulates it.
-///  * `modelUsage` only (cumulative per-model, no flat `usage`) — compute
-///    `turn = cumulative - snapshot` and advance the snapshot.
-///
-/// The flat-path snapshot value is kept in sync so that future switches
-/// between the two payload shapes remain consistent. Returns `None` when
-/// the result carries no usage information at all.
+/// cumulative snapshot in place. Sources: flat `usage` (accumulated) or
+/// `modelUsage` (delta against snapshot). `None` when no usage is present.
 fn compute_turn_usage_from_result(
     parsed: &serde_json::Value,
     flat: Option<&UsageInfo>,
@@ -1145,10 +1049,7 @@ fn compute_turn_usage_from_result(
             .saturating_add(delta.cache_write_tokens);
         return Some(delta);
     }
-    // Fallback path: only `modelUsage` is present. Compute the delta against
-    // the cumulative snapshot. After a resume, callers should restore the
-    // snapshot via `restore_session_snapshot` before the first Result; if
-    // not, the first delta equals the full cumulative total (best-effort).
+    // Fallback: only `modelUsage` is present — delta against the snapshot.
     let cumulative = extract_cumulative_usage(parsed)?;
     let delta = TurnUsage::delta(&cumulative, snapshot);
     *snapshot = cumulative;
@@ -1226,17 +1127,9 @@ pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Valu
     })
 }
 
-/// AskUserQuestion response carrying the **full** answers map (one per
-/// question slot) per the Agent SDK contract.
-///
-/// Key = question text; value = the chosen label (or `", "`-joined labels for
-/// multi-select, joined by the frontend before submission). The original
-/// `questions` array is preserved unchanged in `updatedInput`.
-///
-/// Fails closed on duplicate question text: the SDK's answers-map keying
-/// would silently drop one slot's answer (last-write-wins on a JSON Map),
-/// which violates the "every answered question is reflected on the wire"
-/// invariant. We refuse to emit a partial-truth payload; the user retries.
+/// AskUserQuestion response carrying the **full** answers map (key = question
+/// text, value = chosen label) per the Agent SDK contract; `questions` is
+/// preserved in `updatedInput`. Fails closed on duplicate question text.
 fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<serde_json::Value> {
     let mut updated_input = partial.request.input.clone();
     let mut answers = serde_json::Map::with_capacity(partial.questions.len());
@@ -1274,13 +1167,8 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
 }
 
 /// Validate a message UUID passed to `--resume-session-at`.
-///
-/// Claude Code's message ids take two shapes in the wild: Anthropic-API
-/// `msg_...` ids (alphanumeric with underscores) and UUID v4 strings.  Rather
-/// than enumerate both, we accept any bounded string whose characters are
-/// safe to pass as a CLI argument — no shell metacharacters, no whitespace,
-/// no path traversal. Empty strings are rejected so the caller can treat
-/// "no known retry target" as a distinct error condition.
+/// Accepts a non-empty bounded `[A-Za-z0-9_-]` string (covers API `msg_...`
+/// and UUID v4 ids); rejects shell metacharacters, whitespace, traversal.
 pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.is_empty() {
         anyhow::bail!("retry uuid must not be empty");
@@ -1288,8 +1176,7 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.len() > 128 {
         anyhow::bail!("retry uuid too long (max 128 chars)");
     }
-    // Allow [A-Za-z0-9_-] only — the two observed formats (API `msg_...`
-    // and UUID v4) fit within this set and it disallows shell injection.
+    // Allow [A-Za-z0-9_-] only.
     for ch in uuid.chars() {
         if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
             anyhow::bail!("retry uuid contains invalid character: {ch:?}");
@@ -1299,11 +1186,8 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
 }
 
 /// Build the argument list for Claude Code's stream-json mode.
-///
-/// When `resume_session_id` is `Some`, adds `--resume <id>` to resume an
-/// existing conversation. When `resume_at_uuid` is `Some`, additionally
-/// rewinds the conversation to that user-message UUID (ADR-046) — Claude
-/// Code's native retry flag.
+/// `resume_session_id` adds `--resume <id>`; `resume_at_uuid` adds
+/// `--resume-session-at <uuid>` (ADR-046 retry anchor).
 pub fn build_claude_args(
     resume_session_id: Option<&str>,
     resume_at_uuid: Option<&str>,
@@ -1375,11 +1259,9 @@ fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::
     Ok(())
 }
 
-/// Manages a Claude Code subprocess running inside the container.
-/// Claude is launched via `container_exec` from the ContainerRuntime trait,
-/// which abstracts limactl/nerdctl/wsl.exe differences.
-///
-/// Stdout is parsed in a background thread that emits Tauri events directly.
+/// Manages a Claude Code subprocess running inside the container, launched via
+/// `container_exec`. Stdout is parsed in a background thread that emits Tauri
+/// events directly.
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
@@ -1411,11 +1293,8 @@ impl ChatSession {
     }
 
     /// Build the argv + container name for a Claude Code spawn.
-    ///
-    /// - `resume_session_id` adds `--resume <id>` (required for retry).
-    /// - `resume_at_uuid` adds `--resume-session-at <uuid>` (ADR-046 retry
-    ///   anchor). When both are `Some`, the spawn rewinds the session to the
-    ///   given user-message UUID and regenerates the assistant turn natively.
+    /// - `resume_session_id` adds `--resume <id>`.
+    /// - `resume_at_uuid` adds `--resume-session-at <uuid>` (ADR-046 retry anchor).
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
@@ -1439,16 +1318,9 @@ impl ChatSession {
         Ok((args, container))
     }
 
-    /// Start Claude Code in stream-json mode inside the container.
-    /// Spawns a background thread that reads stdout and emits `chat_stream`
-    /// Tauri events for the Angular frontend.
-    ///
-    /// When `resume_session_id` is `Some`, resumes an existing conversation.
-    ///
-    /// **Precondition:** The caller must have already verified container
-    /// health (e.g. via `check_claude_auth`, which calls
-    /// `ensure_exec_healthy` internally).  This method does NOT run
-    /// `ensure_exec_healthy` itself to avoid double health-checks.
+    /// Start Claude Code in stream-json mode inside the container, spawning a
+    /// background thread that reads stdout and emits `chat_stream` events.
+    /// Precondition: the caller must have already verified container health.
     pub fn start(
         &mut self,
         app_handle: AppHandle,
@@ -1457,12 +1329,9 @@ impl ChatSession {
         self.start_with_retry(app_handle, resume_session_id, None)
     }
 
-    /// Start (or resume+retry) a Claude Code session.
-    ///
-    /// When `resume_at_uuid` is `Some`, Claude Code rewinds the session to
-    /// the given user-message UUID and regenerates the assistant turn
-    /// natively (ADR-046). The caller MUST also pass `resume_session_id`;
-    /// retry without a session is nonsensical.
+    /// Start (or resume+retry) a Claude Code session. `resume_at_uuid` rewinds
+    /// to that user-message UUID (ADR-046) and MUST be paired with
+    /// `resume_session_id`.
     pub fn start_with_retry(
         &mut self,
         app_handle: AppHandle,
@@ -1515,10 +1384,8 @@ impl ChatSession {
         };
         self.session_log_path = session_log_path.clone();
 
-        // Spawn stderr reader to log errors (avoids pipe buffer deadlock).
-        // Each reader thread opens its own O_APPEND handle to the session log.
-        // POSIX guarantees atomic writes below PIPE_BUF (4 KB); our lines are
-        // ~100 bytes, so interleaving cannot corrupt individual entries.
+        // Spawn stderr reader to log errors (avoids pipe buffer deadlock);
+        // each reader opens its own O_APPEND handle to the session log.
         let stderr_log_path = session_log_path.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
@@ -1550,12 +1417,8 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
 
-        // On resume: recover the cumulative session state from the existing
-        // transcript so the first turn after resume reports a real per-turn
-        // delta. Without this seed the parser would compare the next
-        // cumulative snapshot against zero and emit the entire session
-        // total as a single turn. Failures here are non-fatal — we log and
-        // proceed with a zero baseline (matches pre-resume-seed behaviour).
+        // On resume: seed cumulative session state from the transcript so the
+        // first turn reports a real delta. Non-fatal — log and use a zero baseline.
         let resume_seed = resume_session_id.and_then(|id| {
             match history::compute_resume_snapshot(&self.project_name, id) {
                 Ok(s) => Some(s),
@@ -1596,9 +1459,7 @@ impl ChatSession {
                     }
                 };
 
-                // Parse JSON once — pass the Value to both control_request and stream parsers.
-                // Non-JSON lines (e.g. ANTHROPIC_LOG=debug HTTP traces) are joined into single
-                // entries by `http_debug_collator` before being written to the session log.
+                // Parse JSON once; non-JSON lines are collated by `http_collator`.
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
@@ -1708,8 +1569,7 @@ impl ChatSession {
                     continue;
                 }
 
-                // Undecodable control_request: don't invent a wire response,
-                // but surface the likely stall instead of dropping it silently.
+                // Undecodable control_request: surface the likely stall, no wire response.
                 if msg_type == "control_request" {
                     log::warn!(
                         "unrecognized control_request shape; not auto-responding (turn may stall)"
@@ -1730,9 +1590,7 @@ impl ChatSession {
                         entry.prefix,
                         &entry.message,
                     );
-                    // Stream-protocol markers signal in-flight HTTP transactions
-                    // are done — flush any pending ANTHROPIC_LOG=debug response
-                    // fragments so they appear in the log alongside the marker.
+                    // On stream-protocol markers, flush pending debug response fragments.
                     if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
                         for merged in http_collator.flush_all_pending_responses() {
                             speedwave_runtime::log_file::write_log_line(
@@ -1743,40 +1601,24 @@ impl ChatSession {
                         }
                     }
                 }
-                // Track whether we received a terminal event so we can
-                // emit a fallback error on unexpected EOF.  Covers:
-                // - StreamChunk::Result / Error from normal turns
-                // - system messages (including non-actionable ones that
-                //   return no chunk but still indicate normal lifecycle)
+                // Track terminal events to emit a fallback error on unexpected EOF.
                 let is_terminal = chunks
                     .iter()
                     .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
-                // Capture the session_id from a Result chunk before the
-                // chunks vector is consumed by the emit loop. ADR-045 drain
-                // happens here: when a turn ends, take any queued message
-                // for this session and write it to stdin as the next turn.
+                // Capture session_id from a Result chunk before the emit loop consumes `chunks`.
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
                 if is_terminal || msg_type == "system" {
                     got_result = true;
-                    // Clear StreamParser per-turn state. message_stop also
-                    // triggers reset inside parse_line, but an interrupted
-                    // turn may emit Result without a preceding message_stop,
-                    // leaving active_blocks entries that could misroute
-                    // ToolInputDelta events in the next turn.
+                    // Clear per-turn state (interrupts emit Result with no message_stop).
                     parser.reset();
                 }
                 for chunk in chunks {
                     emit_sanitized_chunk(&app_handle, chunk);
                 }
-                // ADR-045 drain: after Result chunks have been emitted (so
-                // the frontend already saw `is_streaming=false`), take any
-                // queued message for this session and write it back to
-                // Claude's stdin as the next turn. The composer ALSO clears
-                // its local `state.pending_queue` via the `QueueDrained`
-                // event below — both sides converge on the same state.
+                // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
                     drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
                 }
@@ -1786,8 +1628,7 @@ impl ChatSession {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
 
-            // If the stdout pipe closed without a proper result/error,
-            // emit an error so the frontend doesn't hang with isStreaming=true.
+            // stdout closed without a result/error: emit an error so the UI doesn't hang.
             if !got_result {
                 log::warn!("stdout reader: stream ended without result");
                 let chunk = StreamChunk::Error {
@@ -1804,11 +1645,8 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Send a user message to Claude (write JSON to stdin).
-    /// Uses the stream-json input format: `{"type":"user","message":{"role":"user","content":[...]}}`.
-    ///
-    /// Returns an error if the subprocess has exited (broken pipe).
-    /// The caller should restart the session and retry.
+    /// Send a user message to Claude (write JSON to stdin) in stream-json input
+    /// format. Errors if the subprocess has exited (broken pipe).
     pub fn send_message(&mut self, blocks: &[WireContentBlock]) -> anyhow::Result<()> {
         let child = self
             .child
@@ -1850,14 +1688,9 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Record one slot's answer for a multi-question `AskUserQuestion` and,
-    /// once every slot is filled, write a single `control_response` to
-    /// Claude's stdin.
-    ///
-    /// On post-fill errors (serialize / oversize / stdin write) the partial
-    /// state is restored with the just-filled slot cleared, so the user can
-    /// retry. Pre-fill errors (oversize answer, no active session) leave the
-    /// pending map untouched.
+    /// Record one slot's answer for a multi-question `AskUserQuestion`; once
+    /// every slot is filled, write a single `control_response` to stdin.
+    /// Post-fill errors clear the just-filled slot for retry.
     pub fn submit_question_answer(
         &mut self,
         tool_use_id: &str,
@@ -1955,12 +1788,9 @@ impl ChatSession {
         Ok(FillOutcome::Completed(entry))
     }
 
-    /// Best-effort re-insert of a `PartialAnswers` after a downstream
-    /// failure (serialize / oversize / stdin write). Logs and continues if
-    /// the mutex is poisoned. When `cleared_idx` is set the corresponding
-    /// `answers` slot is reverted to `None` so the user can re-submit it —
-    /// without this, `validate_slot` would reject the retry as
-    /// already-answered and the session would be stuck.
+    /// Best-effort re-insert of a `PartialAnswers` after a downstream failure;
+    /// logs and continues if the mutex is poisoned. `cleared_idx` reverts that
+    /// `answers` slot to `None` for re-submission.
     fn restore_partial(
         &self,
         tool_use_id: &str,
@@ -1983,19 +1813,11 @@ impl ChatSession {
         }
     }
 
-    /// Cancel the current turn without killing the session.
-    ///
-    /// Writes a stream-json `control_request` with `subtype: "interrupt"` to
-    /// Claude's stdin (protocol: `SDKControlInterruptRequest` in
-    /// https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
-    /// Claude aborts the in-flight turn, emits a `result` with
-    /// `subtype: "error_during_execution"`, and stays ready for the next user
-    /// message on the same stdin — session, context, MCP hub, and history
-    /// preserved.
+    /// Cancel the current turn without killing the session. Writes a
+    /// stream-json `control_request` with `subtype: "interrupt"` to stdin;
+    /// Claude aborts the turn and stays ready on the same stdin.
     pub fn interrupt(&mut self) -> anyhow::Result<()> {
-        // Mirror send_message/submit_question_answer: detect a child that has already
-        // exited so we surface a clean "session exited" (or OOM) error instead
-        // of a confusing broken-pipe write failure.
+        // Detect an already-exited child for a clean "session exited"/OOM error.
         if let Some(child) = self.child.as_mut() {
             if let Some(status) = child.try_wait()? {
                 self.child = None;
@@ -2030,8 +1852,7 @@ impl ChatSession {
         self.shared_stdin = None;
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
-            // Wait with timeout — nerdctl exec can be slow to die.
-            // If it doesn't exit in 5 seconds, abandon it (OS will reap).
+            // Wait up to 5 s for exit, then abandon it (OS reaps).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match child.try_wait() {
@@ -2050,27 +1871,7 @@ impl ChatSession {
                 }
             }
         }
-        // Join already-finished reader threads; detach any still running.
-        // Pipes may still be open if the child didn't exit in time.
-        //
-        // When the child exits cleanly (the common case, including the
-        // 5 s wait above), the kernel closes its pipe ends immediately,
-        // which unblocks the reader's `read_line` with EOF — but the Rust
-        // thread still needs a short moment to propagate that through
-        // `BufReader::lines()` -> loop exit -> the `is_finished` flag. A
-        // naive `is_finished()` check right after `kill()` therefore
-        // produces noisy "still running, detaching" warnings even on the
-        // happy path. Give the readers a brief grace window (polled at
-        // 10 ms) so the flag has time to flip before we classify them.
-        //
-        // The deadline is shared across ALL reader handles, not per-handle —
-        // stdout and stderr from the same child both receive EOF at the same
-        // instant (when the child exits), so one shared window covers them.
-        // If the first handle is genuinely stuck and burns the full window,
-        // the second handle still gets at least one poll before classification.
-        // The window only adds latency when a reader is actually stuck (then
-        // we wait up to READER_GRACE_MS total and give up); in the common
-        // case each handle is finished on the very first poll.
+        // Join finished reader threads; detach the rest after a grace window so `is_finished` can flip.
         const READER_GRACE_MS: u64 = 200;
         const READER_POLL_MS: u64 = 10;
         let reader_grace_deadline =
@@ -2081,9 +1882,7 @@ impl ChatSession {
             }
             let name = format!("{:?}", handle.thread().id());
             if !handle.is_finished() {
-                // Pipe is genuinely wedged — typically because an upstream
-                // in the SSH -> nerdctl chain didn't close its end. Detach
-                // so `stop()` still returns to the caller in a bounded time.
+                // Pipe wedged — detach so `stop()` returns in bounded time.
                 log::warn!(
                     "stop: reader thread {name} still running after {READER_GRACE_MS}ms grace, detaching"
                 );
@@ -2115,10 +1914,9 @@ impl Drop for ChatSession {
 /// Thread-safe wrapper for ChatSession, to be used from Tauri commands.
 pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 
-/// Drain any queued message for `session_id` (ADR-045) and write it to
-/// `stdin` as the next turn. Called from the stream reader thread when a
-/// `Result` chunk is observed — i.e. the turn just ended and a new one
-/// can start. Best-effort: failures are logged, never fatal.
+/// Drain any queued message for `session_id` (ADR-045) and write it to `stdin`
+/// as the next turn (called on a `Result` chunk). Best-effort: failures are
+/// logged, never fatal.
 fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
@@ -2361,16 +2159,8 @@ mod tests {
 
     #[test]
     fn stop_grace_period_joins_reader_that_finishes_late() {
-        // Regression: `stop()` used to check `handle.is_finished()` the
-        // instant after `child.kill()` + `wait`, which races the reader
-        // thread's EOF propagation through BufReader::lines(). The flag
-        // would often read `false` for a reader that was about to exit
-        // cleanly anyway, producing noisy "still running, detaching"
-        // warnings even on the happy path.
-        //
-        // Simulate a reader that finishes after ~50ms (well below the
-        // 200ms grace window). `stop()` must join it instead of
-        // classifying it as "still running".
+        // Regression: a reader finishing after ~50 ms (below the 200 ms grace)
+        // must be joined by `stop()`, not classified as "still running".
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2389,10 +2179,8 @@ mod tests {
 
     #[test]
     fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
-        // When a reader is truly wedged (pipe upstream didn't close), the
-        // grace window must still be bounded so `stop()` returns to the
-        // caller in a predictable time. We simulate a stuck reader by
-        // spawning a thread that sleeps longer than the grace window.
+        // A wedged reader's grace window must stay bounded; simulate one by
+        // sleeping longer than the window.
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2401,10 +2189,8 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: the grace window is 200ms total (shared across all
-        // handles, not per-handle) — stop() must detach the stuck reader
-        // within that window and return. 1000ms leaves plenty of room for
-        // CI jitter while still catching a regression to an unbounded join.
+        // Upper bound: 200 ms grace window; 1000 ms allows CI jitter while
+        // catching a regression to an unbounded join.
         assert!(
             elapsed < std::time::Duration::from_millis(1000),
             "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"
@@ -2647,10 +2433,8 @@ mod tests {
 
     #[test]
     fn build_user_message_with_paste_reference_in_text() {
-        // After ADR-065: the composer writes pasted bytes to
-        // `<project>/.speedwave/pastes/` and inlines an `@…` reference at
-        // the end of the text block. The wire format is purely text — no
-        // `image` content block crosses stdin.
+        // ADR-065: pastes go to `<project>/.speedwave/pastes/` with an inlined
+        // `@…` ref; the wire is text-only.
         let blocks = text_only("Co tu widać?\n\n@/workspace/.speedwave/pastes/paste-123.png");
         let msg = build_user_message(&blocks);
         let items = msg["message"]["content"].as_array().unwrap();
@@ -2662,11 +2446,8 @@ mod tests {
 
     #[test]
     fn build_user_message_snapshot_wire_format() {
-        // Contract snapshot — pins the wire shape so a regression that
-        // re-introduces inline base64 image blocks (the OOM-killing path
-        // ADR-065 removed) fails loudly. `media_type` flipping to
-        // `mimeType` or a new `parent_tool_use_id` sneaking in would also
-        // trip this test.
+        // Contract snapshot pinning the text-only wire shape (ADR-065); trips
+        // on inline image blocks, `media_type`→`mimeType`, or `parent_tool_use_id`.
         let blocks = text_only(
             "review these\n\n@/workspace/.speedwave/pastes/paste-1.png\n@/workspace/.speedwave/pastes/paste-2.jpg",
         );
@@ -2708,9 +2489,7 @@ mod tests {
 
     #[test]
     fn max_wire_bytes_is_1_mib() {
-        // ADR-065: image bytes no longer cross the wire — the cap is sized
-        // for text + paste-path references only. Bumping it would invite a
-        // regression that reintroduces inline base64.
+        // ADR-065: the cap is sized for text + paste-path refs only.
         assert_eq!(MAX_WIRE_BYTES, 1024 * 1024);
     }
 
@@ -2827,11 +2606,8 @@ mod tests {
     }
 
     /// Regression test for the interrupt path: an interrupted turn can emit
-    /// `result` without a preceding `message_stop`, so the stdout-reader
-    /// calls `parser.reset()` after every terminal chunk. Without that
-    /// reset, stale `active_blocks` entries would misroute
-    /// `ToolInputDelta` events in the next turn when Claude reuses the
-    /// same content-block index for a different tool.
+    /// `result` without a preceding `message_stop`, so the stdout-reader calls
+    /// `parser.reset()` after every terminal chunk.
     #[test]
     fn reset_after_result_prevents_stale_tool_contamination() {
         let mut parser = StreamParser::new();
@@ -2841,9 +2617,7 @@ mod tests {
         parse_line_str(&mut parser, start);
         assert!(parser.active_blocks.contains_key(&0));
 
-        // Interrupt emits a `result` directly — no preceding `message_stop`.
-        // The stdout-reader loop calls `parser.reset()` after this chunk, so
-        // simulate that here (parse_line alone does not reset on `result`).
+        // Simulate the reader's `reset()` after `result` (parse_line does not).
         let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
         parse_line_str(&mut parser, result);
         parser.reset();
@@ -2851,9 +2625,8 @@ mod tests {
         assert!(parser.active_blocks.is_empty());
         assert!(parser.tool_input.is_empty());
 
-        // Turn 2: Claude reuses index 0 for a different tool. Without the
-        // reset above, an input delta at index 0 would still route to the
-        // OLD tool_id; after reset the new tool_id takes over cleanly.
+        // Turn 2 reuses index 0; without the reset above, the input delta
+        // would route to the OLD tool_id.
         let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start2);
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
@@ -3017,10 +2790,8 @@ mod tests {
         }
     }
 
-    // `cost_usd` was the original JSON field name in older test fixtures. The CLI
-    // never actually emitted it — the parser reads `total_cost_usd` (current) with
-    // `total_cost` (legacy) as fallback. This test guards against someone adding
-    // `cost_usd` back as a third alias, which would silently resurrect a dead name.
+    // The parser reads `total_cost_usd` (current) / `total_cost` (legacy);
+    // this guards against re-adding the dead `cost_usd` alias.
     #[test]
     fn parse_result_with_legacy_cost_usd_only_produces_no_cost() {
         let mut parser = StreamParser::new();
@@ -3085,13 +2856,8 @@ mod tests {
 
     #[test]
     fn parse_result_picks_dominant_model_when_modelusage_has_multiple_keys() {
-        // Regression: a single turn can mix a main-response model with
-        // background calls (Haiku for title generation, summarization, hook
-        // self-review, etc.). Picking `keys().next()` was non-deterministic
-        // and tended to surface Haiku (alphabetically before Opus) even when
-        // Opus did the real user-facing work, so the chat footer showed the
-        // wrong model. The fix selects the model with the highest
-        // outputTokens.
+        // Regression: a turn mixing a main model with background Haiku calls
+        // must report the model with the highest outputTokens.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50,"contextWindow":200000},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500,"contextWindow":1000000}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -3129,12 +2895,8 @@ mod tests {
 
     #[test]
     fn parse_result_error_with_empty_result_returns_placeholder_error() {
-        // Regression guard: an `is_error=true` message with empty/missing
-        // `result` text used to be swallowed silently, leaving the user
-        // with a blank bubble and no indication of failure. Local LLM
-        // providers (e.g. llama.cpp + Qwen) hit this path frequently, so
-        // the parser now surfaces a placeholder Error chunk so the UI
-        // always shows *something*.
+        // Regression guard: `is_error=true` with empty `result` now surfaces a
+        // placeholder Error chunk instead of being swallowed.
         let mut parser = StreamParser::new();
         for line in [
             r#"{"type":"result","is_error":true,"result":""}"#,
@@ -3178,10 +2940,8 @@ mod tests {
 
     #[test]
     fn parse_assistant_type_emits_no_chunk() {
-        // Assistant messages don't emit chunks — content streams via
-        // `stream_event` deltas, and the final `Result` carries the UUID.
-        // An assistant line WITHOUT a `message.id` (local LLM) is silently
-        // ignored just like before.
+        // Assistant messages emit no chunks (content streams via deltas; the
+        // Result carries the UUID); a missing `message.id` is ignored.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
@@ -3205,9 +2965,8 @@ mod tests {
 
     #[test]
     fn result_commits_pending_assistant_uuid_and_clears_it() {
-        // The assistant UUID seen before a Result commits ONTO that Result
-        // (ADR-046: atomic commit on turn completion) and is cleared so the
-        // next turn doesn't recycle a stale id.
+        // The pending assistant UUID commits onto the Result (ADR-046) and is
+        // cleared for the next turn.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_turn1","role":"assistant","content":[]}}"#;
@@ -3239,10 +2998,8 @@ mod tests {
 
     #[test]
     fn assistant_uuid_does_not_leak_into_error_result() {
-        // An error turn also `take`s the pending UUID so a subsequent
-        // successful turn that arrives without its own `assistant` event
-        // (an edge protocol) cannot be mislabeled with the errored turn's
-        // identity.
+        // An error turn also takes the pending UUID so a later success without
+        // its own `assistant` event isn't mislabeled.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
@@ -3250,10 +3007,8 @@ mod tests {
         parse_line_str(&mut parser, assistant);
         let chunk = parse_line_str(&mut parser, error_result).unwrap();
         assert!(matches!(chunk, StreamChunk::Error { .. }));
-        // pending_assistant_uuid stays set here because `parse_result`
-        // short-circuits on `is_error=true`; the stdout-reader loop calls
-        // `parser.reset()` after every terminal chunk which clears it. The
-        // reset() is exercised explicitly to prove the clear happens.
+        // pending_assistant_uuid survives `parse_result`'s `is_error`
+        // short-circuit; reset() clears it (exercised here).
         parser.reset();
         assert!(parser.pending_assistant_uuid.is_none());
     }
@@ -3283,10 +3038,8 @@ mod tests {
 
     #[test]
     fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
-        // Mixed content (Claude Code occasionally interleaves a narrative
-        // text block alongside a tool_result wrapper in the same user
-        // event). The text presence MUST NOT trigger a UserMessageCommit:
-        // the message is still a tool-result wrapper, not a real prompt.
+        // Mixed content: a text block alongside a tool_result wrapper MUST NOT
+        // trigger a UserMessageCommit.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
@@ -3321,9 +3074,8 @@ mod tests {
 
     #[test]
     fn user_message_commit_survives_reset() {
-        // Across a turn boundary (reset), a previously-committed user UUID
-        // must stay in the dedup set — otherwise the re-echoed prompt on a
-        // resume would commit a second time.
+        // Across a turn boundary (reset), a committed user UUID must stay in
+        // the dedup set so a re-echoed prompt isn't re-committed.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_persist","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
@@ -3491,9 +3243,8 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_event_extracts_fields() {
-        // Real 2.1.173 wire shape: the reset timestamp is camelCase `resetsAt`
-        // (rate_limit_info schema in the binary). status/utilization are
-        // case-identical. resetsAt is what drives the footer reset countdown.
+        // Real 2.1.173 wire shape: reset timestamp is camelCase `resetsAt`
+        // (drives the footer countdown).
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -3518,9 +3269,7 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_event_accepts_legacy_snake_case_resets_at() {
-        // Older Claude Code builds emitted snake_case `resets_at`; the parser
-        // keeps a fallback so a downgrade or a replayed legacy line still
-        // surfaces the reset time.
+        // Older builds emitted snake_case `resets_at`; the parser keeps a fallback.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resets_at":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -4040,9 +3789,8 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_duplicate_question_text_fails_closed() {
-        // Two slots share question text → wire layer would lose one answer
-        // (JSON Map last-write-wins). The host refuses to emit the lossy
-        // payload and surfaces the error so the caller can retry.
+        // Two slots share question text; the host refuses the lossy payload
+        // and surfaces an error.
         let partial = make_partial(
             "req_dup",
             &[("Same?", "H1"), ("Same?", "H2")],
@@ -4073,8 +3821,7 @@ mod tests {
     #[test]
     fn submit_question_answer_no_session_errors_cleanly() {
         // Without an active child, submit_question_answer must fail with
-        // "no active session" — exercising the early-return guard before
-        // any state mutation.
+        // "no active session" before mutating state.
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
@@ -4205,10 +3952,8 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_oversize_payload_serializes_to_more_than_64_kib() {
-        // Verify that the cap can in fact be hit: build a 4-question payload
-        // where each label is large enough that the serialised wire response
-        // exceeds 64 KiB. This is the input shape that exercises
-        // submit_question_answer's wire-cap guard at the integration level.
+        // Build a 4-question payload whose serialized wire response exceeds
+        // 64 KiB to exercise the wire-cap guard.
         let big = "x".repeat(20_000);
         let partial = make_partial(
             "req_oversize",
@@ -5135,9 +4880,8 @@ mod tests {
 
     #[test]
     fn parse_result_resume_session_restores_snapshot_correctly() {
-        // Simulate resuming mid-session: restore the cumulative snapshot
-        // from history, then verify the next Result's delta is computed
-        // against the restored baseline, not against zero.
+        // Simulate mid-session resume: restore the snapshot, then verify the
+        // next Result's delta is against the baseline, not zero.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {
@@ -5295,9 +5039,8 @@ mod tests {
 
     #[test]
     fn parse_result_with_negative_cost_delta_drops_turn_cost() {
-        // Defensive: if the CLI ever reports a cumulative cost lower than
-        // the previous snapshot (resume edge case), we drop `turn_cost`
-        // rather than report a nonsense negative value.
+        // Defensive: a cumulative cost below the previous snapshot drops
+        // `turn_cost` instead of reporting a negative value.
         let mut parser = StreamParser::new();
         let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.50}"#;
         parse_line_str(&mut parser, t1);
@@ -5361,12 +5104,8 @@ mod tests {
 
     #[test]
     fn first_turn_after_resume_seed_emits_delta_not_cumulative() {
-        // End-to-end-ish coverage of the resume path: feed the parser a
-        // seed that mirrors what `compute_resume_snapshot` would return for
-        // a real prior transcript, then assert the first new `result` line
-        // produces the per-turn delta — not the entire cumulative total.
-        // Without `restore_session_snapshot` being invoked on the live
-        // resume path, this test would fail with delta == cumulative.
+        // Resume path: seed the parser like `compute_resume_snapshot` would,
+        // then assert the first result is the per-turn delta, not the cumulative.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {

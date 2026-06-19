@@ -6,13 +6,9 @@
 //! `os.environ/SPW_KEY_<PROVIDER_ID>`, resolved inside the container by
 //! the entrypoint from the `/tokens` mount.
 //!
-//! INVARIANT (validated in the Phase 0 spike): the rendered config and the
-//! container environment must never define Anthropic credentials under
-//! their canonical names (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`).
-//! LiteLLM's `/anthropic` passthrough route forwards the client's
-//! `Authorization` header (the subscription OAuth token) only while the
-//! proxy itself holds no Anthropic credential — a canonical name would
-//! silently override every passthrough call.
+//! INVARIANT: the rendered config and container env must never define
+//! Anthropic credentials under `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
+//! (canonical names override the `/anthropic` passthrough route).
 
 use crate::config::{LlmConfig, LlmProviderKind};
 use std::path::{Path, PathBuf};
@@ -47,17 +43,14 @@ pub fn render_litellm_config(llm: &LlmConfig) -> String {
     let mut model_list = String::new();
 
     for entry in &llm.providers {
-        // ids are slug-validated on resolve (migrate_llm_to_v2); the YAML
-        // below embeds them bare, so re-check defensively.
+        // Re-check: ids are embedded bare in the YAML below.
         if !crate::plugin::is_valid_slug(&entry.id) {
             log::warn!("litellm config: skipping provider with invalid id");
             continue;
         }
         let key_ref = format!("os.environ/{}", spw_key_env_name(&entry.id));
         match entry.kind {
-            // Subscription traffic never enters model_list: it rides the
-            // built-in /anthropic passthrough with the client's own OAuth
-            // Authorization header.
+            // Subscription rides the /anthropic passthrough, never model_list.
             LlmProviderKind::AnthropicOauth => {}
             LlmProviderKind::AnthropicApiKey => {
                 model_list.push_str(&format!(
@@ -77,8 +70,7 @@ pub fn render_litellm_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 };
-                // Defense in depth: re-validate before embedding bare in YAML
-                // (pure check; the save path already gates it).
+                // Re-validate before embedding bare in YAML.
                 if let Err(e) = super::llm::validate_base_url(base_url) {
                     log::warn!(
                         "litellm config: provider '{}' has invalid base_url — skipped: {e}",
@@ -86,15 +78,12 @@ pub fn render_litellm_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 }
-                // Container-side URL: the claude/litellm containers reach a
-                // host-side server via host.docker.internal (ADR-062); the
-                // stored base_url already uses that alias (validate_base_url).
+                // Container-side URL: base_url already uses host.docker.internal (ADR-062).
                 let api_base = ensure_v1_suffix(base_url);
                 let api_key = if entry.has_api_key {
                     key_ref.clone()
                 } else {
-                    // llama.cpp/Ollama ignore the key but litellm's OpenAI
-                    // client requires one.
+                    // litellm's OpenAI client requires a key even when ignored.
                     "\"dummy\"".to_string()
                 };
                 model_list.push_str(&format!(
@@ -129,20 +118,13 @@ fn ensure_v1_suffix(base_url: &str) -> String {
 }
 
 /// Usage-callback source, embedded at compile time. LiteLLM resolves the
-/// `callbacks: litellm_callback.…` module RELATIVE TO THE CONFIG FILE's
-/// directory when started with `--config` (its `get_instance_fn` requires
-/// `<config dir>/litellm_callback.py` to exist and never falls back to
-/// PYTHONPATH) — so the renderer must place the module next to config.yaml.
-/// The copy baked into the image at /opt/speedwave is unreachable for this
-/// purpose.
+/// callbacks module relative to the config dir, so it must sit next to config.yaml.
 const LITELLM_CALLBACK_SRC: &str =
     include_str!("../../../../containers/litellm/litellm_callback.py");
 
-/// Renders and atomically persists the config (0600 + fsync) under
-/// `<data_dir>/litellm/<project>/config.yaml`, alongside the usage-callback
-/// module litellm imports from the same directory. Also lifts a legacy
-/// `local-llm/api_key` into the llm token namespace so a migrated `local`
-/// entry's `SPW_KEY_LOCAL` reference resolves (ADR-073 migration).
+/// Renders and atomically persists the config (0600 + fsync) plus the
+/// usage-callback module under `<data_dir>/litellm/<project>/`. Also lifts a
+/// legacy `local-llm/api_key` into the llm token namespace (ADR-073 migration).
 pub fn write_litellm_config_in(
     data_dir: &Path,
     project: &str,
@@ -165,12 +147,8 @@ pub fn write_litellm_config_in(
 }
 
 /// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
-/// every key file's NAME + CONTENT HASH. Key values are folded in as their
-/// own sha256, not raw — the digest is a one-way fingerprint that can't
-/// reveal a secret, and content-hashing (not size/mtime) means a rotated
-/// same-length key always changes it. litellm reads both config and keys
-/// only at container start, so any change here must alter the compose
-/// definition to force a recreate.
+/// every key file's name + content hash (key values folded in as their own
+/// sha256, never raw). Changing it forces a litellm container recreate.
 pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -211,12 +189,8 @@ pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String 
     crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
-/// v1→v2 key-file migration: the legacy `local` provider stored its Bearer
-/// at `tokens/<project>/local-llm/api_key`; the litellm entrypoint reads
-/// `tokens/<project>/llm/local_api_key`. Copy once when the target is
-/// missing — the legacy file stays for the kill-switch direct path.
-/// Failures are non-fatal (the proxy then sends the dummy key, exactly the
-/// pre-migration behaviour for keyless servers).
+/// v1→v2 key-file migration: copies legacy `local-llm/api_key` into the llm
+/// token namespace once when the target is missing. Non-fatal on failure.
 fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
     let needs_local_key = llm
         .providers
@@ -243,9 +217,8 @@ fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) 
 }
 
 /// Validates and persists one provider's API key under the llm token
-/// namespace. Mirrors the ADR-040 local-llm key rules: strips an
-/// accidental `Bearer ` prefix, rejects control characters (CRLF header
-/// injection), rejects empty values.
+/// namespace: strips a `Bearer ` prefix, rejects control chars and empty
+/// values (ADR-040 rules).
 pub fn write_llm_provider_key_in(
     data_dir: &Path,
     project: &str,
@@ -412,9 +385,7 @@ general_settings: {}
 
     #[test]
     fn render_skips_provider_with_invalid_base_url() {
-        // Defense in depth: a corrupted/replayed base_url (credentials, traversal,
-        // non-http scheme) is re-validated at render time and the entry dropped
-        // rather than embedded bare in the YAML.
+        // A corrupted base_url is re-validated at render time and dropped.
         for bad in [
             "http://user:pass@host.docker.internal:9000",
             "file:///etc/passwd",
@@ -459,9 +430,7 @@ general_settings: {}
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config must be owner-only");
         }
-        // litellm resolves the callbacks module relative to the config file's
-        // directory — the module MUST land next to config.yaml or the proxy
-        // fails startup with "Could not find module file".
+        // The callback module must land next to config.yaml.
         let callback = path.parent().unwrap().join("litellm_callback.py");
         assert!(
             callback.is_file(),
@@ -557,8 +526,7 @@ general_settings: {}
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
-        // Same-length rotation must still flip the digest — it hashes key
-        // content, not size/mtime (the metadata-only digest could collide).
+        // Same-length rotation must flip the digest: it hashes content, not size/mtime.
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
         let d3 = litellm_state_digest_in(dir.path(), "proj");
         assert_ne!(d2, d3, "same-length key rotation must change the digest");

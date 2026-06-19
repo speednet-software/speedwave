@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// Mock the two I/O collaborators so the tests exercise the helper's control
-// flow (which statuses refresh, retry-once, proactive, single-flight) without
-// touching the network or disk.
 const refreshAccessToken = vi.fn();
 const loadToken = vi.fn();
 const accessTokenExpiresWithin = vi.fn();

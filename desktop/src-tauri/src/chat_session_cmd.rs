@@ -1,9 +1,5 @@
-// Chat session lifecycle Tauri commands.
-//
-// Thin `#[tauri::command]` wrappers around `ChatSession` for the active
-// project: start / resume a session, send a message, submit an ask-user
-// answer, and interrupt the current turn. The heavy lifting (auth pre-flight,
-// session swap) lives in `start_session_inner`.
+// Chat session lifecycle Tauri commands wrapping `ChatSession`:
+// start/resume a session, send a message, submit an ask-user answer, interrupt.
 
 use crate::chat::{self, ChatSession, SharedChatSession};
 use crate::reconcile::SharedOauth;
@@ -11,15 +7,9 @@ use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
-/// Shared implementation for `start_chat` and `resume_conversation`.
-///
-/// 1. Acquires the per-project compose lock via `rt.transaction()` and verifies
-///    Claude auth (which also runs `ensure_exec_healthy`).
-/// 2. Extracts the old session from the mutex and stops it **outside** the
-///    session lock — `stop()` can block on `child.wait()` / reader thread
-///    join, and holding the session mutex during that time would starve
-///    `send_message`.
-/// 3. Re-acquires the session lock and starts the new session.
+/// Shared impl for `start_chat`/`resume_conversation`: acquires the per-project
+/// compose lock + checks Claude auth, stops the old session outside the session
+/// lock, then starts the new one under it.
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -38,8 +28,7 @@ fn start_session_inner(
     // Per-project compose lock serialises auth check with concurrent compose ops.
     log::info!("start_session_inner: acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
-    // `_rt` unused: `check_claude_auth` builds its own runtime; HELD_LOCKS
-    // makes that call reentrant within this thread + project.
+    // `_rt` unused: `check_claude_auth` builds its own (reentrant via HELD_LOCKS).
     rt.transaction(project, |_rt| -> anyhow::Result<()> {
         log::info!("start_session_inner: compose lock acquired, checking auth");
         let authed = setup_wizard::check_claude_auth(project)?;
@@ -196,11 +185,8 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Extracts the body of a function from source code by matching `{`/`}`
-    /// counting braces. Used by structural tests to assert on function contents.
-    ///
-    /// NOTE: uses `split(fn_signature)` which matches the first occurrence of
-    /// the literal string in the entire file. Signatures must be unique.
+    /// Extracts a function body from source by brace-counting from the first
+    /// `split(fn_signature)` match, so `fn_signature` must be unique in the file.
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -287,11 +273,6 @@ mod tests {
 
     #[test]
     fn start_session_inner_waits_for_image_readiness_before_compose_paths() {
-        // Race guard: both recreate_project_containers_if_running (fresh
-        // oauth branch) and check_claude_auth → ensure_exec_healthy
-        // can call compose_up_recreate. Gate must come BEFORE the if-block
-        // (covers fresh-worker branch) AND BEFORE check_claude_auth (covers
-        // the always-runs path).
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
 
@@ -316,10 +297,6 @@ mod tests {
     }
 
     // -- spawn_blocking guard-rail tests --
-    //
-    // Chat commands must never acquire the SharedChatSession Mutex on the main
-    // thread. These structural tests enforce that every command wrapping the
-    // mutex uses `spawn_blocking` and acquires `.lock()` inside it.
 
     #[test]
     fn start_chat_uses_spawn_blocking() {
@@ -394,10 +371,6 @@ mod tests {
     }
 
     // -- validation-before-spawn tests --
-    //
-    // Fast validations (check_project, length checks) must run BEFORE
-    // spawn_blocking so invalid requests fail immediately without entering
-    // the thread pool.
 
     #[test]
     fn start_chat_validates_project_before_spawn_blocking() {
@@ -448,10 +421,6 @@ mod tests {
     }
 
     // -- JoinError handling tests --
-    //
-    // spawn_blocking returns JoinHandle which can fail with JoinError (e.g.
-    // if the spawned task panics). The outer .await.map_err(…) must convert
-    // this to a String for the Tauri IPC error channel.
 
     #[test]
     fn start_chat_handles_join_error() {
@@ -491,9 +460,7 @@ mod tests {
 
     #[test]
     fn stop_chat_inner_without_active_session_errors() {
-        // interrupt() requires an active stdin (shared_stdin=Some). A freshly
-        // constructed ChatSession has no stdin, so interrupt — and therefore
-        // stop_chat_inner — returns "no active session" instead of panicking.
+        // A fresh ChatSession has no stdin, so interrupt returns "no active session".
         let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
         let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
         assert!(

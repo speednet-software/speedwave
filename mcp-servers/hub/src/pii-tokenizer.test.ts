@@ -301,7 +301,6 @@ describe('pii-tokenizer', () => {
     it('tokenizes a valid Polish IBAN', () => {
       const context = createPIIContext();
       // Valid Polish IBAN (mod-97 check digit = 1)
-      // PL61109010140000071219812874 is a well-known valid test IBAN
       const data = { account: 'PL61109010140000071219812874' };
       const result = tokenizePII(data, context) as Record<string, string>;
 

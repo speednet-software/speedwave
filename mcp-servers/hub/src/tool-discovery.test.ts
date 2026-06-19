@@ -45,10 +45,7 @@ function mockJsonResponse(
 }
 
 /**
- * Create a mock fetch function that handles the 3-call sequence:
- * 1. initialize -> success
- * 2. notifications/initialized -> 204
- * 3. tools/list -> tools response
+ * Mock fetch for the initialize / notifications/initialized / tools/list sequence.
  * @param tools - Tools to return from tools/list
  * @param sessionId - Optional session ID to return from initialize
  */
@@ -131,8 +128,7 @@ describe('tool-discovery', () => {
     });
 
     it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', async () => {
-      // PR0 fix: a plugin slug like `my-plugin` must look up `WORKER_MY_PLUGIN_URL`
-      // (the form compose injects), not the broken `WORKER_MY-PLUGIN_URL`.
+      // slug `my-plugin` looks up `WORKER_MY_PLUGIN_URL` (hyphens normalized to underscores)
       process.env.WORKER_MY_PLUGIN_URL = 'http://mcp-my-plugin:4040';
 
       const mockTools: Tool[] = [

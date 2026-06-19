@@ -17,12 +17,7 @@ describe('ThinkingBlockComponent', () => {
     el = fixture.nativeElement as HTMLElement;
   });
 
-  /**
-   * Simulates a native `<details>` toggle, which jsdom does not fire from a
-   * `summary.click()` call. Sets `open` on the `<details>` element and then
-   * dispatches the native `toggle` event so the production component's
-   * `(toggle)` handler runs and the `collapsed()` signal updates.
-   */
+  /** Sets `open` on `<details>` and dispatches the native `toggle` event. */
   function activateToggle(): void {
     const details = el.querySelector('details') as HTMLDetailsElement;
     details.open = !details.open;
@@ -139,9 +134,7 @@ describe('ThinkingBlockComponent', () => {
   });
 
   it('omits aria-controls when collapsed (details closed)', () => {
-    // ARIA forbids aria-controls referencing a non-visible region; the
-    // production component nulls the attribute while collapsed even though
-    // <details> keeps the content in the DOM.
+    // aria-controls is nulled while collapsed.
     fixture.componentRef.setInput('content', 'x');
     fixture.componentRef.setInput('collapsedDefault', true);
     fixture.detectChanges();
@@ -161,11 +154,7 @@ describe('ThinkingBlockComponent', () => {
   });
 
   it('toggles the collapsed signal when the native <details> toggle event fires', () => {
-    // Native <summary> elements toggle the parent <details> on click in real
-    // browsers, but jsdom does not fire the toggle event from a summary click.
-    // We dispatch the toggle event manually to verify the (toggle) handler
-    // updates the signal — browser-level click→toggle translation is provided
-    // by the platform, not our code.
+    // jsdom does not fire toggle from a summary click; dispatched manually.
     fixture.componentRef.setInput('content', 'click activates');
     fixture.detectChanges();
 

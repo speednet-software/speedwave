@@ -161,15 +161,8 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# set -e kills the entrypoint when HOME is not writable (the Windows bug)
-#
-# On Windows the CLAUDE_HOME 9p mount defaulted to uid 0 while the container
-# runs as uid 1000; with metadata enforcing ownership, the entrypoint's first
-# write to ${HOME} hit EACCES and `set -euo pipefail` exited non-zero BEFORE
-# `exec sleep infinity`, so the container went Exited ("cannot exec in a
-# stopped state"). The host-side fix is uid=1000 in the wsl.conf automount
-# options; this test pins the invariant that a non-writable HOME is fatal, so
-# the entrypoint can never silently "succeed" into a half-set-up home.
+# set -e kills the entrypoint when HOME is not writable: non-writable HOME
+# is a fatal error, never a silent half-set-up success.
 # ---------------------------------------------------------------------------
 
 @test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
@@ -229,9 +222,8 @@ EOF
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # skills is a real directory of per-entry symlinks (not a whole-directory
-    # symlink) so per-integration entries can be gated on/off without disturbing
-    # the core entries that share the directory.
+    # skills is a real directory of per-entry symlinks, not a whole-directory
+    # symlink.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -L "$HOME/.claude/skills/my-skill.md" ]
@@ -241,17 +233,15 @@ EOF
 @test "resource directory exists but is empty when source is absent" {
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # The entrypoint always creates the four resource dirs (so plugin and
-    # integration links can be added per-entry); if the source mount has no
-    # skills/ then the directory just stays empty.
+    # The entrypoint always creates the four resource dirs; an absent source
+    # mount leaves the directory empty.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -z "$(ls -A "$HOME/.claude/skills")" ]
 }
 
 @test "links the bundled core web-authoring skills from the real resources tree" {
-    # Point at the real claude-resources tree (not a synthetic fixture) so this
-    # test verifies the actual top-level core skills ship as symlinks. These are
+    # Point at the real claude-resources tree; top-level core skills are
     # unconditionally linked (no integration gating, no ENABLED_SERVICES).
     real_resources="$BATS_TEST_DIRNAME/../../containers/claude-resources"
     export SPEEDWAVE_RESOURCES="$real_resources"
@@ -452,9 +442,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 # ~/.claude.json pre-seed: always pre-accepts the /workspace trust dialog;
-# onboarding only when logged in (ADR-052). Trust is keyed by working_dir and
-# is separate from --dangerously-skip-permissions, so it must be set even with
-# no credentials, while onboarding stays incomplete so `claude` shows OAuth.
+# onboarding completes only when logged in (ADR-052).
 # ---------------------------------------------------------------------------
 
 @test "pre-accepts /workspace trust but skips onboarding when credentials are absent" {
@@ -939,16 +927,12 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Migration: ~/.claude/<resource_type> mode flips between runs.
-# claude-home is a persistent volume, so a stale layout from a previous
-# start can poison the current one if the entrypoint doesn't normalize it.
+# claude-home is a persistent volume; the entrypoint normalizes stale layouts.
 # ---------------------------------------------------------------------------
 
 @test "plugin mode replaces stale whole-directory symlink left from no-plugins run" {
-    # Reproduce the scenario from the bug: project was started without plugins
-    # (skills became a symlink to read-only resources), then a plugin was
-    # installed and the project restarted. Without normalization the per-entry
-    # ln below would resolve through the symlink and try to write into the
-    # read-only resources mount, killing the container with `set -e`.
+    # No-plugins run leaves skills as a symlink to read-only resources; a later
+    # plugin run must replace it instead of writing through it.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core skill" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
 
@@ -993,9 +977,8 @@ EOF
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
-    # Simulate a previous plugin run leaving a stale plugin link behind: it must
-    # NOT be tracked in the state file (we did not create it), so the entrypoint
-    # should leave it alone — only links it owns get cleaned up.
+    # Untracked stale plugin link (not in the state file): the entrypoint leaves
+    # it alone — only links it owns get cleaned up.
     mkdir -p "$HOME/.claude/skills"
     ln -sfn "/some/old/plugin/path/leftover" "$HOME/.claude/skills/leftover"
 
@@ -1152,10 +1135,8 @@ setup_integrations_fixture() {
     [ ! -e "${TEST_HOME}/.claude/skills/slack" ]
 }
 
-# Regression guard for the toggle-off path: ~/.claude is persistent across
-# container restarts, so a once-linked integration skill must disappear when
-# the user toggles the integration off. Without state-file cleanup the link
-# would linger and Claude would call tools whose worker is no longer running.
+# ~/.claude persists across restarts; a toggled-off integration link must be
+# cleaned up via the state file.
 @test "toggle off removes previously-linked integration skill" {
     setup_integrations_fixture
 

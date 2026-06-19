@@ -9,7 +9,6 @@ import { ts } from './logger.js';
 
 /**
  * Configuration options for session manager behavior.
- * Controls session timeout and cleanup frequency.
  */
 export interface SessionManagerOptions {
   /** Session timeout in milliseconds (default: 30 minutes) */
@@ -20,7 +19,6 @@ export interface SessionManagerOptions {
 
 /**
  * Manages active MCP sessions with automatic expiration.
- * Tracks client connections and enforces session timeouts.
  */
 export class SessionManager {
   private sessions: Map<string, Session> = new Map();
@@ -90,7 +88,6 @@ export class SessionManager {
 
   /**
    * Destroy a session explicitly (e.g., on logout).
-   * Sessions also expire automatically via TTL, but this allows immediate termination.
    * @param sessionId Session ID to destroy
    */
   public destroySession(sessionId: string): void {

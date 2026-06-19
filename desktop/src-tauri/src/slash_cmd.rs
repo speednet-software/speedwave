@@ -1,9 +1,5 @@
 //! Tauri command for the slash-menu popover.
-//!
-//! Thin wrapper that delegates to [`speedwave_runtime::slash`]. The
-//! runtime crate owns all I/O, caching, and filesystem access; this
-//! module only resolves the active project and converts errors to
-//! strings so Tauri can serialize them.
+//! Delegates to [`speedwave_runtime::slash`].
 
 use crate::types::check_project;
 use speedwave_runtime::config;
@@ -12,11 +8,8 @@ use speedwave_runtime::slash;
 use std::path::PathBuf;
 
 /// Lists every slash command Claude Code exposes for `project_id`.
-///
-/// Returns the cached result when fresh (see `slash::CACHE_STALENESS`).
-/// Falls back to a hardcoded built-in list if the container is not
-/// running or discovery times out — callers should treat the
-/// `source` field as the source-of-truth indicator.
+/// Returns cached results when fresh, else a built-in fallback list;
+/// the `source` field marks which.
 #[tauri::command]
 pub(crate) async fn list_slash_commands(
     project_id: String,
@@ -67,8 +60,7 @@ mod tests {
 
     #[test]
     fn invalidate_slash_cache_accepts_valid_project_name() {
-        // Valid name passes the check; the cache lookup itself is a no-op
-        // for an unknown project, so the call should succeed.
+        // Valid name passes the check; cache lookup is a no-op for an unknown project.
         let res = invalidate_slash_cache("acme".to_string());
         assert!(res.is_ok());
     }

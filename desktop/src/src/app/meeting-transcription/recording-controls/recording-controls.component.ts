@@ -32,8 +32,7 @@ function accelLabel(backends: Backend[]): string {
 /**
  * Recording controls: language toggle (PL/EN — never auto-detected), audio
  * source picker (per-app entries only when the host backend supports it), an
- * acceleration badge, and Start/Stop. Emits `started`/`stopped` so the parent
- * can subscribe to / detach from the session's live stream.
+ * acceleration badge, and Start/Stop. Emits `started`/`stopped`.
  */
 @Component({
   selector: 'app-recording-controls',
@@ -196,8 +195,7 @@ export class RecordingControlsComponent implements OnInit {
       this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
-      // Default to "Whole meeting" (mixed) if offered, else "System
-      // (everything)", else the first entry.
+      // Prefer mixed, then system_wide, else first entry.
       const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
       const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
       this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
@@ -210,10 +208,7 @@ export class RecordingControlsComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  /**
-   * Re-reads whether a Whisper model is downloaded. The parent calls this after
-   * a model download finishes so the Start button un-disables.
-   */
+  /** Re-reads whether a Whisper model is downloaded. */
   async refreshModelAvailability(): Promise<void> {
     try {
       const ack = await this.transcription.listModels();

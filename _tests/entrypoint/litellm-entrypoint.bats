@@ -55,9 +55,7 @@ teardown() {
 }
 
 @test "skips provider ids that fail the slug shape" {
-    # Uppercase, dots, and underscores would not have passed host-side slug
-    # validation — the entrypoint must not export them (defense in depth
-    # against a tampered tokens dir injecting arbitrary env names).
+    # Uppercase, dots, underscores fail slug validation; must not export.
     printf 'v' > "$TOKENS_DIR/Bad.Provider_api_key"
     printf 'v' > "$TOKENS_DIR/UPPER_api_key"
     run "$ENTRYPOINT"

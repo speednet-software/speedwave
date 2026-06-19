@@ -20,12 +20,9 @@ import type { ConversationSummary } from '../../models/chat';
 import { IconComponent } from '../../shared/icon.component';
 
 /**
- * Buckets a conversation summary into a relative-day group.
- *
- * Mirrors the mockup's `today / yesterday / older` headers (lines 443/462/475).
- * Falls back to `older` when a timestamp can't be parsed so we never drop a row.
+ * Buckets a conversation summary into a relative-day group (today/yesterday/older).
  * @param ts ISO timestamp of the conversation's last activity.
- * @param now Reference epoch in ms; defaults to `Date.now()` for testability.
+ * @param now Reference epoch in ms; defaults to `Date.now()`.
  */
 function bucketForTimestamp(ts: string | null | undefined, now: number = Date.now()): string {
   if (!ts) return 'older';
@@ -38,11 +35,7 @@ function bucketForTimestamp(ts: string | null | undefined, now: number = Date.no
   return 'older';
 }
 
-/**
- * One conversation row prepared for rendering — preview/timestamp passed
- * through the cleanup helpers once when the buckets are computed, so the
- * template never re-runs the regexes per CD tick.
- */
+/** One conversation row prepared for rendering with cleaned preview/timestamp. */
 interface ConversationRow {
   readonly conv: ConversationSummary;
   readonly preview: string;
@@ -275,18 +268,13 @@ export class ConversationsSidebarComponent {
     });
   });
 
-  /**
-   * Sync the `open` input with the CDK overlay lifecycle. Opening builds a
-   * left-anchored full-height panel with a dark backdrop and dispatches close
-   * on backdrop click or Escape. Closing detaches the portal (no DOM remains).
-   */
+  /** Sync the `open` input with the CDK overlay lifecycle (open/close panel). */
   constructor() {
     effect(() => {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
-    // Defensive: dispose the overlay if the host is torn down while open
-    // (e.g., a route swap with the drawer left open).
+    // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
   }
 

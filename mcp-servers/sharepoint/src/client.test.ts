@@ -38,9 +38,7 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     }),
-    // The shared refresh-retry loop is unit-tested in oauth-authed-request.test.ts;
-    // here we mock it to assert SharePoint delegates correctly. Its default
-    // implementation (one send) is wired in beforeEach.
+    // Mocked to assert SharePoint delegates; default impl wired in beforeEach.
     authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };
@@ -85,16 +83,13 @@ describe('SharePointClient', () => {
     fetchMock = vi.fn();
     global.fetch = fetchMock as typeof fetch;
 
-    // After ADR-060, SharePointClient.refreshAccessToken re-reads access_token
-    // from /tokens after the oauth worker writes it. Default the mock to a
-    // valid token so 401-retry paths can proceed.
+    // ADR-060: refreshAccessToken re-reads access_token from /tokens.
     mockLoadToken.mockResolvedValue('refreshed-access-token');
     mockOauthRefresh.mockResolvedValue({
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     });
-    // Default: delegate straight to `send` once (the no-refresh happy path).
-    // Refresh-specific tests override this per case.
+    // Default: delegate to `send` once; refresh tests override per case.
     mockAuthedRequest.mockImplementation((opts) => opts.send(opts.state.accessToken));
 
     // Create fresh client instance
@@ -121,8 +116,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  // Health getters delegate to TokenManager. Cheap to test, important for
-  // the OAuth diagnostics path used by the Desktop integrations card.
+  // Tests OAuth diagnostics path used by Desktop integrations card.
   describe('token save error getters', () => {
     it('getLastTokenSaveError starts null and survives clear', () => {
       expect(client.getLastTokenSaveError()).toBeNull();
@@ -131,8 +125,6 @@ describe('SharePointClient', () => {
     });
 
     it('getHealthStatus exposes tokenSaveError + connection status', () => {
-      // Now returns the shared HealthStatus shape with SharePoint's
-      // tokenSaveError as an optional extension.
       expect(client.getHealthStatus()).toEqual({
         connection: 'unknown',
         connectionError: null,
@@ -147,8 +139,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  // 401 → host-side oauth worker refresh → retry. The new path (ADR-060)
-  // replaces the v1 Microsoft endpoint hit; this batch covers the wiring.
+  // 401 → host-side oauth worker refresh → retry (ADR-060).
   describe('auth delegation (host-side oauth worker, ADR-060)', () => {
     it('delegates the Graph call to authedRequest with the sharepoint service + proactive window', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
@@ -173,10 +164,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  // graphRequest is the public Graph wrapper used by tools/page-tools.ts +
-  // tools/list-tools.ts (PR4 / PR5). Hits every code path of the helper:
-  // path form, absolute-URL form, body + Content-Type injection, 204 no
-  // content, non-2xx with Graph error message, non-2xx with non-JSON body.
+  // Public Graph wrapper used by tools/page-tools.ts + tools/list-tools.ts.
   describe('graphRequest', () => {
     it('expands /sites/{site-id} path and adds v1.0 prefix', async () => {
       fetchMock.mockResolvedValueOnce({
@@ -262,9 +250,6 @@ describe('SharePointClient', () => {
     });
 
     it('falls back to status line when Graph returns valid JSON without an error.message field', async () => {
-      // Some Graph error responses arrive as `{}` or `{error: {}}`. Without
-      // a message we keep the bare status line — appending ": undefined"
-      // would be a regression caller error UIs surface.
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 422,
@@ -277,9 +262,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  // SharePointClient.formatError() is a static helper used by every tool's
-  // wrapErr() — coverage of its branches is what makes audit/diagnostics
-  // surfaces consistent.
+  // Static helper used by every tool's wrapErr().
   describe('formatError', () => {
     it('rewrites 401 / Unauthorized with setup guidance', () => {
       expect(SharePointClient.formatError(new Error('401 Unauthorized'))).toMatch(
@@ -335,7 +318,7 @@ describe('SharePointClient', () => {
     });
 
     it('flows a 401-retry result back through authedRequest (the helper owns the retry)', async () => {
-      // Simulate the helper's 401 → retry: send is called twice (first 401, then 200).
+      // Helper's 401 → retry: send called twice (401, then 200).
       fetchMock
         .mockResolvedValueOnce({ status: 401, ok: false })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
@@ -356,8 +339,7 @@ describe('SharePointClient', () => {
     });
 
     it('state is a live view — a helper token write propagates to later requests', async () => {
-      // The shim's setter must mutate config.accessToken (not a copy), so a
-      // refresh performed by the helper sticks for every subsequent call.
+      // Shim setter must mutate config.accessToken, not a copy.
       fetchMock.mockResolvedValue({ ok: true, json: async () => ({ value: [] }) });
       mockAuthedRequest.mockImplementationOnce(async (opts) => {
         opts.state.accessToken = 'rotated-token';
@@ -434,10 +416,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // getDriveItemForSharePointPath is the lookup path that addImageWebPart
-  // relies on — it must reject traversal attempts before issuing a Graph
-  // call, and must surface usable errors when Graph returns 4xx/5xx or a
-  // malformed payload.
   describe('getDriveItemForSharePointPath', () => {
     it('rejects path-traversal input before issuing any Graph call (security)', async () => {
       await expect(client.getDriveItemForSharePointPath('../../etc/passwd')).rejects.toThrow(
@@ -471,8 +449,6 @@ describe('SharePointClient', () => {
     });
 
     it('rejects responses missing id or sharepointIds (defensive parse)', async () => {
-      // Graph normally returns both fields, but a malformed/incomplete payload
-      // would surface as a confusing error later in addImageWebPart. Fail fast.
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ name: 'hero.jpg' /* no id, no sharepointIds */ }),
@@ -721,9 +697,7 @@ describe('SharePointClient', () => {
       const result = await client.listFiles({ path: 'Reports' });
 
       expect(result.files[0].path).toBe('Reports/report.pdf');
-      // After dropping base_path, file ops resolve straight against the site
-      // drive root — `listFiles({ path: 'Reports' })` hits
-      // `/sites/{siteId}/drive/root:/Reports:/children`.
+      // listFiles({ path: 'Reports' }) hits /drive/root:/Reports:/children.
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining(`drive/root:/Reports:/children`),
         expect.any(Object)
@@ -1348,8 +1322,7 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('file.txt', '/workspace/file.txt');
 
-      // After dropping base_path: file in root has no parent segments to check,
-      // so only the upload PUT happens.
+      // File in root has no parent segments; only the upload PUT happens.
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -1388,16 +1361,13 @@ describe('SharePointClient', () => {
     });
 
     it('should return early from ensureParentFolders when path has no parent (single segment)', async () => {
-      // A single segment path like "file.txt" has no parent — should return immediately
-      // without making any API calls
+      // Single-segment path has no parent — returns without API calls.
       await client.ensureParentFolders('file.txt');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('should create folder at root drive level when first segment does not exist', async () => {
-      // When the first segment (accum = single segment) is 404, we call
-      // buildFolderChildrenUrl("") which returns the root/children URL.
-      // We test this via ensureParentFolders directly with a top-level path.
+      // First-segment 404 hits buildFolderChildrenUrl("") → root/children URL.
       // 'Documents' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
@@ -1592,8 +1562,7 @@ describe('SharePointClient', () => {
     });
 
     it('should throw when folder path has trailing slash (empty folder name)', async () => {
-      // "folder/" passes path validation but splitPath gives empty folderName.
-      // ensureParentFolders on "folder/" checks the single "folder" segment.
+      // "folder/" passes validation but splitPath gives empty folderName.
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1672,11 +1641,7 @@ describe('SharePointClient', () => {
     });
 
     it('emits a debug log entry with the parseError context when DEBUG is set', async () => {
-      // debugLog has a two-arg overload (message, data) used by createRemoteFolder
-      // when JSON parsing fails. Under DEBUG=1 the log must include the parseError
-      // so the operator can see *why* the body was unparseable, not just that it
-      // was. This guards the two-arg branch from regressing when someone refactors
-      // the logger.
+      // debugLog has a two-arg overload used when JSON parsing fails.
       const prev = process.env.DEBUG;
       process.env.DEBUG = '1';
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1723,8 +1688,7 @@ describe('SharePointClient', () => {
     });
 
     it('should initialize client with valid tokens', async () => {
-      // mockReset clears any leftover mockResolvedValueOnce from earlier tests
-      // (vi.clearAllMocks does not drain the Once queue, only call history).
+      // vi.clearAllMocks does not drain the Once queue, only call history.
       mockLoadToken.mockReset();
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
@@ -1788,10 +1752,7 @@ describe('SharePointClient', () => {
       expect(console.warn).toHaveBeenCalled();
     });
 
-    // ADR-060 + base_path removal: SharePoint container mounts only
-    // access_token / site_id. The other former fields (refresh_token /
-    // client_id / tenant_id) live in the host-only oauth.json; base_path
-    // was dropped because site_id already scopes the worker.
+    // ADR-060: refresh_token/client_id/tenant_id live in host-only oauth.json.
     it('should return null when any worker-mounted required token is missing', async () => {
       const required = ['access_token', 'site_id'];
 
@@ -2115,9 +2076,7 @@ describe('SharePointClient', () => {
     });
 
     it('delegates the cold-start lookup to authedRequest and returns its refreshed result', async () => {
-      // Cold-start scenario: /tokens/access_token is stale. The shared helper
-      // owns the 401 → refresh → retry; here we drive it via the mock (send
-      // twice: stale 401, then fresh 200) and assert the composite id flows out.
+      // Cold-start: /tokens/access_token stale; helper owns 401 → refresh → retry.
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
@@ -2149,8 +2108,7 @@ describe('SharePointClient', () => {
     });
 
     it('logs and continues when authedRequest rejects during init (refresh failure)', async () => {
-      // If the shared helper rejects during the cold-start lookup, the catch
-      // must log a usable warning and fall through to a bare lookup — not crash.
+      // Helper rejection during cold-start: log warning and fall through.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const fetchMock = vi
         .fn()
@@ -2171,11 +2129,7 @@ describe('SharePointClient', () => {
     });
 
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {
-      // Pre-fix the cold-start fetch had no timeout — a hung Graph response
-      // would block initializeSharePointClient indefinitely and starve the
-      // hub's discovery retry budget. The signal proves the AbortController
-      // is wired up; the actual timeout behavior is exercised by the
-      // dedicated "aborts and returns transient" test below.
+      // Cold-start Graph hang would block initializeSharePointClient indefinitely.
       const fetchMock = vi.fn().mockResolvedValueOnce({
         ok: true,
         json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
@@ -2204,9 +2158,7 @@ describe('SharePointClient', () => {
     });
 
     it('guards both the initial and the post-401-refresh retry fetch with an AbortSignal', async () => {
-      // The cold-start `send` SharePoint passes to authedRequest wires a per-
-      // request AbortController. Drive the helper through both attempts (401,
-      // then 200) and assert each carries a signal — pre-fix only the initial had one.
+      // Cold-start send wires per-request AbortController; pre-fix only initial had signal.
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })

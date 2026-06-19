@@ -22,9 +22,7 @@ class HostComponent {
 }
 
 /**
- * Query the drawer content rendered into the CDK overlay container.
- * The component renders via CDK Overlay portal attached to `document.body`,
- * not inside the host fixture, so we query the global document.
+ * Query the drawer content in the CDK overlay container on document.body.
  * @param sel CSS selector to locate the element under document.
  */
 function q(sel: string): HTMLElement | null {

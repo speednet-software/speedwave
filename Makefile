@@ -691,10 +691,10 @@ setup-e2e-vms:
 # ── Linting ──────────────────────────────────────────────────────────────────
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
-	@# The `audio-transcription` feature is off by default, so the line above
-	@# doesn't lint the `transcription` module — clippy it explicitly too.
-	cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
+	@# `--all-targets` lints test code too. `test-support` + `audio-transcription`
+	@# are off by default, so lint those modules/feature-gated tests explicitly.
+	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp

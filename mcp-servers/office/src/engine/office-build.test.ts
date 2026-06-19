@@ -1,6 +1,5 @@
 /**
- * Tests for the DSL validation and orchestration in office-build (python invocation +
- * path resolution are mocked, so this exercises the TypeScript-side validation branches).
+ * Tests for the DSL validation and orchestration in office-build.
  * @module mcp-office/engine/office-build.test
  */
 

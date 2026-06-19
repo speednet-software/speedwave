@@ -1,10 +1,4 @@
-// Project-management Tauri commands.
-//
-// `list_projects` / `switch_project` plus the pure helpers behind the project
-// switch (config mutation, container transition, chat rebind, and the
-// rollback/failure-payload logic). The container orchestration lives in
-// `containers_cmd`; this module owns the command surface and the
-// config/event-payload glue.
+// Project-management Tauri commands: list/switch, config mutations, event payloads.
 
 use crate::chat::{ChatSession, SharedChatSession};
 use crate::reconcile;
@@ -60,10 +54,7 @@ pub(crate) async fn switch_project(
         return Err("A project switch is already in progress".to_string());
     };
 
-    // Config is committed first to keep the config lock brief — holding it
-    // across the blocking container transition would starve other config
-    // readers. If the container switch fails, rollback_and_emit_failed
-    // restores active_project to `previous`.
+    // Commit config first to keep the lock brief; rollback restores `previous` on failure.
     let previous = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let prev = user_config.active_project.clone();
@@ -99,24 +90,15 @@ pub(crate) async fn switch_project(
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            // Eager-start host workers before compose render — live WORKER_*_URLs
-            // prevent the first-message container recreate.
+            // Eager-start host workers before compose render so WORKER_*_URLs are live.
             crate::ensure_oauth_running(&oauth_arc, proj);
-            // Previous project is stopped in the background after the switch
-            // fully succeeds — never here.
-            // Wrap the destination project's render → validate → up sequence in a
-            // single transaction so it shares semantics with every other compose
-            // callsite (see ADR-066) and benefits from compose_validate_with_retry's
-            // virtiofs/9p propagation-lag recovery.
+            // Previous project is stopped in the background after success, not here.
+            // Wrap render → validate → up in one transaction (ADR-066).
             use crate::types::IntoAnyhow;
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                // Idempotent up, not force-recreate: nerdctl ≥ 2.2.0 config-hash
-                // convergence recreates only containers whose config (or
-                // content-addressed image tag) actually changed — so a changed
-                // image or integration re-runs the entrypoint, while an
-                // unchanged destination is left in place instead of churned.
+                // Idempotent up, not force-recreate: nerdctl ≥ 2.2.0 config-hash convergence (ADR-068).
                 rt.compose_up(proj)?;
                 Ok(())
             })
@@ -148,10 +130,7 @@ pub(crate) async fn switch_project(
             .map_err(|e| e.to_string())?;
 
     if let Err(e) = rebind_result {
-        // Previous is still running (teardown deferred) — only tear
-        // down the new project, then rebind chat back to previous.
-        // The eagerly-started host workers for the destination must be
-        // retired too, or they linger pointing at downed containers.
+        // Tear down the new project and its host workers, then rebind chat to previous.
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
         let mut cleanup_parts: Vec<String> = Vec::new();
 
@@ -192,9 +171,7 @@ pub(crate) async fn switch_project(
         return Err(full_error);
     }
 
-    // Switch fully succeeded — stop the previous project in the background
-    // and retire its host workers. Doing this only AFTER success keeps a
-    // failed switch's previous project fully functional.
+    // Switch succeeded: stop the previous project and retire its host workers in the background.
     if let Some(prev) = pending_teardown {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
@@ -221,12 +198,8 @@ pub(crate) fn rebind_chat(
     session.start(app.clone(), None).map_err(|e| e.to_string())
 }
 
-/// Parses a prefix-encoded CloudStorage TCC error into the `(stable_id, dir)`
-/// pair if present, otherwise returns `None`.
-///
-/// Format produced by `cloudstorage::check_project_readable_or_err`:
-/// `"CloudStorage TCC required: {stable_id}|{dir}"`. Tolerates extra suffix
-/// text that downstream wrappers may have appended after the dir.
+/// Parses a CloudStorage TCC error `"CloudStorage TCC required: {stable_id}|{dir}"`
+/// into `(stable_id, dir)`, or `None`. Tolerates appended suffix text after the dir.
 fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
     let body = error.strip_prefix(speedwave_runtime::cloudstorage::CLOUDSTORAGE_TCC_PREFIX)?;
     let pipe_idx = body.find('|')?;
@@ -241,11 +214,8 @@ fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
 
 /// Builds the JSON payload for the `project_switch_failed` Tauri event.
 ///
-/// Pure function (no IO) so it can be unit-tested independently of Tauri.
-/// When the error string is prefix-encoded with `CLOUDSTORAGE_TCC_PREFIX`,
-/// emits structured `error_kind`/`provider`/`project_dir` fields so the
-/// frontend can route to the CloudStorage remediation modal. Otherwise
-/// emits only `project` + `error`.
+/// Emits structured CloudStorage TCC fields if the error is prefix-encoded,
+/// else generic `project` + `error`.
 pub(crate) fn compute_project_switch_failure_payload(
     previous: Option<&str>,
     full_error: &str,
@@ -336,9 +306,7 @@ mod tests {
     }
 
     /// Structural: project switch must use idempotent `compose_up`, not
-    /// `compose_up_recreate`. nerdctl ≥ 2.2.0 config-hash convergence recreates
-    /// only what changed (config or content-addressed image tag); an unchanged
-    /// destination is left in place. See the nerdctl SSOT pin.
+    /// `compose_up_recreate` (nerdctl ≥ 2.2.0 config-hash convergence, ADR-068).
     #[test]
     fn switch_uses_idempotent_compose_up() {
         let source = include_str!("project_cmd.rs");
@@ -411,9 +379,7 @@ mod tests {
             prev_oauth > success_marker,
             "previous-project worker teardown must live in the success path"
         );
-        // ...while the rebind-failure block retires the DESTINATION's
-        // eagerly-started workers (they would otherwise point at downed
-        // containers for the rest of the session).
+        // ...while the rebind-failure block retires the DESTINATION's workers.
         let rebind_fail = body
             .find("rebind_result {")
             .expect("rebind-failure block must exist");

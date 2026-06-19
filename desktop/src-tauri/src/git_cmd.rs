@@ -1,20 +1,11 @@
-// Lightweight git introspection for the chat status bar.
-//
-// Only one command exists: `get_git_branch` — returns the current branch name
-// for the active project's working directory, or `None` when the directory is
-// not a git repo / git is unavailable. The status strip in the composer uses
-// this to display `<branch icon> main` next to the session cost.
+// Git introspection for the chat status bar: `get_git_branch`.
 
 use std::path::Path;
 
 use speedwave_runtime::config;
 
-/// Returns the current git branch for `project`, or `None` if the project
-/// directory is not a git repository (or git can't be executed).
-///
-/// Resolves the project's `dir` from the user config and runs
-/// `git rev-parse --abbrev-ref HEAD` against it. Detached HEADs return
-/// `Some("HEAD")` — the frontend treats that label like any other branch.
+/// Returns the current git branch for `project`, or `None` if not a git repo
+/// or git can't be executed. Detached HEAD returns `Some("HEAD")`.
 #[tauri::command]
 pub(crate) fn get_git_branch(project: String) -> Result<Option<String>, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -28,8 +19,7 @@ pub(crate) fn get_git_branch(project: String) -> Result<Option<String>, String> 
 /// branch name. Any non-zero exit (not a git repo, git missing, etc.) maps
 /// to `None` so the UI silently hides the branch chip.
 fn read_branch(dir: &Path) -> Option<String> {
-    // system_command applies CREATE_NO_WINDOW on Windows so the git probe (run
-    // on chat status-bar init) does not flash a console over the Desktop UI.
+    // system_command applies CREATE_NO_WINDOW on Windows so git does not flash a console.
     let output = speedwave_runtime::binary::system_command("git")
         .arg("-C")
         .arg(dir)
@@ -83,8 +73,7 @@ mod tests {
     fn read_branch_returns_none_for_unborn_head() {
         let tmp = tempfile::tempdir().unwrap();
         run(&["init", "-b", "main"], tmp.path());
-        // No commits yet — HEAD points at an unborn branch, so rev-parse
-        // exits non-zero and we surface that as `None`.
+        // Unborn HEAD: rev-parse exits non-zero → None.
         assert_eq!(read_branch(tmp.path()), None);
     }
 

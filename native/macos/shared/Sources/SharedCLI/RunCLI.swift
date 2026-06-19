@@ -1,18 +1,7 @@
 import Foundation
 
-/// Shared `main()` scaffold for the native macOS CLIs (calendar/reminders/mail/notes).
-///
-/// Handles the identical skeleton: arg-count check, `check_permission`
-/// short-circuit, JSON-args decode, optional access-gate guard, command
-/// dispatch, and pretty-printed JSON output. Each CLI supplies only its name,
-/// command list, permission gate, optional access guard, and command table.
-///
-/// - `checkPermissionGate`: receives the full argv (so AppleEvents CLIs can read
-///   the `--launch` flag) and returns the gate used for `check_permission`.
-/// - `accessGuard`: runs once before dispatch for non-`check_permission`
-///   commands; returns `nil` on success or an error message to exit with.
-///   Defaults to a no-op (mail/notes have no EventKit access gate).
-/// - `commands`: maps command name to a handler producing a JSON-serializable value.
+/// Shared `main()` scaffold for the native macOS CLIs: arg parsing, permission
+/// check, optional access guard, command dispatch, and JSON output.
 public func runCLI(
     arguments: [String] = CommandLine.arguments,
     cliName: String,

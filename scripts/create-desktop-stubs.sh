@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# create-desktop-stubs.sh — Creates minimal stub files for desktop/src-tauri/
-# so that build.rs validation passes with SPEEDWAVE_ALLOW_BUNDLE_STUBS=1.
-#
-# Used by: Makefile (check-desktop-clippy), CI (test.yml).
-# Does NOT overwrite existing real files (e.g. from bundle-build-context.sh or downloads).
+# create-desktop-stubs.sh — stub files for desktop/src-tauri/ so build.rs
+# validation passes with SPEEDWAVE_ALLOW_BUNDLE_STUBS=1; never overwrites real files.
 
 set -euo pipefail
 

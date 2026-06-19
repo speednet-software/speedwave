@@ -42,9 +42,7 @@ describe('tool-registry', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
-    // Skip the up-to-7 s production backoff (1+2+4 s delays) so tests don't wait
-    // every time discovery returns zero tools. The retry logic itself is
-    // covered by a dedicated test in this file.
+    // Skip production backoff (1+2+4 s) so tests run fast.
     _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
   });
 
@@ -740,29 +738,22 @@ describe('tool-registry', () => {
         .mockImplementationOnce(() => firstRefreshPromise) // first interval (slow)
         .mockResolvedValue({}); // any further calls
 
-      // Switch to fake timers BEFORE initializeRegistry so the setInterval created by
-      // _startBackgroundRefresh() is registered with fake timers. The startup discovery
-      // mock resolves immediately (non-empty result → no retry delays), so the await
-      // completes without needing to advance fake timers.
+      // Fake timers before initializeRegistry so the refresh setInterval uses them.
       vi.useFakeTimers();
       await initializeRegistry();
 
-      // Advance to trigger the first interval callback (sets _refreshInProgress = true).
-      // advanceTimersByTimeAsync also flushes pending microtasks after advancing.
+      // First interval callback sets _refreshInProgress = true.
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
-      // Advance again to fire the interval a second time — should hit the early return
-      // because _refreshInProgress is still true (firstRefreshPromise not yet resolved).
+      // Second interval fire hits the early return (_refreshInProgress still true).
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
 
-      // Resolve the first refresh and flush remaining microtasks.
       resolveFirstRefresh!();
       // Drain microtask queue so _refreshInProgress is reset to false.
       await Promise.resolve();
 
-      // Registry remains intact — the overlapping refresh was skipped without error
+      // Overlapping refresh was skipped without error.
       expect(TOOL_REGISTRY['slack']).toBeDefined();
-      // discoverAndMergeService was called once for startup + once for the first refresh
-      // (the second interval call was skipped via the _refreshInProgress guard)
+      // Called once for startup + once for the first refresh (second skipped).
       expect(mockDiscover).toHaveBeenCalledTimes(2);
     });
 
@@ -775,9 +766,7 @@ describe('tool-registry', () => {
       const mockDiscover = vi.mocked(discoverAndMergeService);
       mockDiscover.mockClear();
 
-      // Return a non-empty tool set on the first call so discoverWithStartupRetry exits
-      // immediately without waiting for retry delays. The background refresh itself
-      // (the second call) can return anything — we just want the interval to fire.
+      // Non-empty first call so discoverWithStartupRetry exits immediately.
       const slackTool: ToolMetadata = {
         name: 'sendChannel',
         description: 'Send a channel message',

@@ -11,10 +11,7 @@ struct MailCLI {
         "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email"
 
     static func main() {
-        // check_permission validates Apple Mail automation via the unified
-        // AppleEventsGate (Outlook availability is checked separately by
-        // resolveClient). `permissionCheckScript` accesses real data — "to name"
-        // does NOT trigger the macOS Automation prompt. See notes/NotesCLI.swift.
+        // check_permission validates Apple Mail automation via AppleEventsGate; Outlook is checked by resolveClient.
         runCLI(
             cliName: "mail-cli",
             commandList: commandList,
@@ -214,8 +211,6 @@ enum MailError: LocalizedError {
 
 // MARK: - Permission Helpers
 
-/// AppleScript command used by check_permission to verify Automation access.
-/// Must access actual data (not just app metadata like `name`) to trigger the
-/// macOS Automation permission prompt. `to name` does NOT require permission.
+/// AppleScript for check_permission; must access real data to trigger the macOS Automation prompt.
 // SYNC: permissionCheckScript rationale must match notes/Sources/NotesCLI.swift
 let permissionCheckScript = "tell application \"Mail\" to count of accounts"

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Helper: launch `cargo tauri dev` with sherpa-onnx env on Windows.
-# GnuWin32 make 3.81 mishandles complex quoting inline; this wrapper
-# isolates the bash logic so make only needs to pass the cache path.
+# GnuWin32 make 3.81 mishandles complex quoting inline.
 set -euo pipefail
 
 SHERPA_LIB_CACHE="${1:?missing cache file path}"

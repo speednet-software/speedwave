@@ -70,8 +70,7 @@ pub(crate) async fn wait_for_callback(
                 Ok(None) => {
                     let _ = write_http_response(&mut stream, "Waiting…").await;
                 }
-                // A single broken connection (port scan, etc.) must not abort the
-                // flow — keep waiting, but record why for support.
+                // A broken connection (port scan, etc.) must not abort the flow.
                 Err(e) => {
                     log::debug!("oauth callback read error (ignored): {e}");
                     continue;
@@ -150,9 +149,7 @@ pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> Result<
             _ => {}
         }
     }
-    // Verify CSRF state first — for BOTH the success and error branches, so a
-    // forged `?error=...` without a valid state can't terminate the flow
-    // (RFC 6749 §10.12).
+    // Verify CSRF state before the error branch (RFC 6749 §10.12).
     if state.as_deref() != Some(expected_state) {
         return Err("state mismatch (possible CSRF)".to_string());
     }
@@ -209,8 +206,7 @@ mod tests {
 
     #[test]
     fn build_authorize_url_uses_custom_scope_param() {
-        // Slack: scopes travel as `user_scope`; a plain `scope` key must NOT
-        // appear (it would request bot scopes, forbidden on desktop redirects).
+        // Slack: scopes travel as `user_scope`; a plain `scope` key must NOT appear.
         let url = build_authorize_url(
             "https://slack.com/oauth/v2/authorize",
             "cid",
@@ -271,8 +267,7 @@ mod tests {
 
     #[test]
     fn parse_callback_query_checks_state_before_error() {
-        // A forged ?error= without a valid state is a CSRF mismatch, not a
-        // "provider denied" — state is verified first on both branches.
+        // A forged ?error= without a valid state is a CSRF mismatch, not "provider denied".
         let err = parse_callback_query("error=access_denied", "xyz").unwrap_err();
         assert!(err.contains("state mismatch"), "got: {err}");
     }
@@ -283,8 +278,7 @@ mod tests {
         assert!(err.contains("missing authorization code"), "got: {err}");
     }
 
-    // The request line may arrive split across TCP segments; read_callback_request
-    // must accumulate until CRLF, not truncate on the first read.
+    // read_callback_request must accumulate a request line split across TCP segments.
     #[tokio::test]
     async fn read_callback_request_handles_fragmented_request_line() {
         use std::time::Duration;
@@ -333,8 +327,7 @@ mod tests {
         writer.await.unwrap();
     }
 
-    // An endless request line must not grow the accumulator unboundedly — the
-    // reader stops at MAX_REQUEST_LINE_BYTES and parses what it has.
+    // The reader stops at MAX_REQUEST_LINE_BYTES and parses what it has.
     #[tokio::test]
     async fn read_callback_request_caps_oversized_request_line() {
         use tokio::io::AsyncWriteExt;
@@ -356,8 +349,7 @@ mod tests {
         let _ = writer.await;
     }
 
-    // User cancellation must surface as CallbackFailure::Cancelled (quiet
-    // `cancelled` UI terminal), never as the red `error` status.
+    // User cancellation must surface as CallbackFailure::Cancelled, never as error.
     #[tokio::test]
     async fn wait_for_callback_cancellation_is_distinct_from_error() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -372,8 +364,7 @@ mod tests {
         );
     }
 
-    // Dual-stack: a connection on the SECONDARY listener must be served too
-    // (a `localhost` redirect may resolve to ::1 while the primary is IPv4).
+    // Dual-stack: a connection on the SECONDARY listener must be served too.
     #[tokio::test]
     async fn wait_for_callback_accepts_on_secondary_listener() {
         use tokio::io::AsyncWriteExt;
