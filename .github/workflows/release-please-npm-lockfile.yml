@@ -7,7 +7,6 @@ on:
     paths:
       - "package.json"
       - "mcp-servers/*/package.json"
-      - "mcp-servers/playwright/package.json"
       - "desktop/src/package.json"
 
 permissions: {}
