@@ -24,7 +24,6 @@ describe('ModelManagerComponent', () => {
 
   const ack: ModelsAck = {
     whisper: [entry('small', true), entry('large-v3', false)],
-    diarization: [entry('pyannote-seg', false)],
     total_bytes_used: 79_000_000,
   };
 
@@ -42,11 +41,10 @@ describe('ModelManagerComponent', () => {
     component = fixture.componentInstance;
   });
 
-  it('lists whisper + diarization models from the backend', async () => {
+  it('lists whisper models from the backend', async () => {
     await component.ngOnInit();
     expect(svc.listModels).toHaveBeenCalled();
     expect(component.whisper().map((m) => m.key)).toEqual(['small', 'large-v3']);
-    expect(component.diarization().map((m) => m.key)).toEqual(['pyannote-seg']);
   });
 
   it('renders the "uses network" disclaimer line', async () => {

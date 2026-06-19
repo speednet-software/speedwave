@@ -14,12 +14,9 @@ function session(id: string, createdAt: string, audioKept: boolean): TranscriptS
     live_segments: [],
     final_segments: null,
     audio_path: audioKept ? `/t/${id}/audio.wav` : null,
-    speaker_names: {},
     models_used: {
       live: null,
       finalize: null,
-      diarization_segmentation: null,
-      diarization_embedding: null,
     },
     last_seq: 0,
   } as TranscriptSession;

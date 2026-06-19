@@ -29,9 +29,9 @@ interface ProgressState {
 }
 
 /**
- * Whisper + diarization model list with download / delete. Downloads use the
- * network — the line at the bottom says so. The UI reads the catalogue from the
- * backend (`list_transcription_models`) and never hard-codes model names.
+ * Whisper model list with download / delete. Downloads use the network — the
+ * line at the bottom says so. The UI reads the catalogue from the backend
+ * (`list_transcription_models`) and never hard-codes model names.
  */
 @Component({
   selector: 'app-model-manager',
@@ -102,13 +102,8 @@ export class ModelManagerComponent implements OnInit {
 
   /** Whisper catalogue entries + on-disk status. */
   readonly whisper = signal<ModelStatusEntry[]>([]);
-  /** Diarization catalogue entries + on-disk status. */
-  readonly diarization = signal<ModelStatusEntry[]>([]);
   /** Sections rendered by the template (one row group per model kind). */
-  readonly sections = computed(() => [
-    { title: 'speech-to-text', entries: this.whisper() },
-    { title: 'speaker diarization', entries: this.diarization() },
-  ]);
+  readonly sections = computed(() => [{ title: 'speech-to-text', entries: this.whisper() }]);
   /** Total bytes the downloaded models occupy. */
   readonly totalUsed = signal(0);
   /** In-flight downloads, keyed by model key. */
@@ -129,7 +124,6 @@ export class ModelManagerComponent implements OnInit {
     try {
       const ack = await this.transcription.listModels();
       this.whisper.set(ack.whisper);
-      this.diarization.set(ack.diarization);
       this.totalUsed.set(ack.total_bytes_used);
       this.error.set('');
     } catch (e: unknown) {

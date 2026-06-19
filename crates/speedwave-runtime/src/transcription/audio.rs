@@ -4,9 +4,8 @@
 //! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
 //! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
 //! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
-//! orchestration (the transcriber, the diarizer, the driver) can be exercised
-//! without a real device — and doubles as the dev affordance ("transcribe a
-//! WAV file").
+//! orchestration (the transcriber, the driver) can be exercised without a real
+//! device — and doubles as the dev affordance ("transcribe a WAV file").
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,10 +45,9 @@ pub enum AudioSource {
         /// Device id (`None` = system default input).
         device: Option<String>,
     },
-    /// Both `system` and `mic` captured together as two timestamped streams —
-    /// the "meeting transcription" default (the "poor man's diarization" angle:
-    /// the mic is "[You]", the loopback is "[Meeting]"). The backend mixes or
-    /// keeps them separate as the engine requests.
+    /// Both `system` (the meeting's audio output) and `mic` (your voice)
+    /// captured together — the "meeting transcription" default. The backend
+    /// mixes the two streams into one mono buffer for the transcriber.
     Mixed {
         /// What to capture for the "other side" (typically `SystemWide` or a
         /// `Process`).

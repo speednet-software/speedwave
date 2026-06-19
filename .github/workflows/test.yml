@@ -400,4 +400,4 @@ jobs:
 
       # installer_hooks tests run on macOS (cargo check above already
       # validates Windows compile); linking the test bin here clashes
-      # with sherpa-onnx/whisper-rs CRT (ADR-061).
+      # with whisper-rs CRT (ADR-061).

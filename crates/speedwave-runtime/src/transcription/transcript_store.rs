@@ -2,7 +2,6 @@
 //! ADR-043's history_plus_stream). Mutators atomically: update session, bump
 //! seq, push event, persist.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::transcription::transcriber::{Segment, SpeakerId};
+use crate::transcription::transcriber::Segment;
 use crate::transcription::transcript::{TranscriptSession, TranscriptStatus};
 
 /// Capacity of each session's `broadcast` channel — generous enough that a
@@ -42,29 +41,12 @@ pub enum TranscriptEvent {
         /// The replacement segments.
         segments: Vec<Segment>,
     },
-    /// The diarizer stamped a speaker onto a segment.
-    SpeakerAssigned {
-        /// Monotonic seq.
-        seq: u64,
-        /// Index in the effective segment list.
-        segment_index: usize,
-        /// Speaker id.
-        speaker: SpeakerId,
-    },
     /// The lifecycle status changed.
     StatusChanged {
         /// Monotonic seq.
         seq: u64,
         /// New status.
         status: TranscriptStatus,
-    },
-    /// The user (or driver) renamed a speaker. Carries the full updated map.
-    SpeakerRelabeled {
-        /// Monotonic seq.
-        seq: u64,
-        /// Updated `speaker_id → name` map.
-        #[serde(with = "speaker_name_map")]
-        speaker_names: HashMap<SpeakerId, String>,
     },
     /// Progress signal during the offline pass.
     FinalizeProgress {
@@ -73,17 +55,13 @@ pub enum TranscriptEvent {
         /// 0.0 → 1.0.
         progress: f32,
     },
-    /// The offline pass produced `final_segments` (with speaker IDs already
-    /// remapped to preserve user relabels). The UI swaps the live transcript
-    /// for this set; `speaker_names` may also have shifted, so it's resent.
+    /// The offline pass produced `final_segments`; the UI swaps the live
+    /// transcript for this higher-quality set.
     FinalSegmentsReady {
         /// Monotonic seq.
         seq: u64,
         /// The higher-quality offline segments.
         segments: Vec<Segment>,
-        /// Updated `speaker_id → name` map (same map, resent for convenience).
-        #[serde(with = "speaker_name_map")]
-        speaker_names: HashMap<SpeakerId, String>,
     },
     /// The recorded WAV was discarded; re-transcription is no longer possible.
     AudioDiscarded {
@@ -103,9 +81,7 @@ impl TranscriptEvent {
         match self {
             TranscriptEvent::SegmentAppended { seq, .. }
             | TranscriptEvent::SegmentsReplaced { seq, .. }
-            | TranscriptEvent::SpeakerAssigned { seq, .. }
             | TranscriptEvent::StatusChanged { seq, .. }
-            | TranscriptEvent::SpeakerRelabeled { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
             | TranscriptEvent::AudioDiscarded { seq, .. }
@@ -361,34 +337,6 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Stamps a speaker on the segment at `segment_index` of the effective list.
-    pub fn assign_speaker(
-        &self,
-        id: Uuid,
-        segment_index: usize,
-        speaker: SpeakerId,
-    ) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
-            // Apply to live by default; if final exists, apply there too.
-            if let Some(seg) = s.live_segments.get_mut(segment_index) {
-                seg.speaker = Some(speaker);
-            }
-            if let Some(finals) = s.final_segments.as_mut() {
-                if let Some(seg) = finals.get_mut(segment_index) {
-                    seg.speaker = Some(speaker);
-                }
-            }
-            TranscriptEvent::SpeakerAssigned {
-                seq,
-                segment_index,
-                speaker,
-            }
-        })?;
-        Ok(seq_out)
-    }
-
     /// Sets the status.
     pub fn set_status(&self, id: Uuid, status: TranscriptStatus) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -396,25 +344,6 @@ impl TranscriptStore {
             seq_out = seq;
             s.status = status.clone();
             TranscriptEvent::StatusChanged { seq, status }
-        })?;
-        Ok(seq_out)
-    }
-
-    /// User-supplied speaker name.
-    pub fn relabel_speaker(
-        &self,
-        id: Uuid,
-        speaker: SpeakerId,
-        name: &str,
-    ) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
-            s.relabel_speaker(speaker, name);
-            TranscriptEvent::SpeakerRelabeled {
-                seq,
-                speaker_names: s.speaker_names.clone(),
-            }
         })?;
         Ok(seq_out)
     }
@@ -430,27 +359,20 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Installs the offline pass's `final_segments`, remapping speaker IDs to
-    /// preserve user relabels by max-overlap against the live turns
-    /// (`TranscriptSession::merge_live_into_final`). Emits `FinalSegmentsReady`
-    /// so an open UI swaps the live transcript for the higher-quality one.
-    pub fn merge_final_segments(
+    /// Installs the offline pass's `final_segments` and emits
+    /// `FinalSegmentsReady` so an open UI swaps the live transcript for the
+    /// higher-quality one.
+    pub fn set_final_segments(
         &self,
         id: Uuid,
         final_segs: Vec<Segment>,
-        final_turns: &[crate::transcription::diarizer::SpeakerTurn],
-        live_turns: &[crate::transcription::diarizer::SpeakerTurn],
     ) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         self.with_session(id, |s, seq| {
             seq_out = seq;
-            s.merge_live_into_final(final_segs, final_turns, live_turns);
+            s.set_final_segments(final_segs);
             let segments = s.final_segments.clone().unwrap_or_default();
-            TranscriptEvent::FinalSegmentsReady {
-                seq,
-                segments,
-                speaker_names: s.speaker_names.clone(),
-            }
+            TranscriptEvent::FinalSegmentsReady { seq, segments }
         })?;
         Ok(seq_out)
     }
@@ -512,37 +434,6 @@ fn restrict_dir_perms(dir: &Path) {
     let _ = dir;
 }
 
-/// Serde adapter for `HashMap<SpeakerId, String>` inside an internally-tagged
-/// enum. serde_json's "parse numeric map key from string" shortcut doesn't fire
-/// through the `Content` buffer that internal tagging uses, so we serialize the
-/// map as a `Vec<(u32, String)>` of pairs instead.
-mod speaker_name_map {
-    use super::SpeakerId;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
-
-    /// Serializes the map as a list of `(speaker_id, name)` pairs.
-    pub fn serialize<S: Serializer>(
-        map: &HashMap<SpeakerId, String>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        let mut pairs: Vec<(u32, &String)> = map.iter().map(|(k, v)| (k.0, v)).collect();
-        pairs.sort_by_key(|(id, _)| *id);
-        pairs.serialize(s)
-    }
-
-    /// Deserializes a list of `(speaker_id, name)` pairs back into the map.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<HashMap<SpeakerId, String>, D::Error> {
-        let pairs: Vec<(u32, String)> = Vec::deserialize(d)?;
-        Ok(pairs
-            .into_iter()
-            .map(|(id, name)| (SpeakerId(id), name))
-            .collect())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -568,7 +459,6 @@ mod tests {
             end: Duration::from_secs_f32(end_s),
             text: text.to_string(),
             words: vec![],
-            speaker: None,
         }
     }
 
@@ -640,15 +530,13 @@ mod tests {
         let s2 = store
             .replace_segments(id, 0, vec![seg(0.0, 1.0, "A")])
             .unwrap();
-        let s3 = store.assign_speaker(id, 0, SpeakerId(0)).unwrap();
-        let s4 = store
+        let s3 = store
             .set_status(id, TranscriptStatus::Finalizing { progress: 0.5 })
             .unwrap();
-        let s5 = store.relabel_speaker(id, SpeakerId(0), "Alice").unwrap();
-        let s6 = store.finalize_progress(id, 0.75).unwrap();
-        let s7 = store.finish(id).unwrap();
+        let s4 = store.finalize_progress(id, 0.75).unwrap();
+        let s5 = store.finish(id).unwrap();
         // Monotonic seqs.
-        let seqs = [s1, s2, s3, s4, s5, s6, s7];
+        let seqs = [s1, s2, s3, s4, s5];
         for w in seqs.windows(2) {
             assert_eq!(
                 w[1],
@@ -661,18 +549,14 @@ mod tests {
             let ev = rx.recv().await.unwrap();
             assert_eq!(ev.seq(), expected, "out of order: {seqs:?}");
         }
-        // The snapshot reflects the cumulative changes (last_seq = s7).
+        // The snapshot reflects the cumulative changes (last_seq = s5).
         let snap = store.get(id).unwrap();
-        assert_eq!(snap.last_seq, s7);
+        assert_eq!(snap.last_seq, s5);
         assert!(matches!(snap.status, TranscriptStatus::Done));
-        assert_eq!(
-            snap.speaker_names.get(&SpeakerId(0)).map(String::as_str),
-            Some("Alice")
-        );
-        assert_eq!(snap.live_segments[0].speaker, Some(SpeakerId(0)));
+        assert_eq!(snap.live_segments[0].text, "A");
         // Persisted on disk (cache-independent).
         let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
-        assert_eq!(loaded.last_seq, s7);
+        assert_eq!(loaded.last_seq, s5);
         assert!(matches!(loaded.status, TranscriptStatus::Done));
     }
 
@@ -830,18 +714,9 @@ mod tests {
                 from_index: 0,
                 segments: vec![],
             },
-            TranscriptEvent::SpeakerAssigned {
-                seq: 3,
-                segment_index: 0,
-                speaker: SpeakerId(0),
-            },
             TranscriptEvent::StatusChanged {
                 seq: 4,
                 status: TranscriptStatus::Done,
-            },
-            TranscriptEvent::SpeakerRelabeled {
-                seq: 5,
-                speaker_names: HashMap::new(),
             },
             TranscriptEvent::FinalizeProgress {
                 seq: 6,
@@ -850,7 +725,6 @@ mod tests {
             TranscriptEvent::FinalSegmentsReady {
                 seq: 7,
                 segments: vec![seg(0.0, 1.0, "f")],
-                speaker_names: HashMap::new(),
             },
             TranscriptEvent::AudioDiscarded { seq: 8 },
             TranscriptEvent::Finished { seq: 9 },
@@ -858,9 +732,7 @@ mod tests {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
                 TranscriptEvent::SegmentsReplaced { seq, .. } => *seq,
-                TranscriptEvent::SpeakerAssigned { seq, .. } => *seq,
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
-                TranscriptEvent::SpeakerRelabeled { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
                 TranscriptEvent::AudioDiscarded { seq } => *seq,
@@ -910,47 +782,22 @@ mod tests {
     }
 
     #[test]
-    fn merge_final_segments_installs_finals_and_remaps_speakers() {
-        use crate::transcription::diarizer::SpeakerTurn;
+    fn set_final_segments_installs_finals_and_emits_ready() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        // User named the live speaker 0.
-        store.relabel_speaker(id, SpeakerId(0), "Ola").unwrap();
         let mut sub = store.subscribe(id).unwrap();
 
-        // Live turns: speaker 0 over 0..10. Final pass used id 5 over the same.
-        let live_turns = vec![SpeakerTurn {
-            start: Duration::from_secs(0),
-            end: Duration::from_secs(10),
-            speaker: SpeakerId(0),
-        }];
-        let final_turns = vec![SpeakerTurn {
-            start: Duration::from_secs(0),
-            end: Duration::from_secs(10),
-            speaker: SpeakerId(5),
-        }];
-        let mut s = seg(2.0, 4.0, "hi");
-        s.speaker = Some(SpeakerId(5));
         store
-            .merge_final_segments(id, vec![s], &final_turns, &live_turns)
+            .set_final_segments(id, vec![seg(2.0, 4.0, "hi")])
             .unwrap();
 
-        // The event carries the merged segments + speaker_names.
+        // The event carries the merged segments.
         let ev = sub.events.try_recv().unwrap();
         match ev {
-            TranscriptEvent::FinalSegmentsReady {
-                segments,
-                speaker_names,
-                ..
-            } => {
+            TranscriptEvent::FinalSegmentsReady { segments, .. } => {
                 assert_eq!(segments.len(), 1);
-                // Final-5 → live-0 (max overlap) → name "Ola" still resolves.
-                assert_eq!(segments[0].speaker, Some(SpeakerId(0)));
-                assert_eq!(
-                    speaker_names.get(&SpeakerId(0)).map(String::as_str),
-                    Some("Ola")
-                );
+                assert_eq!(segments[0].text, "hi");
             }
             other => panic!("expected FinalSegmentsReady, got {other:?}"),
         }
@@ -958,7 +805,7 @@ mod tests {
         let snap = store.get(id).unwrap();
         assert!(snap.final_segments.is_some());
         assert_eq!(snap.effective_segments().len(), 1);
-        assert_eq!(snap.effective_segments()[0].speaker, Some(SpeakerId(0)));
+        assert_eq!(snap.effective_segments()[0].text, "hi");
     }
 
     #[test]
@@ -966,11 +813,6 @@ mod tests {
         let ev = TranscriptEvent::FinalSegmentsReady {
             seq: 7,
             segments: vec![seg(0.0, 1.0, "f")],
-            speaker_names: {
-                let mut m = HashMap::new();
-                m.insert(SpeakerId(0), "Ola".to_string());
-                m
-            },
         };
         assert_eq!(
             serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),

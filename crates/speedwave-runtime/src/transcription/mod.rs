@@ -1,6 +1,6 @@
 //! Host-side meeting transcription — SSOT layer (ADR-056). Capture +
-//! Whisper + sherpa-onnx + model store; gated behind the `audio-transcription`
-//! feature (CLI never enables it).
+//! Whisper + model store; gated behind the `audio-transcription` feature
+//! (CLI never enables it). Speaker diarization was removed (ADR-075).
 
 pub mod accel;
 pub mod audio;
@@ -8,7 +8,6 @@ pub mod audio;
 pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
-pub mod diarizer;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
@@ -24,20 +23,15 @@ pub use audio::{
     CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-pub use diarizer::{DiarizeError, DiarizeOptions, Diarizer, SherpaDiarizer, SpeakerTurn};
 pub use mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{
-    default_diarization_model, diarization_model, whisper_model, DiarizationModelInfo,
-    DiarizationModelKind, ModelRole, Quantization, WhisperModelInfo, DIARIZATION_MODELS,
-    WHISPER_MODELS,
+    whisper_model, ModelRecommendation, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS,
 };
 pub use model_store::{
-    no_progress, DiarizationModelPaths, DownloadProgress, ModelStatusEntry, ModelStore,
-    ModelStoreError,
+    no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,
 };
 pub use transcriber::{
-    Language, Segment, SpeakerId, TranscribeError, TranscribeOptions, Transcriber,
-    WhisperCppTranscriber, Word,
+    Language, Segment, TranscribeError, TranscribeOptions, Transcriber, WhisperCppTranscriber, Word,
 };
 pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus};
 pub use transcript_driver::{
@@ -52,7 +46,7 @@ pub fn transcripts_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::TRANSCRIPTS_SUBDIR)
 }
 
-/// `<data_dir>/models/` (whisper/ + diarization/).
+/// `<data_dir>/models/` (whisper/).
 pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }

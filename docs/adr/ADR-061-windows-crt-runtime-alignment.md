@@ -1,6 +1,6 @@
 # ADR-061: Windows CRT Runtime Alignment for sherpa-onnx + whisper.cpp
 
-**Status:** Accepted
+**Status: Superseded by [ADR-075](ADR-075-remove-speaker-diarization.md)** — sherpa-onnx was the only library that forced the `/MT`-vs-`/MD` mismatch this ADR works around, so with sherpa-onnx removed the CRT-alignment problem no longer exists. The text below is retained as a historical record.
 
 **Date:** 2026-05-19
 

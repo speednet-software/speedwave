@@ -78,23 +78,6 @@ function accelLabel(backends: Backend[]): string {
           </select>
         </label>
 
-        <label
-          class="flex items-center gap-1"
-          title="Hint for the speaker diarizer. 0 = auto-estimate (less accurate)."
-        >
-          <span class="text-[var(--ink-mute)]">Speakers</span>
-          <input
-            type="number"
-            min="0"
-            max="20"
-            class="w-12 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
-            data-testid="speakers-input"
-            [disabled]="recording()"
-            [value]="expectedSpeakers()"
-            (change)="onSpeakers(+$any($event.target).value)"
-          />
-        </label>
-
         <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
           {{ accel() }}
         </span>
@@ -160,8 +143,6 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Hint for the diarizer: 0 = auto, 1-20 = exact count. */
-  readonly expectedSpeakers = signal<number>(0);
   /** Host capture capabilities (drives the per-app note). */
   readonly capabilities = signal<CaptureCapabilities | null>(null);
   /** Compiled whisper.cpp backends for this build. */
@@ -242,15 +223,6 @@ export class RecordingControlsComponent implements OnInit {
     if (i >= 0 && i < this.sources().length) this.sourceIndex.set(i);
   }
 
-  /**
-   * Updates the expected-speakers hint. 0 = auto-estimate; clamped to 0-20.
-   * @param n - speaker count entered by the user.
-   */
-  onSpeakers(n: number): void {
-    if (!Number.isFinite(n)) return;
-    this.expectedSpeakers.set(Math.max(0, Math.min(20, Math.floor(n))));
-  }
-
   /** Starts recording the chosen source in the chosen language. */
   async start(): Promise<void> {
     const src: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
@@ -261,12 +233,7 @@ export class RecordingControlsComponent implements OnInit {
     this.busy.set(true);
     this.error.set('');
     try {
-      const speakers = this.expectedSpeakers();
-      const ack = await this.transcription.startRecording(
-        src,
-        this.language(),
-        speakers > 0 ? speakers : null
-      );
+      const ack = await this.transcription.startRecording(src, this.language());
       this.activeSessionId = ack.session_id;
       this.recording.set(true);
       this.started.emit(ack.session_id);

@@ -42,7 +42,7 @@ describe('MeetingTranscriptionComponent', () => {
         backends: ['cpu'],
       })),
       listAudioSources: vi.fn(async () => []),
-      listModels: vi.fn(async () => ({ whisper: [], diarization: [], total_bytes_used: 0 })),
+      listModels: vi.fn(async () => ({ whisper: [], total_bytes_used: 0 })),
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),

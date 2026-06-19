@@ -72,11 +72,6 @@ ensure_provisioned_windows() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        # bzip2 required by scripts/lib/fetch-sherpa-onnx-md.sh (ADR-061).
-        # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'command -v bzip2'" >/dev/null 2>&1 || ok=0
-    fi
-    if [ "$ok" -eq 1 ]; then
         echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
@@ -492,15 +487,6 @@ $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cargo-build'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
-
-# Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR
-# so the rest of the toolchain stays on /MD (default). Stage on C:\ so wslpath
-# returns a plain Windows path (not \\wsl.localhost\...) and the idempotency
-# guard survives between E2E runs. See ADR-061.
-$libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'SHERPA_ONNX_FETCH_DIR=/mnt/c/sherpa-onnx-md /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh').Trim()
-Assert-ExitCode
-$env:SHERPA_ONNX_LIB_DIR = (wsl.exe -d $WINDOWS_WSL_DISTRO -- wslpath -w "$libDir").Trim()
-Write-Host "SHERPA_ONNX_LIB_DIR = $env:SHERPA_ONNX_LIB_DIR"
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri

@@ -48,17 +48,10 @@ hound = { version = "3", optional = true }
 # `spawn_blocking`; `stream` for chunked reads while hashing on the fly.
 # `rustls-tls` to match the rest of Speedwave (no system OpenSSL).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
-# Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
-tar = { version = "0.4", optional = true }
-bzip2 = { version = "0.6", optional = true }
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
 whisper-rs = { version = "0.16", optional = true }
-# Speaker diarization. Exact pin: prebuilt static-lib tarball name encodes the
-# version, and Windows CI overrides SHERPA_ONNX_LIB_DIR with the MD-Release
-# variant matching this exact version (see ADR-061, .sherpa-onnx-version SSOT).
-sherpa-onnx = { version = "=1.13.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS, build whisper.cpp with the Metal backend (the Metal shader library
@@ -99,8 +92,9 @@ rustix = { version = "1", features = ["fs"] }
 
 [features]
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
-# transcriber + the sherpa-onnx diarizer (+ cpal on Windows for WASAPI loopback).
-audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:whisper-rs", "dep:sherpa-onnx", "windows-capture"]
+# transcriber (+ cpal on Windows for WASAPI loopback). Speaker diarization was
+# removed — ADR-075 — so sherpa-onnx and the tar/bzip2 archive deps are gone.
+audio-transcription = ["dep:hound", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
 # Internal: pulls in cpal. Only meaningful on Windows (the target-specific dep
 # block above), but listing it unconditionally keeps `--features` simple.
 windows-capture = ["dep:cpal"]

@@ -46,16 +46,12 @@ export interface Segment {
   end: { secs: number; nanos: number };
   text: string;
   words: Word[];
-  /** Speaker id (0-indexed); `null` until diarization stamps it. */
-  speaker: number | null;
 }
 
 /** Which models were used for each pass of a session. */
 export interface ModelsUsed {
   live: string | null;
   finalize: string | null;
-  diarization_segmentation: string | null;
-  diarization_embedding: string | null;
 }
 
 /** Lifecycle of a recording. */
@@ -76,33 +72,20 @@ export interface TranscriptSession {
   live_segments: Segment[];
   final_segments: Segment[] | null;
   audio_path: string | null;
-  speaker_names: Record<number, string>;
   models_used: ModelsUsed;
   last_seq: number;
 }
-
-/**
- * `speaker_names` on the wire inside a `TranscriptEvent` — a list of
- * `[speaker_id, name]` pairs. (The Rust side serializes the map this way for
- * events because serde_json's "numeric map key from string" shortcut doesn't
- * fire through the internally-tagged enum's `Content` buffer. The reducer
- * converts it to the `Record<number, string>` shape used on `TranscriptSession`.)
- */
-export type SpeakerNamePairs = readonly (readonly [number, string])[];
 
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
 export type TranscriptEvent =
   | { kind: 'segment_appended'; seq: number; segment: Segment }
   | { kind: 'segments_replaced'; seq: number; from_index: number; segments: Segment[] }
-  | { kind: 'speaker_assigned'; seq: number; segment_index: number; speaker: number }
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
-  | { kind: 'speaker_relabeled'; seq: number; speaker_names: SpeakerNamePairs }
   | { kind: 'finalize_progress'; seq: number; progress: number }
   | {
       kind: 'final_segments_ready';
       seq: number;
       segments: Segment[];
-      speaker_names: SpeakerNamePairs;
     }
   | { kind: 'finished'; seq: number };
 
@@ -131,12 +114,12 @@ export interface ModelStatusEntry {
   downloaded: boolean;
   size_bytes: number;
   path: string | null;
+  recommendation?: 'final_quality' | 'live' | null;
 }
 
 /** `list_transcription_models` command return type. */
 export interface ModelsAck {
   whisper: ModelStatusEntry[];
-  diarization: ModelStatusEntry[];
   total_bytes_used: number;
 }
 

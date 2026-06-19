@@ -1,5 +1,5 @@
 name: 'Prepare Desktop Bundle'
-description: 'Downloads per-platform runtime assets (Lima/WSL/sherpa/Node), bundles the build context + native binaries, builds the CLI, and verifies the bundle. Shared by desktop-build.yml and desktop-release.yml.'
+description: 'Downloads per-platform runtime assets (Lima/WSL/Node), bundles the build context + native binaries, builds the CLI, and verifies the bundle. Shared by desktop-build.yml and desktop-release.yml.'
 inputs:
   platform:
     description: 'Runner platform (e.g. macos-latest, windows-latest)'
@@ -19,10 +19,6 @@ runs:
     - name: Download WSL resources for offline bundling
       if: inputs.platform == 'windows-latest'
       uses: ./.github/actions/download-wsl-resources
-
-    - name: Pre-fetch sherpa-onnx MD-Release prebuilt (Windows CRT alignment)
-      if: inputs.platform == 'windows-latest'
-      uses: ./.github/actions/download-sherpa-onnx
 
     - name: Download Node.js for bundling
       uses: ./.github/actions/download-nodejs

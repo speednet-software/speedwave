@@ -71,8 +71,7 @@ guard-not-prod-data-dir:
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
-        download-wsl-resources clean-wsl-resources \
-        download-sherpa-onnx
+        download-wsl-resources clean-wsl-resources
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
 
@@ -307,7 +306,7 @@ test-swift:
 bundle-native-assets:
 	@bash scripts/bundle-native-assets.sh
 
-# Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
+# Copy the static third-party licenses we keep in-repo (whisper.cpp,
 # onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
 # THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
 # download-* targets fetch there. The static dir is VCS-tracked; the bundled
@@ -894,38 +893,18 @@ download-wsl-resources:
 clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
-# ── Windows: pre-fetch sherpa-onnx MD-Release prebuilt for CRT alignment ────
-# See ADR-061. No-op on non-Windows platforms.
-# Writes the resolved lib dir to a cache file so consumers (dev, build-tauri)
-# can read it back as SHERPA_ONNX_LIB_DIR for the cargo invocation.
-# Extracts to a persistent location under target/ (not /tmp — which is wiped on
-# reboot and not visible to cargo as a Windows path).
-SHERPA_LIB_CACHE := desktop/src-tauri/.sherpa-onnx-lib-dir
-SHERPA_FETCH_DIR := $(CURDIR)/target/sherpa-onnx-md
-download-sherpa-onnx:
-ifeq ($(OS),Windows_NT)
-	@echo "Pre-fetching sherpa-onnx MD-Release for Windows CRT alignment (ADR-061)..."
-	@mkdir -p $(SHERPA_FETCH_DIR)
-	@bash scripts/dev-fetch-sherpa-cache.sh "$(SHERPA_FETCH_DIR)" "$(SHERPA_LIB_CACHE)"
-else
-	@echo "  ⬚ download-sherpa-onnx skipped (not Windows)"
-endif
-
 # ── Development ──────────────────────────────────────────────────────────────
-# On Windows, build-cli must see SHERPA_ONNX_LIB_DIR — so the prereq order is:
-# (1) download-sherpa-onnx writes cache file, (2) recipe exports the var and
-# invokes the actual builds explicitly.
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
-	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
+	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 	@"$(MAKE)" verify-bundled-assets
-	@bash scripts/dev-tauri-windows.sh $(SHERPA_LIB_CACHE)
+	@bash scripts/dev-tauri-windows.sh
 else
 dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }

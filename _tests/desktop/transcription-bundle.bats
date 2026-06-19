@@ -46,7 +46,7 @@ PY
 }
 
 @test "static transcription licenses are present in licenses-static/" {
-    for f in whisper-cpp-LICENSE sherpa-onnx-LICENSE onnxruntime-LICENSE cpal-LICENSE transcription-models-LICENSE; do
+    for f in whisper-cpp-LICENSE cpal-LICENSE transcription-models-LICENSE; do
         [ -f "$LICENSES_STATIC/$f" ] || { echo "Missing $LICENSES_STATIC/$f" >&2; return 1; }
     done
 }

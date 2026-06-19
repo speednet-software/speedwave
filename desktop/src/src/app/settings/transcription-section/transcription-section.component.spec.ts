@@ -25,7 +25,6 @@ describe('TranscriptionSectionComponent', () => {
       { key: 'small', downloaded: true, size_bytes: 79_000_000, path: '/m/small' },
       { key: 'large-v3', downloaded: false, size_bytes: 2_900_000_000, path: null },
     ],
-    diarization: [],
     total_bytes_used: 79_000_000,
   };
 

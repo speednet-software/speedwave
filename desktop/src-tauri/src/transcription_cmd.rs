@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DiarizeOptions, Diarizer,
-    DriverConfig, FinalizeConfig, Language, ModelStatusEntry, ModelStore, SherpaDiarizer,
-    SpeakerId, StopSignal, TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession,
-    TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
+    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DriverConfig, FinalizeConfig,
+    Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
+    TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -44,17 +43,6 @@ fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("invalid transcript id: {e}"))
 }
 
-/// Caps a user-supplied speaker name length (matches `TranscriptSession::relabel_speaker`).
-const MAX_SPEAKER_NAME_LEN: usize = 64;
-/// Defensive upper bound on the diarizer's `num_clusters` hint. Real meetings
-/// rarely exceed a dozen distinct speakers; we cap well above that so a UI
-/// glitch or a malicious caller can't pass a giant value straight to sherpa.
-const MAX_EXPECTED_SPEAKERS: u32 = 50;
-
-fn cap_name(name: &str) -> String {
-    name.trim().chars().take(MAX_SPEAKER_NAME_LEN).collect()
-}
-
 /// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics
 /// (which key off the `session_id` name) don't flag every diagnostic. The
 /// first 8 hex chars are enough to correlate.
@@ -62,18 +50,6 @@ fn short_id(id: Uuid) -> String {
     let mut s = id.to_string();
     s.truncate(8);
     s
-}
-
-/// Sanitises the `expected_speakers` hint: `Some(0)` collapses to `None`
-/// (auto-estimate), anything above the cap is rejected.
-fn validate_expected_speakers(n: Option<u32>) -> Result<Option<u32>, String> {
-    match n {
-        None | Some(0) => Ok(None),
-        Some(v) if v <= MAX_EXPECTED_SPEAKERS => Ok(Some(v)),
-        Some(v) => Err(format!(
-            "expected_speakers={v} exceeds the {MAX_EXPECTED_SPEAKERS} cap"
-        )),
-    }
 }
 
 // ---- 1) feature-toggle commands (top-level user config, ADR-056 §13) ------
@@ -177,8 +153,6 @@ pub struct StartParams {
     pub source: serde_json::Value,
     pub language: String,
     pub live_model_override: Option<String>,
-    /// Diarizer hint: `None` = auto-estimate.
-    pub expected_speakers: Option<u32>,
 }
 
 #[tauri::command]
@@ -194,9 +168,7 @@ pub async fn start_transcription(
         source,
         language,
         live_model_override,
-        expected_speakers,
     } = params;
-    let expected_speakers = validate_expected_speakers(expected_speakers)?;
     // Force-language is enum-validated at the Rust boundary.
     let lang = match language.as_str() {
         "pl" => Language::Pl,
@@ -243,40 +215,6 @@ pub async fn start_transcription(
             .map_err(|e| e.to_string())?
     };
 
-    // Optional diarizer: best-effort — if the diarization models are present,
-    // load them; otherwise run without speaker labels.
-    let diarize_opts = DiarizeOptions {
-        num_speakers: expected_speakers.map(|n| n as usize),
-        ..DiarizeOptions::default()
-    };
-    let diarizer: Option<Box<dyn Diarizer>> = {
-        let m = models_arc.clone();
-        match tokio::task::spawn_blocking(move || {
-            if !m.diarization_is_present() {
-                return Ok::<Option<Box<dyn Diarizer>>, String>(None);
-            }
-            let paths = m
-                .ensure_diarization_models(&mut |_| {})
-                .map_err(|e| e.to_string())?;
-            let d = SherpaDiarizer::load(
-                &paths.segmentation_onnx,
-                &paths.embedding_onnx,
-                &diarize_opts,
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(Some(Box::new(d) as Box<dyn Diarizer>))
-        })
-        .await
-        .map_err(|e| format!("diarizer load task panicked: {e}"))?
-        {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("diarizer unavailable — running without speaker labels: {e}");
-                None
-            }
-        }
-    };
-
     // Create the session, then start capture.
     // The audio.wav path lives under `<root>/<id>/`, so we need the id before
     // creating the session — pick it now so the path is correct from the first
@@ -296,7 +234,6 @@ pub async fn start_transcription(
         audio_wav.clone(),
     );
     session.models_used.live = Some(live_key.clone());
-    session.expected_speakers = expected_speakers;
     store
         .create(session)
         .map_err(|e| format!("store create: {e}"))?;
@@ -332,9 +269,7 @@ pub async fn start_transcription(
         store: store_arc.clone(),
         audio: stream,
         transcriber: Box::new(transcriber),
-        diarizer,
         transcribe_opts: TranscribeOptions::for_language(lang),
-        diarize_opts,
         stop,
     });
     // The driver loop blocks on `next_chunk` — run it on a blocking task.
@@ -439,40 +374,12 @@ pub async fn stop_transcription(
                 return;
             }
         };
-        // Optional re-diarization over the whole recording (best-effort).
-        let diarize_opts = DiarizeOptions {
-            num_speakers: store_arc
-                .get(id)
-                .ok()
-                .and_then(|s| s.expected_speakers)
-                .map(|n| n as usize),
-            ..DiarizeOptions::default()
-        };
-        let diarizer: Option<Box<dyn Diarizer>> = if models_arc.diarization_is_present() {
-            match models_arc
-                .ensure_diarization_models(&mut |_| {})
-                .ok()
-                .and_then(|p| {
-                    SherpaDiarizer::load(&p.segmentation_onnx, &p.embedding_onnx, &diarize_opts)
-                        .ok()
-                }) {
-                Some(d) => Some(Box::new(d)),
-                None => None,
-            }
-        } else {
-            None
-        };
-        // Live turns aren't tracked across the driver boundary in v1; offline
-        // diarizer's clusters win.
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
             audio_path: audio_wav,
             transcriber,
-            diarizer,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
-            diarize_opts,
-            live_turns: Vec::new(),
         };
         if let Err(e) = speedwave_runtime::transcription::run_finalize(cfg) {
             log::warn!("offline finalize for {} failed: {e}", short_id(id));
@@ -719,21 +626,6 @@ pub async fn discard_transcript_audio(
 }
 
 #[tauri::command]
-pub async fn relabel_speaker(
-    session_id: String,
-    speaker_id: u32,
-    name: String,
-    store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<(), String> {
-    let id = parse_transcript_id(&session_id)?;
-    let capped = cap_name(&name);
-    store
-        .relabel_speaker(id, SpeakerId(speaker_id), &capped)
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn get_transcript_markdown(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
@@ -749,8 +641,6 @@ pub async fn get_transcript_markdown(
 pub struct ModelsAck {
     /// Status of each Whisper model in the catalogue.
     pub whisper: Vec<ModelStatusEntry>,
-    /// Status of each diarization model.
-    pub diarization: Vec<ModelStatusEntry>,
     /// Total bytes the downloaded models occupy on disk.
     pub total_bytes_used: u64,
 }
@@ -761,7 +651,6 @@ pub async fn list_transcription_models(
 ) -> Result<ModelsAck, String> {
     Ok(ModelsAck {
         whisper: models.whisper_status(),
-        diarization: models.diarization_status(),
         total_bytes_used: models.total_bytes_used(),
     })
 }
@@ -773,24 +662,13 @@ pub async fn download_transcription_model(
     app: AppHandle,
 ) -> Result<(), String> {
     let models = models.inner().clone();
-    // Diarization keys pull both sherpa models; Whisper keys go to ensure_model.
-    let is_diarization = speedwave_runtime::transcription::diarization_model(&model_id).is_some();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        if is_diarization {
-            models
-                .ensure_diarization_models(&mut |p| {
-                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-                })
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        } else {
-            models
-                .ensure_model(&model_id, &mut |p| {
-                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-                })
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
+        models
+            .ensure_model(&model_id, &mut |p| {
+                let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("download task panicked: {e}"))??;
@@ -844,27 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn cap_name_trims_and_caps_length() {
-        assert_eq!(cap_name("  Alice  "), "Alice");
-        assert_eq!(cap_name(""), "");
-        let long: String = "x".repeat(200);
-        assert_eq!(cap_name(&long).chars().count(), 64);
-    }
-
-    #[test]
-    fn validate_expected_speakers_collapses_none_zero_and_rejects_overflow() {
-        assert_eq!(validate_expected_speakers(None).unwrap(), None);
-        assert_eq!(validate_expected_speakers(Some(0)).unwrap(), None);
-        assert_eq!(validate_expected_speakers(Some(1)).unwrap(), Some(1));
-        assert_eq!(
-            validate_expected_speakers(Some(MAX_EXPECTED_SPEAKERS)).unwrap(),
-            Some(MAX_EXPECTED_SPEAKERS)
-        );
-        assert!(validate_expected_speakers(Some(MAX_EXPECTED_SPEAKERS + 1)).is_err());
-        assert!(validate_expected_speakers(Some(u32::MAX)).is_err());
-    }
-
-    #[test]
     fn short_id_truncates_to_eight_hex_chars() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(short_id(id), "550e8400");
@@ -882,18 +739,7 @@ mod tests {
         // get / list reflect a freshly created session.
         assert_eq!(store.get(id).unwrap().id, id);
         assert_eq!(store.list().len(), 1);
-        // relabel goes through.
-        store.relabel_speaker(id, SpeakerId(0), "Alice").unwrap();
-        assert_eq!(
-            store
-                .get(id)
-                .unwrap()
-                .speaker_names
-                .get(&SpeakerId(0))
-                .map(String::as_str),
-            Some("Alice")
-        );
-        // Append a segment with that speaker so the markdown body renders.
+        // Append a segment so the markdown body renders.
         store
             .append_segment(
                 id,
@@ -902,17 +748,13 @@ mod tests {
                     end: std::time::Duration::from_secs(1),
                     text: "hi".to_string(),
                     words: vec![],
-                    speaker: Some(SpeakerId(0)),
                 },
             )
             .unwrap();
-        // markdown renders the user-supplied name + footer.
+        // markdown renders the segment text + footer (no speaker labels).
         let md = store.get(id).unwrap().to_markdown();
-        assert!(
-            md.contains("Alice"),
-            "expected Alice in markdown, got:\n{md}"
-        );
-        assert!(md.ends_with("speaker labels are approximate._\n"));
+        assert!(md.contains("hi"), "expected text in markdown, got:\n{md}");
+        assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
         // delete removes it.
         store.delete(id).unwrap();
         assert!(store.list().is_empty());
@@ -935,21 +777,6 @@ mod tests {
         let store = ModelStore::with_root(dir.path());
         // Nothing downloaded → None.
         assert_eq!(pick_offline_model(&store), None);
-    }
-
-    #[test]
-    fn download_routing_distinguishes_whisper_from_diarization_keys() {
-        // download_transcription_model decides which ensure_* to call by
-        // whether the key is a diarization-catalogue key. Verify that split
-        // (the bug was: a diarization key went to ensure_model → "no such
-        // model in the catalogue").
-        use speedwave_runtime::transcription::{diarization_model, whisper_model};
-        assert!(diarization_model("pyannote-segmentation-3-0").is_some());
-        assert!(diarization_model("nemo-titanet-small").is_some());
-        assert!(whisper_model("pyannote-segmentation-3-0").is_none());
-        // A Whisper key is NOT a diarization key.
-        assert!(diarization_model("small").is_none());
-        assert!(whisper_model("small").is_some());
     }
 
     #[test]

@@ -1260,7 +1260,6 @@ fn main() {
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
             transcription_cmd::discard_transcript_audio,
-            transcription_cmd::relabel_speaker,
             transcription_cmd::get_transcript_markdown,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
