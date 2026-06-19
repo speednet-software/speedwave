@@ -22,6 +22,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// `true` if a process with `pid` is currently running (Windows).
 #[cfg(windows)]
 pub fn is_pid_alive(pid: u32) -> bool {
     // `tasklist /FI "PID eq N" /NH` prints "INFO: No tasks are running..."

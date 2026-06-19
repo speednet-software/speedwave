@@ -26,6 +26,7 @@ pub fn is_node_process(pid: u32) -> bool {
     }
 }
 
+/// `true` if `pid` is a `node` process (Windows; matches the image name).
 #[cfg(windows)]
 pub fn is_node_process(pid: u32) -> bool {
     let output = crate::binary::system_command("tasklist")
@@ -54,6 +55,8 @@ pub fn kill_process(pid: u32) {
         .status();
 }
 
+/// Terminate a process by PID (`taskkill /F` on Windows). Errors are ignored —
+/// the process may already be gone.
 #[cfg(windows)]
 pub fn kill_process(pid: u32) {
     let _ = crate::binary::system_command("taskkill")

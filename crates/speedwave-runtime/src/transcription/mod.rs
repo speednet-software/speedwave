@@ -99,16 +99,13 @@ mod tests {
     #[test]
     fn detect_audio_capture_picks_the_host_backend() {
         let caps = detect_audio_capture().capabilities();
-        // macOS always has a real backend (the audio-capture-cli enforces
-        // 14.4 itself, so we assume taps are available). Windows depends on a
-        // present output device — true on a dev box, possibly false on a bare
-        // CI runner — so we don't assert its flags beyond per-process being
-        // off in v1. Other OSes fall back to FileAudioCapture.
+        // Windows flags are host-dependent (output device, build 20348+) and
+        // pinned precisely in audio_windows tests; other OSes use FileAudioCapture.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
             assert!(caps.supports_per_process);
         } else if cfg!(windows) {
-            assert!(!caps.supports_per_process, "no per-app on Windows in v1");
+            assert!(caps.note.is_some());
         } else {
             assert!(!caps.supports_system_audio);
             assert!(!caps.supports_per_process);

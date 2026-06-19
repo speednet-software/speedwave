@@ -1,32 +1,25 @@
-//! Windows audio capture: WASAPI loopback via `cpal` (ADR-056). cpal turns a
-//! `build_input_stream` on an *output* device into a loopback capture of that
-//! device — that's our "System (everything)" source, available on Windows 7+.
-//!
-//! Per-process loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) needs
-//! Windows 10 build 20348+. cpal 0.17 doesn't expose it, so v1 ships
-//! system-wide-only: `capabilities().supports_per_process` is `false` and a
-//! `Process` source is rejected with a clear "use System audio" error. (A
-//! future iteration can add a `windows-sys` shim — see ADR-056.)
-//!
-//! cpal callbacks deliver samples in the device's native rate (typically
-//! 48 kHz, stereo); we down-mix to mono and linear-resample to 16 kHz on the
-//! capture thread. A single-source capture pushes chunks through a channel; a
-//! `Mixed` (system loopback + mic) capture runs two cpal streams that sum into
-//! one shared `MixBuffer` (ADR-056 decision 15).
+//! Windows audio capture (ADR-056): system audio via the `wasapi` crate
+//! (cpal's loopback is unreliable — RustAudio/cpal#476), microphone via cpal.
+//! Per-process loopback needs build 20348+, else falls back to the full mix.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-#[cfg(test)]
 use super::audio::ProcessSelector;
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
 use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
+
+/// How long the wasapi capture loop waits for the buffer-ready event before
+/// looping back to re-check the stop flag. Short enough that teardown is snappy
+/// on a silent endpoint, long enough not to busy-spin.
+const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Channel depth for chunks in flight from the capture thread to the consumer.
 /// A few seconds of audio — enough to absorb a slow consumer without unbounded
@@ -82,13 +75,14 @@ fn detect_windows_build() -> Option<u32> {
 impl AudioCapture for WasapiAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
         let host = cpal::default_host();
+        // System audio is captured via wasapi (not cpal), but cpal's device
+        // enumeration is a reliable proxy for "is there a default render
+        // endpoint?" without opening a wasapi client here.
         let has_output = host.default_output_device().is_some();
         let has_input = host.default_input_device().is_some();
-        // v1: per-process is gated by the OS build *and* the (not-yet-shipped)
-        // shim — so it's always false here, but the note tells the truth.
-        let per_process_possible = self.build_supports_per_process();
-        let note = if per_process_possible {
-            Some("WASAPI loopback (system-wide). Per-app capture is planned.".to_string())
+        let per_process = self.build_supports_per_process();
+        let note = if per_process {
+            Some("WASAPI loopback (system-wide + per-app).".to_string())
         } else {
             Some(
                 "WASAPI loopback (system-wide). Per-app capture requires Windows 10 build 20348+."
@@ -96,7 +90,7 @@ impl AudioCapture for WasapiAudioCapture {
             )
         };
         CaptureCapabilities {
-            supports_per_process: false,
+            supports_per_process: per_process,
             supports_system_audio: has_output,
             supports_microphone: has_input,
             note,
@@ -120,10 +114,9 @@ impl AudioCapture for WasapiAudioCapture {
         }
         // System loopback — the default output device's loopback.
         if let Some(dev) = host.default_output_device() {
-            let label = dev
-                .name()
+            let label = device_name(&dev)
                 .map(|n| format!("System ({n})"))
-                .unwrap_or_else(|_| "System (everything)".to_string());
+                .unwrap_or_else(|| "System (everything)".to_string());
             sources.push(AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label,
@@ -141,7 +134,7 @@ impl AudioCapture for WasapiAudioCapture {
         // Microphones — every input device cpal sees.
         if let Ok(inputs) = host.input_devices() {
             for dev in inputs {
-                let name = dev.name().unwrap_or_else(|_| "Unknown input".to_string());
+                let name = device_name(&dev).unwrap_or_else(|| "Unknown input".to_string());
                 sources.push(AudioSourceInfo {
                     source: AudioSource::Microphone {
                         device: Some(name.clone()),
@@ -157,13 +150,15 @@ impl AudioCapture for WasapiAudioCapture {
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         let host = cpal::default_host();
         match &source {
-            AudioSource::SystemWide => {
-                let dev = resolve_system(&host, &source)?;
+            // System audio (whole system or a single process) → wasapi loopback.
+            AudioSource::SystemWide | AudioSource::Process { .. } => {
+                let target = self.system_target(&source)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
-                let stream = open_capture_stream(&dev, ResamplerSink::Channel(tx))?;
-                Ok(Box::new(CpalAudioStream {
-                    _streams: vec![stream],
+                let stop = Arc::new(AtomicBool::new(false));
+                let handle = spawn_wasapi_loopback(target, ResamplerSink::Channel(tx), &stop)?;
+                Ok(Box::new(WasapiLoopbackStream {
                     rx,
+                    _handle: handle,
                 }))
             }
             AudioSource::Microphone { device } => {
@@ -175,21 +170,20 @@ impl AudioCapture for WasapiAudioCapture {
                     rx,
                 }))
             }
-            AudioSource::Process { .. } => Err(CaptureError::Unsupported(
-                "per-app capture isn't available on Windows yet — use System audio".to_string(),
-            )),
             AudioSource::Mixed { system, mic } => {
-                // Two concurrent cpal streams (system loopback + mic) summed in
-                // one shared MixBuffer; next_chunk pops mixed chunks from it.
-                let sys_dev = resolve_system(&host, system)?;
+                // System loopback (wasapi, on its own thread) + mic (cpal stream)
+                // sum into one shared MixBuffer; next_chunk pops mixed chunks.
+                let target = self.system_target(system)?;
                 let mic_dev = resolve_mic(&host, mic)?;
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
-                let sys_stream = open_capture_stream(
-                    &sys_dev,
+                let stop = Arc::new(AtomicBool::new(false));
+                let handle = spawn_wasapi_loopback(
+                    target,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::System,
                     },
+                    &stop,
                 )?;
                 let mic_stream = open_capture_stream(
                     &mic_dev,
@@ -198,13 +192,60 @@ impl AudioCapture for WasapiAudioCapture {
                         source: MixSource::Mic,
                     },
                 )?;
-                Ok(Box::new(MixedCpalAudioStream {
-                    _streams: vec![sys_stream, mic_stream],
+                Ok(Box::new(MixedWasapiAudioStream {
                     buf,
+                    handle: Some(handle),
+                    _mic: mic_stream,
                 }))
             }
         }
     }
+}
+
+impl WasapiAudioCapture {
+    /// Resolves the system side of a source to a [`LoopbackTarget`]. `Process`
+    /// needs per-process support (else falls back to the full mix); a mic or
+    /// nested mix as the "system" side is rejected.
+    fn system_target(&self, src: &AudioSource) -> Result<LoopbackTarget, CaptureError> {
+        match src {
+            AudioSource::SystemWide => Ok(LoopbackTarget::System),
+            AudioSource::Process { selector } => {
+                let pid = pid_of(selector)?;
+                if self.build_supports_per_process() {
+                    Ok(LoopbackTarget::Process {
+                        pid,
+                        include_tree: true,
+                    })
+                } else {
+                    // Below build 20348 the per-process API isn't reliable; fall
+                    // back to a full-mix capture so the user still gets audio.
+                    log::warn!(
+                        target: "transcription::capture",
+                        "per-process loopback needs Windows build 20348+; capturing full system mix instead"
+                    );
+                    Ok(LoopbackTarget::System)
+                }
+            }
+            other => Err(CaptureError::Unsupported(format!(
+                "unsupported system source on Windows: {other:?}"
+            ))),
+        }
+    }
+}
+
+/// What a wasapi loopback capture targets: the whole render endpoint, or one
+/// process (by PID, optionally including its child process tree).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopbackTarget {
+    /// The default render endpoint's full mix (all system audio).
+    System,
+    /// A single process's audio via `new_application_loopback_client`.
+    Process {
+        /// Target process id.
+        pid: i32,
+        /// Include the process's child tree (`include_tree`).
+        include_tree: bool,
+    },
 }
 
 /// Builds the cpal input stream for the given sample format, wiring its data
@@ -244,90 +285,259 @@ fn build_stream(
     stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))
 }
 
-/// A resolved capture device tagged with which config API selects its stream
-/// format — a loopback capture inherits the device's *output* (render) config; a
-/// mic uses its *input* config. Carrying the kind in the type means the caller
-/// can't pick the wrong API.
-enum DeviceKind {
-    /// An output device captured as a loopback (system audio).
-    Loopback(cpal::Device),
-    /// An input device (microphone).
-    Input(cpal::Device),
-}
-
-impl DeviceKind {
-    fn device(&self) -> &cpal::Device {
-        match self {
-            DeviceKind::Loopback(d) | DeviceKind::Input(d) => d,
-        }
-    }
-
-    /// The supported stream config to capture this device with.
-    fn supported_config(&self) -> Result<cpal::SupportedStreamConfig, CaptureError> {
-        match self {
-            DeviceKind::Loopback(d) => d
-                .default_output_config()
-                .map_err(|e| CaptureError::Failed(format!("default output config: {e}"))),
-            DeviceKind::Input(d) => d
-                .default_input_config()
-                .map_err(|e| CaptureError::Failed(format!("default input config: {e}"))),
-        }
-    }
-}
-
-/// Opens a cpal capture stream on `kind`, resampling to 16 kHz mono into `sink`.
-/// Returns the running `Stream`.
+/// Opens a cpal capture stream on a microphone `device`, resampling to 16 kHz
+/// mono into `sink`. Returns the running `Stream` (dropping it stops capture).
 fn open_capture_stream(
-    kind: &DeviceKind,
+    device: &cpal::Device,
     sink: ResamplerSink,
 ) -> Result<cpal::Stream, CaptureError> {
-    let supported = kind.supported_config()?;
+    let supported = device
+        .default_input_config()
+        .map_err(|e| CaptureError::Failed(format!("default input config: {e}")))?;
     let sample_format = supported.sample_format();
     let src_rate = supported.sample_rate();
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);
-    let stream = build_stream(kind.device(), &config, sample_format, resampler, sink)?;
+    let stream = build_stream(device, &config, sample_format, resampler, sink)?;
     stream
         .play()
         .map_err(|e| CaptureError::Failed(format!("start stream: {e}")))?;
     Ok(stream)
 }
 
-/// Resolves the *system* side of a source (a plain `SystemWide` or the inner
-/// `system` of a `Mixed`) to a loopback-captured output device. Windows v1
-/// doesn't ship per-process loopback, so a `Process` (or anything else) is
-/// rejected with a clear error — including when nested inside `Mixed`.
-fn resolve_system(host: &cpal::Host, src: &AudioSource) -> Result<DeviceKind, CaptureError> {
-    match src {
-        AudioSource::SystemWide => host
-            .default_output_device()
-            .map(DeviceKind::Loopback)
-            .ok_or_else(|| {
-                CaptureError::NoDevice("no default output device for loopback".to_string())
-            }),
-        AudioSource::Process { .. } => Err(CaptureError::Unsupported(
-            "per-app capture isn't available on Windows yet — use System audio".to_string(),
-        )),
-        other => Err(CaptureError::Unsupported(format!(
-            "unsupported system source on Windows: {other:?}"
-        ))),
-    }
-}
-
 /// Resolves a mic device name (`None` = default input) to a cpal input device.
-fn resolve_mic(host: &cpal::Host, device: &Option<String>) -> Result<DeviceKind, CaptureError> {
-    let dev = match device {
+fn resolve_mic(host: &cpal::Host, device: &Option<String>) -> Result<cpal::Device, CaptureError> {
+    match device {
         None => host
             .default_input_device()
-            .ok_or_else(|| CaptureError::NoDevice("no default input device".to_string()))?,
+            .ok_or_else(|| CaptureError::NoDevice("no default input device".to_string())),
         Some(name) => host
             .input_devices()
             .map_err(|e| CaptureError::Failed(format!("enumerate inputs: {e}")))?
-            .find(|d| d.name().map(|n| &n == name).unwrap_or(false))
-            .ok_or_else(|| CaptureError::NoDevice(format!("input device {name:?} not found")))?,
+            .find(|d| device_name(d).as_deref() == Some(name.as_str()))
+            .ok_or_else(|| CaptureError::NoDevice(format!("input device {name:?} not found"))),
+    }
+}
+
+/// The human-readable name of a cpal device, or `None` if it can't be read.
+/// Wraps the (non-deprecated) `description()` API so the call sites stay clean
+/// and the enumerate/resolve round-trip uses one consistent naming source.
+fn device_name(dev: &cpal::Device) -> Option<String> {
+    dev.description().ok().map(|d| d.name().to_string())
+}
+
+/// Handle to a running wasapi capture thread. Dropping it signals the stop flag
+/// and joins the thread, so capture stops deterministically.
+struct WasapiCaptureHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WasapiCaptureHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+/// Spawns the wasapi loopback capture thread for `target`, delivering 16 kHz
+/// mono chunks into `sink` until `stop` is set. Reports setup success/failure
+/// back through a one-shot channel so a bad endpoint fails `start()` cleanly.
+fn spawn_wasapi_loopback(
+    target: LoopbackTarget,
+    sink: ResamplerSink,
+    stop: &Arc<AtomicBool>,
+) -> Result<WasapiCaptureHandle, CaptureError> {
+    // COM objects are apartment-bound, so the capture thread creates them.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let stop_thread = Arc::clone(stop);
+    let join = std::thread::Builder::new()
+        .name("wasapi-loopback".to_string())
+        .spawn(move || {
+            run_wasapi_loopback(target, sink, &stop_thread, ready_tx);
+        })
+        .map_err(|e| CaptureError::Failed(format!("spawn wasapi capture thread: {e}")))?;
+    // Wait for the thread's setup result (bounded — a wedged COM init shouldn't
+    // hang start() forever).
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(WasapiCaptureHandle {
+            stop: Arc::clone(stop),
+            join: Some(join),
+        }),
+        Ok(Err(e)) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            Err(CaptureError::Failed(format!("wasapi loopback init: {e}")))
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            Err(CaptureError::Failed(
+                "wasapi loopback init timed out".to_string(),
+            ))
+        }
+    }
+}
+
+/// The wasapi capture thread body: init COM, open the loopback capture client,
+/// signal readiness, then pump frames → `Resampler` → `sink` until `stop`.
+#[cfg(windows)]
+fn run_wasapi_loopback(
+    target: LoopbackTarget,
+    sink: ResamplerSink,
+    stop: &AtomicBool,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    use std::collections::VecDeque;
+    use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+
+    // COM must be initialised on the capturing thread (MTA so the realtime
+    // capture isn't bound to a UI message pump).
+    if let Err(e) = wasapi::initialize_mta().ok() {
+        let _ = ready.send(Err(format!("CoInitializeEx(MTA): {e:?}")));
+        return;
+    }
+
+    // Open the AudioClient for the target. System loopback uses the default
+    // *render* endpoint captured in loopback; per-process uses the dedicated
+    // application-loopback constructor.
+    let client_res = match target {
+        LoopbackTarget::System => DeviceEnumerator::new()
+            .and_then(|e| e.get_default_device(&Direction::Render))
+            .and_then(|d| d.get_iaudioclient()),
+        LoopbackTarget::Process { pid, include_tree } => {
+            AudioClient::new_application_loopback_client(pid as u32, include_tree)
+        }
     };
-    Ok(DeviceKind::Input(dev))
+    let mut client = match client_res {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = ready.send(Err(format!("open audio client: {e:?}")));
+            return;
+        }
+    };
+
+    // For the system endpoint the device mix format is authoritative; in
+    // process-loopback mode `get_mixformat` is unreliable, so request an
+    // explicit shared-mode format (32-bit float, 48 kHz, stereo).
+    let format = match target {
+        LoopbackTarget::System => match client.get_mixformat() {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = ready.send(Err(format!("get_mixformat: {e:?}")));
+                return;
+            }
+        },
+        LoopbackTarget::Process { .. } => {
+            WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None)
+        }
+    };
+    let src_rate = format.get_samplespersec();
+    let src_channels = format.get_nchannels() as usize;
+    let block_align = format.get_blockalign() as usize;
+    let bytes_per_sample = block_align / src_channels.max(1);
+    let is_float = matches!(format.get_subformat(), Ok(SampleType::Float));
+
+    // Loopback always captures in shared, event-driven mode. `autoconvert`
+    // lets WASAPI resample to our requested format where it can.
+    if let Err(e) = client.initialize_client(
+        &format,
+        &Direction::Capture,
+        &StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: 0,
+        },
+    ) {
+        let _ = ready.send(Err(format!("initialize_client: {e:?}")));
+        return;
+    }
+    let event = match client.set_get_eventhandle() {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = ready.send(Err(format!("event handle: {e:?}")));
+            return;
+        }
+    };
+    let capture = match client.get_audiocaptureclient() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = ready.send(Err(format!("get_audiocaptureclient: {e:?}")));
+            return;
+        }
+    };
+    if let Err(e) = client.start_stream() {
+        let _ = ready.send(Err(format!("start_stream: {e:?}")));
+        return;
+    }
+
+    // Setup OK — let start() return.
+    let _ = ready.send(Ok(()));
+
+    let mut resampler = Resampler::new(src_rate, src_channels);
+    let mut queue: VecDeque<u8> = VecDeque::new();
+    let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
+
+    while !stop.load(Ordering::SeqCst) {
+        // Wait for the buffer-ready event, but time out so we re-check `stop`
+        // on a silent endpoint (teardown stays snappy).
+        if event.wait_for_event(timeout_ms).is_err() {
+            continue;
+        }
+        if let Err(e) = capture.read_from_device_to_deque(&mut queue) {
+            log::warn!(target: "transcription::capture", "wasapi read error: {e:?}");
+            break;
+        }
+        if queue.is_empty() {
+            continue;
+        }
+        let bytes: Vec<u8> = queue.drain(..).collect();
+        let frames = decode_pcm_to_f32(&bytes, bytes_per_sample, is_float);
+        resampler.feed(&frames, &sink);
+    }
+
+    let _ = client.stop_stream();
+    wasapi::deinitialize();
+}
+
+/// Decodes a raw interleaved WASAPI byte buffer into `f32` samples. Handles
+/// 32-bit float and 16/32-bit int (the shared-mode mix formats we accept).
+/// Platform-agnostic (pure byte math) so it's unit-tested on any host.
+fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec<f32> {
+    if bytes_per_sample == 0 {
+        return Vec::new();
+    }
+    let n = raw.len() / bytes_per_sample;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = i * bytes_per_sample;
+        let s = match (is_float, bytes_per_sample) {
+            (true, 4) => f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]),
+            (false, 2) => i16::from_le_bytes([raw[off], raw[off + 1]]) as f32 / 32_768.0,
+            (false, 4) => {
+                i32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f32
+                    / 2_147_483_648.0
+            }
+            _ => 0.0,
+        };
+        out.push(s);
+    }
+    out
+}
+
+/// On non-Windows targets the wasapi thread body is never reached (the whole
+/// module is `#[cfg(windows)]` in production), but the cross-target test build
+/// of the surrounding logic needs the symbol to resolve.
+#[cfg(not(windows))]
+fn run_wasapi_loopback(
+    _target: LoopbackTarget,
+    _sink: ResamplerSink,
+    _stop: &AtomicBool,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    let _ = ready.send(Err("wasapi loopback is Windows-only".to_string()));
 }
 
 /// Where a resampler delivers its 16 kHz mono output. Either a channel to a
@@ -492,29 +702,58 @@ impl AudioStream for CpalAudioStream {
     }
 }
 
-/// `AudioStream` for a mixed capture: two cpal streams (system loopback + mic)
-/// feed one shared `MixBuffer`; `next_chunk` polls it via `mix::poll_mixed_chunk`
-/// (which handles the stall/poison/EOF cases). The driver also stops by dropping
-/// this, which stops both cpal streams.
-struct MixedCpalAudioStream {
-    /// Held to keep both cpal streams alive (system + mic).
-    _streams: Vec<cpal::Stream>,
-    /// The buffer both stream callbacks push into; `next_chunk` pops from it.
-    buf: Arc<Mutex<MixBuffer>>,
+/// `AudioStream` for a system-audio capture (whole system or one process): the
+/// wasapi capture thread pushes chunks through the channel. The held
+/// `WasapiCaptureHandle` stops + joins the thread on drop.
+struct WasapiLoopbackStream {
+    rx: Receiver<AudioChunk>,
+    /// Held to keep the capture thread alive; its `Drop` winds the thread down.
+    _handle: WasapiCaptureHandle,
 }
 
-impl AudioStream for MixedCpalAudioStream {
+impl AudioStream for WasapiLoopbackStream {
+    fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
+        // The capture thread is event-driven with a poll timeout, so a stopped
+        // or silent endpoint won't wedge it — `recv` blocks until a chunk or
+        // until the sender (the thread) drops on stop → clean EOF.
+        match self.rx.recv() {
+            Ok(chunk) => Ok(Some(chunk)),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+/// `AudioStream` for a mixed capture: the wasapi system-loopback thread + a cpal
+/// mic stream feed one shared `MixBuffer` polled by `next_chunk`. Dropping it
+/// stops both.
+struct MixedWasapiAudioStream {
+    /// The buffer both sides push into; `next_chunk` pops from it.
+    buf: Arc<Mutex<MixBuffer>>,
+    /// Held to keep the wasapi capture thread alive; its `Drop` stops + joins.
+    handle: Option<WasapiCaptureHandle>,
+    /// Held to keep the cpal mic stream alive.
+    _mic: cpal::Stream,
+}
+
+impl AudioStream for MixedWasapiAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         poll_mixed_chunk(&self.buf)
     }
 }
 
-/// Extracts a PID from a `ProcessSelector`. Windows v1 rejects `Process`
-/// sources before this would be reached (per-process loopback isn't wired
-/// yet), so it currently only exercises the selector contract in tests; gated
-/// behind `cfg(test)` to keep production code dead-code-free. A future
-/// per-process implementation lifts the gate.
-#[cfg(test)]
+impl Drop for MixedWasapiAudioStream {
+    fn drop(&mut self) {
+        // Stop the wasapi thread first (the cpal stream stops when `_mic` drops),
+        // then mark the buffer finished so any final poll returns EOF.
+        self.handle.take();
+        if let Ok(mut b) = self.buf.lock() {
+            b.finish();
+        }
+    }
+}
+
+/// Extracts a PID from a `ProcessSelector`. Per-process loopback (PR-3) needs a
+/// real PID; a `NodeId` selector (reserved for non-PID backends) is rejected.
 fn pid_of(selector: &ProcessSelector) -> Result<i32, CaptureError> {
     match selector {
         ProcessSelector::Pid { pid } => Ok(*pid),
@@ -548,18 +787,97 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_never_advertise_per_process_in_v1() {
-        // Even on a build that *could* do it, v1 doesn't implement the shim.
+    fn capabilities_advertise_per_process_iff_build_supports_it() {
+        // On a build ≥ 20348 the per-process loopback API is available.
         let cap = WasapiAudioCapture {
             os_build: Some(22_631),
         };
-        assert!(!cap.capabilities().supports_per_process);
-        // …but the note must say per-app is planned, not impossible.
-        assert!(cap.capabilities().note.unwrap().contains("planned"));
+        assert!(cap.capabilities().supports_per_process);
+        assert!(cap.capabilities().note.unwrap().contains("per-app"));
+        // Below 20348 it's off, and the note cites the build requirement.
         let old = WasapiAudioCapture {
             os_build: Some(19_045),
         };
+        assert!(!old.capabilities().supports_per_process);
         assert!(old.capabilities().note.unwrap().contains("20348"));
+        // Unknown build → conservatively off.
+        let unknown = WasapiAudioCapture { os_build: None };
+        assert!(!unknown.capabilities().supports_per_process);
+    }
+
+    #[test]
+    fn system_target_maps_sources_to_loopback_targets() {
+        // SystemWide → whole-system loopback.
+        let cap = WasapiAudioCapture {
+            os_build: Some(22_631),
+        };
+        assert_eq!(
+            cap.system_target(&AudioSource::SystemWide).unwrap(),
+            LoopbackTarget::System
+        );
+        // Process on a supported build → per-process loopback with that PID.
+        assert_eq!(
+            cap.system_target(&AudioSource::Process {
+                selector: ProcessSelector::Pid { pid: 4321 }
+            })
+            .unwrap(),
+            LoopbackTarget::Process {
+                pid: 4321,
+                include_tree: true
+            }
+        );
+        // Process on an OLD build → falls back to the full system mix.
+        let old = WasapiAudioCapture {
+            os_build: Some(19_045),
+        };
+        assert_eq!(
+            old.system_target(&AudioSource::Process {
+                selector: ProcessSelector::Pid { pid: 4321 }
+            })
+            .unwrap(),
+            LoopbackTarget::System
+        );
+        // A mic (or anything non-system) as the system side is rejected.
+        assert!(matches!(
+            cap.system_target(&AudioSource::Microphone { device: None }),
+            Err(CaptureError::Unsupported(_))
+        ));
+        // A NodeId process selector is rejected (needs a real PID).
+        assert!(matches!(
+            cap.system_target(&AudioSource::Process {
+                selector: ProcessSelector::NodeId {
+                    id: "x".to_string()
+                }
+            }),
+            Err(CaptureError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn decode_pcm_handles_float_and_int_formats() {
+        // 32-bit float: round-trips bit-exact.
+        let f = [1.0f32, -0.5];
+        let mut bytes = Vec::new();
+        for s in f {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let got = decode_pcm_to_f32(&bytes, 4, true);
+        assert_eq!(got.len(), 2);
+        assert!((got[0] - 1.0).abs() < 1e-6);
+        assert!((got[1] + 0.5).abs() < 1e-6);
+        // 16-bit int: full-scale maps to ~1.0.
+        let i = [i16::MAX, 0, i16::MIN];
+        let mut ib = Vec::new();
+        for s in i {
+            ib.extend_from_slice(&s.to_le_bytes());
+        }
+        let gi = decode_pcm_to_f32(&ib, 2, false);
+        assert_eq!(gi.len(), 3);
+        assert!((gi[0] - 1.0).abs() < 1e-3);
+        assert!(gi[1].abs() < 1e-6);
+        assert!((gi[2] + 1.0).abs() < 1e-3);
+        // Zero bytes-per-sample is a safe no-op.
+        assert!(decode_pcm_to_f32(&[0, 1, 2, 3], 0, true).is_empty());
     }
 
     #[test]
@@ -667,55 +985,6 @@ mod tests {
             chunk.iter().all(|&s| (s - 1.0).abs() < 1e-4),
             "system 1.0 + mic 1.0, each ×0.5, summed = 1.0"
         );
-    }
-
-    #[test]
-    fn mixed_cpal_audio_stream_polls_the_shared_buffer_for_a_full_chunk() {
-        // No real cpal streams needed: feed the buffer directly, then verify
-        // next_chunk delivers (this exercises the poll_mixed_chunk path).
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
-        {
-            let mut b = buf.lock().unwrap();
-            let want = CHUNK_SAMPLES;
-            b.push(MixSource::System, 0, &vec![1.0; want]);
-            b.push(MixSource::Mic, 0, &vec![1.0; want]);
-        }
-        let mut stream = MixedCpalAudioStream {
-            _streams: Vec::new(),
-            buf: std::sync::Arc::clone(&buf),
-        };
-        let chunk = stream.next_chunk().unwrap().expect("a chunk is delivered");
-        assert_eq!(chunk.samples.len(), CHUNK_SAMPLES);
-        assert!(chunk.samples.iter().all(|&s| (s - 1.0).abs() < 1e-4));
-        // After draining, finish() + empty → clean EOF.
-        buf.lock().unwrap().finish();
-        assert!(stream.next_chunk().unwrap().is_none());
-    }
-
-    #[test]
-    fn resolve_system_rejects_process_and_other_non_system_sources() {
-        // A Process (per-app loopback not shipped) or a Microphone-as-system is
-        // rejected before any device is touched.
-        let host = cpal::default_host();
-        assert!(matches!(
-            resolve_system(
-                &host,
-                &AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: 1 }
-                }
-            ),
-            Err(CaptureError::Unsupported(_))
-        ));
-        assert!(matches!(
-            resolve_system(&host, &AudioSource::Microphone { device: None }),
-            Err(CaptureError::Unsupported(_))
-        ));
-        // SystemWide either resolves to the default output device or errors
-        // NoDevice if there isn't one — never Unsupported.
-        match resolve_system(&host, &AudioSource::SystemWide) {
-            Ok(_) | Err(CaptureError::NoDevice(_)) => {}
-            other => panic!("unexpected: {other:?}"),
-        }
     }
 
     #[test]
