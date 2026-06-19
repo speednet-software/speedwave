@@ -151,13 +151,6 @@ export interface SaveCredentialsEvent {
             }
 
             <div class="flex gap-3 mt-4">
-              <!--
-                Save button only for classic-form services (no OAuth flow).
-                When an OAuth flow exists (SharePoint, GitHub), the Sign in /
-                Reconnect button persists every non-OAuth field via
-                save_integration_credentials before kicking off the flow,
-                so an explicit Save is redundant.
-              -->
               @if (hasNonOAuthFields() && !hasOAuthFields()) {
                 <button
                   type="submit"
@@ -206,10 +199,8 @@ export class ServiceCardComponent {
   editedValues: Record<string, string> = {};
 
   /**
-   * Provider label used in OAuth button copy — from the descriptor SSOT
-   * (`consts.rs::oauth_provider_label`; extracted when Slack became the
-   * third OAuth service, per the Rule of Three).
-   * @returns the IdP brand name shown to users (e.g. "Microsoft", "Slack")
+   * Provider label for the OAuth button.
+   * @returns the IdP brand name (e.g. "Microsoft", "Slack").
    */
   oauthProviderLabel(): string {
     return this.svc().oauth_provider_label ?? 'provider';
@@ -245,13 +236,7 @@ export class ServiceCardComponent {
     }
   }
 
-  /**
-   * Whether this service has anything the user can configure in the card body.
-   * Services with an empty `auth_fields` list (e.g. Playwright, which only
-   * reaches public URLs) have nothing to enter — the toggle header is the
-   * entire UI surface, so we hide the form, setup hint, and the Save / Remove
-   * Credentials buttons to avoid nonsensical empty prompts.
-   */
+  /** Whether this service has any configurable auth fields. */
   get hasConfigurableFields(): boolean {
     return this.svc().auth_fields.length > 0;
   }
@@ -282,12 +267,7 @@ export class ServiceCardComponent {
     return `Fill in ${missing.join(', ')} above to enable sign-in.`;
   }
 
-  /**
-   * Returns whether any auth fields are NOT OAuth-driven (i.e. need a Save
-   * button because the user types them into the form). For services where
-   * every field is `oauth_flow: true` (e.g. GitHub OAuth App), the Save
-   * button is suppressed — the token is persisted by the polling task.
-   */
+  /** Whether any auth fields are NOT OAuth-driven. */
   hasNonOAuthFields(): boolean {
     return this.svc().auth_fields.some((f) => !f.oauth_flow);
   }
@@ -310,9 +290,8 @@ export class ServiceCardComponent {
   }
 
   /**
-   * Emits the toggleService event with the service and DOM event.
-   * If the service is not configured, expands the form instead.
-   * @param event - the checkbox change event
+   * Toggles service on/off or expands form if not configured.
+   * @param event - checkbox change event
    */
   onToggle(event: Event): void {
     const svc = this.svc();
@@ -354,9 +333,7 @@ export class ServiceCardComponent {
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
       } else if (value === '' && field.optional) {
-        // Send empty string explicitly so the backend overwrites any
-        // previously-saved value in config.json (omitting the key would
-        // leave the stale value intact).
+        // Explicit empty string persists backend config change (omitting key leaves stale value).
         credentials[field.key] = '';
       }
     }

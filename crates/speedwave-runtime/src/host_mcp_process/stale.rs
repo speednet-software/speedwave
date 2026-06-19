@@ -1,10 +1,5 @@
 //! Stale-process detection helpers shared by every host MCP worker
 //! manager.
-//!
-//! The generic [`super::process::HostMcpProcess::spawn_with_spec`]
-//! reads the PID from `lock.json` and gates the kill behind
-//! `is_node_process` so a recycled PID for a non-node process is not
-//! touched.
 
 #[cfg(unix)]
 use std::process::Command;

@@ -14,8 +14,7 @@ import { LoggerService } from '../services/logger.service';
 
 /**
  * OAuth login instructions card.
- * Displays a copyable CLI command for the user to paste into their terminal,
- * then polls auth status to detect when login completes.
+ * Displays a copyable CLI command and polls auth status for completion.
  */
 @Component({
   selector: 'app-auth-terminal',
@@ -120,17 +119,15 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       })
       .catch((err: unknown) => {
-        // Non-fatal: the Windows PowerShell hint just won't show. Login still
-        // works. Log so the failure isn't completely invisible.
+        // Non-fatal: the Windows PowerShell hint just won't show.
         this.log.warn(`auth-terminal: get_platform failed: ${String(err)}`);
       });
     this.startPolling();
   }
 
   /**
-   * Spawns the host's system terminal running `speedwave login` for the
-   *  active project. Does NOT cancel polling — `get_auth_status` still
-   *  detects when the user finishes the OAuth flow.
+   * Spawns the host terminal running `speedwave login`.
+   * Polling continues to detect login completion.
    */
   openTerminal(): void {
     this.opening = true;
@@ -189,9 +186,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
           this.done.emit(true);
         }
       } catch (err: unknown) {
-        // Expected while the container is still starting; log anything that
-        // doesn't look like that so a real regression (e.g. the command
-        // disappearing) leaves a trace instead of an infinite silent poll.
+        // Expected while the container is still starting; log anything else.
         const msg = typeof err === 'string' ? err : String(err);
         if (!/container|not running|starting/i.test(msg)) {
           this.log.debug(`auth-terminal: get_auth_status poll error: ${msg}`);

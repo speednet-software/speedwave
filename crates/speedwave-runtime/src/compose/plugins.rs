@@ -11,26 +11,9 @@ use crate::consts;
 use crate::engine_path::to_engine_path;
 use crate::plugin;
 
-/// Applies all installed and enabled plugins to the compose YAML:
-/// - Generates MCP service definitions for enabled plugins with service_id
-/// - Injects WORKER_<PLUGIN>_URL into mcp-hub environment
-/// - Adds plugin resource volume mounts to claude container
-/// - Sets SPEEDWAVE_PLUGINS env var in claude container
-///
-/// Loads plugins via [`plugin::list_verified_plugins`], which fails the
-/// compose render if any installed plugin has a missing/invalid signature
-/// or a directory/manifest slug mismatch — a missing fail-closed loader
-/// here would let an attacker who tampered with one plugin still get the
-/// rest of the compose to render and run. Manifests are re-validated at
-/// render time so a post-install tamper that only changed the manifest
-/// (not enough to change the digest, e.g. a different field semantic)
-/// would still be caught by the same code that gates install.
-///
-/// **Host-gateway note:** `ensure_host_gateway_extra_host` is intentionally NOT
-/// called for plugin services. Plugin workers communicate with `mcp-hub` over
-/// the internal compose network — they have no direct host-side dependency.
-/// If a future plugin needs to reach the host, the helper must be called for
-/// that plugin's compose service.
+/// Applies installed+enabled plugins to compose YAML: generates MCP services,
+/// injects WORKER_*_URL, mounts resources, sets SPEEDWAVE_PLUGINS.
+/// Manifests are re-validated at render time (ADR-051).
 pub(crate) fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
     apply_plugins_from_verified(yaml, ctx, &plugins)
@@ -48,14 +31,8 @@ pub(crate) struct ApplyPluginsCtx<'a> {
     pub bridges: &'a HostBridgesInfo,
 }
 
-/// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
-/// list of `VerifiedPlugin` instead of consulting the on-disk
-/// `~/.speedwave/plugins/`. Production callers go through
-/// `apply_plugins`; tests inject crafted scenarios (forged manifest,
-/// dangling `claude-resources` symlink, slug collision) without
-/// touching the user's real data dir.
-// Internal helper exposed only for tests that need to inject crafted
-// `VerifiedPlugin` fixtures; the public entrypoint is `apply_plugins`.
+/// Test-friendly variant of [`apply_plugins`] accepting pre-verified plugins
+/// instead of consulting disk. Production goes through `apply_plugins`.
 pub(crate) fn apply_plugins_from_verified(
     yaml: &str,
     ctx: &ApplyPluginsCtx<'_>,
@@ -82,12 +59,6 @@ pub(crate) fn apply_plugins_from_verified(
         let slug = &manifest.slug;
         let service_id = manifest.service_id.as_deref();
 
-        // Re-validate the manifest at render time. The signature already
-        // covers the manifest bytes, but re-running validate_manifest gives
-        // us a single rendering of the post-install rules (built-in slug
-        // collision, reserved env keys, mem/cpu caps) — useful when
-        // validate_manifest grows new rules and we don't want any installed
-        // plugin to silently survive a stricter ruleset.
         plugin::validate_manifest(manifest, plugin_dir)?;
 
         // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
@@ -111,12 +82,7 @@ pub(crate) fn apply_plugins_from_verified(
                 tokens_dir,
                 project_dir,
             )?;
-            // Insert into doc["services"]["mcp-<service_id>"]. Refuse to
-            // overwrite a built-in service already present in the YAML —
-            // validate_manifest blocks the obvious "slug: hub" case at
-            // install, but a future change there should not silently
-            // re-open the door here. serde_yaml_ng's mapping insert
-            // overwrites on key collision; we want a hard failure instead.
+            // Refuse to overwrite a built-in service (validate_manifest gates the obvious cases at install).
             let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
                 let key = serde_yaml_ng::Value::String(compose_name.clone());
@@ -127,9 +93,7 @@ pub(crate) fn apply_plugins_from_verified(
                 }
                 services.insert(key, service_value);
             }
-            // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
-            // each container has its own network namespace, so port reuse is
-            // safe and DNS disambiguates. See ADR-038.
+            // Inject WORKER_*_URL into hub; all workers share PORT_WORKER (ADR-038).
             if let Some(declared) = manifest.port {
                 if declared != consts::PORT_WORKER {
                     log::warn!(
@@ -149,9 +113,7 @@ pub(crate) fn apply_plugins_from_verified(
             );
             inject_worker_env(&mut doc, &worker_env, &url);
 
-            // Plugin's manifest may declare a host-side WebSocket bridge
-            // (see ADR-063). When the Desktop has registered one for this
-            // slug, inject the env vars the plugin asked for.
+            // Inject host-bridge env vars when Desktop registered one for this slug (ADR-063).
             if manifest.host_bridge.is_some() {
                 if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
                 {
@@ -175,10 +137,7 @@ pub(crate) fn apply_plugins_from_verified(
             }
         }
 
-        // Mount claude-resources to claude container. The resources dir
-        // must be a *real* directory inside the verified plugin tree —
-        // a symlink (or anything that escapes the tree under canonicalize)
-        // would let an attacker bind-mount /etc into the claude container.
+        // Validate claude-resources is a real dir, not a symlink (ADR-051 security model).
         let plugin_resources = plugin_dir.join("claude-resources");
         if plugin_resources.exists() {
             ensure_resources_dir_safe(plugin_dir, &plugin_resources)
@@ -192,10 +151,7 @@ pub(crate) fn apply_plugins_from_verified(
         }
     }
 
-    // SPEEDWAVE_PLUGINS in claude: slug per enabled plugin; the digest goes
-    // into a SEPARATE var so a plugin upgrade changes claude's config-hash
-    // (recreate -> entrypoint relinks resources) without altering the slug
-    // list the entrypoint iterates (plugin contract, CLAUDE.md).
+    // slug in SPEEDWAVE_PLUGINS; digest in separate var for config-hash recreation (plugin contract).
     if !plugin_slugs.is_empty() {
         let slugs: Vec<&str> = plugin_slugs
             .iter()

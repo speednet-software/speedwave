@@ -1,7 +1,4 @@
 // Slack OAuth2 authorization_code flow (loopback redirect + PKCE, ADR-071).
-// Bundled public client_id, user_scope only — Claude acts as the signed-in
-// human. The rotating refresh token stays host-side under oauth/; only the
-// short-lived access token reaches the worker container.
 
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::oauth_loopback::{build_authorize_url, wait_for_callback, CallbackFailure};
@@ -88,11 +85,7 @@ pub async fn start_slack_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    // The redirect is registered on the Slack app as
-    // `http://localhost:<port>/callback` and Slack matches it exactly, so the
-    // port is fixed and the host is `localhost` — which the browser may
-    // resolve to either 127.0.0.1 or ::1. Bind both; one failing is fine
-    // (IPv6-less hosts), both failing means another process owns the port.
+    // Fixed port registered on the Slack app; bind both 127.0.0.1 and ::1.
     let port = consts::SLACK_OAUTH_REDIRECT_PORT;
     // SSOT-allow: browser-side OAuth redirect listener, not a container-reach bind (see ADR-071; same rationale as plugin_oauth_cmd).
     let v4 = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
@@ -122,7 +115,7 @@ pub async fn start_slack_oauth(
         &scopes,
         &state,
         &pkce.challenge,
-        // user_scope, never scope: bot scopes are forbidden on desktop redirects.
+        // user_scope, never scope (bot scopes).
         "user_scope",
     )
     .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
@@ -265,10 +258,8 @@ fn pick_display_name(user: SlackUserInfoUser) -> Option<String> {
     from_profile.or(user.real_name.filter(|s| !s.is_empty()))
 }
 
-/// Best-effort display-name lookup via `users.info` on the freshly-issued user
-/// token. Returns None on any failure — sign-in must never fail because the
-/// cosmetic name lookup did (the card falls back to the user ID).
-/// `users_info_url` is derived from the token URL so there is no second SSOT.
+/// Best-effort display-name lookup via `users.info`; returns None on any
+/// failure. `users_info_url` is derived from the token URL.
 async fn fetch_slack_display_name(
     users_info_url: &str,
     access_token: &str,
@@ -346,8 +337,7 @@ async fn exchange_slack_code(
     let access_token = user.access_token.filter(|t| !t.is_empty()).ok_or_else(|| {
         "Slack returned no user access token — check the app's user_scope configuration".to_string()
     })?;
-    // Rotation is mandatory on the Speedwave Slack app; a response without
-    // refresh_token/expires_in means the app is misconfigured.
+    // Rotation is mandatory; refresh_token/expires_in are required.
     let refresh_token = user
         .refresh_token
         .filter(|t| !t.is_empty())

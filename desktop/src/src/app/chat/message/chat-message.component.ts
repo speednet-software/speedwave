@@ -10,15 +10,7 @@ import { UserMessageComponent } from './user-message.component';
 import { MessageActionsComponent } from './message-actions.component';
 import { MessageMetadataComponent } from './message-metadata.component';
 
-/**
- * Renders a single chat message in the terminal-minimal layout.
- *
- * - User messages → delegate to `<app-user-message>` (mono "user · time" meta
- *   line + plain content, no bubble).
- * - Assistant messages → mono "speedwave · time" meta line, then body blocks,
- *   then `<app-message-metadata>` (model · edited · tokens · cache · cost),
- *   then `<app-message-actions>` (copy / retry).
- */
+/** Renders a single chat message in the terminal-minimal layout. */
 @Component({
   selector: 'app-chat-message',
   imports: [
@@ -41,11 +33,6 @@ import { MessageMetadataComponent } from './message-metadata.component';
       </article>
     } @else {
       <article data-testid="chat-message" [attr.data-role]="role()">
-        <!-- Author + timestamp meta line removed: identity is conveyed by
-             alignment (assistant on the left, user-bubble on the right) and
-             the per-message metadata row at the bottom already shows model
-             + tokens + cost; an explicit "speedwave · HH:MM" header was
-             redundant. Streaming state is signalled by the trailing caret. -->
         <div class="text-[14px] leading-[1.7] text-[var(--ink)]">
           @for (block of blocks(); track $index) {
             @switch (block.type) {

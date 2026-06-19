@@ -48,8 +48,7 @@ pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
             if ipv4.is_private() && !ipv4.is_link_local() && !ipv4.is_unspecified() {
                 return true;
             }
-            // RFC 6598 — 100.64.0.0/10 shared address space (CGNAT). Non-routable
-            // on the public internet; in practice used by Tailscale and similar.
+            // RFC 6598 — 100.64.0.0/10 shared address space (CGNAT)
             let oct = ipv4.octets();
             if oct[0] == 100 && (oct[1] & 0xc0) == 64 {
                 return true;
@@ -528,8 +527,7 @@ mod tests {
 
     #[test]
     fn validate_url_blocks_credentials_on_public_host() {
-        // Previously only caught because the host was a private IP. Now caught
-        // unconditionally — userinfo has no legitimate use in an endpoint URL.
+        // userinfo has no legitimate use in an endpoint URL
         assert!(validate_url("https://user:pass@example.com/")
             .unwrap_err()
             .contains("credentials"));

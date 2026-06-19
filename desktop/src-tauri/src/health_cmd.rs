@@ -1,8 +1,4 @@
-// Health-check Tauri command.
-//
-// `get_health` aggregates per-container health for the active project. On
-// macOS it also resolves whether any OS-integration is enabled so the report
-// can include the native OS-bridge state.
+// Health-check Tauri command: aggregates per-container and (on macOS) OS-bridge health.
 
 use crate::health::{self, HealthMonitor};
 use crate::types::check_project;

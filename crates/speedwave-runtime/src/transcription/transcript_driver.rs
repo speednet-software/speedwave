@@ -23,16 +23,11 @@ const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
 /// Diarize the live buffer every N seconds of audio (cheaper than per-chunk).
 const LIVE_DIARIZE_EVERY_SECS: f32 = 10.0;
-/// Log a `warn` for every multiple of this many seconds of accumulated audio
-/// — long meetings keep the whole PCM buffer in RAM (`~115 MB / hour` at
-/// 16 kHz mono f32) and operators want a hint when something's running long.
+/// Log a `warn` for every multiple of this many seconds of accumulated audio.
 const PCM_WARN_STEP_SECS: f32 = 30.0 * 60.0;
 
-/// A stop signal shared with the driver task; flip it to `true` to ask the
-/// driver to wind down at the next chunk boundary. Carries a `Notify` the
-/// driver host can pulse once `run()` has actually exited, so the Tauri
-/// `stop_transcription` callsite can `await` the wind-down instead of
-/// spin-polling.
+/// A stop signal shared with the driver task. Carries a `Notify` the driver
+/// host pulses once `run()` has exited, releasing `await_finished()` waiters.
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
@@ -149,24 +144,21 @@ impl TranscriptDriver {
         }
     }
 
-    /// Runs the driver to completion (until the audio stream ends or `stop`
-    /// is tripped). Writes a WAV at `audio_wav_path` along the way. On any error
-    /// the session is flipped to `Failed{reason}` and the (partial) WAV is
-    /// closed before the error propagates.
+    /// Runs until the audio stream ends or `stop` is tripped, writing a WAV at
+    /// `audio_wav_path`. On error flips the session to `Failed{reason}` and
+    /// closes the partial WAV before propagating.
     pub fn run(mut self, audio_wav_path: &Path) -> Result<(), DriverError> {
         let mut wav = WavWriter::create(audio_wav_path)?;
         // Mark the session as Recording (a no-op transition from new()).
         let _ = self.store.set_status(self.id, TranscriptStatus::Recording);
 
         let result = self.pump_loop(&mut wav);
-        // Always close the WAV — even on error, a partial recording is better
-        // than a truncated/locked file.
+        // Always close the WAV, even on error.
         let _ = wav.finalize();
 
         match result {
             Ok(()) => {
-                // Final live decode over what's left (so the user sees the last
-                // chunk), then hand off to the finalize pass.
+                // Final live decode over what's left, then hand off to finalize.
                 let _ = self.decode_window();
                 let _ = self
                     .store
@@ -221,8 +213,7 @@ impl TranscriptDriver {
                     if let Err(e) =
                         run_diarize_pass(d, &self.diarize_opts, &self.pcm, &self.store, self.id)
                     {
-                        // Non-fatal: log + keep going (the transcript without
-                        // labels is still useful).
+                        // Non-fatal: log and keep going.
                         log::warn!("diarization pass failed: {e}");
                     }
                     self.last_diarize_at = accumulated_secs;
@@ -232,11 +223,7 @@ impl TranscriptDriver {
     }
 
     /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and replaces exactly
-    /// the segments that fall inside that window. `feed()` returns segments for
-    /// the *whole* window each time, so the splice index must be "the first
-    /// `live_segments` entry whose start is ≥ the window's start" — not a
-    /// running count, which would duplicate the earlier segments once the
-    /// window starts at offset 0 and re-covers them.
+    /// the segments that fall inside that window.
     fn decode_window(&mut self) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -312,11 +299,9 @@ const FINALIZE_WINDOW_SECS: f32 = 30.0;
 /// window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
-/// Runs the offline pass: load the recorded WAV, transcribe it with the
-/// higher-quality model, (optionally) re-diarize the whole recording, merge the
-/// result preserving user speaker relabels, and mark the session `Done`. On
-/// failure the session is flipped to `Failed{reason}` and the error returned —
-/// the caller can still fall back to the live transcript (it's untouched).
+/// Runs the offline pass: load the recorded WAV, transcribe with the
+/// higher-quality model, (optionally) re-diarize, merge preserving user speaker
+/// relabels, mark `Done`. On failure flips to `Failed{reason}` and returns it.
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
@@ -353,11 +338,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
     };
 
-    // 2) + 3) Transcribe in ~30 s windows with a short overlap, stitching the
-    //    results and emitting real per-window progress. Chunking (vs one
-    //    whole-recording call) loses a little cross-utterance context but lets
-    //    the progress bar actually move; the overlap + de-dup keeps boundaries
-    //    clean. Progress here fills the 5%..60% band.
+    // 2) + 3) Transcribe in ~30 s overlapping windows; progress fills 5%..60%.
     let _ = store.finalize_progress(id, 0.05);
     let final_segs =
         match transcribe_chunked(transcriber.as_mut(), &pcm, &transcribe_opts, |frac| {
@@ -368,8 +349,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         };
     let _ = store.finalize_progress(id, 0.65);
 
-    // 4) Optional re-diarization over the whole recording. Best-effort: a
-    //    failure here keeps the (un-labelled-by-this-pass) final segments.
+    // 4) Optional re-diarization over the whole recording; best-effort.
     let (final_segs, final_turns) = match diarizer.as_mut() {
         Some(d) => match d.diarize(&pcm, &diarize_opts) {
             Ok(turns) if !turns.is_empty() => {
@@ -387,8 +367,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     };
     let _ = store.finalize_progress(id, 0.9);
 
-    // 5) Merge: install final_segments, remapping speaker IDs to preserve
-    //    user relabels by overlap against the live turns.
+    // 5) Merge: install final_segments, remapping speaker IDs to preserve relabels.
     if let Err(e) = store.merge_final_segments(id, final_segs, &final_turns, &live_turns) {
         return Err(fail(&store, format!("merge final segments: {e}")));
     }
@@ -402,9 +381,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
 
 /// Transcribes `pcm` (16 kHz mono) in `FINALIZE_WINDOW_SECS` windows with a
 /// `FINALIZE_WINDOW_OVERLAP_SECS` overlap, stitching the per-window segments
-/// into one absolute-timestamped list. Calls `progress` with a 0.0→1.0 fraction
-/// after each window so a UI bar can move. Segments whose start falls inside the
-/// *next* window's overlap are dropped to de-dup the boundary.
+/// into one absolute-timestamped list. Calls `progress` (0.0→1.0) per window.
 fn transcribe_chunked(
     transcriber: &mut dyn Transcriber,
     pcm: &[f32],
@@ -433,9 +410,7 @@ fn transcribe_chunked(
         let is_last = end >= total;
         let window = &pcm[start..end];
         let window_start = Duration::from_secs_f64(start as f64 / rate as f64);
-        // Window-relative-end below which we *keep* segments: everything for the
-        // last window; up to where the next window starts (its overlap zone) for
-        // earlier windows, so straddling segments come from exactly one window.
+        // Keep segments up to the next window's overlap to de-dup boundaries.
         let keep_until = if is_last {
             Duration::from_secs_f64(window.len() as f64 / rate as f64)
         } else {
@@ -490,8 +465,7 @@ fn run_diarize_pass(
     if turns.is_empty() {
         return Ok(());
     }
-    // Pull the current live_segments snapshot, assign speakers locally,
-    // then emit per-segment SpeakerAssigned events for any changes.
+    // Assign speakers locally, then emit a SpeakerAssigned event per change.
     let snap = store
         .get(id)
         .map_err(|e| DriverError::Store(e.to_string()))?;

@@ -19,21 +19,7 @@ import { IconComponent } from '../../shared/icon.component';
 
 /**
  * Left overlay drawer that surfaces the active project's CLAUDE.md.
- *
- * Anchored to the left edge of the viewport via Angular CDK Overlay so the
- * memory button in the chat header opens its panel in the same place as the
- * conversations history drawer. The component itself renders no inline DOM —
- * its template is a single `<ng-template>` portalled by the overlay when the
- * `open` input flips to `true`.
- *
- * - Header: mono "memory" + neutral pill with section count + close ×.
- * - Body: when the source markdown contains the canonical section markers
- *   (## User / ## Project / ## Feedback / ## Reference) we render each as a
- *   mono kicker + dimmed text block — matching the mockup. Otherwise we render
- *   the raw source as preformatted plain text inside a <pre>. We deliberately
- *   do not run the markdown pipeline here: MEMORY.md often contains relative
- *   markdown links to per-memory files, and rendering them as <a> would let a
- *   click navigate the embedded webview off the SPA route (white screen).
+ * Rendered via CDK overlay portal; link-stripping prevents off-route navigation.
  */
 @Component({
   selector: 'app-memory-panel',
@@ -132,18 +118,13 @@ export class MemoryPanelComponent {
   private readonly viewContainerRef = inject(ViewContainerRef);
   private overlayRef: OverlayRef | null = null;
 
-  /**
-   * Sync the `open` input with the CDK overlay lifecycle. Opening builds a
-   * left-anchored full-height panel with a dark backdrop and dispatches close
-   * on backdrop click or Escape. Closing detaches the portal (no DOM remains).
-   */
+  /** Sync the `open` input with the CDK overlay lifecycle. */
   constructor() {
     effect(() => {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
-    // Defensive: dispose the overlay if the host is torn down while open
-    // (e.g., a route swap with the drawer left open).
+    // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
   }
 
@@ -187,9 +168,7 @@ const SECTION_MARKERS: readonly { id: string; label: string; pattern: RegExp }[]
 
 /**
  * Splits a CLAUDE.md-style memory document into mockup-shaped sections.
- *
- * Returns an empty array when none of the canonical headers are present so the
- * caller can fall back to the standard markdown renderer.
+ * Returns an empty array when no canonical headers are present (caller falls back).
  * @param markdown - Raw markdown source.
  */
 export function parseSections(
@@ -216,8 +195,7 @@ export function parseSections(
 }
 
 /**
- * Collapses `- [title](file.md) — desc` to `- desc` so the drawer never renders
- * a clickable pointer link (would navigate the webview off-route and white-screen).
+ * Collapses `- [title](file.md) — desc` to `- desc`, stripping clickable pointer links.
  * @param text - Raw markdown source.
  */
 export function stripPointerLinks(text: string): string {

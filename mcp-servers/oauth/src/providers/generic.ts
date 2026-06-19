@@ -1,9 +1,5 @@
 /**
- * Data-driven OAuth2 provider for plugins (ADR-069).
- *
- * `token_url`, client id/secret, grant type, and auth style all come from the
- * stored state (host-validated at manifest install + start_plugin_oauth), so
- * this provider re-validates the URL and hardens the HTTP call on every refresh.
+ * Data-driven OAuth2 provider for plugins; re-validates token_url and grant on every refresh (ADR-069).
  */
 
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
@@ -26,9 +22,7 @@ interface GenericProviderData {
 }
 
 /**
- * Narrows untyped `providerData` to the generic shape. An unknown
- * `authStyle`/`grantType` literal (tampered or future-version state file) is
- * rejected rather than silently falling through to a default branch.
+ * Narrows untyped `providerData` to the generic shape; rejects unknown authStyle/grantType.
  * @param raw - the stored providerData map
  */
 function parseGenericProviderData(
@@ -59,10 +53,7 @@ const RFC6749_ERROR_CODES = new Set([
 ]);
 
 /**
- * Keeps the `error` code only if it is a known RFC 6749 §5.2 value; a
- * data-driven IdP could otherwise stuff secrets into a free-form `error`.
- * The raw value stays diagnosable via a capped worker-stderr breadcrumb —
- * a bare `http: redacted` is unsupportable on its own.
+ * Returns the `error` code only if it is a known RFC 6749 §5.2 value, else 'redacted'.
  * @param errorCode - the IdP `error` field (or empty)
  */
 export function redactGenericError(errorCode: string): string {
@@ -86,13 +77,10 @@ function validateTokenUrl(raw: string): URL | null {
   }
   if (url.protocol !== 'https:') return null;
   if (url.username || url.password) return null;
-  // Strip the brackets URL keeps on IPv6 literals (URL also lower-cases +
-  // normalizes ::ffff:10.0.0.1 to its hex form ::ffff:a00:1).
+  // Strip brackets URL keeps on IPv6 literals.
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost')) return null;
-  // Block private/loopback/link-local/CGNAT literals; the host-side Rust
-  // validator is authoritative at install — this is defense-in-depth against a
-  // tampered state file, not a complete reserved-range implementation.
+  // Block private/loopback/link-local/CGNAT literals.
   if (
     /^127\./.test(host) ||
     /^0\./.test(host) ||
@@ -173,8 +161,7 @@ export async function refreshGenericToken(req: RefreshRequest): Promise<RefreshR
     clearTimeout(timeoutId);
   }
 
-  // A 3xx (redirect: 'manual' yields an opaqueredirect/non-ok) is not a valid
-  // token response — refuse rather than follow an attacker-influenced Location.
+  // A 3xx is not a valid token response.
   if (response.status >= 300 && response.status < 400) {
     return {
       ok: false,

@@ -10,12 +10,7 @@ import {
 import { _resetUnknownModelWarnings } from './pricing.testing';
 import type { TurnUsage } from '../models/chat';
 
-/**
- * Stand-in for the `list_anthropic_models` payload (the Rust SSOT
- * `AnthropicModelInfo` serialized). Mirrors the ids, contexts, and rates in
- * `defaults.rs::ANTHROPIC_MODELS` so the parity assertion is meaningful — bump
- * this together with the catalog when a model is added.
- */
+/** Stand-in for `list_anthropic_models`; mirror `defaults.rs::ANTHROPIC_MODELS` when a model is added. */
 const CATALOG: PricedAnthropicModel[] = [
   {
     id: 'claude-fable-5',
@@ -56,10 +51,7 @@ const CATALOG: PricedAnthropicModel[] = [
 ];
 
 /**
- * Counts how many `plugin:log|log` warn-level (level 4) calls the stubbed
- * tauri invoke received. `pluginLogWarn` (used by pricing for unknown-model
- * warnings) forwards to `invoke('plugin:log|log', { message, level: 4 })`, the
- * same pipeline LoggerService uses; we assert on it rather than the raw console.
+ * Counts `plugin:log|log` warn-level (level 4) calls the stubbed invoke received.
  * @param invokeSpy - The stubbed `__TAURI_INTERNALS__.invoke` spy.
  */
 function logWarnCalls(invokeSpy: ReturnType<typeof vi.fn>): unknown[][] {
@@ -210,12 +202,7 @@ describe('calculateCost', () => {
   });
 
   it('sums all four components for a realistic turn', () => {
-    // Opus: input 11_000 (1000 billed after subtracting cache_read) + 10k cache-read +
-    //   5k cache-write + 500 output
-    //   billedInput = max(0, 11000 - 10000) = 1000
-    //   = 1000 * 5 / 1e6 + 10000 * 0.5 / 1e6 + 5000 * 6.25 / 1e6 + 500 * 25 / 1e6
-    //   = 0.005 + 0.005 + 0.03125 + 0.0125
-    //   = 0.05375
+    // Opus: 1000 billed input (11k - 10k cache_read) + cache_read + cache_write + output = 0.05375
     const usage: TurnUsage = {
       input_tokens: 11_000,
       output_tokens: 500,

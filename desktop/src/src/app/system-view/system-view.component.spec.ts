@@ -8,8 +8,7 @@ import type { HealthReport } from '../models/health';
 
 const MOCK_HEALTHY_REPORT: HealthReport = {
   containers: [
-    // Backend (parse_container_entries) strips the compose prefix; mocks
-    // reflect the post-strip wire format the component actually receives.
+    // Post-strip wire format: parse_container_entries removes the compose prefix.
     { name: 'claude', status: 'running', healthy: true },
     { name: 'mcp_hub', status: 'running', healthy: true },
     { name: 'mcp_redmine', status: 'starting', healthy: false },
@@ -158,8 +157,7 @@ describe('SystemViewComponent', () => {
   });
 
   it('adds an aria-label communicating the actual restart-all scope', async () => {
-    // The Tauri command recreates ALL project containers, not just the one
-    // whose row was clicked. The label must communicate the actual scope.
+    // recreate_project_containers recreates all project containers, not just the clicked row.
     await component.ngOnInit();
     fixture.detectChanges();
 

@@ -23,16 +23,8 @@ export interface CreatedProject {
 
 /**
  * Modal dialog for creating a new Speedwave project. Opens the OS folder
- * picker, derives a default project name from the chosen directory's basename
- * (editable), and invokes `create_project` on the Rust backend on submit.
- *
- * Reused by the setup-wizard (where it is non-dismissible — user must create
- * a project to finish setup) and the project-switcher dropdown (dismissible).
- *
- * Uses Angular Signal Forms (`@angular/forms/signals`) for the editable
- * project-name field. Signal Forms are signal-driven and OnPush-safe — they
- * avoid the second change-detection pass that the legacy `NgModel` directive
- * schedules, which Angular 21.2.x crashes on inside embedded views.
+ * picker, derives a default project name from the dir basename (editable),
+ * and invokes the configured command on the Rust backend on submit.
  */
 @Component({
   selector: 'app-create-project-modal',
@@ -166,18 +158,9 @@ export interface CreatedProject {
 export class CreateProjectModalComponent {
   /** Whether the modal is visible. */
   readonly open = input.required<boolean>();
-  /**
-   * Whether the user is allowed to close the modal without creating a project.
-   * Setup-wizard sets this to `false` (project creation is mandatory there);
-   * the project-switcher sets it to `true`.
-   */
+  /** Whether the user is allowed to close the modal without creating a project. */
   readonly dismissible = input<boolean>(true);
-  /**
-   * Tauri command to invoke on submit. Defaults to `create_project` (setup
-   * pipeline — config-only registration). The project-switcher should pass
-   * `add_project` instead, which also boots containers and switches active
-   * project as part of the same transaction.
-   */
+  /** Tauri command to invoke on submit (defaults to `create_project`). */
   readonly command = input<'create_project' | 'add_project'>('create_project');
 
   /** Emitted with the chosen `name` + `dir` after `create_project` succeeds. */
@@ -188,17 +171,9 @@ export class CreateProjectModalComponent {
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 
-  /**
-   * Reactive model backing the Signal Forms tree. `dir` is set programmatically
-   * by `browse()`; `name` is auto-filled from the dir basename then editable.
-   */
+  /** Reactive model backing the Signal Forms tree. */
   protected readonly model = signal<CreatedProject>({ name: '', dir: '' });
-  /**
-   * Signal Forms field tree. The name input binds via `[formField]` — this
-   * routes user input directly through the model and tracks dirty state for
-   * us, replacing the legacy `[value]+(input)` workaround and the manual
-   * `nameTouched` flag.
-   */
+  /** Signal Forms field tree backing the name input. */
   protected readonly projectForm = form(this.model, (path) => {
     required(path.name, { message: 'Project name is required' });
   });
@@ -224,10 +199,7 @@ export class CreateProjectModalComponent {
     this.error.set(null);
     let selected: string | string[] | null;
     try {
-      // E2E test seam: WebDriver cannot drive the OS folder picker, so the
-      // suite plants `window.__E2E_DIALOG_PATH__` to short-circuit the
-      // native call. `string` resolves the picker, `null` simulates cancel.
-      // Anything else (`undefined`, missing) falls through to the real API.
+      // E2E seam: `window.__E2E_DIALOG_PATH__` overrides the picker (string=path, null=cancel).
       const e2eOverride = (window as unknown as { __E2E_DIALOG_PATH__?: string | null })
         .__E2E_DIALOG_PATH__;
       selected =
@@ -240,9 +212,7 @@ export class CreateProjectModalComponent {
     if (typeof selected !== 'string' || selected.length === 0) {
       return;
     }
-    // Auto-fill name only when the user has not yet edited it. Signal Forms
-    // marks the `name` field as dirty whenever its value flows through the
-    // `[formField]` binding, so `dirty()` is the SSOT for "user touched it".
+    // Auto-fill name only when the user has not yet edited it.
     const nameDirty = this.projectForm.name().dirty();
     this.model.update((m) => ({
       ...m,
@@ -250,8 +220,7 @@ export class CreateProjectModalComponent {
       name: nameDirty ? m.name : slugify(basename(selected as string)),
     }));
     this.cloudstorageWarning.set(null);
-    // Non-blocking: fire-and-forget CloudStorage detection; ignore errors so a
-    // missing Tauri context (tests, browser preview) doesn't break the picker.
+    // Fire-and-forget CloudStorage detection; errors ignored.
     void this.detectCloudstorage(selected as string);
     this.cdr.markForCheck();
   }
@@ -276,11 +245,6 @@ export class CreateProjectModalComponent {
 
   /**
    * Handles manual edits to the project-name input.
-   *
-   * In production the `[formField]` directive owns the input event and writes
-   * directly to the form's control value. This method exists so unit tests can
-   * simulate user typing without spinning up a full DOM event — it routes
-   * through the same control-value setter, which keeps `dirty()` honest.
    * @param event - Native `input` event (or test stand-in) from the name field.
    */
   onNameInput(event: Event): void {
@@ -331,8 +295,7 @@ export class CreateProjectModalComponent {
 
   private reset(): void {
     this.model.set({ name: '', dir: '' });
-    // Clear the form's dirty/touched flags so the next `browse()` is treated
-    // as a fresh selection rather than a continuation of the previous edit.
+    // Clear the form's dirty/touched flags.
     this.projectForm().reset();
     this.error.set(null);
     this.cloudstorageWarning.set(null);

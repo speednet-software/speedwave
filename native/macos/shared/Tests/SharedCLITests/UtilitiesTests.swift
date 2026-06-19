@@ -221,17 +221,12 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testResolvedBundleIdentifierUsesProvidedValueWhenPresent() {
-        // When a bundle identifier is present (production: Bundle.main has the parent .app's ID),
-        // the function must pass it through verbatim.
+        // When a bundle identifier is present, pass it through verbatim.
         XCTAssertEqual(resolvedBundleIdentifier(from: "pl.speedwave.desktop"), "pl.speedwave.desktop")
         XCTAssertEqual(resolvedBundleIdentifier(from: "com.example.other"), "com.example.other")
     }
 
     func testSpeedwaveBundleIdentifierMatchesTauriConf() throws {
-        // Belt-and-braces: read tauri.conf.json from disk and assert literal SSOT matches.
-        // The authoritative drift guard is the bats test in release-workflow-signing.bats;
-        // this test is a developer-experience belt-and-braces when running `swift test`
-        // from the package directory.
         let candidates = [
             "../../../desktop/src-tauri/tauri.conf.json",
             "../../../../desktop/src-tauri/tauri.conf.json",
@@ -341,9 +336,7 @@ final class SharedCLITests: XCTestCase {
     func testEntityNameUsesCapitalizedRawValue() {
         let calMsg = composeErrorMessage(status: .denied, entity: .calendar)
         XCTAssertTrue(calMsg.contains("Calendar"), "Calendar denied must contain 'Calendar'")
-        // Note: bundleId contains 'pl.speedwave.desktop.calendar' (lowercase by design),
-        // so we cannot assert that 'calendar' is fully absent from the message. We only
-        // check that the user-visible entity name is capitalised.
+        // bundleId contains lowercase by design; test only checks the capitalised entity name.
         let remMsg = composeErrorMessage(status: .denied, entity: .reminders)
         XCTAssertTrue(remMsg.contains("Reminders"), "Reminders denied must contain 'Reminders'")
     }
@@ -551,8 +544,7 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTimeout() {
-        // 0.1s is large enough to avoid scheduler flake yet keeps the test fast.
-        // MockGate.requestAccess deliberately never invokes completion when deferRequest=true.
+        // 0.1s timeout; MockGate.requestAccess defers completion to exercise the timeout path.
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.deferRequest = true
@@ -564,10 +556,8 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTargetNotRunningInvokesRequestForAutoLaunch() {
-        // .targetNotRunning is NOT terminal — orchestrator passes through to
-        // requestAccess so AppleEventsGate can attempt auto-launch. If the
-        // launch attempt also fails (mock keeps post-status = .targetNotRunning),
-        // the result remains targetNotRunning with no tccutil recovery hint.
+        // .targetNotRunning is NOT terminal; orchestrator passes through to requestAccess
+        // for an auto-launch attempt. Launch failure keeps the result targetNotRunning.
         let gate = MockGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
@@ -584,8 +574,7 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTargetNotRunningRecoversWhenAutoLaunchSucceeds() {
-        // Simulates the success path: gate's request returns granted=true and
-        // post-status is .granted (the auto-launch worked, AE got permission).
+        // Success path: auto-launch succeeds and the gate gets permission.
         let gate = MockGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.requestGranted = true
@@ -597,8 +586,7 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformDataAccessFailureOverridesGranted() {
-        // TCC reports granted but verifyDataAccess returns an error string —
-        // result must be silentReject with the data-access error included.
+        // TCC granted + verifyDataAccess error = silentReject with the data-access error in the message.
         let gate = MockGate()
         gate.initialStatus = .granted
         gate.dataAccessError = "AppleScript error: probe failed"
@@ -626,7 +614,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     // exitWithError calls exit(1) and cannot be unit-tested without process spawning.
-    // Covered by integration: all 4 CLIs use it and would crash on incorrect behavior.
 
     // MARK: - resolveCalendars (Reminders)
 

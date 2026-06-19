@@ -1,9 +1,6 @@
 /**
  * Tests for the worker entry point.
- *
- * Regression-guards the rule that the local /health probe MUST NOT call
- * Context7 — at 30 s intervals it would burn the ~200/day anonymous quota
- * in under 2 h, breaking every other user on the same source IP.
+ * Guards that the local /health probe never calls Context7.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -11,9 +8,7 @@ import { createMCPServer } from '@speedwave/mcp-shared';
 
 describe('context7 worker healthcheck', () => {
   it('healthCheck does NOT make outbound HTTP — anonymous quota regression guard', async () => {
-    // The worker installs a local readiness probe. If anyone "improves" it
-    // by probing Context7 (`fetch(BASE_URL + '/libs/search?...')`), this
-    // assertion fires.
+    // Local readiness probe must not call Context7.
     const fetchSpy = vi.fn(() => {
       throw new Error('healthCheck must NOT make HTTP calls');
     });
@@ -26,9 +21,7 @@ describe('context7 worker healthcheck', () => {
         version: '0.0.0',
         port: 0,
         auth: { token: 'test-token' },
-        // No healthCheck callback — local readiness only. Mirrors the
-        // production worker (`src/index.ts`): an external probe here
-        // would burn anonymous quota.
+        // Local readiness only; mirrors production src/index.ts.
         healthCheck: async () => {},
       });
       const actualPort = await server.start();

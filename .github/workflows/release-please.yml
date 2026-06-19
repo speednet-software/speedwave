@@ -24,9 +24,7 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN }}
           target-branch: main
 
-      # Defense-in-depth: ensure the release PR has the label that release-please
-      # needs to identify it as a merged release PR. The labeling API call inside
-      # release-please can fail transiently (PR node ID not propagated yet).
+      # release-please's own label call can fail transiently
       - name: Ensure release PR has autorelease label
         if: steps.release.outputs.pr
         continue-on-error: true
@@ -51,9 +49,7 @@ jobs:
           done
           echo "::warning::Failed to apply label after 3 retries"
 
-      # Defense-in-depth: ensure the git tag exists as a ref. GitHub draft
-      # releases may not create a git ref, even with force-tag-creation: true.
-      # Without the tag, checkout in desktop-release.yml fails.
+      # GitHub draft releases may not create the git ref desktop-release.yml needs
       - name: Ensure release tag exists
         if: steps.release.outputs.release_created == 'true'
         continue-on-error: true

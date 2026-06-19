@@ -56,15 +56,7 @@ const SHARE_COLORS = [
 /** Bars shown in the daily chart — the most recent month of activity. */
 export const DAILY_CHART_DAYS = 30;
 
-/**
- * LLM usage dashboard (ADR-073). Renders the aggregate returned by the
- * `get_llm_usage` Tauri command — the litellm callback JSONL is the single
- * source of truth here; per-session chat statistics (the stream-derived
- * numbers in `session-stats`) are intentionally NOT mixed in, the same
- * request would be counted twice.
- *
- * All charts are plain div/grid constructs — no chart library.
- */
+/** LLM usage dashboard (ADR-073). Renders the aggregate returned by the `get_llm_usage` Tauri command. */
 @Component({
   selector: 'app-llm-usage',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -320,11 +312,7 @@ export class LlmUsageComponent {
   /** Row labels of the heatmap, Monday-first. */
   readonly weekdayLabels = ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'] as const;
 
-  /**
-   * Refetches whenever the bound project changes — covers the first render and
-   * an in-place project switch via the page's own project pill (the host keeps
-   * this instance alive, so a one-shot init would show stale data).
-   */
+  /** Refetches on project changes; covers initial render and in-place project switches. */
   constructor() {
     effect(() => {
       const project = this.project();
@@ -394,11 +382,7 @@ export class LlmUsageComponent {
   }
 
   /**
-   * Share of input tokens served from the provider's prompt cache, clamped to
-   * [0,1]. Anthropic-format streamed records report `prompt_tokens` EXCLUDING
-   * cached tokens, so cache_read can exceed it — the true denominator is then
-   * prompt + cache_read. Clamp guards against any remaining provider skew so
-   * the card never shows a nonsensical >100%.
+   * Share of input tokens from prompt cache, clamped to [0,1].
    * @param bucket - Aggregate bucket (totals or a table row).
    */
   cacheHitRate(bucket: UsageBucket): number {
@@ -411,9 +395,7 @@ export class LlmUsageComponent {
   }
 
   /**
-   * Mean output throughput (tok/s) over successful timed records, or null when
-   * none exist. Numerator and denominator come from the same record subset
-   * (backend excludes failures and untimed records), so the rate is honest.
+   * Mean output throughput (tok/s) over timed records, null when none.
    * @param bucket - Aggregate bucket (totals or a table row).
    */
   tokensPerSec(bucket: UsageBucket): number | null {

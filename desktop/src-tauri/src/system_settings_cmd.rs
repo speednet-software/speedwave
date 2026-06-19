@@ -20,8 +20,7 @@ fn open_privacy_subpane(anchor: &str) -> Result<(), String> {
 pub fn open_files_folders_pane() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        // The "Files and Folders" sub-pane is not directly addressable, but
-        // opening the parent pane with this anchor guides the user there.
+        // "Files and Folders" sub-pane is not directly addressable; use parent anchor.
         open_privacy_subpane("Privacy_FilesAndFolders")?;
     }
     Ok(())
@@ -67,8 +66,7 @@ mod tests {
             assert!(open_microphone_pane().is_ok());
             assert!(open_audio_capture_pane().is_ok());
         }
-        // On macOS we can only verify the source carries the expected anchors —
-        // spawning `open` in CI would pop System Settings.
+        // On macOS verify the source carries the expected anchors.
         #[cfg(target_os = "macos")]
         {
             let source = include_str!("system_settings_cmd.rs");

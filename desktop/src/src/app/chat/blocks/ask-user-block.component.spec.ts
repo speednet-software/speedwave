@@ -386,8 +386,7 @@ describe('AskUserBlockComponent', () => {
     component.freeformText.set('partial draft');
     expect(component.selected().size).toBe(1);
 
-    // Parent reducer advances current_index after a successful answer —
-    // simulate that by handing in a new block with the slot filled.
+    // Parent reducer advances current_index: new block with slot filled.
     setBlock(
       makeBlock({
         questions: [makeQuestion({ question: 'Q0' }), makeQuestion({ question: 'Q1' })],

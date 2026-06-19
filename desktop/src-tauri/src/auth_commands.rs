@@ -70,21 +70,8 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Strips the `\\?\` extended-length prefix from a Windows path when the
-/// remainder begins with `<drive>:\` or `<drive>:/` (`\\?\C:\…` -> `C:\…`).
-/// Returns the input unchanged for paths that don't match `\\?\<drive>:\`
-/// (UNC paths, already-stripped paths, POSIX paths, anything else). The
-/// function is purely pattern-based on the input string and does not inspect
-/// the host OS. Bare `\\?\C:` (no separator) is intentionally left alone —
-/// `Set-Location 'C:'` would set drive-relative cwd, which is not what the
-/// user copied a project path for; passing the original string through means
-/// PowerShell raises a clear "path not found" error rather than silently
-/// changing drive.
-///
-/// The Tauri folder picker on Windows can return canonicalized paths with
-/// the `\\?\` prefix; neither PowerShell `Set-Location` nor `cd` handles
-/// these, and they are not user-readable. This helper unifies the path so
-/// the rendered command is paste-ready.
+/// Strips `\\?\` extended-length prefix from Windows paths when followed by `<drive>:\`.
+/// Returns input unchanged for UNC, POSIX, or already-stripped paths.
 pub(crate) fn strip_windows_extended_length_prefix(path: &str) -> &str {
     let b = path.as_bytes();
     if b.len() >= 7
@@ -109,16 +96,9 @@ pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Pure, host-platform-agnostic command assembly. The `is_windows` flag
-/// selects PowerShell-shaped output (Set-Location, `;`, $env:, '' escape,
-/// \\?\ prefix stripping) versus POSIX-shaped output (cd, &&, export,
-/// '\'' escape). The flag is taken as a parameter — not derived inside the
-/// function from `cfg!()` — so both branches are reachable from unit tests
-/// on macOS where `make test-desktop` runs.
-///
-/// The trailing command is `speedwave login --project '<project>'` — once
-/// stored, the OAuth token is per-project, so the exact name is bound into
-/// the copy-paste so it works regardless of CWD.
+/// Pure command assembly. `is_windows` selects PowerShell-shaped output
+/// (Set-Location, `;`, $env:, '' escape, \\?\ stripping) vs POSIX (cd, &&,
+/// export, '\'' escape).
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
     project_dir: &str,
@@ -189,10 +169,8 @@ fn build_auth_command(
     )
 }
 
-/// Resolves the inputs both auth surfaces need: the project's directory (from
-/// user config), the active data dir, and the default data dir (for the
-/// `SPEEDWAVE_DATA_DIR` pin decision). Shared so `get_auth_command` (copy-paste)
-/// and `start_oauth_login` (auto-spawn) cannot drift.
+/// Resolves the project directory, active data dir, and default data dir.
+/// Shared by `get_auth_command` and `start_oauth_login` to prevent drift.
 pub(crate) fn resolve_project_dirs(
     project: &str,
 ) -> Result<(String, std::path::PathBuf, Option<std::path::PathBuf>), String> {
@@ -240,9 +218,7 @@ mod tests {
 
     #[test]
     fn get_auth_status_waits_for_image_readiness() {
-        // Race guard: setup_wizard::check_claude_auth → ensure_exec_healthy →
-        // compose_up_recreate. UI polls auth status at startup; without the
-        // gate, polling during reconcile surfaces "image not available".
+        // Race guard: get_auth_status must gate on image readiness before exec.
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
@@ -447,9 +423,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_includes_project_in_login_argument() {
-        // Sanity check: the project name actually flows into the trailing
-        // `--project '<name>'`. Catches a future bug where the call-site in
-        // get_auth_command forgets to thread `project` through.
+        // Project name must flow into the trailing `--project '<name>'`.
         let cmd = build_auth_command(
             "specific-project-name",
             "/proj",
@@ -461,9 +435,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_escapes_single_quote_in_project_name() {
-        // Defensive: validate_project_name forbids `'`, but the renderer
-        // must defensively escape — otherwise relaxing validation later
-        // would silently break the output.
+        // Defensive escaping in case validation is relaxed.
         let cmd = build_auth_command(
             "weird'name",
             "/proj",
@@ -474,9 +446,6 @@ mod tests {
     }
 
     // -- strip_windows_extended_length_prefix tests --
-    // build_auth_command_for_platform is infallible by design — every input is a valid
-    // PathBuf or &str chosen by the user. No error-path or state-transition tests apply
-    // to pure functions.
 
     #[test]
     fn strip_prefix_uppercase_drive() {
@@ -714,8 +683,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
-        // Custom data dir containing a `'` must use PS doubling (`''`),
-        // never POSIX backslash escaping (`'\''`). Closes review gap.
+        // Custom data dir must use PS doubling (''), not POSIX ('\').
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -733,10 +701,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
-        // Defence-in-depth: if data_dir ever carries `\\?\` (e.g. a future
-        // "choose data directory" picker on Windows), the env var must be
-        // set to a clean, paste-ready path — not the raw extended-length
-        // form which subsequent tools would mishandle.
+        // Defence-in-depth: if data_dir carries \\?\, env var must be cleaned.
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -764,8 +729,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_project_name() {
-        // Defensive escaping for project names containing `'`. validate_project_name
-        // forbids them — but renderer must escape regardless.
+        // Defensive escaping in case validation changes.
         let cmd = build_auth_command_for_platform(
             "weird'name",
             r"C:\proj",

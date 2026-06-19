@@ -1,8 +1,5 @@
 #!/usr/bin/env bats
 # Static validation of critical updater config fields in tauri.conf.json.
-# Each test runs against the real file (expect PASS) and against a matching
-# fixture (expect FAIL with asserted stderr substring).
-#
 # Set TAURI_CONF_OVERRIDE to use a different config file.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"

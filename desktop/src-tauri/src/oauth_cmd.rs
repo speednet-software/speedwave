@@ -99,9 +99,7 @@ struct SpOAuthState<'a> {
     expires_in: u64,
 }
 
-/// `data_dir`-parameterised so tests pass a tempdir, bypassing the
-/// `consts::data_dir()` OnceLock (cf. `plugin::oauth_state_file_in`).
-/// Production reaches this via `save_tokens`.
+/// `data_dir`-parameterised variant; production reaches this via `save_tokens`.
 fn save_oauth_state_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -207,8 +205,7 @@ fn save_tokens_in(
     tenant_id: &str,
     tokens: &MsTokenResponse,
 ) -> Result<(), String> {
-    // State first, mounted token second: a crash in between leaves
-    // recoverable state, never a mounted token without refresh state.
+    // State first, mounted token second.
     save_oauth_state_in(
         data_dir,
         project,
@@ -627,10 +624,8 @@ mod tests {
         }
     }
 
-    /// SSOT parity guard: the written key set must equal the schema that
-    /// `mcp-servers/oauth/src/oauth-state.ts::assertOAuthState` requires. A field
-    /// rename on either side (e.g. `refreshToken` → `refresh_token`) breaks token
-    /// refresh at runtime with no other guard — this pins it at build time.
+    /// SSOT parity guard: written key set must equal
+    /// `mcp-servers/oauth/src/oauth-state.ts::assertOAuthState`.
     #[test]
     fn save_oauth_state_key_set_matches_documented_ts_schema() {
         // Mirror of OAuthState in oauth-state.ts (top-level + providerData keys).
@@ -804,8 +799,7 @@ mod tests {
 
     #[test]
     fn classify_sp_other_error_redacts_description() {
-        // The `other` branch routes error_description through redaction — a
-        // tenant/request detail must not leak verbatim into the failure message.
+        // The `other` branch routes error_description through redaction.
         let body =
             br#"{"error":"invalid_grant","error_description":"AADSTS9000 secret tenant detail"}"#;
         match classify_sharepoint_response(400, body) {

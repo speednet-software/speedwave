@@ -1,11 +1,8 @@
 //! Behavioural coverage for `update::apply_update_transaction` and
-//! `update::apply_rollback_transaction` — replaces brittle source-text
-//! ordering assertions with mocked `LockedRuntime` call recording.
-//!
-//! Lives in its own integration-test binary because `consts::data_dir()`
-//! uses a `OnceLock`: the env var is honoured on the first resolution
-//! only. All tests share one tmp dir (one resolution) and serialise to
-//! keep recorded call vectors uncontaminated.
+//! `update::apply_rollback_transaction` via mocked `LockedRuntime` call
+//! recording. Own binary: `consts::data_dir()` `OnceLock` resolves once.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::OnceLock;
 
@@ -61,8 +58,7 @@ fn apply_update_transaction_runs_down_then_validate_then_recreate() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_does_not_build_images() {
-    // Contract pin (ADR-066): builds happen OUTSIDE the lock. The caller
-    // (`update_containers`) builds first, then invokes this helper.
+    // Contract pin (ADR-066): builds happen OUTSIDE the lock.
     let data_dir = shared_data_dir();
     let project = "tx-no-build";
     let compose_dir = data_dir.join("compose").join(project);

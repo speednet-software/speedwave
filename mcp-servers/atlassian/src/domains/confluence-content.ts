@@ -47,9 +47,7 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
         );
         key = sp.key ? String(sp.key) : undefined;
       } catch (error) {
-        // A 404 just means the space isn't visible; any other error
-        // (401/403/429/timeout) is surfaced so a transient failure doesn't
-        // masquerade as a "space not allowed" configuration error.
+        // 404 means the space isn't visible; other statuses are warned, not swallowed.
         const status = (error as { response?: { status?: number } })?.response?.status;
         if (status !== 404) {
           console.warn(

@@ -37,12 +37,7 @@ const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; act
   },
 };
 
-/**
- * Renders a chat error in one of three timeline shapes — red (failure), amber
- * (operator-recoverable), or muted gray (stopped by user). Mirrors the mockup
- * lines 861–910: every variant is `mono border-l-2 border-<color>/50 pl-4
- * text-[12.5px]` — NEVER a callout box. Pure Tailwind, no inline `<style>`.
- */
+/** Renders a chat error in one of three timeline shapes: red, amber, or gray. */
 @Component({
   selector: 'app-error-block',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -79,11 +74,7 @@ export class ErrorBlockComponent {
   /** Error message content displayed next to the kind label. */
   readonly content = input.required<string>();
 
-  /**
-   * Discriminator driving both shape and label. Missing/invalid values are
-   * normalised to `'generic'` via `kindOrDefault()` so callers may pass
-   * `undefined` without a crash.
-   */
+  /** Discriminator driving both shape and label; missing/invalid normalised to `'generic'`. */
   readonly kind = input<ErrorBlockKind>('generic');
 
   /** Parent can listen for user clicks on the inline action button. */
@@ -104,11 +95,7 @@ export class ErrorBlockComponent {
   /** Operator-recoverable hints render as amber timeline events. */
   readonly isAmberTimeline = computed(() => this.meta().shape === 'amber-timeline');
 
-  /**
-   * Boolean accessor preserved for downstream callers that switched on
-   * "is this a callout-shape error" — every actionable error is now an amber
-   * timeline, so the flag aliases to `isAmberTimeline`.
-   */
+  /** Alias for `isAmberTimeline`. */
   readonly isCallout = computed(() => this.isAmberTimeline());
 
   /** True when any of the three timeline variants applies (always, post-rewrite). */

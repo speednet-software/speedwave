@@ -1,9 +1,5 @@
 /**
  * Tests for Atlassian credential loading and the auth-token wiring.
- *
- * `normalizeSiteUrl` and `readCredentials` are unit-tested with a mocked `fs`.
- * The `MCP_ATLASSIAN_AUTH_TOKEN` exit-1 contract and `createMCPServer` middleware
- * wiring follow the same shape as the other workers (see `redmine/src/auth.test.ts`).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';

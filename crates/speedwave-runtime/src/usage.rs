@@ -1,21 +1,6 @@
-//! LLM usage aggregation (ADR-073).
-//!
-//! Reads the append-only JSONL written by the litellm container's usage
-//! callback (`<data_dir>/usage/<project>/litellm/usage.jsonl`, mounted
-//! `:rw` at `/usage`) and aggregates it for the Desktop dashboard.
-//!
-//! Source-of-truth split (ADR-073 §usage): this file is the ONLY input to
-//! the usage dashboard. The Claude Code result stream (`total_cost_usd`,
-//! `modelUsage` parsed in desktop `chat.rs`/`history.rs`) remains the input
-//! to per-session chat statistics and is never summed with this data — the
-//! same request would otherwise be counted twice.
-//!
-//! Records are deduplicated by `response_id`: should a future litellm
-//! version start emitting success events for streamed unified-route
-//! requests (which today only the iterator hook captures), both lines
-//! would carry the same id — first-seen wins (the duplicate is skipped).
-//! Today the two capture paths are mutually exclusive per request, so the
-//! tie-break never fires.
+//! LLM usage aggregation (ADR-073): reads the litellm callback JSONL
+//! (`<data_dir>/usage/<project>/litellm/usage.jsonl`) for the Desktop
+//! dashboard. Records are deduplicated by `response_id`, first-seen wins.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -78,11 +63,8 @@ pub struct UsageBucket {
     pub cache_write: u64,
     /// Summed cost in USD (0.0 where litellm had no pricing — local models).
     pub cost_usd: f64,
-    /// Throughput numerator: completion tokens from SUCCESS records that also
-    /// carried a latency. Paired with `throughput_latency_ms_sum` so tok/s
-    /// divides matched numerator/denominator — failures (latency, ~0 output)
-    /// and pre-latency records (output, no latency) are excluded from both,
-    /// otherwise the rate is wildly skewed.
+    /// Throughput numerator: completion tokens from success records that also
+    /// carried a latency. Paired with `throughput_latency_ms_sum`.
     pub throughput_completion_tokens: u64,
     /// Throughput denominator: wall-clock latency over the same success+latency
     /// records that feed `throughput_completion_tokens`.
@@ -168,9 +150,7 @@ fn aggregate_file(
             summary.skipped_lines += 1;
             continue;
         };
-        // Dedup across capture paths: same response counted once, first-seen
-        // wins (the second line with that id is skipped). The two paths are
-        // mutually exclusive per request today, so the order never matters.
+        // Dedup by response_id; first-seen wins.
         if let Some(id) = record.response_id.as_deref() {
             if !id.is_empty() && !seen_ids.insert(id.to_string()) {
                 continue;
@@ -212,8 +192,7 @@ fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord) {
     bucket.cache_read += r.cache_read.unwrap_or(0);
     bucket.cache_write += r.cache_write.unwrap_or(0);
     bucket.cost_usd += r.cost_usd.unwrap_or(0.0);
-    // Throughput uses only successful records that produced output AND timed it,
-    // so numerator and denominator describe the same requests.
+    // Throughput counts only successful records with output and latency.
     if let Some(latency) = r.latency_ms {
         if !is_failure && completion > 0 && latency > 0 {
             bucket.throughput_completion_tokens += completion;
@@ -256,8 +235,7 @@ mod tests {
         assert_eq!(day1["claude-haiku-4-5"].requests, 1);
         assert_eq!(day1["local/qwen3"].completion_tokens, 2);
         assert_eq!(s.skipped_lines, 0);
-        // Throughput counts only successful timed records with output — the
-        // 60 s failure (0 tokens) is excluded from both numerator and divisor.
+        // Failure with 0 output excluded from throughput numerator and denominator.
         assert_eq!(s.totals.throughput_completion_tokens, 12);
         assert_eq!(s.totals.throughput_latency_ms_sum, 1200);
         assert_eq!(day1["claude-haiku-4-5"].throughput_latency_ms_sum, 900);
@@ -279,8 +257,7 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                // Hour field not numeric / out of range / ts too short — the
-                // record still aggregates, only the histogram entry is skipped.
+                // Record aggregates; only hour histogram skipped for malformed timestamps.
                 r#"{"ts":"2026-06-12Txx:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
                 r#"{"ts":"2026-06-12T99:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
                 r#"{"ts":"short","status":"success","model":"m","prompt_tokens":4}"#,
@@ -297,19 +274,15 @@ mod tests {
 
     #[test]
     fn multibyte_timestamp_does_not_panic_on_byte_slicing() {
-        // `ts` is sliced by byte index (get(0..10)/get(11..13)). A multibyte
-        // char straddling byte 10 or 13 makes str::get return None (not panic):
-        // the record still aggregates under day "unknown", histogram skipped.
+        // Byte-slicing `ts` is safe with multibyte chars; str::get returns None (no panic).
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
             "proj",
             &[
-                // 'éé' (2 bytes each) makes byte 10 land mid-char, so the day
-                // slice get(0..10) returns None → day "unknown".
+                // 'éé' crosses byte 10 → day becomes 'unknown'.
                 r#"{"ts":"2026-06éé2T10:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
-                // Emoji (4 bytes) at byte 11 makes the hour slice get(11..13)
-                // return None → valid day, histogram entry skipped.
+                // Emoji at byte 11 → histogram entry skipped.
                 r#"{"ts":"2026-06-12T😀0:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
             ],
         );

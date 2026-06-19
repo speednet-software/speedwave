@@ -11,24 +11,16 @@ export interface DiffLine {
 type DiffSegment = { type: 'line'; line: DiffLine } | { type: 'omitted'; count: number };
 
 /**
- * Computes a unified line diff between two strings.
- *
- * Delegates to the `diff` package's `diffLines` (Myers diff) and flattens its
- * change-object stream into per-line `add`/`remove`/`ctx` rows. CRLF is
- * normalized to LF before diffing so Windows-saved files do not appear as
- * fully-changed against LF-only inputs.
+ * Computes a unified line diff between two strings; normalizes CRLF to LF.
  * @param oldStr - Original text content (lines separated by "\n" or "\r\n").
  * @param newStr - Replacement text content (lines separated by "\n" or "\r\n").
  */
 export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
-  // Normalize CRLF -> LF so Windows files don't diff against Unix files
-  // line-by-line. `diffLines` does not normalize line endings on its own.
+  // Normalize CRLF -> LF so Windows files don't diff line-by-line vs Unix.
   const oldNormalized = oldStr.replace(/\r\n/g, '\n');
   const newNormalized = newStr.replace(/\r\n/g, '\n');
   return diffLines(oldNormalized, newNormalized).flatMap((part) => {
-    // `part.value` is the concatenated content for the change run, with
-    // newline separators preserved. Split into lines and drop the empty
-    // tail produced by a trailing "\n" so each line maps to one row.
+    // Split the run into lines, dropping the empty tail from a trailing "\n".
     const lines = part.value.split('\n');
     if (part.value.endsWith('\n')) {
       lines.pop();
@@ -40,13 +32,7 @@ export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
 
 /**
  * Per-line unified diff renderer used by tool-block for Edit/Write tools.
- *
- * The container (`overflow-hidden rounded ring-1 ring-line bg-bg-1`) clips the
- * per-line background tints to rounded corners. Each line is a `<div>` with
- * `whitespace-pre` applied individually — never on the wrapper — to avoid
- * blank-line artifacts between the row divs (see implementation-prompt.md).
- * Diffs longer than `truncateLines` collapse to a head/tail view with an
- * `expand full diff` button.
+ * Diffs longer than `truncateLines` collapse to a head/tail view with an expand button.
  */
 @Component({
   selector: 'app-diff-view',
@@ -113,10 +99,7 @@ export class DiffViewComponent {
    * Resets the expand-toggle whenever the diff input strings change.
    */
   constructor() {
-    // Reset the user's expand-toggle when either input string changes —
-    // otherwise an instance reused for a different file (live tool block
-    // streaming an edit, recycled for a later edit) keeps the previous expand
-    // state.
+    // Reset expand-toggle on input change so a recycled instance has no stale state.
     effect(() => {
       // Touch both inputs so the effect re-runs on either change.
       this.oldString();

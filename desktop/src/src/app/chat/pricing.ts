@@ -17,12 +17,8 @@ export interface ModelPricing {
 }
 
 /**
- * Catalog entry shape consumed from the Rust SSOT
- * (`speedwave_runtime::defaults::AnthropicModelInfo`, served by the
- * `list_anthropic_models` Tauri command). Only the fields pricing needs are
- * declared here so the module has no dependency on the full `AnthropicModel`
- * interface. `pricing` / `pricing_1m` use snake_case to match the serialized
- * Rust struct; `pricing_1m` is `null` for sub-1M families (no `[1m]` variant).
+ * Catalog entry from the Rust SSOT `defaults::AnthropicModelInfo`.
+ * snake_case matches the serialized struct; `pricing_1m` is null for sub-1M families.
  */
 export interface PricedAnthropicModel {
   id: string;
@@ -32,23 +28,8 @@ export interface PricedAnthropicModel {
 }
 
 /**
- * Bootstrap pricing seed, keyed by the exact served model id (base alias plus
- * its `[1m]` variant). The numbers are the Rust SSOT
- * (`defaults.rs::ANTHROPIC_MODELS` pricing fields) restated here so the
- * synchronous cost reducer (`buildEntryMeta` in `chat-state.service.ts`) can
- * price a turn before the async `list_anthropic_models` round-trip lands. Once
- * the catalog loads, {@link setPricingCatalog} replaces this index with the
- * backend's numbers — so the running app is always SSOT-on-Rust; this seed
- * only covers the pre-load window. A parity test
- * (`pricing.spec.ts` → "parity: …") asserts this seed covers every catalog id
- * (and its `[1m]` variant where the context window is 1M), so a model bump in
- * `defaults.rs` cannot silently leave a price-less entry here.
- *
- * Conventions across the Claude 4.x/5 generation: cache-read = 10% of input,
- * cache-write = 125% of input. Fable 5 is $10/$50 (1M window is the default,
- * standard-priced); Opus 4.5+ is $5/$25 with the 1M window at the base rate;
- * Sonnet 4.6 is $3/$15 base with a 1M-context premium ($6/$22.5); Haiku 4.5
- * is $1/$5 with no 1M variant.
+ * Bootstrap pricing seed keyed by served model id, from `defaults.rs::ANTHROPIC_MODELS`.
+ * Replaced by {@link setPricingCatalog} once the backend catalog loads; parity test in `pricing.spec.ts`.
  */
 const SEED_PRICING: Readonly<Record<string, ModelPricing>> = {
   // Fable family — $10 / $50 per 1M; 1M context is the default ([1m] == base)
@@ -71,21 +52,11 @@ const SEED_PRICING: Readonly<Record<string, ModelPricing>> = {
   'claude-haiku-4-5': { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 },
 };
 
-/**
- * Live pricing index, keyed by the served model id. Initialised from
- * {@link SEED_PRICING} and replaced wholesale by {@link setPricingCatalog} once
- * the backend catalog loads. `calculateCost` reads this synchronously so the
- * cost reducer stays non-async.
- */
+/** Live pricing index keyed by served model id; seeded from {@link SEED_PRICING}. */
 const PRICING = new Map<string, ModelPricing>(Object.entries(SEED_PRICING));
 
 /**
- * Replaces the pricing index with rates derived from the backend catalog
- * (the Rust SSOT). Idempotent — clears first, so a re-fetch never leaves stale
- * ids. Each entry contributes its base id and, for 1M-context families, the
- * `[1m]` variant id (the suffix Claude Code appends to unlock the upgraded
- * window). Entries with a missing/malformed `pricing` block are skipped so a
- * partial payload never stores an undefined rate.
+ * Replaces the pricing index with backend catalog rates. Clears first; skips malformed entries.
  * @param models - Catalog entries from `list_anthropic_models`.
  */
 export function setPricingCatalog(models: readonly PricedAnthropicModel[]): void {
@@ -116,59 +87,41 @@ export function _pricingEntryCountForTest(): number {
 }
 
 /**
- * Normalizes a model id from chat/session metadata into a key the pricing
- * index can resolve. Strips a snapshot date (`claude-opus-4-7-20260501` →
- * `claude-opus-4-7`) and re-prepends `claude-` to the short form Claude Code
- * sometimes emits (`opus-4.7` → `claude-opus-4-7`). A `[1m]` suffix is
- * preserved so the 1M variant resolves to its own rate.
+ * Normalizes a model id into a pricing-index key: strips snapshot date, re-prepends `claude-`, keeps `[1m]`.
  * @param model - Raw model id as reported in a turn's usage metadata.
  */
 function normalizeModelId(model: string): string {
   const oneM = model.endsWith('[1m]') ? '[1m]' : '';
   let base = oneM ? model.slice(0, -oneM.length) : model;
   base = base.startsWith('claude-') ? base : `claude-${base.replace('.', '-')}`;
-  // Drop a trailing snapshot date (`-YYYYMMDD`) so dated ids in saved sessions
-  // fall back to the stable alias the catalog carries.
+  // Drop a trailing snapshot date (`-YYYYMMDD`).
   base = base.replace(/-\d{8}$/, '');
   return `${base}${oneM}`;
 }
 
-/**
- * Models seen without a PRICING entry — ensures one warning per id, not per
- * turn. The underscore-prefixed export is module-internal: only the
- * companion `pricing.testing.ts` should import it (so tests can reset the
- * warning state between cases without polluting the production surface).
- */
+/** Models seen without a PRICING entry — dedupes the unknown-model warning to one per id. */
 export const _unknownModelWarningsForTest = new Set<string>();
 
 /**
- * Computes per-turn cost in USD for a given Claude model and token usage.
- * Looks the model up against the pricing index, normalizing dated/short ids to
- * their stable alias first. Logs a single warning per unknown id so unknown
- * models do not spam the log pipeline in long sessions.
+ * Computes per-turn cost in USD for a Claude model and token usage; warns once per unknown id.
  * @param model - Claude model id (e.g. `"claude-opus-4-7"`, `"opus-4.7"`,
  *   `"claude-sonnet-4-6[1m]"`).
  * @param usage - Per-turn token usage (from {@link TurnUsage}).
- * @returns Cost in USD; `null` when the model is not in the pricing index so
- *   the UI can hide the cost segment instead of displaying a misleading
- *   $0.000 for an unrecognised model id.
+ * @returns Cost in USD; `null` when the model is not in the pricing index.
  */
 export function calculateCost(model: string, usage: TurnUsage): number | null {
   const pricing = PRICING.get(model) ?? PRICING.get(normalizeModelId(model));
   if (!pricing) {
     if (!_unknownModelWarningsForTest.has(model)) {
       _unknownModelWarningsForTest.add(model);
-      // Route through the tauri-plugin-log pipeline (same as LoggerService) so
-      // the warning lands in the logs ZIP, not the raw browser console.
+      // Route through the tauri-plugin-log pipeline so the warning lands in the logs ZIP.
       pluginLogWarn(`[pricing] Unknown model "${model}" — cost segment will be hidden.`).catch(
         () => {}
       );
     }
     return null;
   }
-  // input_tokens already excludes cached reads in Anthropic's API output; we
-  // still subtract defensively in case a future CLI version emits the raw
-  // total (clamped to ≥0).
+  // Subtract cached reads defensively (clamped to ≥0).
   const billedInput = Math.max(0, usage.input_tokens - usage.cache_read_tokens);
   return (
     (billedInput * pricing.input) / 1_000_000 +

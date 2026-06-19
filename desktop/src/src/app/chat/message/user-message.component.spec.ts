@@ -80,10 +80,7 @@ describe('UserMessageComponent', () => {
   });
 
   // ── Timestamp formatting ─────────────────────────────────────────────
-  // The "user · HH:MM" header was removed from the bubble — identity comes
-  // from right-alignment + bubble background, and the timestamp would have
-  // duplicated info already present in the assistant's metadata row. So
-  // there is no `user-message-time` element to assert against any more.
+  // No `user-message-time` element; the timestamp header was removed.
 
   // ── Edge case — empty blocks ─────────────────────────────────────────
 

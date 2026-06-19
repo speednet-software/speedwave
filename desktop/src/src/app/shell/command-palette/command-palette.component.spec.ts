@@ -8,9 +8,7 @@ import { UiStateService } from '../../services/ui-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
 /**
- * The palette renders through CDK Dialog into the document-level overlay
- * container, so tests must query the global `document` rather than the
- * fixture's native element.
+ * Query the document-level CDK overlay container.
  * @param selector CSS selector to look up in the document root.
  */
 function q(selector: string): HTMLElement | null {
@@ -18,9 +16,7 @@ function q(selector: string): HTMLElement | null {
 }
 
 describe('CommandPaletteComponent', () => {
-  // CdkListbox calls `Element.scrollIntoView()` in `setActiveStyles()` when an
-  // option is clicked — jsdom does not implement it, which surfaces as an
-  // unhandled exception that pollutes the test report. Stub it for this suite.
+  // jsdom does not implement Element.scrollIntoView; stub it for this suite.
   beforeAll(() => {
     const proto = Element.prototype as unknown as { scrollIntoView?: () => void };
     if (typeof proto.scrollIntoView !== 'function') {
@@ -76,8 +72,7 @@ describe('CommandPaletteComponent', () => {
   });
 
   afterEach(() => {
-    // CDK Dialog leaves its overlay container attached to the document body.
-    // Closing via the signal lets the next test start with a clean DOM.
+    // Close the CDK Dialog overlay so the next test starts with a clean DOM.
     ui.closePalette();
     fixture.detectChanges();
   });

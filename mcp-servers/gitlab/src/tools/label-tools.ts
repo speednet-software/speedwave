@@ -112,7 +112,7 @@ const createLabelTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Builds the GitLab label tool definitions.
  * @param client - GitLab client instance
  */
 export function createLabelTools(client: GitLabClient | null): ToolDefinition[] {

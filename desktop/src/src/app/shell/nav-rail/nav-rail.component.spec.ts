@@ -74,9 +74,6 @@ describe('NavRailComponent', () => {
   });
 
   it('does not render hover tooltips on rail entries', () => {
-    // The hover tooltip with the shortcut hint was removed — the rail
-    // surface is intentionally minimal (mockup-aligned) and the keyboard
-    // shortcuts live in the command palette.
     const tip = fixture.nativeElement.querySelector('[data-testid="nav-chat"] .tooltip');
     expect(tip).toBeNull();
     const tipKbd = fixture.nativeElement.querySelector('[data-testid="nav-integrations"] .tooltip');

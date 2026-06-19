@@ -1,16 +1,6 @@
 /**
- * Container Health E2E tests.
- *
- * After the setup wizard completes (spec 02), containers should be running
- * for the 'e2e-test' project. This spec calls the `get_health` Tauri command
- * (the same data source the System Health UI uses) and verifies that:
- *   - The VM is running
- *   - Both expected containers (claude, mcp_hub) are present and healthy
- *   - overall_healthy is true
- *
- * Does NOT assert mcp_os.running or ide_bridge.running — mcp-os depends on
- * timing/platform, and no IDE is present during E2E runs. Neither affects
- * overall_healthy in a fresh E2E run with clean project dirs.
+ * Container Health E2E tests. Verifies VM and containers (claude, mcp_hub)
+ * are running and healthy via get_health. Does not assert mcp_os/ide_bridge.
  */
 
 import { getHealth, waitForHealthy } from '../helpers/health';

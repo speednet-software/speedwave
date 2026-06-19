@@ -21,8 +21,7 @@ pub(crate) struct DiagnosticsInput {
 ///
 /// All textual content is passed through `log_sanitizer::sanitize()` before
 /// being written to the archive. System info is appended without sanitization.
-/// Writes one ZIP entry, ALWAYS sanitized. The single textual-write path —
-/// every secret-bearing entry goes through here, so none can skip redaction.
+/// Writes one ZIP entry, always sanitized.
 fn write_sanitized_entry(
     zip: &mut zip::ZipWriter<std::fs::File>,
     options: zip::write::SimpleFileOptions,
@@ -68,8 +67,7 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // Entry names come from the SSOT registry (keyed by source), so a stray
-    // hand-rolled entry can't appear — every name traces to DIAGNOSTIC_SOURCES.
+    // Entry names come from the DIAGNOSTIC_SOURCES registry, keyed by source.
     let zip_entry = |key: &str| -> &'static str {
         speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES
             .iter()
@@ -100,8 +98,6 @@ pub(crate) fn build_diagnostics_zip(
     }
 
     // System info: compile-time constants, no secrets — the one raw entry.
-    // claude_pinned is what the image SHOULD run; runtime skew surfaces as
-    // the entrypoint WARNING inside this ZIP's compose-logs entry.
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\nclaude_pinned: {}\n",
         std::env::consts::OS,
@@ -569,8 +565,7 @@ mod tests {
             container_logs: Some(secrets[2].into()),
             mcp_os_log: Some(mk("mcp.log", secrets[3])),
             compose_path: Some(mk("compose.yml", secrets[0])),
-            // Carries the Bearer token (secrets[4]) so the redaction matrix
-            // still exercises all five secret patterns across the sources.
+            // Carries the Bearer token (secrets[4]).
             claude_session_log: Some(mk("claude.log", secrets[4])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -616,8 +611,7 @@ mod tests {
 
         let registry_entries: Vec<&str> = DIAGNOSTIC_SOURCES.iter().map(|s| s.zip_entry).collect();
         for name in zip_entry_names(&zip_path) {
-            // system-info.txt is the documented non-source trailing write;
-            // `logs/<file>` are the desktop dir's N dynamic entries (zip_entry "logs/").
+            // system-info.txt is the non-source trailing write; `logs/<file>` are dynamic.
             let traced = name == "system-info.txt"
                 || name.starts_with("logs/")
                 || registry_entries.contains(&name.as_str());

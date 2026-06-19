@@ -1,12 +1,8 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Embeds Resources/Info.plist into Mach-O `__TEXT,__info_plist` so the CLI
-// binary carries `CFBundleIdentifier` (`pl.speedwave.desktop.audio-capture`),
-// `NSAudioCaptureUsageDescription`, and `NSMicrophoneUsageDescription` —
-// required by TCC because the parent .app's Info.plist is not inherited when
-// we spawn this binary directly (ADR-049 rationale). macOS 14.4+ for taps;
-// `Package.swift` targets 14 and the runtime check enforces 14.4.
+// Embeds Resources/Info.plist into Mach-O `__TEXT,__info_plist` so the CLI binary
+// carries CFBundleIdentifier, NSAudioCaptureUsageDescription, NSMicrophoneUsageDescription.
 let package = Package(
     name: "audio-capture-cli",
     platforms: [.macOS(.v14)],

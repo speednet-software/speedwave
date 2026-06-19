@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-# sign-bundled-binaries.sh — Signs Mach-O binaries that ship inside
-# Speedwave.app/Contents/Resources/ so the bundle passes Apple notarization.
-#
-# Apple Notary Service rejects bundles that contain unsigned Mach-O files,
-# even if the outer .app is signed. Tauri signs only Contents/MacOS/<main>;
-# every Mach-O listed in tauri.macos.conf.json under bundle.resources that
-# ends up as an executable must be signed here, before tauri bundles them.
-#
-# macOS only. On Windows exits 0 — Windows does not require OS-level code
-# signing today. If Windows signing is added, a separate branch in this
-# script will handle it.
-#
-# Required env when signing is active:
-#   APPLE_SIGNING_IDENTITY — "Developer ID Application: Name (TEAMID)"
-# When unset, the script is a no-op (unsigned dev build).
+# Signs Mach-O binaries in Speedwave.app/Contents/Resources/ for Apple notarization.
+# Requires APPLE_SIGNING_IDENTITY env; no-op on Windows.
 
 set -euo pipefail
 
@@ -27,8 +14,7 @@ if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# SRC_TAURI can be overridden by tests to point at a sandbox directory.
-# In production, this resolves to desktop/src-tauri/ within the repo.
+# SRC_TAURI is overridable by tests; defaults to desktop/src-tauri/.
 SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 VIRTUALIZATION_ENTITLEMENTS="$SRC_TAURI/entitlements/virtualization.plist"
@@ -37,17 +23,9 @@ REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 AUDIO_CAPTURE_ENTITLEMENTS="$SRC_TAURI/entitlements/audio-capture.plist"
 
-# Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
-# Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources.
-# Must stay in sync with that file — when a new executable resource is added
-# there, add its source path here.
-#
-# Format: "<source-path>:<entitlements-path>" — entitlements optional.
-# Binaries using restricted platform APIs under Hardened Runtime must carry
-# entitlements plists to opt back in. See ADR-037 for the full inventory
-# (virtualization for limactl, Apple Events for mail/notes CLIs, calendars
-# for calendar-cli and reminders for reminders-cli, audio-input for
-# audio-capture-cli per ADR-056, JIT for Node.js).
+# Paths tauri.macos.conf.json copies to .app/Contents/Resources/.
+# Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources (keep in sync).
+# Format: "<source-path>:<entitlements-path>" (entitlements optional; see ADR-037).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"
@@ -100,9 +78,7 @@ verify_macho() {
   local path="$1"
   local entitlements="$2"
 
-  # codesign -v --strict is the authoritative signature validator. It verifies
-  # every resource in the signature, including that the embedded entitlements
-  # match the plist passed at signing time.
+  # codesign -v --strict is the authoritative validator.
   if ! codesign -v --strict "$path"; then
     echo "ERROR: signature verification failed for $path" >&2
     exit 1
@@ -113,10 +89,7 @@ verify_macho() {
     return
   fi
 
-  # Explicitly cross-check every <key> in the plist against the signed binary's
-  # embedded entitlements. This is belt-and-braces — codesign -v --strict should
-  # already catch mismatches — but it produces a clearer error if, say, a
-  # future codesign version relaxes that check.
+  # Cross-check plist keys against the binary's embedded entitlements.
   local key_count
   key_count="$(grep -c '<key>' "$entitlements")"
   if [[ "$key_count" -eq 0 ]]; then
@@ -149,16 +122,8 @@ verify_macho() {
   echo "  verified: signature valid, $key_count entitlement(s) present"
 }
 
-# Verifies the signed Mach-O carries the expected sub-identifier (from the
-# binary's embedded `__TEXT,__info_plist` section). codesign reads the embedded
-# CFBundleIdentifier and stores it in the signature; this is what TCC.db indexes
-# permission rows by, so a mismatch means recovery commands like `tccutil reset
-# Calendar pl.speedwave.desktop.calendar` won't work for users.
-#
-# This function is invoked only for the native macOS CLIs (calendar-cli,
-# reminders-cli, mail-cli, notes-cli, audio-capture-cli) — other bundled
-# binaries either have no user-visible TCC binding (speedwave, node) or use a
-# fixed system identifier (limactl).
+# Verifies the Mach-O's CFBundleIdentifier matches the __info_plist section.
+# Only for native macOS CLIs with TCC bindings (others use fixed or no identifiers).
 verify_identifier() {
   local path="$1"
   local expected="$2"

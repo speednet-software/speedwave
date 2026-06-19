@@ -74,9 +74,7 @@ describe('SlashMenuComponent', () => {
   });
 
   /**
-   * Reads the protected `activeIndex` signal on a SlashMenuComponent without
-   * tunneling through `any` — the component exposes it as `protected` so we
-   * narrow it to its public shape (callable getter + `set()`).
+   * Reads the protected `activeIndex` signal on a SlashMenuComponent.
    * @param c - Component instance whose `activeIndex` signal to read.
    */
   const readActive = (c: SlashMenuComponent): number =>

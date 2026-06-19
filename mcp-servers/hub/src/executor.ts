@@ -122,7 +122,6 @@ type AuditCategory = 'READ' | 'WRITE' | 'DELETE';
 
 /**
  * Derive audit category from a tool's annotations in the registry.
- * Falls back to 'WRITE' when annotations are unavailable (safe default).
  * @param service - Service name (e.g., 'redmine', 'gitlab')
  * @param tool - camelCase tool method name (e.g., 'createIssue')
  */
@@ -269,14 +268,7 @@ function logErrorDebug(context: string, error: unknown): void {
 }
 
 /**
- * Create tool wrappers for sandbox execution
- * These wrap HTTP bridge calls with PII tokenization and audit logging.
- *
- * ARCHITECTURE: Uses buildExecutorWrappers from tool-registry.ts
- * - Tool metadata (name, service) is Single Source of Truth
- * - Wrappers are generated dynamically from registry
- * - No manual duplication of method definitions
- * - Timeout propagation: remaining time budget passed to each worker call
+ * Create tool wrappers for sandbox execution (PII tokenization, audit logging).
  * @param piiContext - PII tokenization context for this execution
  * @param auditContext - Audit logging context for tracking tool calls
  * @param executionStartTime - Start time of execution (Date.now())
@@ -573,10 +565,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       }
     }
 
-    // Smart error enhancement: detect underscore notation "service_method is not defined"
-    // Claude sometimes generates service_method instead of service.method
-    // The greedy regex splits at the last underscore so serviceName = everything before the last _
-    // and methodName = the part after. This directly gives the longest possible service prefix.
+    // Detect underscore notation: "service_method is not defined"
     const underscoreMatch = message.match(/^([\w]+)_([\w_]+) is not defined$/);
     if (underscoreMatch) {
       const [, serviceName, methodName] = underscoreMatch;

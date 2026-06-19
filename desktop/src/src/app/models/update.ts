@@ -6,10 +6,7 @@ export interface UpdateInfo {
   is_critical: boolean;
 }
 
-/**
- * Tagged result of `check_for_update`. Mirrors the Rust enum
- * `updater::UpdateCheckOutcome` (serde tag = "kind", snake_case).
- */
+/** Tagged result of `check_for_update`; mirrors Rust `updater::UpdateCheckOutcome` (serde tag "kind", snake_case). */
 export type UpdateCheckOutcome =
   | { kind: 'up_to_date' }
   | ({ kind: 'update_available' } & UpdateInfo);
@@ -57,11 +54,7 @@ export interface BundleReconcileStatus {
   applied_bundle_id: string | null;
 }
 
-/**
- * Payload emitted with the `project_switch_failed` Tauri event.
- * Extends the basic error with optional CloudStorage failure context
- * so the frontend can route to the CloudStorage remediation modal.
- */
+/** Payload emitted with the `project_switch_failed` Tauri event, with optional CloudStorage failure context. */
 export interface ProjectSwitchFailedPayload {
   /** The project name that was active before the failed switch (may be null). */
   project: string | null;

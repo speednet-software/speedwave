@@ -33,8 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/e2e-common.sh"
 
 # SSOT: exclude list for repo transfers to remote E2E machines.
-# Both transfer functions (macos_rsync_to, windows_rsync_to) reference this
-# array. Each remote machine downloads its own platform assets.
+# Referenced by both macos_rsync_to and windows_rsync_to.
 E2E_RSYNC_EXCLUDES=(
     node_modules target dist .e2e-artifacts .git build-context
     .angular .build
@@ -57,9 +56,7 @@ MACOS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=
 # Host repo path — resolved from git root of this script's location.
 HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-# Staging dir on host for passing artifacts between phases
 # Artifacts are kept on each remote machine's ~/Desktop/ (survives clean_state).
-# No local staging needed — avoids 352 MB+ round-trip transfers over the network.
 
 # -- Auto-provisioning ---------------------------------------------------------
 # Check if remote machine has required tools; run setup if not.
@@ -103,17 +100,13 @@ ensure_provisioned_macos() {
 # PowerShell commands are run via `powershell.exe -Command ...`.
 # WSL2 Linux commands are run via `wsl.exe -d <distro> ...`.
 #
-# The WSL2 staging dir is ~/speedwave-e2e (/home/windows/speedwave-e2e) — must
-# NOT be /tmp because WSL2 clears tmpfs on each restart (and WSL2 auto-terminates
-# after idle, losing /tmp data between SSH calls).
+# The WSL2 staging dir is ~/speedwave-e2e (/home/windows/speedwave-e2e), NOT /tmp.
 # The Windows build dir is C:\speedwave-e2e.
 # The Windows install dir is C:\Speedwave.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 
 # Run a PowerShell script on the Windows host.
 # Writes the script to a .ps1 temp file via sftp, then executes via -File.
-# This is necessary because `powershell.exe -Command -` (reading from stdin)
-# ignores $ErrorActionPreference and does not propagate non-zero exit codes.
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
     ps_script=$(cat)
@@ -123,9 +116,7 @@ windows_ps() {
     # Inject $WINDOWS_WSL_DISTRO so PS heredocs can reference it without
     # switching to unquoted heredocs (which would require escaping all PS $vars).
     local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'"
-    # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
-    # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
-    # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
+    # Write with UTF-8 BOM so PowerShell reads .ps1 as UTF-8, not system locale.
     printf '\xEF\xBB\xBF%s\n%s\n' "$ps_prefix" "$ps_script" > "$tmpfile_local"
     # Upload the script via scp (scp uses -P for port, not -p)
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -160,8 +151,7 @@ windows_rsync_to() {
     # Windows-specific extras (macOS resource forks)
     tar_excludes+=('--exclude=._*')
     local -a tar_flags=(--no-mac-metadata)
-    # Ensure the WSL distro is running before proceeding — wsl.exe may need
-    # time to restart after a --unregister of another distro shut down the VM.
+    # Ensure the WSL distro is running before proceeding.
     echo "  Waiting for WSL distro $WINDOWS_WSL_DISTRO..."
     local wsl_ready=0
     for i in $(seq 1 10); do
@@ -178,17 +168,13 @@ windows_rsync_to() {
         return 1
     fi
 
-    # Prepare the destination directory via separate SSH calls (avoids cmd.exe
-    # quoting issues with bash -c inside a single command).
+    # Prepare the destination directory via separate SSH calls.
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf ${dst}"
-    # Ensure the parent directory exists — /home/<user>/ may not exist if the
-    # WSL distro was freshly installed or the default user's home wasn't created.
+    # Ensure the parent directory exists (fresh WSL install may lack a home dir).
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'mkdir -p ${dst}'"
-    # Create a local tar archive, scp it to the Windows host, then extract
-    # inside WSL2. Piping tar directly through SSH → cmd.exe → wsl.exe is
-    # unreliable — stdin forwarding breaks after WSL VM restarts.
+    # Create a local tar archive, scp it to the Windows host, then extract in WSL2.
     local tar_local
     tar_local=$(mktemp "${TMPDIR:-/tmp}/speedwave-e2e-XXXXXX.tar")
     echo "  tar: creating archive from $(dirname "$src")/$(basename "$src")..."
@@ -281,18 +267,13 @@ if (Test-Path "C:\Speedwave\uninstall.exe") {
 }
 
 # Unregister the Speedwave WSL2 distro (removes rootfs, containerd state, images).
-# Always attempt unregister — wsl.exe -l -q outputs UTF-16LE which makes
-# Select-String matching unreliable. --unregister is a no-op if the distro
-# does not exist (exits 0 with "not found" message).
+# --unregister is a no-op if the distro does not exist (exits 0).
 wsl.exe --unregister Speedwave 2>$null
-# Wait for WSL VM to fully shut down and restart — unregistering a distro
-# can terminate the lightweight VM, and subsequent wsl.exe calls may fail
-# with "The system cannot find the path specified" until it restarts.
+# Wait for the WSL VM to shut down and restart after unregister.
 Start-Sleep -Seconds 5
 
-# Remove stale CNI bridge interfaces left behind by unregistered distro.
-# These live in the WSL2 kernel (shared) and cause "already has an IP
-# address different from ..." errors on the next run.
+# Remove stale CNI bridge interfaces left behind by an unregistered distro.
+# These live in the shared WSL2 kernel and break the next run's networking.
 $bridges = wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- bash -c "ip -o link show type bridge 2>/dev/null | grep -o 'br-[^:@]*'" 2>$null
 if ($bridges) {
     $bridges -split "`n" | ForEach-Object {
@@ -383,18 +364,14 @@ run_windows() {
     ensure_provisioned_windows
 
     # -- Phase 1: Build NSIS installer -----------------------------------------
-    # Copy the repo source to the Windows machine and produce a release NSIS
-    # installer. The build runs via PowerShell (Windows-native toolchain:
-    # Rust, Node, MSVC). Repo is transferred via tar-over-SSH into WSL2,
-    # then copied to C:\ for the Windows build.
+    # Copy the repo to the Windows machine and build a release NSIS installer
+    # via PowerShell (Rust, Node, MSVC).
     echo "[windows] Phase 1: Building NSIS installer..."
     echo "[windows] Syncing repo to remote..."
     windows_rsync_to "$HOST_REPO_DIR/" "$WINDOWS_WSL_STAGING/"
 
     # Copy from WSL2 filesystem to Windows filesystem, then build.
-    # Each phase is a separate windows_ps call to avoid SSH timeouts —
-    # long-running builds (cargo ~15 min) can exceed NAT idle
-    # timeouts even with SSH keepalives.
+    # Each phase is a separate windows_ps call to avoid SSH timeouts.
 
     # -- Step 1: Copy repo and install npm dependencies --
     echo "[windows] Step 1/5: Copy repo + npm install..."
@@ -493,10 +470,8 @@ $env:CARGO_TARGET_DIR = 'C:\cargo-build'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
 
-# Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR
-# so the rest of the toolchain stays on /MD (default). Stage on C:\ so wslpath
-# returns a plain Windows path (not \\wsl.localhost\...) and the idempotency
-# guard survives between E2E runs. See ADR-061.
+# Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR,
+# staged on C:\ so wslpath returns a plain Windows path. See ADR-061.
 $libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'SHERPA_ONNX_FETCH_DIR=/mnt/c/sherpa-onnx-md /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh').Trim()
 Assert-ExitCode
 $env:SHERPA_ONNX_LIB_DIR = (wsl.exe -d $WINDOWS_WSL_DISTRO -- wslpath -w "$libDir").Trim()
@@ -526,8 +501,6 @@ SCRIPT
 
     # -- Phase 2: Install & test on clean system --------------------------------
     # Clean previous state — uninstall, remove user data and build artifacts.
-    # The machine is now a clean Windows desktop, simulating a real user who
-    # just downloaded the installer from GitHub Releases.
     # ~/Desktop/speedwave-setup.exe survives clean_state.
     windows_clean_state
 
@@ -572,9 +545,6 @@ SCRIPT
 
     # -- Phase 3: Second launch (clean system again) ----------------------------
     # Clean ALL state (same as Phase 2 prep) so the wizard runs from scratch.
-    # This verifies the app works correctly on a second fresh install — catching
-    # issues with leftover system-level state (WSL2 distros, registry entries)
-    # that survive user-data removal.
     echo "[windows] Phase 3: Running E2E again (second install — clean system)..."
     windows_clean_state
 
@@ -679,8 +649,7 @@ try {
 } finally {
     Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
     # Kill all leftover Speedwave child processes (WSL2 nerdctl, node mcp workers).
-    # Killing ALL node.exe processes is intentional — this is a dedicated build
-    # machine, not a shared server, so no other node processes should be running.
+    # Killing ALL node.exe is intentional — dedicated build machine.
     Stop-Process -Name "speedwave-desktop" -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "node" -Force -ErrorAction SilentlyContinue
     # Stop WSL2 distro if it was started by the app
@@ -698,8 +667,7 @@ run_macos() {
     ensure_provisioned_macos
 
     # -- Phase 1: Build .dmg package --------------------------------------------
-    # Copy the repo source to the macOS machine and produce a release .dmg
-    # package — same as GitHub Actions CI.
+    # Copy the repo to the macOS machine and build a release .dmg (same as CI).
     echo "[macos] Phase 1: Building .dmg package..."
     echo "[macos] Syncing repo to remote..."
     macos_ssh "rm -rf /tmp/speedwave-e2e" || true
@@ -720,9 +688,7 @@ echo "── Building full release (.dmg)..."
 make test-e2e-desktop-build
 SCRIPT
 
-    # Locate and copy the .dmg artifact in a separate SSH call — the long-running
-    # build above can consume stdin (via npm/cargo subprocesses), which would
-    # swallow subsequent commands if they were in the same heredoc.
+    # Locate and copy the .dmg artifact in a separate SSH call.
     echo "[macos] Locating .dmg artifact on remote..."
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
@@ -734,9 +700,7 @@ cp desktop/src-tauri/target/release/bundle/dmg/*.dmg ~/Desktop/speedwave.dmg
 SCRIPT
 
     # -- Phase 2: Install & test on clean system --------------------------------
-    # Clean previous state — remove installed .app, user data, and build
-    # artifacts. The machine is now a clean macOS desktop, simulating a real
-    # user who just downloaded the .dmg from GitHub Releases.
+    # Clean previous state — remove installed .app, user data, and build artifacts.
     # ~/Desktop/speedwave.dmg survives clean_state.
     macos_clean_state
 
@@ -777,9 +741,6 @@ SCRIPT
 
     # -- Phase 3: Second launch (clean system again) ----------------------------
     # Clean ALL state (same as Phase 2 prep) so the wizard runs from scratch.
-    # This verifies the app works correctly on a second fresh install — catching
-    # issues with leftover system-level state (Lima cache, VM remnants)
-    # that survive user-data removal.
     echo "[macos] Phase 3: Running E2E again (second install — clean system)..."
     macos_clean_state
 
@@ -849,8 +810,7 @@ rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Launch the app in the background.
-# macOS requires a GUI session — SSH must connect to a user with an active
-# login session (e.g., auto-login enabled, or connected via Screen Sharing).
+# macOS requires an active GUI login session for the SSH user.
 "$APP_PATH" &
 APP_PID=$!
 

@@ -101,9 +101,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MATRIX_ARGS: ${{ matrix.args }}
         run: |
-          # Split MATRIX_ARGS into an array so intentional multi-token values
-          # (e.g. `--target x`) still split, but no glob/metacharacter is
-          # interpreted by the shell (hardening — see PR #766 review).
+          # Split MATRIX_ARGS into an array (word-split, no glob expansion).
           read -ra ARGS <<< "$MATRIX_ARGS"
           # No signing key (fork PR / Dependabot) → unsigned bundle.
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then

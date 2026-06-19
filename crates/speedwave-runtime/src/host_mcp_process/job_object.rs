@@ -28,8 +28,6 @@ mod imp {
             // SAFETY: owned handle from CreateJobObjectW, not closed before.
             let ok = unsafe { CloseHandle(self.0) };
             if ok == 0 {
-                // CloseHandle failure indicates a double-close bug or kernel
-                // quota pressure — keep at warn so it surfaces in prod logs.
                 log::warn!(
                     "Job Object: CloseHandle failed ({}); possible double-close or handle leak",
                     std::io::Error::last_os_error()
@@ -52,8 +50,7 @@ mod imp {
             );
             return None;
         }
-        // From here on the handle is owned by `JobHandle` — every early
-        // return drops it and CloseHandle runs.
+        // From here on the handle is owned by `JobHandle`.
         let handle = JobHandle(job);
 
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -109,8 +106,7 @@ mod imp {
     use std::cell::Cell;
     use std::marker::PhantomData;
 
-    // PhantomData<Cell<()>> mirrors Windows variant: Send but !Sync. No
-    // `unsafe impl` needed — auto-traits handle it.
+    // PhantomData<Cell<()>> mirrors Windows variant: Send but !Sync.
     pub struct JobHandle(PhantomData<Cell<()>>);
 
     pub fn attach_to_kill_on_close_job(_child: &std::process::Child) -> Option<JobHandle> {
@@ -128,8 +124,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn stub_returns_none_without_panic() {
-        // `/bin/sh -c "exit 0"` is more robust than bare `true` against
-        // minimal containers / sandboxed PATH.
+        // `/bin/sh -c "exit 0"` works under minimal/sandboxed PATH.
         let child = std::process::Command::new("/bin/sh")
             .args(["-c", "exit 0"])
             .spawn()
@@ -162,9 +157,7 @@ mod tests {
         };
         drop(job);
 
-        // Child must die within 2 s of dropping the job; the 30 s sleep
-        // cannot exit naturally in that window. Windows exit codes from
-        // job termination vary, so we only assert "no longer running".
+        // Child must die within 2 s of dropping the job; assert "no longer running".
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             match child.try_wait() {

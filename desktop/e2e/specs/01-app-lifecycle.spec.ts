@@ -1,10 +1,5 @@
 /**
- * App Lifecycle E2E tests.
- *
- * Verifies the Tauri app launched correctly, Angular is rendering,
- * and the setup wizard is shown on a fresh install.
- *
- * These tests run first — if they fail, the app did not start properly.
+ * App Lifecycle E2E tests: Tauri launch, Angular render, setup wizard on fresh install.
  */
 
 describe('App Lifecycle', function () {

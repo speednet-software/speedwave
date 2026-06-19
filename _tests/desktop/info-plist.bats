@@ -1,16 +1,9 @@
 #!/usr/bin/env bats
-# Static checks on desktop/src-tauri/Info.plist — prevents regressions where
-# a TCC usage-description key is removed or misspelled. Without the right
-# description key, macOS cannot display the consent dialog and silently
-# blocks access to the protected resource (Reminders, Calendar, Contacts,
-# Apple Events, FileProvider domains like OneDrive/iCloud Drive).
+# Static checks on desktop/src-tauri/Info.plist TCC usage-description keys.
 
 INFO_PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/Info.plist"
 
-# Single source of truth for which TCC usage-description keys Speedwave must
-# declare. Add a key here when a bundled binary starts using a new TCC-gated
-# API — every @test below iterates this list. See ADR-037 §1b for the mapping
-# between keys and the APIs/binaries that require them.
+# SSOT for required TCC usage-description keys (see ADR-037 §1b for mapping).
 REQUIRED_TCC_KEYS=(
     NSRemindersUsageDescription
     NSRemindersFullAccessUsageDescription
@@ -24,9 +17,7 @@ REQUIRED_TCC_KEYS=(
 )
 
 plist_get() {
-    # Parse the plist XML directly with python so this works on Linux CI
-    # where plutil does not exist. Handles the standard <key>/<string>
-    # layout used in Info.plist files.
+    # Parse the plist XML with python (cross-platform; plutil is macOS-only).
     local key="$1"
     python3 - "$INFO_PLIST" "$key" <<'PY'
 import plistlib, sys
@@ -49,9 +40,7 @@ PY
 }
 
 @test "all required TCC usage descriptions are present and non-empty" {
-    # Each key must resolve to a non-empty string, otherwise macOS cannot
-    # display the consent dialog. Failures are reported per-key so a
-    # missing key names itself in the output.
+    # Each key must resolve to a non-empty string; failures reported per-key.
     local key val missing=()
     for key in "${REQUIRED_TCC_KEYS[@]}"; do
         val="$(plist_get "$key")"
@@ -66,19 +55,16 @@ PY
 }
 
 @test "NSFileProviderDomainUsageDescription specifically is declared" {
-    # Explicit test for the key that caused the v0.7.2 CloudStorage
-    # regression — macOS silently blocks virtiofs reads from
-    # ~/Library/CloudStorage/ (OneDrive, iCloud Drive, Dropbox, Google
-    # Drive) without this key. See anthropics/claude-code#26981.
+    # v0.7.2 regression: without this key macOS silently blocks virtiofs
+    # reads from ~/Library/CloudStorage/. See anthropics/claude-code#26981.
     local val
     val="$(plist_get NSFileProviderDomainUsageDescription)"
     [ -n "$val" ]
 }
 
 @test "NSAppleEventsUsageDescription specifically is declared" {
-    # Explicit test for the key used by mail-cli and notes-cli. Missing
-    # this key makes osascript → Apple Events calls fail silently with
-    # error -1743.
+    # Key used by mail-cli and notes-cli; missing it makes Apple Events
+    # calls fail silently with error -1743.
     local val
     val="$(plist_get NSAppleEventsUsageDescription)"
     [ -n "$val" ]

@@ -1,16 +1,4 @@
-//! One-slot queued message per session (ADR-045).
-//!
-//! When the user sends a message while a turn is streaming, the runtime
-//! does NOT append it to a FIFO backlog. Instead it replaces a single
-//! reserved queue slot per session: the most recent message wins, the
-//! prior queued message (if any) is returned to the caller so it can
-//! surface a "replaced" UX hint. On turn completion, the runtime drains
-//! the slot via `take()` and starts the next turn from there.
-//!
-//! Replace semantics deliberately differ from FIFO: the user always
-//! knows what runs next (the visible "queued: …" preview), and a
-//! background backlog cannot accumulate "send 5, get 5 back" surprise.
-//! See ADR-045 for the full rationale and source citations.
+//! One-slot replace-semantics queued message per session (ADR-045).
 
 use std::sync::Arc;
 
@@ -40,10 +28,8 @@ impl QueuedMessageService {
         Self::default()
     }
 
-    /// Place `msg` in `session_id`'s slot, returning any previous queued
-    /// message that was displaced. `None` when the slot was empty —
-    /// callers can surface "replaced previous queued: <preview>" only when
-    /// `Some(_)` comes back.
+    /// Place `msg` in `session_id`'s slot, returning any displaced message
+    /// or `None` when the slot was empty.
     pub fn queue(&self, session_id: &str, msg: QueuedMessage) -> Option<QueuedMessage> {
         self.inner.insert(session_id.to_string(), msg)
     }
@@ -186,9 +172,7 @@ mod tests {
 
     #[test]
     fn empty_text_is_a_valid_queued_message() {
-        // The runtime treats the slot as opaque storage — it does not enforce
-        // "text must be non-empty". The composer is responsible for not
-        // submitting empties; the queue must round-trip whatever it gets.
+        // Slot is opaque storage; the queue round-trips any payload.
         let svc = QueuedMessageService::new();
         svc.queue("s1", msg("", 0));
         let drained = svc.take("s1").unwrap();
@@ -205,13 +189,7 @@ mod tests {
 
     #[test]
     fn concurrent_queue_and_take_is_safe() {
-        // 4 producers replace a slot in a tight loop while 4 consumers
-        // race them with `take`. The invariants we rely on:
-        //   - no panic / poisoned lock under contention
-        //   - the slot count stays at most 1 throughout (one-slot semantics)
-        //   - every producer's final `queue` returns either None (consumer
-        //     drained between calls) or the prior message — never a wedged
-        //     state where the slot grows.
+        // Producers and consumers race; slot count stays at most 1, no panic.
         const PRODUCERS: usize = 4;
         const CONSUMERS: usize = 4;
         const ITERS: usize = 1_000;

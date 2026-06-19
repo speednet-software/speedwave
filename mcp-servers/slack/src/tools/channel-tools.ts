@@ -381,8 +381,7 @@ export async function handleListChannelIds(
 
 /**
  * Tool handler function.
- * @param clients - Slack client instances (always non-null; checks
- *   `_tokensStatus === 'missing'` to surface the configuration error).
+ * @param clients - Slack client instances (non-null; null check via _tokensStatus)
  */
 export function createChannelTools(clients: SlackClients): ToolDefinition[] {
   const gate = withClients(clients);

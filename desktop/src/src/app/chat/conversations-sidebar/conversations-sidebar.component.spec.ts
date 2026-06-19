@@ -50,10 +50,8 @@ const sample: readonly ConversationSummary[] = [
 ];
 
 /**
- * Query the drawer content rendered into the CDK overlay container.
- * The component renders via CDK Overlay portal attached to `document.body`,
- * not inside the host fixture, so we query the global document.
- * @param sel CSS selector to locate the element under document.
+ * Query the CDK overlay portal under document.body.
+ * @param sel - CSS selector to locate the element under document.
  */
 function q(sel: string): HTMLElement | null {
   return document.querySelector(sel) as HTMLElement | null;
@@ -91,11 +89,7 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Drive the child input directly to bypass OnPush propagation issues
-      // when mutating the host wrapper's plain fields. Verifies that the
-      // CDK overlay portal attaches/detaches in lockstep with the open input.
-      // The shared host fixture defaults to open=true, so destroy it first to
-      // avoid having two drawers in the overlay container at the same time.
+      // Destroy the shared open=true fixture to avoid two drawers in the overlay.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);
@@ -158,8 +152,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('falls back to a dash when timestamp is null', () => {
-      // The drawer now formats timestamps as short relative labels
-      // (e.g. "2m", "1h", "3d") and uses "—" for missing values.
       host.conversations = sample;
       fixture.detectChanges();
       const drawer = q('[data-testid="conversations-sidebar"]')!;
@@ -172,8 +164,6 @@ describe('ConversationsSidebarComponent', () => {
       host.conversations = sample;
       host.currentSessionId = 's2';
       fixture.detectChanges();
-      // Row click resumes directly (single primary action), so the test-id is
-      // `conversation-resume-<sid>` rather than the legacy `view-<sid>`.
       const active = q('[data-testid="conversation-resume-s2"]');
       expect(active).not.toBeNull();
       expect(active!.getAttribute('aria-current')).toBe('true');
@@ -260,8 +250,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('clears the confirm state when the drawer is closed and reopened', () => {
-      // Drive the child input directly so we can toggle `open` without going
-      // through the host wrapper's separate fixture lifecycle.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);

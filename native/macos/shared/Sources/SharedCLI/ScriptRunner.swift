@@ -64,10 +64,7 @@ public enum ScriptError: LocalizedError {
     }
 }
 
-/// Escape special characters for AppleScript string literals.
-/// Strips C0 control characters (U+0000–U+001F), DEL (U+007F), and Unicode
-/// line separators (U+0085 NEL, U+2028, U+2029) before escaping.
-/// Prevents injection via newline/CR-based script breakout.
+/// Escape AppleScript string literals; strips C0/DEL/line-separator scalars first.
 public func escapeAppleScript(_ s: String) -> String {
     let safe = String(s.unicodeScalars.filter { scalar in
         let v = scalar.value
@@ -78,10 +75,7 @@ public func escapeAppleScript(_ s: String) -> String {
         .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
-/// Parse a single `||`-delimited email detail row into a dictionary.
-/// Layout: `subject || sender || date || read || to-list(,-joined) || body`.
-/// Body may itself contain `||`, so fields 6+ are re-joined. Throws when fewer
-/// than 6 fields are present. Shared by AppleMailClient/OutlookClient getEmail.
+/// Parse `||`-delimited email row (subject||sender||date||read||to-list||body); throws if <6 fields.
 public func parseEmailDetail(_ output: String, id: String) throws -> [String: Any] {
     let parts = output.components(separatedBy: "||")
     guard parts.count >= 6 else {

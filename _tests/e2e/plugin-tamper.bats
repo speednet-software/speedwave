@@ -1,24 +1,11 @@
 #!/usr/bin/env bats
 
 # Behavioral verification for the plugin signature runtime invariant.
-#
-# These tests exercise `speedwave check` against synthetic plugin
-# directories that should be rejected, then assert exit code 2 and a
-# diagnostic message. They run against whatever binary `SPEEDWAVE_BIN`
-# points at — pass a release build to verify that the
-# `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is compiled out.
 
 load setup
 
-# Override `setup` to also point SPEEDWAVE_DATA_DIR at a per-test
-# tempdir, so we never touch the developer's real `~/.speedwave/`.
-#
-# `consts::derive_instance_name_from` (called eagerly during CLI
-# startup) asserts that the data-dir basename matches
-# `^[a-z][a-z0-9-]{0,63}$`. `mktemp -d` produces basenames like
-# `tmp.XXXXXX` on macOS / `tmp.XXXX` on Linux, both containing a `.`
-# that breaks the assertion — so we create the tempdir, then nest a
-# clean-named child under it and use *that* as SPEEDWAVE_DATA_DIR.
+# SPEEDWAVE_DATA_DIR basename must match `^[a-z][a-z0-9-]{0,63}$`;
+# `mktemp -d` basenames contain a `.`, so nest a clean-named child.
 setup() {
     TEST_TEMP_DIR="$(mktemp -d)"
     export TEST_TEMP_DIR
@@ -50,12 +37,8 @@ EOF
     [[ "$output" == *"evil"* ]]
 }
 
-# The headline test for PR6: a release CLI must reject unsigned plugins
-# even when SPEEDWAVE_ALLOW_UNSIGNED=1 is set in the environment. The
-# bypass is `cfg(debug_assertions)`-gated, so the env var is dead code
-# in release builds. With a debug build this test is skipped — debug
-# binaries are explicitly allowed to bypass signature checks for dev
-# workflows (`make dev` sets the var).
+# Bypass is `cfg(debug_assertions)`-gated; release ignores the env var,
+# debug builds are skipped.
 @test "release CLI rejects unsigned plugin even with SPEEDWAVE_ALLOW_UNSIGNED=1" {
     if [[ "$SPEEDWAVE_BIN" == *"/debug/"* ]]; then
         skip "Skipping on debug build — bypass is intentionally live there"
@@ -84,9 +67,8 @@ EOF
     [[ "$output" == *"evil"* ]]
 }
 
-# Recovery must target only the named plugin even when a good (or, here,
-# another bad) one is co-installed — otherwise a regression that wires
-# `plugin remove` through `list_verified_plugins` would break it.
+# Recovery must target only the named plugin even when another bad one is
+# co-installed.
 @test "speedwave plugin remove targets only the bad plugin" {
     make_unsigned_plugin_dir "evil"
     make_unsigned_plugin_dir "also-evil"
@@ -96,9 +78,7 @@ EOF
     [ -d "$SPEEDWAVE_DATA_DIR/plugins/also-evil" ]
 }
 
-# The tolerant lister must surface every directory so the user can see
-# which one is broken — hiding unverified plugins would make UI recovery
-# impossible.
+# The tolerant lister must surface every directory, verified or not.
 @test "speedwave plugin list shows both verified and unverified entries" {
     make_unsigned_plugin_dir "evil"
     make_unsigned_plugin_dir "also-evil"

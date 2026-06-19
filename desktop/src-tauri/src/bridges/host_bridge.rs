@@ -32,13 +32,7 @@ pub enum AuthScheme {
     /// Token in a request header. Used by Node.js / Rust workers that can
     /// set arbitrary headers on the WebSocket upgrade.
     Header(&'static str),
-    /// Token in the URL query string (`?<name>=<token>`). Required for
-    /// browser-based clients. **Accepted risk:** URL query strings can
-    /// leak via process arg lists, browser history, and `Referer` headers.
-    /// Mitigated by (a) binding only on a host-local address —
-    /// `127.0.0.1` on macOS, WSL vEthernet adapter IP on Windows (invisible
-    /// from LAN), via `compose::host_bind_address`; (b) UUID v4 token
-    /// regenerated each Desktop startup; (c) `0o600` lock file.
+    /// Token in the URL query string (`?<name>=<token>`). For browser clients; risk in ADR-063.
     QueryParam(&'static str),
 }
 
@@ -271,17 +265,11 @@ pub type ConnectionHandler = Arc<
         + 'static,
 >;
 
-/// Handler-side request context. Most fields are exercised only by tests
-/// (`endpoint_context_exposes_path_query_matched_auth`); the IDE Bridge
-/// handler reads `bridge_name` and `peer_addr` directly. `cfg_attr` keeps
-/// the contract intact while silencing dead-code for the prod `--bin` build.
+/// Handler-side request context. The IDE Bridge handler reads `bridge_name` and `peer_addr`.
 pub struct ConnectionContext {
     pub bridge_name: String,
     pub peer_addr: SocketAddr,
-    /// `_`-prefixed fields are part of the public API for connection
-    /// handlers but currently have no in-tree handler that reads them.
-    /// The prefix signals "available, not currently consumed" without
-    /// silencing dead-code lints with `#[allow(...)]`.
+    /// `_`-prefixed: public API for handlers, no in-tree consumer reads them yet.
     pub _path: String,
     pub _query: Option<String>,
     pub _selected_subprotocol: Option<String>,
@@ -295,10 +283,7 @@ pub struct ConnectionContext {
 
 pub type PairingEventCallback = Arc<dyn Fn(PairingEvent) + Send + Sync + 'static>;
 
-/// Event surface for Pairing-mode bridges. `_`-prefixed fields are
-/// emitted for future telemetry / test inspection but no in-tree
-/// consumer reads them — the prefix signals "available, not currently
-/// consumed" without silencing dead-code lints with `#[allow(...)]`.
+/// Event surface for Pairing-mode bridges. `_`-prefixed fields have no in-tree consumer yet.
 #[derive(Clone, Debug)]
 pub enum PairingEvent {
     SlotOccupied {
@@ -776,9 +761,7 @@ async fn run_endpoint_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // Result<Response, http::Response<Option<String>>> — the
-                // error variant size is dictated by tokio_tungstenite.
-                // Threshold raised in clippy.toml, no per-site allow.
+                // Err variant size dictated by tokio_tungstenite; threshold raised in clippy.toml.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {
@@ -1275,11 +1258,7 @@ fn select_subprotocol(req: &Request<()>, policy: &SubprotocolPolicy) -> Option<&
 }
 
 fn http_response(code: u16, body: &str) -> ErrorResponse {
-    // `http::Response::builder()` only fails when the status or header
-    // values are invalid; for a fixed numeric status and a plain string
-    // body neither path is reachable. If the builder ever did fail, we
-    // synthesize a minimal Internal Server Error response so the
-    // accept_hdr_async callback signature stays infallible.
+    // Synthesize a 500 if the builder fails; the callback signature must stay infallible.
     Response::builder()
         .status(code)
         .body(Some(body.to_string()))
@@ -1334,9 +1313,7 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
         Ok(e) => e,
         Err(_) => return,
     };
-    // Probe on the same address bridges bind on (macOS: 127.0.0.1; Windows:
-    // WSL adapter IP). If detection fails, skip — better to leave orphan
-    // locks than to delete files for live bridges that probe rejects.
+    // Probe on the bind address; skip on failure to avoid deleting locks for live bridges.
     let bind: std::net::IpAddr = match speedwave_runtime::compose::host_bind_address() {
         Ok(addr) => match addr.parse() {
             Ok(ip) => ip,
@@ -2002,9 +1979,7 @@ mod tests {
         let handler: ConnectionHandler = Arc::new(move |mut ws, mut ctx| {
             let observed = observed_clone.clone();
             Box::pin(async move {
-                // Touch every public ConnectionContext field so the
-                // contract is exercised end-to-end. `shutdown` is a
-                // broadcast receiver — resubscribe instead of cloning.
+                // `shutdown` is a broadcast receiver — resubscribe instead of cloning.
                 let _shutdown_alive = ctx._shutdown.try_recv().is_err();
                 *observed.lock().unwrap() = Some((
                     ctx.bridge_name.clone(),
@@ -2374,11 +2349,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_rolls_back_on_lock_file_write_failure() {
-        // Drive write_lock_file_atomic into the error branch by pointing
-        // it at a parent path that is a regular file (not a directory) —
-        // tempfile::NamedTempFile::with_prefix_in fails immediately.
-        // start_endpoint then takes the rollback path: shuts down the
-        // accept loop and surfaces the error.
+        // Parent is a regular file, so the tempfile create fails and start_endpoint rolls back.
         let tmp = tempfile::tempdir().unwrap();
         let file_path = tmp.path().join("not-a-dir");
         std::fs::write(&file_path, b"sentinel").unwrap();
@@ -2395,9 +2366,7 @@ mod tests {
 
     #[test]
     fn start_writes_lock_file_atomic_via_named_temp_file() {
-        // Implicit: write_lock_file_atomic uses tempfile::NamedTempFile.
-        // We assert the lock file appears (full content + mode is checked
-        // in write_lock_file_atomic_writes_json + start_lock_file_mode_0o600).
+        // Asserts the lock file appears; content + mode are checked in dedicated tests.
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2865,9 +2834,7 @@ mod tests {
             .await;
             assert!(res.is_err());
             let err = format!("{:?}", res.err().unwrap());
-            // Pre-handshake response means the error contains HTTP 409, NOT
-            // a tungstenite Close frame string. Close frame would surface as
-            // "Connection closed" or "ConnectionClosed", not as a status code.
+            // Pre-handshake error carries HTTP 409, not a tungstenite Close frame.
             assert!(err.contains("409"), "must be HTTP 409, got: {err}");
             assert!(
                 !err.contains("1008"),
@@ -3045,9 +3012,7 @@ mod tests {
             ))
             .await
             .unwrap();
-            // check_interval = max(timeout/4, 1s). With 1s timeout that
-            // gives 1s ticks; the slot needs >= 1s of age before the next
-            // tick clears it. Wait through 2 ticks to be safe.
+            // check_interval = max(timeout/4, 1s) = 1s; wait through 2 ticks to age the slot out.
             tokio::time::sleep(Duration::from_millis(2500)).await;
         });
         let evts = events.lock().unwrap().clone();
@@ -3060,14 +3025,7 @@ mod tests {
         );
     }
 
-    /// Watchdog recovery test — verifies the **logic** that recreates a
-    /// missing lock file by exercising `write_lock_file_atomic` directly.
-    ///
-    /// We avoid relying on real-time scheduling of the watchdog tokio
-    /// runtime: under heavy parallel test load it can be starved beyond
-    /// any reasonable budget, making a timing-based test flaky. The
-    /// integration timing path is exercised in the smoke test
-    /// (`make dev` — see ADR-063 Verification section).
+    /// Verifies lock-file recreation logic; the timing path is covered by the smoke test.
     #[test]
     fn watchdog_recreates_lock_file_when_missing() {
         let dir = tempfile::tempdir().unwrap();

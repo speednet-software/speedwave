@@ -336,8 +336,7 @@ describe('oauth-state', () => {
     });
 
     it('rejects empty bearer key', async () => {
-      // An empty key in the JSON object would map ambiguously inside the auth
-      // map; the loader must reject it. This covers oauth-state.ts:104.
+      // Covers oauth-state.ts:104.
       await writeFile(join(dir, '.bearer-map.json'), JSON.stringify({ '': 'sharepoint' }), {
         mode: 0o600,
       });

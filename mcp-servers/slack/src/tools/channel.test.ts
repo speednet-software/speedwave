@@ -29,8 +29,7 @@ vi.mock('../client.js', async () => {
   };
 });
 
-// Mock the user-directory boundary — its machinery has its own test file;
-// here we only verify the handlers route messages through enrichment.
+// Mock the user-directory boundary; its machinery has its own test file.
 vi.mock('../user-directory.js', () => ({
   enrichMessagesWithAuthors: vi.fn(async (_clients: unknown, msgs: unknown[]) => msgs),
 }));

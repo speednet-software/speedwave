@@ -1,10 +1,6 @@
 /**
- * Navigation E2E tests.
- *
- * Verifies the shell header, nav links, routing, and project switcher
- * after setup has completed. The `before()` hook fails fast if the shell
- * is not present — no silent early returns. All assertions use
- * `data-testid` attributes only — never UX-volatile text.
+ * Navigation E2E tests: shell header, nav links, routing, project switcher.
+ * Uses data-testid only; fails fast if setup incomplete.
  */
 
 import { activeProjectSlug } from '../helpers/projects';
@@ -13,9 +9,7 @@ describe('Navigation', function () {
   before(async function () {
     this.timeout(65_000);
 
-    // The project pill in the chat header is the canonical "shell mounted"
-    // marker — it only renders once setupCompleteGuard has resolved and the
-    // shell component is on screen.
+    // Project pill = ready signal (setupCompleteGuard resolved).
     const pill = await $('[data-testid="project-pill"]');
     await pill.waitForExist({
       timeout: 15_000,
@@ -29,7 +23,7 @@ describe('Navigation', function () {
       throw new Error('Project is in error state — cannot test navigation');
     }
 
-    // If a blocking overlay is visible, wait for it to clear (status → ready).
+    // Wait for blocking overlay to clear (status → ready).
     const overlay = await $('[data-testid="blocking-overlay"]');
     if (await overlay.isExisting()) {
       await overlay.waitForExist({
@@ -49,8 +43,7 @@ describe('Navigation', function () {
   it('should expose Integrations and Settings nav links (Chat conditional on auth)', async function () {
     this.timeout(15_000);
 
-    // Chat link visibility depends on auth state — may or may not be present
-    // after fresh setup. Only verify presence; do not check copy.
+    // Chat link presence depends on auth state; verify only.
     const integrations = await $('[data-testid="nav-integrations"]');
     expect(await integrations.isExisting()).toBe(true);
 
@@ -63,9 +56,7 @@ describe('Navigation', function () {
     const chat = await $('[data-testid="nav-chat"]');
     if (await chat.isExisting()) {
       await chat.click();
-      // The chat surface renders one of: chat-view (authenticated) or
-      // chat-view-blocked (auth_required). Either signals the Chat route
-      // mounted successfully.
+      // Chat route mounted if chat-view OR chat-view-blocked exists.
       await browser.waitUntil(
         async () => {
           return (
@@ -83,7 +74,7 @@ describe('Navigation', function () {
     const integrations = await $('[data-testid="nav-integrations"]');
     await integrations.click();
 
-    // The integrations route is anchored by its body container.
+    // Integrations route anchored by body container.
     const body = await $('[data-testid="integrations-body"]');
     await body.waitForExist({ timeout: 10_000 });
     expect(await body.isDisplayed()).toBe(true);
@@ -94,8 +85,7 @@ describe('Navigation', function () {
     const settings = await $('[data-testid="nav-settings"]');
     await settings.click();
 
-    // Project info card was removed; the page heading is the new ready
-    // signal. Settings ground-truth lives in `activeProjectSlug()`.
+    // Settings ready signal: page heading (project card removed).
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({ timeout: 10_000 });
     expect(await title.isDisplayed()).toBe(true);

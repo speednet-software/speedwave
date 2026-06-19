@@ -425,7 +425,7 @@ mod tests {
         );
         // Empty / whitespace clears.
         s.relabel_speaker(SpeakerId(0), "   ");
-        assert!(s.speaker_names.get(&SpeakerId(0)).is_none());
+        assert!(!s.speaker_names.contains_key(&SpeakerId(0)));
         // Long names are capped (defensively).
         let long = "x".repeat(200);
         s.relabel_speaker(SpeakerId(1), &long);
@@ -568,15 +568,13 @@ mod tests {
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
         let year: i32 = s[..4].parse().unwrap();
-        assert!(year >= 2020 && year < 2100, "year {year} not plausible");
+        assert!((2020..2100).contains(&year), "year {year} not plausible");
     }
 
     #[test]
     fn ymd_hms_known_epochs() {
         // 1970-01-01T00:00:00Z
         assert_eq!(secs_to_ymd_hms(0), (1970, 1, 1, 0, 0, 0));
-        // 2000-02-29 (leap day) at 12:34:56: precompute the exact seconds.
-        // Use the algorithm itself to derive — but we can pick a known date:
         // 2024-01-01T00:00:00Z = 1_704_067_200.
         assert_eq!(secs_to_ymd_hms(1_704_067_200), (2024, 1, 1, 0, 0, 0));
         // 2024-12-31T23:59:59Z = 1_735_689_599.

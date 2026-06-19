@@ -143,12 +143,8 @@ struct Entry {
 }
 
 /// Per-session state store + live event stream.
-///
-/// `<root>/<uuid>/transcript.json` + `<root>/<uuid>/audio.wav`. The store
-/// caches the active session in memory; `list()` walks the disk for inactive
-/// ones. `subscribe()` returns a snapshot + receiver — mutators bump seq,
-/// emit, and persist atomically so the snapshot, the stream, and the disk
-/// state never drift.
+/// Layout: `<root>/<uuid>/transcript.json` + `<root>/<uuid>/audio.wav`.
+/// Mutators bump seq, emit, and persist atomically.
 pub struct TranscriptStore {
     root: PathBuf,
     sessions: Arc<DashMap<Uuid, Entry>>,
@@ -432,8 +428,7 @@ impl TranscriptStore {
 
     /// Installs the offline pass's `final_segments`, remapping speaker IDs to
     /// preserve user relabels by max-overlap against the live turns
-    /// (`TranscriptSession::merge_live_into_final`). Emits `FinalSegmentsReady`
-    /// so an open UI swaps the live transcript for the higher-quality one.
+    /// (`TranscriptSession::merge_live_into_final`). Emits `FinalSegmentsReady`.
     pub fn merge_final_segments(
         &self,
         id: Uuid,
@@ -468,9 +463,7 @@ impl TranscriptStore {
         })?;
         if let Some(p) = path_to_remove {
             if p.exists() {
-                // Best-effort: log but don't fail — the audio_path field is
-                // already cleared and persisted, so re-transcription is gone
-                // either way. A leftover file on disk is harmless.
+                // Best-effort: log but don't fail; audio_path already cleared.
                 if let Err(e) = std::fs::remove_file(&p) {
                     log::warn!("could not remove discarded audio file {p:?}: {e}");
                 }
@@ -513,9 +506,8 @@ fn restrict_dir_perms(dir: &Path) {
 }
 
 /// Serde adapter for `HashMap<SpeakerId, String>` inside an internally-tagged
-/// enum. serde_json's "parse numeric map key from string" shortcut doesn't fire
-/// through the `Content` buffer that internal tagging uses, so we serialize the
-/// map as a `Vec<(u32, String)>` of pairs instead.
+/// enum: serializes the map as a `Vec<(u32, String)>` of pairs, because
+/// serde_json's numeric-map-key shortcut doesn't fire through internal tagging.
 mod speaker_name_map {
     use super::SpeakerId;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

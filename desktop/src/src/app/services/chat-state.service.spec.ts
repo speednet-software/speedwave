@@ -82,8 +82,7 @@ describe('ChatStateService', () => {
       // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
 
-      // A non-auth start_chat failure used to be silent (console.error only).
-      // It must now surface in the UI so the chat is not a dead surface.
+      // A non-auth start_chat failure surfaces in the UI.
       expect(projectState.status).toBe('error');
       expect(projectState.error).toContain('chat backend crashed');
       expect(mockLogger.error).toHaveBeenCalledWith(
@@ -185,8 +184,7 @@ describe('ChatStateService', () => {
         ],
       });
 
-      // Wire format: pure text with the `@…` reference — no `image`
-      // content block ever crosses stdin (avoids the OOM-killing path).
+      // Wire format: pure text with the `@…` reference, no `image` block on stdin.
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [
           {
@@ -1217,8 +1215,7 @@ describe('ChatStateService', () => {
 
   describe('session startup timeout', () => {
     it('shows error when startingSession does not clear within deadline', async () => {
-      // Directly invoke sendMessage without full init — we only need the
-      // retry path and the startingSession flag.
+      // Invoke sendMessage without full init.
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'send_message') throw new Error('no active session');
         return undefined;
@@ -1227,15 +1224,7 @@ describe('ChatStateService', () => {
       // Simulate startingSession permanently stuck true
       (service as unknown as { startingSession: boolean }).startingSession = true;
 
-      // Mock Date.now to make the deadline expire immediately.
-      // sendMessage calls: (1) user-msg timestamp, (2) deadline = Date.now() + 30_000,
-      // (3+) while-loop condition Date.now() < deadline.
-      // Track Date.now() calls.  We need the deadline setup call to
-      // return `base` and all subsequent calls to return past the
-      // deadline.  Use a generous threshold: the first 5 calls return
-      // base (covers user-msg timestamp, notifyChange(), deadline setup,
-      // plus any framework overhead).  After that, jump past the
-      // deadline so the while loop exits on the next iteration.
+      // First 5 Date.now() calls return base, the rest return past the deadline.
       const base = 1000000;
       let nowCall = 0;
       const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
@@ -2279,9 +2268,7 @@ describe('ChatStateService', () => {
   });
 
   describe('resolveContextWindow priority chain', () => {
-    // resolveContextWindow is private; the chain is exercised through the
-    // public surface (Result-chunk handler / seedResumedSession). We hit it
-    // here through a controlled cast for direct assertions on each tier.
+    // resolveContextWindow is private; cast to assert on each tier directly.
     type Internal = {
       resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
       _persistedContextTokens: number | null;

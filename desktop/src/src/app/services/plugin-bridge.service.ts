@@ -15,11 +15,7 @@ interface BridgeEventPayload {
     | 'pending_timeout';
 }
 
-/**
- * Tracks each host-bridge plugin's status via a `plugin_bridge_get_status`
- * snapshot plus live `plugin_bridge_event` updates so the UI sees `paired` /
- * `partner_connected` flip without polling. Other fields reflect the snapshot.
- */
+/** Tracks host-bridge plugin status via snapshot plus live `plugin_bridge_event` updates. */
 @Injectable({ providedIn: 'root' })
 export class PluginBridgeService implements OnDestroy {
   private readonly tauri = inject(TauriService);

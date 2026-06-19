@@ -49,8 +49,7 @@ export function cleanRemoveErrorMessage(msg: string): string {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
-      <!-- Click-outside backdrop — closes the dropdown when clicking anywhere
-           outside it (mockup behaviour). Sits below the dropdown z-index. -->
+      <!-- Click-outside backdrop — closes the dropdown. -->
       <div
         class="fixed inset-0 z-[1000]"
         data-testid="project-switcher-backdrop"
@@ -193,11 +192,7 @@ export function cleanRemoveErrorMessage(msg: string): string {
   `,
 })
 export class ProjectSwitcherComponent implements OnInit, OnDestroy {
-  /**
-   * Backend-loaded list of projects, refreshed on settled events. Must be a
-   * signal — `visibleProjects` is a computed and would not recompute on a
-   * plain field reassignment, leaving the dropdown stale after `add_project`.
-   */
+  /** Backend-loaded list of projects, refreshed on settled events. */
   readonly projects = signal<ProjectEntry[]>([]);
   /** Slug of the currently active project — drives the "current" pill. */
   readonly activeProject = signal<string | null>(null);
@@ -229,9 +224,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
   /** Registers reactive cleanup of transient pending/error state. */
   constructor() {
-    // Reset transient pending/error state when the dropdown closes or when
-    // the row disappears from the list — otherwise reopening would render
-    // a stale "Sure?" confirm prompt or an error for a missing project.
+    // Reset transient pending/error state when the dropdown closes or the row disappears.
     effect(() => {
       if (!this.ui.projectSwitcherOpen()) {
         this.pendingDeleteName.set(null);

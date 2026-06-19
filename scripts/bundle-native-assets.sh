@@ -32,16 +32,7 @@ resolve_binary_path() {
 
 mkdir -p "$DEST"
 
-# `swift build -c release` produces Mach-O with the `linker-signed` code-signing
-# flag (0x20000). macOS taskgated treats a `linker-signed` ad-hoc signature as
-# less trusted than a plain ad-hoc one and SIGKILLs the process ("Taskgated
-# Invalid Signature") when another process spawns it — fatal for the
-# audio-capture CLI, which links CoreAudio's hardened process-tap APIs. A
-# release build (which is what scripts/sign-bundled-binaries.sh runs over later)
-# strips that flag with the Developer ID re-sign; in dev builds nothing
-# re-signs, so do a plain ad-hoc re-sign here. (Harmless if a real signing pass
-# overwrites it afterwards.) With entitlements where one exists, so the embedded
-# entitlements survive the dev-mode re-sign too.
+# Swift release builds set the `linker-signed` flag; taskgated SIGKILLs it.
 adhoc_resign() {
   local path="$1" pkg="$2"
   command -v codesign >/dev/null 2>&1 || return 0

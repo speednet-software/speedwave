@@ -128,8 +128,7 @@ describe('oauth tools', () => {
     });
 
     it('rejects when ctx is missing entirely', async () => {
-      // `ctx?.caller` defaults to '' when ctx itself is undefined — covers
-      // the `?? ''` branch in resolveCaller (tools.ts:79).
+      // ctx undefined → caller defaults to '' (resolveCaller ?? branch, tools.ts:79).
       const tools = buildTools(deps);
       const refresh = tools.find((t) => t.tool.name === 'refresh')!;
       const result = await refresh.handler({}, undefined);
@@ -138,10 +137,7 @@ describe('oauth tools', () => {
     });
 
     it('falls back to Date.now / static registry when overrides absent', async () => {
-      // Covers `deps.now ?? Date.now` and the registry fallback when
-      // `deps.providers` is omitted. We do NOT actually call Microsoft — fetch
-      // is mocked, but the branch coverage we care about (real registry →
-      // microsoftProvider → refreshMicrosoftToken → fetch) is exercised.
+      // Covers `deps.now ?? Date.now` and static registry fallback when `deps.providers` omitted.
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       await seedState(sharepointState);
       const fetchSpy = vi
@@ -286,8 +282,7 @@ describe('oauth tools', () => {
       const refresh = tools.find((t) => t.tool.name === 'refresh')!;
 
       const result = await refresh.handler({}, ctxFor('sharepoint'));
-      // Success-noop: a caller that lost the single-flight race re-reads the
-      // fresh token and retries instead of failing for the whole window.
+      // Success-noop: caller that lost the single-flight race re-reads the fresh token.
       expect(result.isError).toBeFalsy();
       const payload = JSON.parse(getTextResult(result)) as {
         expiresIn: number;
@@ -340,9 +335,7 @@ describe('oauth tools', () => {
       const [r1, r2] = await Promise.all([first, second]);
       expect(r1.isError).toBeFalsy();
       expect(r2.isError).toBeFalsy();
-      // Exactly one IdP call total; the winner is whoever acquired the mutex
-      // first (resolveCaller is async, so order is not positionally pinned —
-      // assert on the SET of outcomes, not which of r1/r2 lost the race).
+      // Exactly one IdP call; assert outcomes as a set (async order unpinned).
       expect(refreshCalls).toHaveLength(1);
       const payloads = [r1, r2].map(
         (r) => JSON.parse(getTextResult(r)) as { rateLimited?: boolean }
@@ -520,9 +513,7 @@ describe('oauth tools', () => {
         await seedBearerMap({ 'bearer-sp': 'sharepoint' });
         await seedState(sharepointState);
         const stateFile = join(stateDir, 'sharepoint.json');
-        // Read-only parent dir → unlink fails with EACCES (non-ENOENT).
-        // Keep the audit log outside the locked dir so the error path can
-        // still record the outcome.
+        // Read-only parent dir → unlink fails with EACCES (non-ENOENT); audit log kept outside locked dir.
         const isolatedAudit = join(tokensBase, 'audit.log');
         await chmod(stateDir, 0o500);
         try {

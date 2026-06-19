@@ -1,7 +1,6 @@
-//! Generic [`HostMcpProcess<S>`] — the SSOT spawn/stop/respawn/cleanup
-//! lifecycle the host MCP worker managers (mcp-os, oauth) share. Each
-//! manager keeps only its worker-specific data and protocol in a
-//! [`WorkerSpec`] impl; the generic struct handles everything else.
+//! Generic [`HostMcpProcess<S>`] — SSOT spawn/stop/respawn/cleanup
+//! lifecycle shared by host MCP worker managers (mcp-os, oauth) via a
+//! [`WorkerSpec`] impl per manager.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,10 +24,8 @@ pub trait WorkerSpec: Send + 'static {
     fn log_tag(&self) -> &'static str;
 
     /// File name of the unified lock file relative to `state_dir`.
-    /// Per-project workers use `consts::PER_PROJECT_LOCK_FILE` (the
-    /// default); mcp-os singleton lives in `data_dir` directly with
-    /// `consts::MCP_OS_LOCK_FILE` to avoid colliding with other
-    /// top-level state files.
+    /// Default `consts::PER_PROJECT_LOCK_FILE`; mcp-os singleton uses
+    /// `consts::MCP_OS_LOCK_FILE` in `data_dir`.
     fn lock_file_name(&self) -> &'static str {
         crate::consts::PER_PROJECT_LOCK_FILE
     }
@@ -38,24 +35,21 @@ pub trait WorkerSpec: Send + 'static {
     /// the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
-    /// Hook invoked after `state_dir` is created and stale-PID cleanup
-    /// has run but BEFORE the Node child is spawned. Worker writes
-    /// anything it needs in the worker's environment view of the disk
-    /// here (oauth bearer map + per-service bearer files).
+    /// Hook invoked after `state_dir` creation and stale-PID cleanup,
+    /// before the Node spawn. Worker writes its disk state here (oauth
+    /// bearer map + per-service bearer files).
     fn pre_spawn(&self, _ctx: &SpawnContext) -> anyhow::Result<()> {
         Ok(())
     }
 
     /// Liveness probe variant. mcp_os does pid+TCP via
-    /// `is_mcp_os_alive_in`; oauth is 3-attempt TCP with backoff (a flake
-    /// on the probe cascades into a container recreate so the retry
-    /// matters — ADR-060).
+    /// `is_mcp_os_alive_in`; oauth is 3-attempt TCP with backoff
+    /// (retries matter — ADR-060).
     fn probe(&self) -> LivenessProbe;
 
     /// Extra files removed alongside `lock.json` on
     /// [`HostMcpProcess::cleanup_files`]. Per-service bearer files and
-    /// `oauth.json` are NOT in this list (they are mounted into
-    /// consumer containers; they must survive a supervisor respawn).
+    /// `oauth.json` are NOT in this list (they survive supervisor respawn).
     fn extra_cleanup_files(&self, _ctx: &SpawnContext) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -131,31 +125,12 @@ pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) script_path: String,
     /// Cleared by `respawn()` before `*self = new` so the dropped old
     /// instance does not delete the replacement's on-disk artifacts.
-    /// Kept private — only `spawn_with_spec`, `respawn`, and `Drop`
-    /// inside this module may mutate it.
     cleanup_on_drop: bool,
 }
 
 impl<S: WorkerSpec> HostMcpProcess<S> {
-    /// Spawn the worker. `state_dir` is whatever the per-manager wrapper
-    /// computes (e.g. `<data_dir>` for mcp-os singleton,
-    /// `<data_dir>/oauth/<project>` for oauth). Blocks up to
-    /// 10 s waiting for the `{"port":N}` handshake on stdout.
-    ///
-    /// Sequence:
-    /// 1. `create_dir_all(state_dir)`
-    /// 2. Idempotent upgrade-time migration of any pre-PR3 legacy
-    ///    3-file layout into `lock.json` (caller is expected to wire
-    ///    `lock::migrate_legacy` separately for service-specific
-    ///    legacy file names — happens before this call).
-    /// 3. Stale-PID cleanup from existing `lock.json` (kills only
-    ///    confirmed node processes).
-    /// 4. `WorkerSpec::pre_spawn` — config snapshot, bearer map, …
-    /// 5. Mint UUID v4 auth-token; spawn `node <script_path>` with the
-    ///    SSOT env policy + `WorkerSpec::apply_env`.
-    /// 6. Drain stdout/stderr; read port from first JSON line (10 s).
-    /// 7. Write `lock.json` with `{service, pid, port, authToken,
-    ///    transport}`.
+    /// Spawn the worker into `state_dir` (per-manager wrapper computes it).
+    /// Blocks up to 10 s waiting for the `{"port":N}` handshake on stdout.
     pub fn spawn_with_spec(
         spec: S,
         data_dir: &Path,
@@ -188,8 +163,7 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
         apply_child_env(&mut cmd, &CurrentProcessEnv);
-        // SSOT: macOS 127.0.0.1, Windows WSL adapter IP — must match host_gateway_ip
-        // so container reaches the worker via extra_hosts: host.docker.internal:<gateway>.
+        // SSOT bind host — must match host_gateway_ip for container extra_hosts.
         cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
         spec.apply_env(&mut cmd, &ctx);
         cmd.stdin(Stdio::null())
@@ -287,10 +261,9 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 }
 
 impl<S: WorkerSpec + Clone> HostMcpProcess<S> {
-    /// Stop the old worker and spawn a fresh one at the same script
-    /// path with the same spec. Disarms the old instance's `Drop` so it
-    /// cannot delete the replacement's `lock.json` or spec-extras
-    /// (token mount files, bearer files) when it goes out of scope.
+    /// Stop the old worker and spawn a fresh one at the same script/spec.
+    /// Disarms the old instance's `Drop` so it cannot delete the
+    /// replacement's `lock.json` or spec-extras on scope exit.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -340,12 +313,7 @@ pub fn kill_stale_node(pid: u32, service_tag: &str) {
         log::debug!("{service_tag}: stale PID {pid} is not a node process — skipping kill");
         return;
     }
-    // `is_node_process` already confirmed PID is alive (ps -p succeeded),
-    // so no second liveness probe is needed. A LIVE node here is a smell:
-    // the sole owner's watchdog respawns only when its worker is dead, so a
-    // live worker at spawn time means a second supervisor is racing us (the
-    // dual-supervisor exit-137 bug — see ADR-060 / project_oauth_dual_supervisor_137).
-    // WARN, not INFO, so the next occurrence is a single greppable line.
+    // Live node at spawn means a second supervisor is racing us (exit-137 bug, ADR-060).
     log::warn!(
         "{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid}) at spawn — possible second supervisor racing this one"
     );
@@ -404,7 +372,7 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::test_support::FakeSpec;
     use super::*;
@@ -465,9 +433,6 @@ mod tests {
     #[test]
     fn fake_spec_records_hook_order() {
         // Spawn-sequence contract: pre_spawn → apply_env → spawn → write_atomic.
-        // Without a real node binary we can't test the full sequence
-        // end-to-end, but we can prove the order pre_spawn → apply_env
-        // by invoking them directly the way `spawn_in` would.
         let spec = FakeSpec::new(LockService::Oauth, "fake");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
@@ -494,10 +459,7 @@ mod tests {
 
     #[test]
     fn kill_stale_node_warn_uses_shared_marker() {
-        // The WARN line MUST carry KILL_STALE_LOG_MARKER — that const is the
-        // grep hint embedded in resources::OOM_MESSAGE. Source-string guard so a
-        // refactor can't drop the marker from the format string while keeping
-        // the const, which would silently break the exit-137 diagnostic.
+        // Source-string guard: WARN line must carry KILL_STALE_LOG_MARKER (grep hint in resources::OOM_MESSAGE).
         let source = include_str!("process.rs");
         assert!(
             source.contains("{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid})"),

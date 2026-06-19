@@ -1,12 +1,6 @@
 //! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
-//!
-//! `AudioCapture` is the seam between the OS-specific capture backends (Windows
-//! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
-//! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
-//! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
-//! orchestration (the transcriber, the diarizer, the driver) can be exercised
-//! without a real device — and doubles as the dev affordance ("transcribe a
-//! WAV file").
+//! `AudioCapture` is the seam between OS-specific capture backends and the engine.
+//! `FileAudioCapture` plays back a 16 kHz mono WAV in fixed chunks for testing.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,10 +9,7 @@ use std::time::Duration;
 /// backends resample their device-native rate down to this.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// Chunk granularity `FileAudioCapture` delivers (and the rough cadence the
-/// real backends aim for — the macOS CLI's framed stdout protocol uses ~200 ms
-/// chunks, per ADR-056). Smaller = lower live latency but more per-chunk
-/// overhead; this is a reasonable default.
+/// Chunk granularity `FileAudioCapture` delivers: 200 ms (per ADR-056).
 pub const CHUNK_DURATION: Duration = Duration::from_millis(200);
 
 /// UI label for the default "system loopback + your microphone" source that
@@ -46,10 +37,7 @@ pub enum AudioSource {
         /// Device id (`None` = system default input).
         device: Option<String>,
     },
-    /// Both `system` and `mic` captured together as two timestamped streams —
-    /// the "meeting transcription" default (the "poor man's diarization" angle:
-    /// the mic is "[You]", the loopback is "[Meeting]"). The backend mixes or
-    /// keeps them separate as the engine requests.
+    /// Both `system` and `mic` captured together as two timestamped streams.
     Mixed {
         /// What to capture for the "other side" (typically `SystemWide` or a
         /// `Process`).
@@ -95,9 +83,7 @@ pub struct AudioSourceInfo {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureCapabilities {
     /// `true` if the backend can capture a single process's audio (Windows
-    /// build 20348+, macOS 14.4+). When `false`, only `SystemWide`
-    /// (+ `Microphone`) is offered, with a tooltip explaining the OS
-    /// requirement.
+    /// build 20348+, macOS 14.4+).
     pub supports_per_process: bool,
     /// `true` if capturing the system loopback at all is possible on this host
     /// (e.g. `false` on macOS < 14.2).
@@ -124,9 +110,6 @@ impl CaptureCapabilities {
 
 /// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus
 /// the offset of this chunk's first sample from the start of the recording.
-/// (When the source is `Mixed`, the backend has already mixed or the engine
-/// requested a single mixed stream — multi-stream interleaving is a backend
-/// detail; the engine only ever sees one mono stream here.)
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// 16 kHz mono samples, `[-1.0, 1.0]`.
@@ -159,10 +142,7 @@ pub enum CaptureError {
 }
 
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
-/// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
-/// for a live backend it doesn't normally end until `stop()` — represented by
-/// dropping the stream / the backend's own stop signal). Implementations are
-/// `Send` so the driver can pump them from a background task.
+/// `Ok(None)` at end of stream. Implementations are `Send`.
 pub trait AudioStream: Send {
     /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
     /// capture broke (the driver flips the session to `Failed`).
@@ -189,13 +169,8 @@ pub trait AudioCapture: Send + Sync {
 // --- FileAudioCapture: the dev/test backend ---------------------------------
 
 /// "Captures" from a WAV file by streaming it back in [`CHUNK_DURATION`] chunks.
-///
-/// It accepts the file path either at construction (for the dev "transcribe
-/// this file" affordance — the path is fixed) or via the `source` argument as
-/// a `Microphone { device: Some("<path>") }` overload (a convenience for tests
-/// that want to drive different fixtures through the same `Box<dyn AudioCapture>`).
-/// The WAV must be 16-bit-int or 32-bit-float PCM; any sample rate / channel
-/// count is accepted and converted to 16 kHz mono `f32` here.
+/// Path comes from construction or `Microphone { device: Some("<path>") }`.
+/// WAV must be 16-bit-int or 32-bit-float PCM; converted to 16 kHz mono `f32`.
 pub struct FileAudioCapture {
     /// Default path used when `start()` is called with a non-path source.
     default_path: Option<PathBuf>,

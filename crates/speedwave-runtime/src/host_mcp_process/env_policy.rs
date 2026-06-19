@@ -1,9 +1,6 @@
 //! Child-process environment policy shared by every host MCP worker.
-//!
-//! `apply_child_env` clears the inherited environment so secrets in the
-//! parent (API keys, tokens) cannot leak to the worker, then re-adds
-//! only the variables the child needs. The `EnvSource` indirection lets
-//! tests inject a `FakeEnv` instead of mutating process-global state.
+//! `apply_child_env` clears the inherited environment, then re-adds only
+//! the variables the child needs.
 
 use std::process::Command;
 
@@ -46,12 +43,9 @@ impl EnvSource for CurrentProcessEnv {
     }
 }
 
-/// Apply the child-process environment policy to `cmd`.
-///
-/// Clears the inherited environment then re-adds only PATH,
-/// HOME/USERPROFILE, optional Windows CSPRNG vars, and
-/// `SPEEDWAVE_RESOURCES_DIR`/`SPEEDWAVE_PROD` when the parent is a
-/// bundled .app. The inherited PATH is forwarded as-is.
+/// Apply the child-process environment policy to `cmd`: clear inherited
+/// env, then re-add PATH, HOME, optional Windows CSPRNG vars, and the
+/// bundle `SPEEDWAVE_RESOURCES_DIR`/`SPEEDWAVE_PROD` pair.
 pub fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env_clear();
 

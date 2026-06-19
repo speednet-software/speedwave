@@ -1,9 +1,5 @@
 //! Tauri commands for the meeting-transcription feature (ADR-056).
-//!
-//! Thin layer over `speedwave_runtime::transcription`: stores live in Tauri
-//! managed state; events forwarded via per-session `transcript_event::<id>`
-//! Tauri event channels (subscribe returns `{event_name, snapshot}` so a late
-//! subscriber doesn't miss what already happened — ADR-043 delivery shape).
+//! Stores live in Tauri state; events forwarded via per-session event channels (ADR-043).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -46,9 +42,7 @@ fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
 
 /// Caps a user-supplied speaker name length (matches `TranscriptSession::relabel_speaker`).
 const MAX_SPEAKER_NAME_LEN: usize = 64;
-/// Defensive upper bound on the diarizer's `num_clusters` hint. Real meetings
-/// rarely exceed a dozen distinct speakers; we cap well above that so a UI
-/// glitch or a malicious caller can't pass a giant value straight to sherpa.
+/// Defensive upper bound on the diarizer's `num_clusters` hint.
 const MAX_EXPECTED_SPEAKERS: u32 = 50;
 
 fn cap_name(name: &str) -> String {
@@ -78,8 +72,7 @@ fn validate_expected_speakers(n: Option<u32>) -> Result<Option<u32>, String> {
 
 // ---- 1) feature-toggle commands (top-level user config, ADR-056 §13) ------
 
-// Synchronous file I/O for the four toggle commands is wrapped in
-// `spawn_blocking` so it never stalls the Tokio runtime thread.
+// File I/O wrapped in spawn_blocking to avoid blocking the Tokio runtime.
 
 #[tauri::command]
 pub async fn transcription_enabled() -> Result<bool, String> {
@@ -211,8 +204,7 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: override wins, else recommendation, else any downloaded.
-    // Never download implicitly — error with a hint if nothing is present.
+    // Override wins, else recommendation, else first downloaded; never implicit download.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
     let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
@@ -243,8 +235,7 @@ pub async fn start_transcription(
             .map_err(|e| e.to_string())?
     };
 
-    // Optional diarizer: best-effort — if the diarization models are present,
-    // load them; otherwise run without speaker labels.
+    // Optional diarizer: load if models present, else run without speaker labels.
     let diarize_opts = DiarizeOptions {
         num_speakers: expected_speakers.map(|n| n as usize),
         ..DiarizeOptions::default()
@@ -277,10 +268,7 @@ pub async fn start_transcription(
         }
     };
 
-    // Create the session, then start capture.
-    // The audio.wav path lives under `<root>/<id>/`, so we need the id before
-    // creating the session — pick it now so the path is correct from the first
-    // persisted write (no fragile post-create patch).
+    // Pick the id before session creation so the audio.wav path is correct from the first write.
     let session_id = Uuid::new_v4();
     let session_dir = store.session_dir(session_id);
     let audio_wav = session_dir.join("audio.wav");
@@ -341,16 +329,13 @@ pub async fn start_transcription(
     let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
-            // Log only the first chunk of the id — UUIDs are not secrets, but
-            // CodeQL's heuristics flag any "session_id"-looking variable in a
-            // log line. The short form is enough to correlate diagnostics.
+            // Log short id only (CodeQL flags session_id in logs; 8 chars enough to correlate).
             log::warn!(
                 "transcript driver for {} ended with error: {e}",
                 short_id(session_id)
             );
         }
-        // Drop the stop-signal entry once the driver has wound down, then
-        // wake anyone waiting on `await_finished()` (e.g. `stop_transcription`).
+        // Remove stop-signal and wake anyone waiting on await_finished (e.g. stop_transcription).
         if let Ok(mut g) = drivers_for_cleanup.lock() {
             g.remove(&session_id);
         }
@@ -373,9 +358,7 @@ pub async fn stop_transcription(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Signal the driver to wind down and grab its finish-notifier (idempotent
-    // if the driver already exited — `await_finished` will then just suspend
-    // until the wind-down notify, or the timeout below trips).
+    // Signal driver to wind down and grab its finish-notifier (idempotent if already exited).
     let stop_handle = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
@@ -384,27 +367,23 @@ pub async fn stop_transcription(
     if let Some(stop) = stop_handle.as_ref() {
         stop.stop();
     } else {
-        // No live driver: just flip to Finalizing so a subsequent finalize pass
-        // (below) can run against whatever was recorded.
+        // No live driver: flip to Finalizing so a subsequent finalize can run against recorded audio.
         let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
     }
 
-    // Wait for the driver loop to actually exit, bounded so a wedged driver
-    // can't hang the command. 5 s mirrors the previous spin-poll budget.
+    // Wait for driver loop to exit, bounded so a wedged driver can't hang (5s mirrors prior budget).
     if let Some(stop) = stop_handle {
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
     }
 
-    // Offline pass: re-transcribe the WAV (prefer `large-v3`, fall back to the
-    // live model) and mark Done; on failure the live transcript stays.
+    // Offline pass: prefer large-v3, fall back to live model, mark Done (live transcript stays on error).
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
     let session_dir = store.session_dir(id);
     let audio_wav = session_dir.join("audio.wav");
     tokio::task::spawn_blocking(move || {
-        // Pick the offline model: `large-v3` if present, else fall back to any
-        // downloaded Whisper model (the live one is guaranteed present).
+        // Pick offline model: large-v3 if present, else first downloaded (live model guaranteed present).
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
             let _ = store_arc.set_status(
@@ -462,8 +441,7 @@ pub async fn stop_transcription(
         } else {
             None
         };
-        // Live turns aren't tracked across the driver boundary in v1; offline
-        // diarizer's clusters win.
+        // Live turns not tracked across driver boundary in v1; offline diarizer's clusters win.
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -488,16 +466,13 @@ fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
 ) -> Result<(), String> {
-    // Exhaustive (no `_` arm) so a new `AudioSource` variant forces a conscious
-    // validation decision here.
+    // Exhaustive (no `_` arm) so a new AudioSource variant forces a validation decision here.
     let (needs_per_process, needs_microphone): (bool, bool) = match src {
         AudioSource::SystemWide => (false, false),
         AudioSource::Process { .. } => (true, false),
         AudioSource::Microphone { .. } => (false, true),
         AudioSource::Mixed { system, mic: _ } => {
-            // The system side of a mix must itself be capturable — System or a
-            // process, not a microphone or another mix. Reject the bad shape
-            // here so the error comes from the boundary, not a deep backend.
+            // System side must be System or Process (not Microphone or nested Mix); reject bad shape at boundary.
             match system.as_ref() {
                 AudioSource::SystemWide => {}
                 AudioSource::Process { .. } => {}
@@ -540,8 +515,7 @@ fn source_label(
             AudioSource::SystemWide => "System (everything)".to_string(),
             AudioSource::Process { .. } => "App audio".to_string(),
             AudioSource::Microphone { .. } => "Microphone".to_string(),
-            // A Mixed not in the picker (e.g. an explicit process + mic via the
-            // API): "<system> + microphone".
+            // Mixed not in the picker: "<system> + microphone".
             AudioSource::Mixed { system, .. } => format!("{} + microphone", generic(system)),
         }
     }
@@ -570,8 +544,7 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
 /// Picks the model for the live pass:
 /// 1. `override_key` if given — must be downloaded, else an error.
 /// 2. The `recommended` model if it's downloaded.
-/// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
-///    multi-GB file — the UI prompts for that).
+/// 3. Otherwise the first downloaded Whisper model (never auto-downloads).
 /// 4. If nothing is downloaded: an error with a download hint.
 fn pick_live_model(
     models: &ModelStore,
@@ -632,8 +605,7 @@ fn spawn_event_forwarder(
     forwarders: ForwardersHandle,
     id: Uuid,
 ) {
-    // Already-running forwarder: skip — emitting twice would duplicate every
-    // event to the frontend.
+    // Already-running forwarder: skip to avoid emitting duplicates to frontend.
     if let Ok(mut set) = forwarders.lock() {
         if !set.insert(id) {
             return;
@@ -712,8 +684,7 @@ pub async fn discard_transcript_audio(
     store: tauri::State<'_, TranscriptStoreHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Routed through the store so the in-memory cache, disk, and broadcast
-    // stream stay in sync (subscribers see an `AudioDiscarded` event).
+    // Routed through the store so cache, disk, and broadcast stream stay in sync.
     store.discard_audio(id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -870,10 +841,7 @@ mod tests {
         assert_eq!(short_id(id), "550e8400");
     }
 
-    /// Driving Tauri commands fully requires a `tauri::State` wrapper that
-    /// isn't trivial to fabricate in unit tests; instead, exercise the
-    /// underlying `TranscriptStore` calls that each command makes, plus the
-    /// validation helpers above (`parse_transcript_id` already covered).
+    /// Exercise underlying TranscriptStore calls (not full Tauri integration); validation helpers already covered.
     #[tokio::test]
     async fn store_round_trip_matches_what_the_commands_will_do() {
         let dir = tempfile::tempdir().unwrap();
@@ -939,10 +907,7 @@ mod tests {
 
     #[test]
     fn download_routing_distinguishes_whisper_from_diarization_keys() {
-        // download_transcription_model decides which ensure_* to call by
-        // whether the key is a diarization-catalogue key. Verify that split
-        // (the bug was: a diarization key went to ensure_model → "no such
-        // model in the catalogue").
+        // download_transcription_model routes by whether the key is a diarization-catalogue key.
         use speedwave_runtime::transcription::{diarization_model, whisper_model};
         assert!(diarization_model("pyannote-segmentation-3-0").is_some());
         assert!(diarization_model("nemo-titanet-small").is_some());
@@ -956,8 +921,7 @@ mod tests {
     fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // No model on disk: an override errors naming that model; no override
-        // errors naming the recommended one — both with "download" guidance.
+        // No model on disk: override errors naming that model, no override names the recommended one.
         let e1 = pick_live_model(&store, Some("small"), "large-v3-turbo").unwrap_err();
         assert!(e1.contains("'small'") && e1.contains("download"));
         let e2 = pick_live_model(&store, None, "large-v3-turbo").unwrap_err();
@@ -966,8 +930,7 @@ mod tests {
 
     #[test]
     fn pick_live_model_uses_a_known_catalogue_key_for_the_override_error() {
-        // Sanity: the message references the requested key verbatim even for an
-        // unknown one (whisper_is_present_by_key returns false → error path).
+        // The error message references the requested key verbatim even for an unknown one.
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
         let err = pick_live_model(&store, Some("nonexistent-model"), "small").unwrap_err();
@@ -976,8 +939,7 @@ mod tests {
 
     #[test]
     fn source_label_falls_back_when_no_match() {
-        // FileAudioCapture's enumerate_sources lists only the bound file (or
-        // nothing) — so a SystemWide source has no match and we fall back.
+        // FileAudioCapture lists only the bound file, so a SystemWide source has no match.
         let cap = speedwave_runtime::transcription::FileAudioCapture::new();
         assert_eq!(
             source_label(
@@ -1084,8 +1046,7 @@ mod tests {
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
         );
-        // A structurally-invalid Mixed (mic-as-system, or nested Mixed) is
-        // rejected at the boundary regardless of capabilities.
+        // A structurally-invalid Mixed (mic-as-system or nested Mixed) is rejected regardless of caps.
         let full = CaptureCapabilities {
             supports_per_process: true,
             supports_system_audio: true,

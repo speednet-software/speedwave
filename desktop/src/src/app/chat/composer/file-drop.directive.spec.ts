@@ -79,8 +79,6 @@ describe('FileDropDirective', () => {
   });
 
   it('drops are no-op when disabled', () => {
-    // Re-create the fixture with disabled=true from the start; flipping the
-    // input mid-test triggers a stale change-detection check on Angular 21.
     const disabledFixture = TestBed.createComponent(HostComponent);
     disabledFixture.componentInstance.disabled = true;
     disabledFixture.detectChanges();

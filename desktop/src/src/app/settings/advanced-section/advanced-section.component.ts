@@ -8,11 +8,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
 
-/**
- * Settings → Danger Zone. Diagnostics export and forced trace-level logging
- * live in the System health view (`/logs`); Settings only owns the
- * destructive factory-reset action now.
- */
+/** Settings → Danger Zone. Owns the factory-reset action. */
 @Component({
   selector: 'app-advanced-section',
   imports: [CommonModule],
@@ -77,12 +73,7 @@ export class AdvancedSectionComponent {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
 
-  /**
-   * Performs a factory reset, destroying containers and VM.
-   * The backend calls app.restart() and never returns a response,
-   * so the lines after invoke() are unreachable in practice —
-   * they exist only as a safety net if restart behaviour changes.
-   */
+  /** Performs a factory reset, destroying containers and VM. */
   async resetEnvironment(): Promise<void> {
     this.resetting = true;
     try {

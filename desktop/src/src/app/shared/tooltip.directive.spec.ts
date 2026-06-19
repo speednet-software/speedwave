@@ -149,9 +149,7 @@ describe('TooltipDirective', () => {
   });
 
   it('removes native title attribute from host on init', () => {
-    // Re-create with a host that has a native title attribute via initial input
-    // The directive strips `title` even if browser default is empty, but more
-    // importantly verify the host element does not carry it after init.
+    // Host element does not carry `title` after init.
     const btn = getButton(fixture!);
     expect(btn.hasAttribute('title')).toBe(false);
   });

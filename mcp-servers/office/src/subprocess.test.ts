@@ -1,8 +1,6 @@
 /**
  * Tests for the hardened subprocess wrapper: capture, timeout/SIGKILL, output cap,
- * non-zero-exit handling, stdin, cwd/env, and spawn-error. Uses real short-lived
- * `node -e` child processes so the actual spawn/timeout/stdio paths are exercised.
- * (The `runPythonScript` JSON-contract branches are covered in `subprocess-pyscript.test.ts`.)
+ * non-zero-exit, stdin, cwd/env, spawn-error.
  * @module mcp-office/subprocess.test
  */
 

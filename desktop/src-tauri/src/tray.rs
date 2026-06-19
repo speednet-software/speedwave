@@ -12,10 +12,8 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 #[cfg(target_os = "windows")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon-white.png");
 
-/// Variable inputs to the tray menu — `update_version` (set by the updater) and
-/// `beta_enabled` (toggled by the user). Managed via `app.manage`; the inner
-/// mutexes are private so all access goes through the accessors below, which
-/// recover from poisoning rather than panicking.
+/// Variable tray-menu inputs (`update_version`, `beta_enabled`) managed via
+/// `app.manage`; access through the accessors, which recover from poisoning.
 #[derive(Default)]
 pub(crate) struct TrayMenuState {
     update_version: Mutex<Option<String>>,
@@ -72,9 +70,7 @@ pub(crate) enum TrayItemSpec {
 }
 
 /// Returns the ordered menu items for the given inputs. Beta toggle is hidden
-/// before setup completion — the toggle writes to user-config and the wizard
-/// owns data-dir creation, so we don't show a developer switch that could
-/// race the wizard.
+/// before setup completion.
 pub(crate) fn tray_menu_spec(
     update_version: Option<&str>,
     beta_enabled: bool,
@@ -100,11 +96,7 @@ pub(crate) fn tray_menu_spec(
 }
 
 /// Loads the platform-appropriate tray icon embedded in the binary.
-///
-/// macOS uses a black glyph paired with `icon_as_template(true)` so the system
-/// inverts it for the active appearance. Windows uses a white glyph because the
-/// notification area commonly renders on a dark background and has no template
-/// mode.
+/// macOS: black glyph (template, system-inverted). Windows: white glyph.
 pub(crate) fn load_tray_icon() -> Result<Image<'static>, tauri::Error> {
     Image::from_bytes(TRAY_ICON_PNG)
 }

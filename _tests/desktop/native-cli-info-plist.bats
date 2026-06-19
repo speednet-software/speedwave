@@ -1,25 +1,6 @@
 #!/usr/bin/env bats
-# SSOT-alignment test: verifies that each native macOS CLI binary
-# (calendar-cli, reminders-cli, mail-cli, notes-cli) carries an embedded
-# `__TEXT,__info_plist` Mach-O section with the right CFBundleIdentifier,
-# usage description, and version.
-#
-# Without this section, EventKit's `requestFullAccessToEvents` silently
-# rejects on macOS 14+ (the Calendar TCC bug fixed by this PR), and TCC
-# binds the permission row to the codesign-default identifier (e.g.
-# `calendar-cli`) instead of the sub-identifier the troubleshooting docs
-# reference (`pl.speedwave.desktop.calendar`).
-#
-# This test is macOS-only because:
-# - `segedit` (extracts Mach-O sections) ships only with macOS Xcode tools
-# - `lipo` (thins universal binaries) is macOS-only
-# - The binaries themselves are only built on macOS via build-native-macos.sh
-#
-# The test reads the source-of-truth Info.plist files directly (not the
-# embedded section) for everything except the existence-of-section check —
-# the build script (build-native-macos.sh) is responsible for stamping
-# tauri.conf.json's version into them, so this test follows the same
-# files SwiftPM linker reads at build time.
+# SSOT-alignment test: each native macOS CLI binary carries an embedded
+# `__TEXT,__info_plist` section with the right id, usage description, version. macOS-only.
 
 setup() {
     if [ "$(uname)" != "Darwin" ]; then
@@ -154,9 +135,8 @@ extract_embedded_plist() {
 }
 
 @test "embedded CFBundleShortVersionString matches tauri.conf.json version" {
-    # SSOT drift guard: build-native-macos.sh stamps tauri.conf.json's version into each
-    # CLI's Resources/Info.plist before swift build. If the stamp step is skipped or the
-    # tauri.conf.json version changes without a rebuild, this fails.
+    # build-native-macos.sh stamps tauri.conf.json's version into each
+    # CLI's Resources/Info.plist before swift build.
     local tauri_version svc bin tmp actual
     if command -v jq >/dev/null 2>&1; then
         tauri_version="$(jq -r '.version' "$REPO_ROOT/desktop/src-tauri/tauri.conf.json")"
@@ -181,9 +161,8 @@ extract_embedded_plist() {
 }
 
 @test "each CLI Info.plist has correct UsageDescription key" {
-    # Source-of-truth Info.plist files (read directly, not from binary) must
-    # carry the right TCC usage description for each service. The linker
-    # embeds these into the binary, so the source file is authoritative.
+    # Source Info.plist files (read directly, not from binary) must
+    # carry the right TCC usage description for each service.
     local svc plist key val
     for svc in "${SERVICES[@]}"; do
         plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
@@ -205,8 +184,6 @@ extract_embedded_plist() {
 }
 
 @test "Resources/Info.plist files exist for every native CLI" {
-    # Without the source plist, the linker -sectcreate flag would point at a
-    # nonexistent path and the build would fail with a cryptic ld error.
     local svc plist
     for svc in "${SERVICES[@]}"; do
         plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
@@ -218,10 +195,8 @@ extract_embedded_plist() {
 }
 
 @test "Package.swift files declare Info.plist linker flags for every CLI" {
-    # Drift guard: every CLI's Package.swift must carry the -sectcreate __TEXT
-    # __info_plist flags pointing at Resources/Info.plist. If a future PR adds a
-    # new native CLI without these flags, EventKit/AppleEvents calls will silently
-    # reject on macOS 14+. This test catches that at PR review time.
+    # Every CLI's Package.swift must carry the -sectcreate __TEXT
+    # __info_plist flags pointing at Resources/Info.plist.
     local svc pkg pattern
     for svc in "${SERVICES[@]}"; do
         pkg="$REPO_ROOT/native/macos/$svc/Package.swift"

@@ -163,19 +163,9 @@ export class AskUserBlockComponent {
     return q.questions[idx];
   });
 
-  /**
-   * Wires the per-input reset effect that clears `selected` and `freeformText`
-   * whenever the parent reducer hands us a new `question()` block.
-   */
+  /** Wires the per-input reset effect for each new `question()` block. */
   constructor() {
-    // Reset transient input state whenever the parent reducer hands us a
-    // new question() input. Lives in an effect (not a computed) because
-    // Angular forbids signal writes inside computed(). Note: the
-    // dependency is the entire `question()` input — any reducer-driven
-    // replacement (which always happens via spread, not in-place mutation)
-    // triggers the reset, not just `current_index` changes. That's
-    // intentional: `selected` and `freeformText` are scoped to the active
-    // slot, so a fresh block reference means a fresh slot to clear.
+    // Reset input state on new question(); effect because computed forbids signal writes.
     effect(() => {
       void this.question();
       this.selected.set(new Set());

@@ -1945,9 +1945,7 @@ describe('initializeGitHubClient', () => {
   });
 
   it('returns client + schedules background test when testConnection fails', async () => {
-    // Init no longer blocks on testConnection — it kicks the check into the
-    // background. The client is returned immediately; healthCheck reads the
-    // tracker to surface the failure.
+    // testConnection runs in the background; the client is returned immediately.
     mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
@@ -2027,8 +2025,7 @@ describe('initializeGitHubClient', () => {
     mockLoadTokenFile.mockRejectedValue(new Error('EACCES: permission denied, open /tokens/token'));
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
-    // The warning must carry the underlying error (a permissions failure must be
-    // distinguishable from a plain "token not found").
+    // The warning must carry the underlying error detail.
     const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
       .map((c) => c.join(' '))
       .join('\n');
