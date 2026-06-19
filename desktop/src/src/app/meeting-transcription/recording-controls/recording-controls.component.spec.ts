@@ -28,6 +28,25 @@ const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
   },
 ];
 
+/** Mixed default + two named mics (the shape macOS/Windows now emit). */
+const SOURCES_WITH_MICS: AudioSourceInfo[] = [
+  {
+    source: { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+    label: 'Whole meeting (system audio + your microphone)',
+    app_id: null,
+  },
+  {
+    source: { kind: 'microphone', device: 'BuiltInMicrophoneDevice' },
+    label: 'Microphone: MacBook Pro Microphone (default)',
+    app_id: null,
+  },
+  {
+    source: { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
+    label: 'Microphone: USB MIC',
+    app_id: null,
+  },
+];
+
 describe('RecordingControlsComponent', () => {
   let component: RecordingControlsComponent;
   let fixture: ComponentFixture<RecordingControlsComponent>;
@@ -132,6 +151,64 @@ describe('RecordingControlsComponent', () => {
 
   it('start() forwards the mixed source object to startRecording', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
+    await component.ngOnInit();
+    await component.start();
+    expect(svc.startRecording).toHaveBeenCalledWith(
+      { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+      'pl'
+    );
+  });
+
+  it('derives named mics from the source list and strips the "Microphone:" prefix', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    expect(component.mics().map((m) => m.name)).toEqual([
+      'MacBook Pro Microphone (default)',
+      'USB MIC',
+    ]);
+    expect(component.mics()[1].uid).toBe('AppleUSBAudioEngine:USB MIC:1');
+  });
+
+  it('shows the mic picker only when the source uses a mic', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    // Default source is mixed → picker shown.
+    expect(fixture.nativeElement.querySelector('[data-testid="mic-select"]')).not.toBeNull();
+    // Switching to System (no mic source in this list) hides it — but here all
+    // non-mixed entries are mics, so assert directly via the computed instead.
+    expect(component.micSelectable()).toBe(true);
+  });
+
+  it('overlays the chosen mic onto the mixed source at start()', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    component.onMic('AppleUSBAudioEngine:USB MIC:1');
+    await component.start();
+    expect(svc.startRecording).toHaveBeenCalledWith(
+      {
+        kind: 'mixed',
+        system: { kind: 'system_wide' },
+        mic: 'AppleUSBAudioEngine:USB MIC:1',
+      },
+      'pl'
+    );
+  });
+
+  it('overlays the chosen mic onto a mic-only source at start()', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    component.onSource(1); // the default built-in mic entry
+    component.onMic('AppleUSBAudioEngine:USB MIC:1');
+    await component.start();
+    expect(svc.startRecording).toHaveBeenCalledWith(
+      { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
+      'pl'
+    );
+  });
+
+  it('keeps the system default mic (null) when none is picked', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(

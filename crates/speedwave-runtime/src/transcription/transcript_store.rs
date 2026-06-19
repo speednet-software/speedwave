@@ -247,7 +247,11 @@ impl TranscriptStore {
                 tx: e.get().tx.clone(),
             }),
             MapEntry::Vacant(slot) => {
-                let session = TranscriptSession::load(&self.session_dir(id))?;
+                let dir = self.session_dir(id);
+                if !dir.is_dir() {
+                    return Err(StoreError::NotFound(id));
+                }
+                let session = TranscriptSession::load(&dir)?;
                 let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
                 let entry = Entry {
                     session: Arc::new(RwLock::new(session)),
@@ -263,23 +267,16 @@ impl TranscriptStore {
         }
     }
 
-    fn entry(&self, id: Uuid) -> Result<EntryHandle, StoreError> {
-        self.sessions
-            .get(&id)
-            .map(|e| EntryHandle {
-                session: e.session.clone(),
-                tx: e.tx.clone(),
-            })
-            .ok_or(StoreError::NotFound(id))
-    }
-
     /// Helper: lock-mutate-persist-emit. Bumps `last_seq`, runs `mutate` with
     /// the new seq (so it can attach it to the event), persists, and emits.
     fn with_session<F>(&self, id: Uuid, mutate: F) -> Result<(), StoreError>
     where
         F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
     {
-        let h = self.entry(id)?;
+        // `activate` loads from disk on a cache miss, so mutators work on
+        // sessions persisted by an earlier run (cache-only `entry` returned
+        // NotFound for them — the "no such transcript session" on discard).
+        let h = self.activate(id)?;
         let dir = self.session_dir(id);
         let event;
         {
@@ -304,15 +301,16 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Number of `live_segments` whose `start < threshold` — the splice point
-    /// for a fresh window decode. Avoids cloning the segment list.
+    /// Splice point for a window re-decode: first segment overlapping the
+    /// window (`end > threshold`). Keying on `end` (not `start`) drops segments
+    /// whose text runs into the window, which would otherwise duplicate.
     pub fn live_splice_at(&self, id: Uuid, threshold: Duration) -> Result<usize, StoreError> {
         let entry = self.sessions.get(&id).ok_or(StoreError::NotFound(id))?;
         let session = entry.session.read();
         Ok(session
             .live_segments
             .iter()
-            .position(|s| s.start >= threshold)
+            .position(|s| s.end > threshold)
             .unwrap_or(session.live_segments.len()))
     }
 
@@ -659,6 +657,26 @@ mod tests {
         ));
     }
 
+    /// Regression: a session persisted by an earlier run (on disk, never in
+    /// this store's cache) is still mutable. Cache-only lookup returned
+    /// NotFound — the "no such transcript session" on discard.
+    #[tokio::test]
+    async fn mutators_work_on_a_disk_only_session() {
+        let dir = tempfile::tempdir().unwrap();
+        // First store persists the session, then is dropped (cache gone).
+        let id = {
+            let s1 = TranscriptStore::with_root(dir.path());
+            s1.create(mk_session(&dir.path().join("a.wav"))).unwrap()
+        };
+        // A fresh store has an empty cache but sees the dir on disk.
+        let s2 = TranscriptStore::with_root(dir.path());
+        assert!(
+            s2.discard_audio(id).is_ok(),
+            "disk-only session must discard"
+        );
+        assert!(s2.get(id).unwrap().audio_path.is_none());
+    }
+
     #[tokio::test]
     async fn concurrent_subscribe_on_a_disk_only_session_yields_a_single_entry() {
         // Guards against the previous activate() race: two concurrent
@@ -818,5 +836,26 @@ mod tests {
             serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),
             ev
         );
+    }
+
+    /// Regression: a kept segment whose text spans into the re-decode window
+    /// (start before threshold, end after) must be spliced out so the fresh
+    /// decode doesn't duplicate it. Splicing on `start` wrongly kept it.
+    #[tokio::test]
+    async fn live_splice_drops_segment_overlapping_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .append_segment(id, seg(0.0, 10.0, "long packed"))
+            .unwrap();
+        store.append_segment(id, seg(10.0, 12.0, "after")).unwrap();
+        let at = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
+        assert_eq!(at, 0, "segment overlapping the window must be spliced out");
+        store
+            .replace_segments(id, 0, vec![seg(0.0, 8.0, "kept")])
+            .unwrap();
+        let at2 = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
+        assert_eq!(at2, 1, "a segment ending exactly at the threshold is kept");
     }
 }

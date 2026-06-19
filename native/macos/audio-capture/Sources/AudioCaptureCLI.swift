@@ -294,6 +294,101 @@ func bundleIdForAudioProcess(_ object: AudioObjectID) -> String? {
     return s.isEmpty ? nil : s
 }
 
+// MARK: - Input device enumeration (--list-mics)
+
+/// Emits a JSON array of input-capable audio devices (`{uid, name, default}`)
+/// on stdout so the UI can offer a microphone picker.
+@available(macOS 14.4, *)
+func listInputDevices() throws -> Data {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = 0
+    guard
+        AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr
+    else {
+        throw NSError(
+            domain: "AudioCapture", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "device list size query failed"])
+    }
+    let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: 0, count: count)
+    _ = ids.withUnsafeMutableBufferPointer { buf in
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize,
+            buf.baseAddress!)
+    }
+    let defaultId = defaultInputDevice()
+    var out: [[String: Any]] = []
+    for id in ids where deviceHasInput(id) {
+        guard let uid = deviceStringProperty(id, kAudioDevicePropertyDeviceUID) else { continue }
+        let name = deviceStringProperty(id, kAudioObjectPropertyName) ?? uid
+        out.append(["uid": uid, "name": name, "default": id == defaultId])
+    }
+    return try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
+}
+
+/// `true` if `device` has at least one input channel.
+@available(macOS 14.4, *)
+func deviceHasInput(_ device: AudioObjectID) -> Bool {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioObjectPropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size > 0 else {
+        return false
+    }
+    let buf = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { buf.deallocate() }
+    guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, buf) == noErr else {
+        return false
+    }
+    let list = buf.assumingMemoryBound(to: AudioBufferList.self)
+    let abl = UnsafeMutableAudioBufferListPointer(list)
+    return abl.contains { $0.mNumberChannels > 0 }
+}
+
+/// The system default input device id, or `0` if unavailable.
+@available(macOS 14.4, *)
+func defaultInputDevice() -> AudioObjectID {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var id: AudioObjectID = 0
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    _ = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
+    return id
+}
+
+/// Reads a CFString device property (e.g. UID or name) as a Swift `String`.
+@available(macOS 14.4, *)
+func deviceStringProperty(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector)
+    -> String?
+{
+    var addr = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var sz = UInt32(MemoryLayout<CFString?>.size)
+    var raw: Unmanaged<CFString>?
+    let status = withUnsafeMutablePointer(to: &raw) { ptr -> OSStatus in
+        AudioObjectGetPropertyData(device, &addr, 0, nil, &sz, ptr)
+    }
+    guard status == noErr, let cf = raw?.takeRetainedValue() else { return nil }
+    let s = cf as String
+    return s.isEmpty ? nil : s
+}
+
 // MARK: - CLI entry point
 
 /// audio-capture-cli <command> [args]
@@ -325,6 +420,14 @@ struct AudioCaptureCLI {
                 if let s = String(data: data, encoding: .utf8) { print(s) }
             } catch {
                 exitWithError("list failed: \(error.localizedDescription)")
+            }
+
+        case "--list-mics":
+            do {
+                let data = try listInputDevices()
+                if let s = String(data: data, encoding: .utf8) { print(s) }
+            } catch {
+                exitWithError("list-mics failed: \(error.localizedDescription)")
             }
 
         case "--record":
@@ -647,8 +750,11 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
 /// unavailable" (the UI then deep-links the user to System Settings) — it does
 /// not crash. Blocks for the prompt result. Returns `true` if granted.
 func preflightSystemAudioConsent() -> Bool {
+    // `TCCAccessRequest(service, options, completion)` — 3 args; the nullable
+    // options dictionary must be passed or TCC treats the block as the options
+    // and crashes with `-[__NSMallocBlock__ objectForKey:]`.
     typealias TCCRequestFn = @convention(c) (
-        CFString, @escaping @convention(block) (Bool) -> Void
+        CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void
     ) -> Void
     guard let handle = dlopen(
         "/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW)
@@ -665,7 +771,7 @@ func preflightSystemAudioConsent() -> Bool {
     let service = "kTCCServiceAudioCapture" as CFString
     let sema = DispatchSemaphore(value: 0)
     var granted = false
-    request(service) { ok in
+    request(service, nil) { ok in
         granted = ok
         sema.signal()
     }
@@ -705,6 +811,21 @@ func requestMicrophoneAccess() -> Bool {
 func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) throws {
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
+
+    // Route to a named device before reading the format — the engine's input
+    // format follows the bound device. A missing/unknown UID falls back to the
+    // system default (logged), so a stale picked device never fails capture.
+    if case .device(let uid) = selector {
+        if let deviceId = inputDeviceId(forUID: uid) {
+            do {
+                try inputNode.auAudioUnit.setDeviceID(deviceId)
+            } catch {
+                logErr("mic device '\(uid)' could not be set (\(error)); using default")
+            }
+        } else {
+            logErr("mic device UID '\(uid)' not found; using default")
+        }
+    }
     let format = inputNode.outputFormat(forBus: 0)
 
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buf, _ in
@@ -729,17 +850,30 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             offsetNs: offset)
     }
 
-    // The `selector` is plumbed so a future iteration can route to a named
-    // device UID via `kAudioDevicePropertyDeviceUID`; today we honor the
-    // engine default. We log the selector for transparency.
-    switch selector {
-    case .device(let uid):
-        logErr("mic selector device='\(uid)' (default device used; named routing not yet wired)")
-    case .defaultDevice, .none:
-        break
-    }
-
     engine.prepare()
     try engine.start()
     session.micEngine = engine
+}
+
+/// Resolves a device UID string to its `AudioDeviceID`, or `nil` if no input
+/// device matches (the UID is stale or the device was unplugged).
+@available(macOS 14.4, *)
+func inputDeviceId(forUID uid: String) -> AudioDeviceID? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard
+        AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr
+    else { return nil }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: 0, count: count)
+    _ = ids.withUnsafeMutableBufferPointer { buf in
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, buf.baseAddress!)
+    }
+    return ids.first { deviceHasInput($0) && deviceStringProperty($0, kAudioDevicePropertyDeviceUID) == uid }
 }

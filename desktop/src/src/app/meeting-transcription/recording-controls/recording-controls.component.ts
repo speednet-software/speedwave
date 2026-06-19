@@ -18,6 +18,28 @@ import type {
   Language,
 } from '../../models/transcript';
 
+/** A named input device for the microphone dropdown. */
+interface MicChoice {
+  uid: string;
+  name: string;
+}
+
+/**
+ * A source's mic device id, or null if it isn't a named-mic source.
+ * @param s - the audio source.
+ */
+function micDeviceId(s: AudioSource): string | null {
+  return s.kind === 'microphone' && s.device ? s.device : null;
+}
+
+/**
+ * Strips the `Microphone: ` prefix from a source label for the dropdown.
+ * @param label - the source's display label.
+ */
+function micName(label: string): string {
+  return label.replace(/^Microphone:\s*/, '');
+}
+
 /**
  * Joins compiled backends into a short "Acceleration: …" string.
  * @param backends - whisper.cpp backends compiled into this build.
@@ -77,6 +99,23 @@ function accelLabel(backends: Backend[]): string {
             }
           </select>
         </label>
+
+        @if (micSelectable() && mics().length > 0) {
+          <label class="flex items-center gap-1">
+            <span class="text-[var(--ink-mute)]">Microphone</span>
+            <select
+              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
+              data-testid="mic-select"
+              [disabled]="recording()"
+              (change)="onMic($any($event.target).value)"
+            >
+              <option value="" [selected]="micDevice() === null">System default</option>
+              @for (m of mics(); track m.uid) {
+                <option [value]="m.uid" [selected]="m.uid === micDevice()">{{ m.name }}</option>
+              }
+            </select>
+          </label>
+        }
 
         <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
           {{ accel() }}
@@ -163,6 +202,19 @@ export class RecordingControlsComponent implements OnInit {
   readonly mixedSourceSelected = computed(
     () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
   );
+  /** Chosen mic device id (UID on macOS, name on Windows); null = system default. */
+  readonly micDevice = signal<string | null>(null);
+  /** Named input devices, derived from the source list. */
+  readonly mics = computed<MicChoice[]>(() =>
+    this.sources()
+      .filter((s) => micDeviceId(s.source) !== null)
+      .map((s) => ({ uid: micDeviceId(s.source) as string, name: micName(s.label) }))
+  );
+  /** Whether the chosen source uses a mic (mixed or mic-only) — shows the picker. */
+  readonly micSelectable = computed(() => {
+    const k = this.sources()[this.sourceIndex()]?.source.kind;
+    return k === 'mixed' || k === 'microphone';
+  });
   /** The active session id (set on start, cleared on stop). */
   private activeSessionId: string | null = null;
 
@@ -223,13 +275,33 @@ export class RecordingControlsComponent implements OnInit {
     if (i >= 0 && i < this.sources().length) this.sourceIndex.set(i);
   }
 
+  /**
+   * Updates the chosen mic device.
+   * @param uid - device id, or '' for the system default.
+   */
+  onMic(uid: string): void {
+    this.micDevice.set(uid === '' ? null : uid);
+  }
+
+  /**
+   * Overlays the chosen mic onto a mixed/mic source (no-op for others).
+   * @param src - the picked source.
+   */
+  private applyMic(src: AudioSource): AudioSource {
+    const mic = this.micDevice();
+    if (src.kind === 'mixed') return { ...src, mic };
+    if (src.kind === 'microphone') return { ...src, device: mic };
+    return src;
+  }
+
   /** Starts recording the chosen source in the chosen language. */
   async start(): Promise<void> {
-    const src: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
-    if (!src) {
+    const picked: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
+    if (!picked) {
       this.error.set('no audio source selected');
       return;
     }
+    const src = this.applyMic(picked);
     this.busy.set(true);
     this.error.set('');
     try {

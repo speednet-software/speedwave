@@ -150,20 +150,12 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// `true` if a Whisper model with this catalogue key is present and its
-    /// on-disk size matches the catalogue's `approx_bytes` within a small
-    /// tolerance (a cheap "is this a complete file" sanity check — the SHA256
-    /// was already verified on download, and we don't re-hash on every status
-    /// query).
+    /// `true` if the model file exists at ≥90% of its catalogue size estimate.
+    /// Download SHA256-verifies before rename, so the floor only rejects a
+    /// truncated leftover (the estimate drifts as upstream re-publishes).
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
-            Ok(m) => {
-                let on_disk = m.len();
-                // approx_bytes is from the HF API — exact for these files, but
-                // allow a tiny slack in case of a metadata vs content mismatch.
-                let diff = on_disk.abs_diff(info.approx_bytes);
-                diff <= 64 || on_disk == info.approx_bytes
-            }
+            Ok(m) => m.len() >= info.approx_bytes / 10 * 9,
             Err(_) => false,
         }
     }
@@ -840,6 +832,46 @@ mod tests {
         // delete removes it:
         store.delete_model("tiny").unwrap();
         assert!(!path.exists());
+    }
+
+    /// Regression: a complete file whose size drifts from the catalogue
+    /// estimate is still "present" (large-v3 showed "not downloaded" under the
+    /// old 64-byte tolerance). Sparse `set_len` keeps multi-GB sizes instant.
+    #[test]
+    fn present_check_tolerates_size_drift_but_rejects_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        let info = whisper_model("large-v3").unwrap();
+        std::fs::create_dir_all(store.whisper_dir()).unwrap();
+        let path = store.whisper_path(info);
+
+        let write_sparse = |len: u64| {
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(len).unwrap();
+        };
+
+        // Exactly the estimate → present.
+        write_sparse(info.approx_bytes);
+        assert!(store.whisper_is_present(info), "exact size must be present");
+
+        // Larger than the estimate (the real-world large-v3 case) → present.
+        write_sparse(info.approx_bytes + 409_792);
+        assert!(
+            store.whisper_is_present(info),
+            "a complete file larger than the estimate must be present"
+        );
+
+        // Just above the 90% floor → present; just below → not.
+        write_sparse(info.approx_bytes / 10 * 9 + 1);
+        assert!(
+            store.whisper_is_present(info),
+            "≥90% of estimate is present"
+        );
+        write_sparse(info.approx_bytes / 10 * 9 - 1);
+        assert!(
+            !store.whisper_is_present(info),
+            "a clearly-truncated file (<90%) is not present"
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ import {
   OnInit,
   ViewChild,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -131,6 +132,18 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     const e = this.error().toLowerCase();
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
   });
+
+  /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
+  constructor() {
+    let last: string | undefined;
+    effect(() => {
+      const state = this.transcription.active()?.status.state;
+      if (state && state !== last && (state === 'done' || state === 'failed')) {
+        void this.sessionList?.refresh();
+      }
+      last = state;
+    });
+  }
 
   /** Loads the opt-in toggle on first paint. */
   async ngOnInit(): Promise<void> {

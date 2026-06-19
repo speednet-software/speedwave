@@ -50,6 +50,16 @@ struct ProcessListEntry {
     _object_id: i64,
 }
 
+/// One entry from `audio-capture-cli --list-mics` — an input device's CoreAudio
+/// `uid` (the selector `--mic` understands), display `name`, and whether it is
+/// the system default.
+#[derive(Debug, Deserialize)]
+struct MicListEntry {
+    uid: String,
+    name: String,
+    default: bool,
+}
+
 /// Header line emitted once at the start of a `--record` stream. `streams` tells
 /// us whether the CLI is emitting a mic stream alongside the system one (so we
 /// know to mix); `started_at_ns` is informational (offsets are relative) — kept
@@ -119,11 +129,32 @@ impl AudioCapture for MacOsAudioCapture {
             label: "System (everything)".to_string(),
             app_id: None,
         });
-        sources.push(AudioSourceInfo {
-            source: AudioSource::Microphone { device: None },
-            label: "Microphone (default input)".to_string(),
-            app_id: None,
-        });
+        // One entry per real input device (named, default flagged), so the
+        // picker can match the mic the user uses in Teams/Slack. Falls back to
+        // the generic default mic if enumeration fails.
+        match list_microphones() {
+            Ok(mics) if !mics.is_empty() => {
+                for m in mics {
+                    let label = if m.default {
+                        format!("Microphone: {} (default)", m.name)
+                    } else {
+                        format!("Microphone: {}", m.name)
+                    };
+                    sources.push(AudioSourceInfo {
+                        source: AudioSource::Microphone {
+                            device: Some(m.uid),
+                        },
+                        label,
+                        app_id: None,
+                    });
+                }
+            }
+            _ => sources.push(AudioSourceInfo {
+                source: AudioSource::Microphone { device: None },
+                label: "Microphone (default input)".to_string(),
+                app_id: None,
+            }),
+        }
         for e in entries {
             // Skip our own helpers and the obvious system daemons that have no
             // bundle id — they're noise in the picker.
@@ -379,6 +410,24 @@ impl AudioStream for MixedCliStream {
 /// so the CLI emits stream 0 (system) + stream 1 (mic); `CliAudioStream` sums
 /// them. The inner `system` must itself be `SystemWide`/`Process` (not a nested
 /// `Mixed` or a `Microphone`).
+/// Lists input devices via `audio-capture-cli --list-mics` (uid, name, default).
+fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
+    let output = super::super::binary::command(CLI_NAME)
+        .arg("--list-mics")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| CaptureError::Failed(format!("spawn {CLI_NAME} --list-mics: {e}")))?;
+    if !output.status.success() {
+        return Err(CaptureError::Failed(format!(
+            "{CLI_NAME} --list-mics exited {:?}",
+            output.status.code()
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| CaptureError::Failed(format!("parse --list-mics JSON: {e}")))
+}
+
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
@@ -488,6 +537,26 @@ mod tests {
         .unwrap();
         assert_eq!(s2, "pid:99");
         assert_eq!(m2, "BuiltInMic");
+    }
+
+    #[test]
+    fn list_mics_json_parses_uid_name_default() {
+        let json = br#"[
+            {"uid":"BuiltInMicrophoneDevice","name":"MacBook Pro Microphone","default":true},
+            {"uid":"AppleUSBAudioEngine:USB MIC:1","name":"USB MIC","default":false}
+        ]"#;
+        let mics: Vec<MicListEntry> = serde_json::from_slice(json).unwrap();
+        assert_eq!(mics.len(), 2);
+        assert_eq!(mics[0].uid, "BuiltInMicrophoneDevice");
+        assert_eq!(mics[0].name, "MacBook Pro Microphone");
+        assert!(mics[0].default);
+        assert!(!mics[1].default);
+    }
+
+    #[test]
+    fn list_mics_rejects_malformed_json() {
+        let mics: Result<Vec<MicListEntry>, _> = serde_json::from_slice(b"{not json}");
+        assert!(mics.is_err());
     }
 
     #[test]

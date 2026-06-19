@@ -1,18 +1,7 @@
-//! Opt-in end-to-end transcription pipeline test (ADR-056). Drives a real WAV
-//! through `FileAudioCapture` → `TranscriptDriver` (live) → `run_finalize`
-//! (offline) → `to_markdown`, with a real `WhisperCppTranscriber`, and asserts
-//! the chain produces a transcript. Gated so normal `make test` (no model on
-//! disk) skips it; the E2E VM runs it with `RUN_STT_E2E=1` + a downloaded model.
-//!
-//! Env:
-//!   RUN_STT_E2E=1                 enable the test (else it returns early)
-//!   STT_E2E_MODEL=<key>           Whisper catalogue key (default "small")
-//!   STT_E2E_WAV=<path>            16 kHz mono WAV to transcribe; if unset, a
-//!                                 synthetic tone is used (chain runs, but the
-//!                                 transcript may be empty — only structural
-//!                                 assertions apply without a real-speech clip)
-//!   STT_E2E_EXPECT=<substr>       case-insensitive substring the markdown must
-//!                                 contain (only checked when STT_E2E_WAV is set)
+//! Opt-in E2E: capture → live → finalize → markdown with a real Whisper model.
+//! Gated by env (normal `make test` skips it): `RUN_STT_E2E=1`,
+//! `STT_E2E_MODEL` (default "small"), `STT_E2E_WAV` (else a synthetic tone),
+//! `STT_E2E_EXPECT` (markdown substring assertion, requires STT_E2E_WAV).
 
 #![cfg(feature = "audio-transcription")]
 
