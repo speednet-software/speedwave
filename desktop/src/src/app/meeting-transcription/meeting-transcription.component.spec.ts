@@ -88,8 +88,10 @@ describe('MeetingTranscriptionComponent', () => {
     const link = fixture.nativeElement.querySelector('[data-testid="download-model-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toContain('/settings');
-    // Panes are not rendered behind the gate.
+    // Neither the panes nor the header chrome render behind the gate.
     expect(fixture.nativeElement.querySelector('app-recording-controls')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="quality-disclaimer"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('header')).toBeNull();
   });
 
   it('fails open (shows the panes) if the model check errors', async () => {

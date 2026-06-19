@@ -32,38 +32,6 @@ import { SessionListComponent } from './session-list/session-list.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
-      <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-        <div>
-          <h1 class="text-lg font-semibold">Meeting transcription</h1>
-          <p class="text-sm text-[var(--ink-mute)]">
-            Audio is transcribed locally on this machine. "Send to Claude" uses the network.
-          </p>
-          <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
-            Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
-            spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
-          </p>
-        </div>
-      </header>
-
-      @if (error()) {
-        <div
-          class="mx-6 mt-3 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
-          role="alert"
-          data-testid="meeting-transcription-error"
-        >
-          {{ error() }}
-          @if (showOpenSettingsLink()) {
-            <button
-              type="button"
-              class="mono ml-2 underline"
-              data-testid="open-mic-settings"
-              (click)="openMicrophoneSettings()"
-            >
-              Open Privacy settings →
-            </button>
-          }
-        </div>
-      }
       @if (modelReady() === false) {
         <section
           class="flex flex-1 flex-col items-center justify-center bg-[var(--bg)] p-8"
@@ -85,6 +53,38 @@ import { SessionListComponent } from './session-list/session-list.component';
           </div>
         </section>
       } @else {
+        <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
+          <div>
+            <h1 class="text-lg font-semibold">Meeting transcription</h1>
+            <p class="text-sm text-[var(--ink-mute)]">
+              Audio is transcribed locally on this machine. "Send to Claude" uses the network.
+            </p>
+            <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
+              Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
+              spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
+            </p>
+          </div>
+        </header>
+
+        @if (error()) {
+          <div
+            class="mx-6 mt-3 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
+            role="alert"
+            data-testid="meeting-transcription-error"
+          >
+            {{ error() }}
+            @if (showOpenSettingsLink()) {
+              <button
+                type="button"
+                class="mono ml-2 underline"
+                data-testid="open-mic-settings"
+                (click)="openMicrophoneSettings()"
+              >
+                Open Privacy settings →
+              </button>
+            }
+          </div>
+        }
         <div class="flex flex-1 gap-4 overflow-hidden p-6">
           <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
