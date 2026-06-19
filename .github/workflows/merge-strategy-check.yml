@@ -1,8 +1,9 @@
 # Merge Strategy Check — ensures PRs to main follow conventions
 #
 # - Release-please and backmerge PRs are exempt
-# - All other PRs must have conventional commit titles (for squash merge)
-# - `chore` is rejected (release-please ignores it); see scripts/validate-pr-title-main.sh
+# - All other PRs must have release-triggering conventional commit titles
+#   for squash merge, so the desktop updater sees a newer semver.
+# - Non-release types are rejected; see scripts/validate-pr-title-main.sh
 
 name: Merge Strategy Check
 
