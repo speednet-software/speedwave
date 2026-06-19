@@ -116,14 +116,6 @@ export class TranscriptionService {
   }
 
   /**
-   * Drops the recorded audio file (the transcript stays).
-   * @param sessionId - the session whose audio to discard.
-   */
-  discardAudio(sessionId: string): Promise<void> {
-    return this.tauri.invoke<void>('discard_transcript_audio', { sessionId });
-  }
-
-  /**
    * Renders the session as markdown (with the "approximate labels" footer).
    * @param sessionId - the session to render.
    */

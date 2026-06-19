@@ -23,7 +23,7 @@ The supporting sub-decisions:
 - **Live-transcript transport** = an append-only event stream with a monotonic `seq` plus snapshot recovery, reusing the _delivery semantics_ of `MsgStore::history_plus_stream()` (ADR-043) — not the full JSON-patch protocol (ADR-042).
 - **Mixed capture (system loopback + microphone) is the product default** — both streams are summed to one 16 kHz mono stream before the engine sees them, so the transcription driver is platform-agnostic.
 - **No per-feature toggle** (Amendment 2). Access is governed by the beta gate (ADR-058); a checked-in repo `.speedwave.json` was never able to enable host-audio recording and still cannot (it carries no transcription field).
-- **Audio retention** = WAV always kept, with manual "delete transcript" / "discard audio" controls per recording; no automatic expiry (YAGNI).
+- **Audio retention** = WAV kept until the user deletes the recording. A single "delete" per recording removes the whole session (audio + transcript); no separate discard-audio control, no automatic expiry (YAGNI).
 
 ## Why
 

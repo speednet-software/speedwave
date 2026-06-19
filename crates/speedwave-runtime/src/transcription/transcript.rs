@@ -61,7 +61,7 @@ pub struct TranscriptSession {
     pub live_segments: Vec<Segment>,
     /// Segments from the higher-quality offline pass; `None` until it runs.
     pub final_segments: Option<Vec<Segment>>,
-    /// On-disk audio file (`None` once "discard audio" was applied).
+    /// On-disk audio file (`None` if missing/never recorded).
     pub audio_path: Option<PathBuf>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
@@ -109,17 +109,6 @@ impl TranscriptSession {
     /// Installs `final_segments` from the higher-quality offline pass.
     pub fn set_final_segments(&mut self, final_segs: Vec<Segment>) {
         self.final_segments = Some(final_segs);
-    }
-
-    /// Drops the recorded audio file (best-effort) and clears `audio_path`.
-    /// After this, re-transcription is impossible.
-    pub fn discard_audio(&mut self) -> std::io::Result<()> {
-        if let Some(p) = self.audio_path.take() {
-            if p.exists() {
-                std::fs::remove_file(&p)?;
-            }
-        }
-        Ok(())
     }
 
     /// Renders the transcript as markdown: a header plus one timestamped line
@@ -310,19 +299,6 @@ mod tests {
         s.set_final_segments(vec![seg(0.0, 2.0, "final")]);
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "final");
-    }
-
-    #[test]
-    fn discard_audio_clears_path_and_removes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.wav");
-        std::fs::write(&path, b"fake wav").unwrap();
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), path.clone());
-        s.discard_audio().unwrap();
-        assert!(s.audio_path.is_none());
-        assert!(!path.exists());
-        // Idempotent — a second call is a no-op.
-        s.discard_audio().unwrap();
     }
 
     #[test]

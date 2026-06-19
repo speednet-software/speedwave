@@ -560,18 +560,6 @@ pub async fn delete_transcript(
 }
 
 #[tauri::command]
-pub async fn discard_transcript_audio(
-    session_id: String,
-    store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<(), String> {
-    let id = parse_transcript_id(&session_id)?;
-    // Routed through the store so the in-memory cache, disk, and broadcast
-    // stream stay in sync (subscribers see an `AudioDiscarded` event).
-    store.discard_audio(id).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn get_transcript_markdown(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,

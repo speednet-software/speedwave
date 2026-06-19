@@ -1255,7 +1255,6 @@ fn main() {
             transcription_cmd::list_transcripts,
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
-            transcription_cmd::discard_transcript_audio,
             transcription_cmd::get_transcript_markdown,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,

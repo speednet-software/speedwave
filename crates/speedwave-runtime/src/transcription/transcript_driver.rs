@@ -745,7 +745,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let (id, _wav) = seed_finalizing_session(&store, 4.0);
-        // Delete the audio after seeding (simulates "discard audio" / corruption).
+        // Delete the audio after seeding (simulates a missing/corrupt WAV).
         let _ = std::fs::remove_file(store.session_dir(id).join("audio.wav"));
 
         let err = run_finalize(FinalizeConfig {

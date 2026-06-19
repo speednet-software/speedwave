@@ -63,11 +63,6 @@ pub enum TranscriptEvent {
         /// The higher-quality offline segments.
         segments: Vec<Segment>,
     },
-    /// The recorded WAV was discarded; re-transcription is no longer possible.
-    AudioDiscarded {
-        /// Monotonic seq.
-        seq: u64,
-    },
     /// The session reached `Done`; the snapshot reflects the final state.
     Finished {
         /// Monotonic seq.
@@ -84,7 +79,6 @@ impl TranscriptEvent {
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
-            | TranscriptEvent::AudioDiscarded { seq, .. }
             | TranscriptEvent::Finished { seq, .. } => *seq,
         }
     }
@@ -375,30 +369,6 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Marks the session `Done` and emits `Finished`.
-    /// Drops the WAV (best-effort) and clears `audio_path` in the cached
-    /// session; emits `AudioDiscarded` so subscribers stay in sync.
-    pub fn discard_audio(&self, id: Uuid) -> Result<u64, StoreError> {
-        let mut path_to_remove: Option<PathBuf> = None;
-        let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
-            path_to_remove = s.audio_path.take();
-            TranscriptEvent::AudioDiscarded { seq }
-        })?;
-        if let Some(p) = path_to_remove {
-            if p.exists() {
-                // Best-effort: log but don't fail — the audio_path field is
-                // already cleared and persisted, so re-transcription is gone
-                // either way. A leftover file on disk is harmless.
-                if let Err(e) = std::fs::remove_file(&p) {
-                    log::warn!("could not remove discarded audio file {p:?}: {e}");
-                }
-            }
-        }
-        Ok(seq_out)
-    }
-
     /// Marks a session done and returns the emitted event sequence number.
     pub fn finish(&self, id: Uuid) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -613,53 +583,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discard_audio_updates_cache_persists_and_emits_event() {
-        let dir = tempfile::tempdir().unwrap();
-        let wav = dir.path().join("a.wav");
-        std::fs::write(&wav, b"fakewav").unwrap();
-        let store = TranscriptStore::with_root(dir.path());
-        let id = store.create(mk_session(&wav)).unwrap();
-
-        // Subscribe before the discard so we see the event live.
-        let mut events = store.subscribe(id).unwrap().events;
-        store.discard_audio(id).unwrap();
-
-        // 1) cache reflects the cleared path
-        assert!(store.get(id).unwrap().audio_path.is_none());
-        // 2) disk reflects the cleared path
-        let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
-        assert!(on_disk.audio_path.is_none());
-        // 3) the WAV file is gone
-        assert!(!wav.exists());
-        // 4) subscribers see the event
-        let ev = events.recv().await.unwrap();
-        assert!(matches!(ev, TranscriptEvent::AudioDiscarded { .. }));
-    }
-
-    #[tokio::test]
-    async fn discard_audio_is_idempotent_when_audio_path_is_already_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path());
-        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        store.discard_audio(id).unwrap();
-        // Second call still increments seq (cheap to bump) and stays Ok.
-        store.discard_audio(id).unwrap();
-        assert!(store.get(id).unwrap().audio_path.is_none());
-    }
-
-    #[tokio::test]
-    async fn discard_audio_on_unknown_id_is_not_found() {
+    async fn finish_on_unknown_id_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         assert!(matches!(
-            store.discard_audio(Uuid::new_v4()).unwrap_err(),
+            store.finish(Uuid::new_v4()).unwrap_err(),
             StoreError::NotFound(_)
         ));
     }
 
     /// Regression: a session persisted by an earlier run (on disk, never in
     /// this store's cache) is still mutable. Cache-only lookup returned
-    /// NotFound — the "no such transcript session" on discard.
+    /// NotFound — the "no such transcript session" on a mutator.
     #[tokio::test]
     async fn mutators_work_on_a_disk_only_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -670,11 +605,8 @@ mod tests {
         };
         // A fresh store has an empty cache but sees the dir on disk.
         let s2 = TranscriptStore::with_root(dir.path());
-        assert!(
-            s2.discard_audio(id).is_ok(),
-            "disk-only session must discard"
-        );
-        assert!(s2.get(id).unwrap().audio_path.is_none());
+        assert!(s2.finish(id).is_ok(), "disk-only session must be mutable");
+        assert!(matches!(s2.get(id).unwrap().status, TranscriptStatus::Done));
     }
 
     #[tokio::test]
@@ -744,7 +676,6 @@ mod tests {
                 seq: 7,
                 segments: vec![seg(0.0, 1.0, "f")],
             },
-            TranscriptEvent::AudioDiscarded { seq: 8 },
             TranscriptEvent::Finished { seq: 9 },
         ] {
             let expected = match &ev {
@@ -753,7 +684,6 @@ mod tests {
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
-                TranscriptEvent::AudioDiscarded { seq } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
             };
             assert_eq!(ev.seq(), expected);
