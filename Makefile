@@ -577,7 +577,8 @@ test-desktop-build: build-angular build-mcp
 # Fast config validation — stable, runs in `make test`.
 test-desktop-config:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats
+	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
+	  _tests/desktop/backmerge-alignment.bats
 	@echo "✅ Desktop config tests passed"
 
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
