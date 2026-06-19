@@ -64,6 +64,12 @@ The mapping is kept honest by `hash_inputs_cover_copy_sources`: it parses every
 if any source is not covered by the image's declared inputs — an undeclared
 source would ship stale code without a rebuild.
 
+The hash walk rejects symlinks (the copier dereferences them, so a skipped link
+would change image content without changing the hash) but skips any
+`node_modules/` directory: it is gitignored, installed via `npm ci` inside the
+build (`--from=builder`), never copied from the build context, and its internal
+`.bin/*` symlinks are not image content.
+
 **Terminology:** this is a hash of **build inputs**, not image content. Base
 images (`node:24-*` etc.) remain external and mutable, exactly as before
 (playwright pins its base by digest; the rest float).
