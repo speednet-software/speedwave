@@ -1,10 +1,6 @@
 /**
  * MCP tools for the oauth worker — `refresh` and `forget`.
- *
- * Neither tool accepts a `service` parameter. The caller's service id is
- * derived from the incoming bearer token via the bearer-map maintained by the
- * Rust supervisor (ADR-060 decision 3b). This eliminates the
- * "compromised-caller forges service" failure mode.
+ * Service id is derived from the bearer token, not a parameter (ADR-060).
  */
 import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
@@ -60,11 +56,7 @@ export interface ToolDeps {
 /** Serializes `fn` per service key; concurrent callers queue FIFO. */
 type ServiceMutex = <T>(service: string, fn: () => Promise<T>) => Promise<T>;
 
-/**
- * Per-service promise-chain mutex. Rotating refresh tokens (Slack) are
- * single-use, so load→refresh→save must never interleave for one service;
- * forget is serialized through the same chain.
- */
+/** Per-service promise-chain mutex (rotating refresh tokens are single-use). */
 function createServiceMutex(): ServiceMutex {
   const tails = new Map<string, Promise<void>>();
   return async <T>(service: string, fn: () => Promise<T>): Promise<T> => {
@@ -116,9 +108,6 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
 
 /**
  * Resolve `service` from `ctx.caller` and the on-disk bearer map.
- * Empty caller (`''`) means the request was authenticated with the supervisor's
- * primary token; this worker has no tool the supervisor itself should call,
- * so we treat it as unauthorized.
  * @param deps - dependencies (used for stateDir)
  * @param ctx - per-call context with caller id
  */
@@ -207,8 +196,7 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
     scopes: state.scopes,
     refreshToken: state.refreshToken,
   };
-  // Provider-specific validation when requirements depend on grant/auth style
-  // (generic); otherwise fall back to the static requiredFields list.
+  // Provider validation if present, else the static requiredFields check.
   const validationError = provider.validateRequest
     ? provider.validateRequest(refreshReq)
     : missingStaticField(provider.requiredFields, state.providerData);
@@ -223,11 +211,7 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
     return errorResult(`${validationError.code}: ${validationError.message}`);
   }
 
-  // Rate limit: if access token is still valid AND last refresh was within the
-  // window, skip the IdP round-trip. (Slows refresh-in-a-loop after RCE —
-  // ADR-060.) Returns success-noop, not an error: a caller that lost the
-  // single-flight race re-reads the freshly written token and retries; the
-  // audit log keeps the rate_limited signal.
+  // Rate limit: skip IdP call if token still valid and refresh is recent.
   const expiresAtMs = Date.parse(state.expiresAt);
   const lastRefreshMs = Date.parse(state.lastRefreshAt);
   const skewMs = 60_000;
@@ -265,8 +249,7 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
   }
 
   const nowMs = now();
-  // Clamp the IdP-supplied lifetime so `new Date(...)` stays in range — an
-  // absurd expiresIn would otherwise throw RangeError out of this handler.
+  // Clamp the IdP-supplied lifetime so `new Date(...)` stays in range.
   const expiresInMs = Math.min(result.value.expiresIn, MAX_EXPIRES_IN_SECONDS) * 1000;
   const newState: OAuthState = {
     ...state,

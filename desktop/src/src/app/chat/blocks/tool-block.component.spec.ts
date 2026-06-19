@@ -81,9 +81,6 @@ describe('ToolBlockComponent', () => {
       fixture.detectChanges();
 
       const status = fixture.nativeElement.querySelector('[data-testid="tool-status"]');
-      // Production renders a centred two-layer Material spinner (root SVG
-      // rotates at one period, the inner circle's stroke-dasharray grows
-      // and shrinks at a coprime period) so the loop seam is invisible.
       expect(status?.tagName.toLowerCase()).toBe('svg');
       expect(status?.classList.contains('spin-svg')).toBe(true);
       const circle = status?.querySelector('circle');
@@ -125,8 +122,6 @@ describe('ToolBlockComponent', () => {
       );
       fixture.detectChanges();
 
-      // The border color class is applied to the outer wrapper; assert the
-      // rendered classes contain the muted gray rail and not the red one.
       const region = fixture.nativeElement.querySelector('[role="region"]') as HTMLElement | null;
       expect(region?.className).toContain('border-[var(--ink-mute)]/50');
       expect(region?.className).not.toContain('red');
@@ -158,9 +153,6 @@ describe('ToolBlockComponent', () => {
   });
 
   describe('collapse default', () => {
-    // Every tool block now starts collapsed regardless of status — the user
-    // expands by clicking the header. This avoids surprise expansion of long
-    // outputs in fresh chats.
     it('collapses running tools by default', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
@@ -419,8 +411,7 @@ describe('ToolBlockComponent', () => {
     it('wires role=region and aria-labelledby/aria-controls/aria-expanded', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
-      // Tool blocks default to collapsed — expand first so the body region
-      // (the [role="region"] container) is rendered for the ARIA assertions.
+      // Expand first so the [role="region"] body renders.
       component.toggleCollapsed();
       fixture.detectChanges();
 
@@ -458,9 +449,6 @@ describe('ToolBlockComponent', () => {
     });
 
     it('toggles when the header button is activated (Enter/Space dispatch click)', () => {
-      // Native <button> elements receive a synthesised `click` from Enter/Space.
-      // We assert the click pathway here; browser-level key→click translation is
-      // covered by Angular's own DOM tests, not ours.
       setTool(makeTool({ status: 'done' }));
       fixture.detectChanges();
 
@@ -515,8 +503,7 @@ describe('ToolBlockComponent', () => {
 
       component.toggleCollapsed();
 
-      // toggleCollapsed must not mutate the bound tool — the override lives
-      // in component-private state, so every original key must be unchanged.
+      // toggleCollapsed must not mutate the bound tool.
       expect(tool).toEqual(snapshot);
     });
 

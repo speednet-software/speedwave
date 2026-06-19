@@ -47,9 +47,6 @@ describe('UpdateSectionComponent', () => {
   });
 
   describe('auto-check defaults (no UI)', () => {
-    // The toggle + frequency dropdown were removed — auto-check is always on
-    // with a fixed 12 h interval. The component rewrites persisted settings
-    // on init when they drift from those defaults.
     it('rewrites backend settings when persisted state has auto_check=false', async () => {
       const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
       mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {

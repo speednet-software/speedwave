@@ -7,17 +7,14 @@
 export const MAX_BODY_BYTES = 256 * 1024;
 
 /**
- * Reads at most `MAX_BODY_BYTES` of the response (streaming, never buffering a
- * larger body), then parses JSON. A hostile token endpoint cannot OOM the
- * worker — the read aborts once the cap is crossed.
+ * Reads at most `MAX_BODY_BYTES` of the response (streaming), then parses JSON.
  * @param response - the token endpoint response
  */
 export async function readJsonCapped(
   response: Response
 ): Promise<{ ok: true; json: Record<string, unknown> } | { ok: false; message: string }> {
   const ctype = response.headers.get('content-type') ?? '';
-  // application/json or a +json suffix type (e.g. application/problem+json) —
-  // a bare /json/ substring match would pass crafted types like text/jsonx.
+  // application/json or a +json suffix type (e.g. application/problem+json).
   if (!/^application\/(?:[^;]+\+)?json\b/i.test(ctype)) {
     return { ok: false, message: `unexpected content-type '${ctype}'` };
   }
@@ -42,9 +39,7 @@ export async function readJsonCapped(
 }
 
 /**
- * Streams the response body, returning its text or `null` once `maxBytes` is
- * crossed (aborting the read). Context7 has an undici-specific counterpart; the
- * body types differ (WHATWG stream vs undici), so they stay separate.
+ * Streams the response body, returning its text or `null` once `maxBytes` is crossed.
  * @param response - the response whose body to read
  * @param maxBytes - upper bound on total bytes
  */

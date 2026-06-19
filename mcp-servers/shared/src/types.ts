@@ -470,11 +470,7 @@ export interface SSEEvent {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Optional per-call context passed to tool handlers. Currently carries the
- * authenticated caller id resolved from the request bearer token (set by the
- * shared `bearerAuth` middleware via `auth.callerTokens`). Tools that need to
- * derive identity from the bearer (e.g. the `oauth` worker per ADR-060) read
- * `context.caller`; tools that don't care can ignore it.
+ * Optional per-call context passed to tool handlers (caller id from bearer token, ADR-060).
  */
 export interface ToolHandlerContext {
   /** Caller id, '' for primary supervisor token, '' if auth is unset. */

@@ -1,9 +1,5 @@
 /**
  * Health-status accessor tests for TokenManager (post-ADR-060).
- *
- * Refresh logic moved to the host-side `oauth` worker — those code paths are
- * tested in `mcp-servers/shared/src/oauth-client.test.ts`. The SharePoint
- * worker's own refresh round-trip is tested in `client.test.ts`.
  */
 import { describe, it, expect } from 'vitest';
 import { TokenManager } from './token-manager.js';

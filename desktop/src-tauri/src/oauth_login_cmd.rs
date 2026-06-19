@@ -1,15 +1,6 @@
 //! Tauri command: open the host's terminal application running
-//! `speedwave login` for the chosen project.
-//!
-//! Why a system terminal? Claude Code's `/login` (the OAuth interactive flow
-//! the user triggers at the TUI prompt) requires a real TTY. Tauri commands
-//! have no TTY, and embedding xterm.js + node-pty would add a heavy frontend
-//! dependency just to host one interactive command. Spawning the OS-native
-//! terminal keeps the host invariants (no PTY in the desktop), reuses the CLI
-//! TTY path that already works, and gives the user an experience identical to
-//! "open Terminal and run …" but without copy-paste friction. The actual
-//! OAuth flow itself happens inside Claude Code in the container — Speedwave
-//! never sees or stores the token.
+//! `speedwave login` for the chosen project. OAuth happens in the container;
+//! Speedwave never sees or stores the token.
 
 use crate::auth_commands::{build_auth_command_for_platform, resolve_project_dirs};
 use crate::types::check_project;
@@ -77,8 +68,6 @@ fn iterm2_installed_in(roots: &[&std::path::Path]) -> bool {
 }
 
 /// True iff iTerm2 is installed in `/Applications/` or `~/Applications/`.
-/// macOS prefers iTerm2 over Terminal.app because iTerm2 honors OSC 52 (the
-/// wrapper that makes "press c to copy URL" work in the container).
 #[cfg(target_os = "macos")]
 fn iterm2_installed() -> bool {
     let system = std::path::PathBuf::from("/Applications");
@@ -92,11 +81,7 @@ fn iterm2_installed() -> bool {
 
 #[cfg(target_os = "macos")]
 fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
-    // iTerm2's `command "..."` runs argv directly via execvp — no shell parsing.
-    // `$SHELL -ilc 'cmd'` runs the user's login shell with PATH from .zshrc.
-    // We do NOT chain a follow-up interactive shell — Claude is the foreground
-    // process that owns the TTY for the entire session. iTerm2 closes the
-    // window on shell exit per its profile setting.
+    // `$SHELL -ilc 'cmd'` runs argv via the login shell with PATH from .zshrc.
     let shell = safe_login_shell();
     let inner_escaped = cmd.replace('\'', "'\\''");
     let wrapped = format!("{shell} -ilc '{inner_escaped}'");
@@ -154,14 +139,6 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 }
 
 /// Encodes a PowerShell command for `-EncodedCommand`: UTF-16LE then base64.
-///
-/// `-EncodedCommand` sidesteps every quoting/splitting hazard: the base64 output
-/// is `[A-Za-z0-9+/=]` only — no spaces, no `;` — so neither wt.exe's argument
-/// parser (which treats a literal `;` as an action delimiter) nor PowerShell's
-/// own parser can mangle the command. Our auth command contains `;`
-/// (`Set-Location '...'; speedwave login ...`); passed raw via `-Command`, wt.exe
-/// split it on the `;` and tried to launch the tail as a separate action,
-/// failing with "file not found" (0x80070002).
 #[cfg(any(target_os = "windows", test))]
 fn encode_powershell_command(cmd: &str) -> String {
     let utf16le: Vec<u8> = cmd.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
@@ -196,14 +173,7 @@ fn base64_standard(input: &[u8]) -> String {
 }
 
 /// Argv for launching the login terminal via Windows Terminal:
-/// `wt.exe new-tab <ps> -NoExit -EncodedCommand <b64>`. Preferred because
-/// wt.exe uses a ConPTY pipeline that pumps stdin to the child from the start.
-/// The old `cmd.exe /c start "" <ps> ...` pattern created a detached console
-/// whose ConPTY input buffer was not pumped to the interactive wsl.exe child
-/// until the window received focus — so Enter was dropped until the user clicked
-/// the window (ADR-052 login terminal; Windows-only bug). `-EncodedCommand`
-/// (vs `-Command`) keeps the `;` in the auth command from being eaten by
-/// wt.exe's action-delimiter parser.
+/// `wt.exe new-tab <ps> -NoExit -EncodedCommand <b64>` (ADR-052).
 #[cfg(any(target_os = "windows", test))]
 fn build_wt_terminal_argv(ps_exe: &str, cmd: &str) -> [String; 5] {
     [
@@ -215,11 +185,8 @@ fn build_wt_terminal_argv(ps_exe: &str, cmd: &str) -> [String; 5] {
     ]
 }
 
-/// Argv for launching PowerShell directly (no `cmd /c start`, no wt.exe):
-/// `<ps> -NoExit -EncodedCommand <b64>`. Spawned as its own process so it
-/// attaches a console that pumps input immediately. Fallback when wt.exe is
-/// unavailable. Uses `-EncodedCommand` for the same quoting-safety reason as the
-/// wt.exe path, so both code paths run an identical command.
+/// Argv for launching PowerShell directly:
+/// `<ps> -NoExit -EncodedCommand <b64>`. Fallback when wt.exe is unavailable.
 #[cfg(any(target_os = "windows", test))]
 fn build_powershell_argv(cmd: &str) -> [String; 3] {
     [
@@ -229,17 +196,9 @@ fn build_powershell_argv(cmd: &str) -> [String; 3] {
     ]
 }
 
-/// Spawns a new terminal window running `cmd` (PowerShell syntax).
-/// `build_auth_command_for_platform` emits PowerShell syntax (`Set-Location`,
-/// `$env:`, `;`) on Windows, so we spawn PowerShell. Prefers `pwsh.exe`
-/// (PowerShell 7+) when on PATH. `-NoExit` keeps the window open so the user
-/// can read output and paste the OAuth code.
-///
-/// Prefers Windows Terminal (`wt.exe`) so the interactive `wsl.exe` child gets
-/// keystrokes without needing a focus/mouse event first (see argv docs above);
-/// falls back to launching PowerShell directly when wt.exe is not installed
-/// (older Windows / locked-down hosts). We do NOT use `cmd /c start` — its
-/// detached console is the cause of the Enter-not-registered bug.
+/// Spawns a new terminal window running `cmd` (PowerShell syntax). Prefers
+/// `pwsh.exe`, then `powershell.exe`; prefers Windows Terminal, else direct
+/// PowerShell spawn. `-NoExit` keeps the window open.
 #[cfg(target_os = "windows")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
@@ -248,12 +207,7 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
         "powershell.exe"
     };
 
-    // Try wt.exe directly — do NOT pre-check with `which_in_path`/`is_file`:
-    // wt.exe ships as a Windows App Execution Alias (a zero-byte reparse point
-    // under WindowsApps), and `Path::is_file()` returns false for it even when
-    // it launches fine. CreateProcess DOES resolve the alias, so spawning by
-    // name is the reliable detection. A spawn error (not installed) or non-zero
-    // status falls through to the direct PowerShell spawn.
+    // wt.exe is an App Execution Alias; spawn by name (is_file() returns false).
     let argv = build_wt_terminal_argv(ps, cmd);
     match std::process::Command::new("wt.exe").args(argv).status() {
         Ok(s) if s.success() => return Ok(()),
@@ -278,8 +232,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 
         let (project_dir, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
 
-        // Same renderer as get_auth_command's copy-paste fallback, so the
-        // auto-spawned command and the one a user could paste are identical.
+        // Same renderer as get_auth_command's copy-paste fallback.
         let cmd = build_auth_command_for_platform(
             &project,
             &project_dir,

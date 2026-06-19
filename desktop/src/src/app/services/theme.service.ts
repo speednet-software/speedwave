@@ -152,10 +152,7 @@ export class ThemeService implements OnDestroy {
           signal: this.abortController.signal,
         });
       } else if (typeof this.mediaQuery.addListener === 'function') {
-        // Legacy WebView fallback — addListener is deprecated but still required
-        // on older WebKit builds shipped in some Tauri targets. Cleaned up by
-        // the matching removeListener in ngOnDestroy (the AbortController only
-        // unregisters the addEventListener path).
+        // Legacy WebView fallback; cleaned up in ngOnDestroy
         this.mediaQuery.addListener(this.mediaListener);
       }
     }
@@ -164,8 +161,7 @@ export class ThemeService implements OnDestroy {
   /** Removes the matchMedia listener when the root service is torn down. */
   ngOnDestroy(): void {
     this.abortController.abort();
-    // Legacy fallback teardown — only needed when addEventListener was unavailable
-    // (otherwise the AbortController above already removed the listener).
+    // Legacy fallback teardown (only when addEventListener unavailable)
     if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
       try {
         this.mediaQuery.removeListener?.(this.mediaListener);
@@ -197,10 +193,8 @@ export class ThemeService implements OnDestroy {
   }
 
   /**
-   * Resolves the effective mode, applies the DOM class, and syncs native chrome.
-   * Does NOT persist — the OS-driven `auto` listener calls this on every system
-   * theme change, and re-writing the unchanged `'auto'` value would be storage
-   * noise. Persistence lives in {@link setMode} (explicit user intent only).
+   * Resolves effective mode, applies DOM class, syncs native chrome.
+   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
    * @param mode Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {

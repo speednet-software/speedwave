@@ -1,8 +1,5 @@
 /// Chat history — reads Claude Code JSONL session files and project memory.
-///
-/// All public functions resolve paths from `consts::data_dir()` and delegate to
-/// internal `_impl` functions that accept a `data_dir: &Path` parameter.
-/// Tests call the `_impl` functions directly with `tempfile::TempDir`.
+/// Public fns delegate to `_impl(data_dir: &Path)` variants that tests call directly.
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -88,17 +85,7 @@ fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
 }
 
 /// Resolves the workspace subdirectory inside `.claude/projects/`.
-/// Claude Code derives the dir name from CWD — `/workspace` → `-workspace`.
-/// Falls back to auto-discovery if `-workspace` doesn't exist (handles
-/// Claude Code internal path derivation changes across versions).
-///
-/// **Known limitation:** Auto-discovery is a best-effort heuristic.  When
-/// multiple candidates exist the newest-by-mtime is picked, which could be
-/// wrong if an unrelated process touched a stale directory.  Both session
-/// JSONL files and `memory/MEMORY.md` share the same resolved path, so they
-/// always resolve together (for better or worse).  Callers that get an empty
-/// result despite sessions existing should check the Desktop log for the
-/// "multiple project dirs" warning emitted here.
+/// `/workspace` → `-workspace`; falls back to newest-by-mtime auto-discovery.
 fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     let default = projects_dir.join("-workspace");
     if default.is_dir() {
@@ -120,10 +107,7 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
                 return candidates.remove(0);
             }
             if candidates.len() > 1 {
-                // Sort by mtime (newest first), then alphabetically as
-                // deterministic tiebreak.  mtime is a best-effort heuristic —
-                // some filesystems (ext3, HFS+) have 1-second granularity;
-                // the alphabetical sort is the ultimate deterministic fallback.
+                // Sort by mtime (newest first), alphabetical as tiebreak.
                 candidates.sort_by(|a, b| {
                     let ma = a.metadata().and_then(|m| m.modified()).ok();
                     let mb = b.metadata().and_then(|m| m.modified()).ok();
@@ -188,12 +172,7 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
-    // Skip Claude Code synthetic meta-entries (slash-command caveats, image
-    // attachment markers, …). They have `type:"user"` but are model-facing
-    // hints, never actual user input. Scoped to "user" so a future
-    // upstream `isMeta` on assistant/result rows isn't silently swallowed.
-    // `isMeta` lives at the top level today; we also probe `message.isMeta`
-    // defensively in case Anthropic nests it later.
+    // Skip synthetic `type:"user"` meta-entries via `isMeta` (top-level or nested) or content sniffing.
     if msg_type == "user" {
         let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
@@ -224,18 +203,14 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     }
 }
 
-/// Detects Claude Code synthetic `type:"user"` entries that aren't real user
-/// input: slash-command markers, slash-command stdout/stderr, and the
-/// SDK CLI's `Commands are in the form …` boilerplate. None of these are
-/// flagged with `isMeta`, so we sniff the content. Caller must ensure
-/// `parsed["type"] == "user"`.
+/// Detects synthetic `type:"user"` entries with no `isMeta` flag by sniffing content.
+/// Caller must ensure `parsed["type"] == "user"`.
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
     if let Some(s) = content.as_str() {
         text_is_synthetic(s)
     } else if let Some(arr) = content.as_array() {
-        // Check each text block separately so a synthetic tag is caught even
-        // when it isn't the first block of a multi-block content array.
+        // Check each text block so a synthetic tag in any block is caught.
         arr.iter()
             .filter(|b| b["type"].as_str() == Some("text"))
             .filter_map(|b| b["text"].as_str())
@@ -390,8 +365,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     }
 
     let timestamp = parsed["timestamp"].as_str().map(String::from);
-    // Result lines don't carry a stable per-turn uuid in the JSONL — they're
-    // synthetic summary entries. Leave `None` so the retry path skips them.
+    // Result lines carry no stable per-turn uuid; leave `None`.
     let uuid = None;
 
     if is_error {
@@ -477,9 +451,7 @@ fn list_conversations_impl(
             continue;
         }
 
-        // Read first ~50 lines to get timestamp and preview without loading
-        // entire multi-MB JSONL files. We also count messages in those lines
-        // as an approximate count for display.
+        // Scan first ~50 lines for timestamp, preview, and approximate count.
         let file = match fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -501,10 +473,7 @@ fn list_conversations_impl(
                 Err(_) => break,
             };
             if let Some(msg) = parse_jsonl_message(&line) {
-                // Deduplicate: skip result whose content is contained in the
-                // preceding assistant message.  `parse_assistant_message`
-                // concatenates text + "[Tool: X]" placeholders, so the result
-                // text (plain text only) is a substring of the assistant content.
+                // Deduplicate: skip result whose content is a substring of the preceding assistant message.
                 if msg.role == "assistant" {
                     if let Some(ref prev) = last_assistant_content {
                         if prev.contains(&msg.content) {
@@ -573,10 +542,7 @@ fn get_conversation_impl(
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         if let Some(msg) = parse_jsonl_message(&line) {
-            // Deduplicate: skip result message whose content is contained in
-            // the preceding assistant message.  `parse_assistant_message`
-            // concatenates text + "[Tool: X]" placeholders, so the result
-            // text (plain text only) is a substring of the assistant content.
+            // Deduplicate: skip result whose content is a substring of the preceding assistant message.
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
                     if prev.contains(&msg.content) {
@@ -659,14 +625,8 @@ pub struct ResumeSnapshot {
 }
 
 /// Compute the cumulative session snapshot from an existing JSONL transcript.
-///
-/// The CLI emits `total_cost_usd` and `modelUsage` cumulatively in every
-/// `result` line, so the latest such values describe the full session
-/// state. Token counts are recovered preferring the latest `modelUsage`
-/// (already cumulative) and falling back to the running sum of per-step
-/// flat `usage` payloads — matching the parser's own snapshot accounting in
-/// `compute_turn_usage_from_result`. The model is taken from the most
-/// recent `modelUsage` key, or the last `system init` line if none.
+/// Prefers the latest `modelUsage`, falls back to summed flat `usage`; model
+/// from the latest `modelUsage` else the last `system init` line.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
@@ -685,8 +645,7 @@ fn compute_resume_snapshot_impl(
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
 
-    // Running sum of flat `usage` blocks — used as a fallback when the
-    // session has no `modelUsage` (older CLI versions / partial payloads).
+    // Running sum of flat `usage` blocks; fallback when no `modelUsage`.
     let mut summed = ResumeSnapshot::default();
     // Cumulative snapshot from the most recent `result` carrying `modelUsage`.
     let mut latest_cumulative: Option<ResumeSnapshot> = None;
@@ -752,13 +711,7 @@ fn compute_resume_snapshot_impl(
                         if any_field {
                             latest_cumulative = Some(cumulative);
                         }
-                        // Pick the model that produced the most output tokens —
-                        // that's the main response model. A single turn can mix
-                        // models (Opus for the user-facing answer + Haiku for
-                        // background tasks like title generation), so picking
-                        // `keys().next()` would be non-deterministic and tended
-                        // to surface Haiku (alphabetically before Opus) even when
-                        // Opus did the real work.
+                        // Pick the model with the most output tokens (the main response model).
                         if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
                             stats
                                 .get("outputTokens")
@@ -1101,8 +1054,7 @@ mod tests {
 
     #[test]
     fn parse_result_message_uuid_is_always_none() {
-        // Result lines are synthesized turn summaries — they're not valid
-        // retry anchors, so the parser should never expose a uuid for them.
+        // Result lines must never expose a uuid.
         let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.uuid.is_none());
@@ -1287,17 +1239,14 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_respects_nested_is_meta_under_message() {
-        // Defensive: should Claude Code ever move `isMeta` from top-level
-        // into `message.*`, the filter must still catch it.
+        // `isMeta` nested under `message.*` must still be caught.
         let line = r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<local-command-caveat>x</local-command-caveat>"}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_does_not_drop_is_meta_on_non_user_types() {
-        // The `isMeta` filter is intentionally scoped to user entries — an
-        // assistant row with isMeta:true must still parse, so future upstream
-        // tagging of legitimate assistant turns doesn't make them vanish.
+        // The `isMeta` filter is scoped to user entries; an assistant row with isMeta:true must still parse.
         let line = r#"{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
         let msg = parse_jsonl_message(line).expect("assistant with isMeta should parse");
         assert_eq!(msg.role, "assistant");
@@ -1348,8 +1297,7 @@ mod tests {
 
     #[test]
     fn list_conversations_skips_slash_command_markers() {
-        // Slash-command invocations carry no `isMeta` flag but are still
-        // synthetic — they should not surface as previews or get counted.
+        // Slash-command invocations carry no `isMeta` flag but are still synthetic.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1373,9 +1321,7 @@ mod tests {
 
     #[test]
     fn list_conversations_drops_sdk_cli_boilerplate_session() {
-        // `claude -p "/cmd"` opens a session whose only user entry is the
-        // boilerplate `Commands are in the form …` (no `isMeta`). Such a
-        // session should never appear in the sidebar.
+        // A session whose only user entry is the `Commands are in the form …` boilerplate must not appear.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1394,9 +1340,7 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_drops_command_args_and_command_result_prefixes() {
-        // Defensive: Claude Code today only emits <command-name> first, but
-        // these sibling tags belong to the same family and should they ever
-        // arrive as standalone user rows we still want them filtered.
+        // Sibling command tags must also be filtered, not only <command-name>.
         for tag in ["<command-args>", "<command-result>"] {
             let line = format!(
                 r#"{{"type":"user","message":{{"role":"user","content":"{tag}foo</X>"}}}}"#
@@ -1410,17 +1354,14 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_drops_boilerplate_with_trailing_punctuation() {
-        // `starts_with` (not `==`) means small upstream wording tweaks —
-        // trailing newline, period, additional context — don't leak the
-        // boilerplate back into the sidebar.
+        // Boilerplate with trailing punctuation/context is still filtered.
         let line = r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`\n\nMore context."}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_drops_synthetic_tag_in_non_first_text_block() {
-        // Multi-block content where the synthetic marker isn't the first
-        // block — caught per-block instead of after `join("\n")`.
+        // Synthetic marker in a non-first text block is caught per-block.
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"preamble"},{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
@@ -1532,8 +1473,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
 
-        // Create a directory at the MEMORY.md path — reading a directory as a
-        // file produces an I/O error that is NOT ErrorKind::NotFound.
+        // A directory at the MEMORY.md path yields an I/O error that is NOT ErrorKind::NotFound.
         let memory_dir = dir.join("memory").join("MEMORY.md");
         fs::create_dir_all(&memory_dir).unwrap();
 
@@ -1683,8 +1623,7 @@ mod tests {
         );
 
         let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
-        // Should have 2 messages: user + assistant (result deduplicated even
-        // though assistant content includes "[Tool: Read]" suffix)
+        // 2 messages: user + assistant (result deduplicated).
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
@@ -1699,8 +1638,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Two turns: each result line carries cumulative `modelUsage` and
-        // cumulative `total_cost_usd`. The latest line is authoritative.
+        // Two cumulative result lines; the latest is authoritative.
         write_session(
             &dir,
             id,
@@ -1727,8 +1665,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // No `modelUsage` anywhere — only flat per-step `usage`. Must sum
-        // them up to recover the cumulative state.
+        // No `modelUsage` anywhere; flat per-step `usage` must be summed.
         write_session(
             &dir,
             id,
@@ -1745,8 +1682,7 @@ mod tests {
         assert_eq!(snap.cache_read_tokens, 3);
         assert_eq!(snap.cache_write_tokens, 1);
         assert_eq!(snap.total_cost, Some(0.05));
-        // No `modelUsage` ever, so the system init model is used as the
-        // fallback signal.
+        // No `modelUsage` ever, so the system init model is the fallback.
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
     }
 
@@ -1756,9 +1692,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Transcript with no result/init lines (e.g., a session that
-        // crashed before the first turn). Must not error and must report
-        // a zero baseline so the resume parser starts fresh.
+        // Transcript with no result/init lines must not error and reports a zero baseline.
         write_session(
             &dir,
             id,
@@ -1775,8 +1709,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Mix of malformed and valid lines — the malformed ones must not
-        // poison the running totals.
+        // Malformed lines must not poison the running totals.
         write_session(
             &dir,
             id,
@@ -1818,9 +1751,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // The init line declares one model, but the latest `modelUsage`
-        // shows another (mid-session model switch). The seed must reflect
-        // the most recent model so the next turn's pricing is correct.
+        // On a mid-session model switch, the seed reflects the latest `modelUsage` model.
         write_session(
             &dir,
             id,
@@ -1836,13 +1767,7 @@ mod tests {
 
     #[test]
     fn compute_resume_snapshot_picks_dominant_model_from_modelusage() {
-        // Regression: Claude Code emits a `modelUsage` map that may contain
-        // several entries when one turn mixes a main-response model with
-        // background calls (Haiku for title generation, summarization, etc.).
-        // Using `keys().next()` was non-deterministic and tended to surface
-        // Haiku (alphabetically before Opus) even when Opus produced the
-        // real answer, so the chat footer showed the wrong model.
-        // The fix selects the model with the highest `outputTokens`.
+        // From a multi-entry modelUsage map, picks the highest `outputTokens`.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456790";

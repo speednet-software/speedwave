@@ -53,12 +53,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             (questionAnswered)="questionAnswered.emit($event)"
           />
         } @else if (showAwaitingCaret()) {
-          <!-- Streaming has started but no block has arrived yet. Show a
-               blinking caret so the user has visual confirmation that
-               the assistant is working — same caret used inline during
-               text streaming, just rendered as a standalone placeholder.
-               No horizontal padding so the caret aligns flush-left with
-               the rule columns of the surrounding tool/thinking blocks. -->
+          <!-- Standalone caret placeholder: streaming started, no block yet. -->
           <div data-testid="chat-message-list-awaiting">
             <span class="caret" aria-label="Assistant is responding"></span>
           </div>
@@ -87,24 +82,14 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Tracks message-count to detect new turns (vs. mere streaming deltas). */
   private lastMessageCount = 0;
 
-  /**
-   * Wires the streaming-aware scroll sync — re-runs on every signal input
-   *  change so streaming deltas (which mutate `currentBlocks` in place) and
-   *  new turns alike trigger a scroll-to-bottom.
-   */
+  /** Wires the streaming-aware scroll sync, re-run on every signal-input change. */
   constructor() {
-    // Re-run on every signal-input change. `messages`, `currentBlocks` and
-    // `isStreaming` all need to drive a scroll sync — relying on
-    // `ngOnChanges` alone misses streaming deltas where the array reference
-    // stays stable but its contents grow.
     effect(() => {
       const count = this.messages().length;
       // Reading these signals subscribes the effect to streaming chunks too.
       this.currentBlocks();
       this.isStreaming();
-      // A genuinely new turn (length grew) re-arms auto-scroll even if the
-      // user had previously scrolled up — they almost always want to see
-      // the freshly-sent message + the assistant's reply.
+      // A new turn (length grew) re-arms auto-scroll.
       if (count > this.lastMessageCount) {
         this.shouldAutoScroll = true;
       }
@@ -118,11 +103,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
     return this.isStreaming() && this.currentBlocks().length > 0;
   }
 
-  /**
-   * Whether to render the standalone blinking caret. True only in the gap
-   * between sending a message and the first streamed block — once any block
-   * arrives the regular streaming bubble takes over.
-   */
+  /** Whether to render the standalone caret: streaming with no block yet. */
   showAwaitingCaret(): boolean {
     return this.isStreaming() && this.currentBlocks().length === 0;
   }

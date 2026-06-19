@@ -1,8 +1,6 @@
 /**
  * Tests for the path policy: workspace confinement, symlink rejection, atomic writes,
- * overwrite refusal, and the default output directory. These run against a temp dir
- * that stands in for `/workspace` by monkeypatching the module's `WORKSPACE_ROOT`/`OUTPUT_DIR`
- * via the `vi.mock` of `./config.js`.
+ * overwrite refusal, and the default output directory.
  * @module mcp-office/path-policy.test
  */
 
@@ -14,8 +12,7 @@ import * as path from 'node:path';
 
 let workspaceDir: string;
 
-// Make the Nth-from-now `lstat`/`lstatSync` call throw `err` (1 = the very next call). Lets a
-// test exercise the EACCES/EPERM branches that real temp dirs cannot reproduce in CI.
+// Make the Nth-from-now `lstat`/`lstatSync` call throw `err` (1 = the very next call).
 const lstatThrow = vi.hoisted(() => ({
   countdown: 0,
   err: null as NodeJS.ErrnoException | null,
@@ -158,8 +155,7 @@ describe('resolveInputFile', () => {
   it('throws when a path component (not the leaf) is not a regular file', async () => {
     await fsp.mkdir(path.join(workspaceDir, 'sub'));
     await fsp.writeFile(path.join(workspaceDir, 'sub', 'f'), 'x');
-    // `sub/f` is a regular file; ask for `sub/f/inner` → `f` is a non-dir component, lstat of the
-    // full path fails → "not found". (Covers the lstat-throws branch with an existing prefix.)
+    // `sub/f` is a regular file; lstat of `sub/f/inner` fails → "not found".
     await expect(resolveInputFile('sub/f/inner')).rejects.toThrow(/not found/);
   });
 
@@ -222,8 +218,7 @@ describe('resolveOutputPath', () => {
   });
 
   it('propagates a permission error from the overwrite check (not treated as "free")', async () => {
-    // The overwrite check is the first lstat call in resolveOutputPath (no symlink walk runs before it
-    // for a bare name under OUTPUT_DIR — resolveWithinWorkspace's walk uses lstatSync, which we skip).
+    // The overwrite check is the first lstat call in resolveOutputPath for a bare name.
     lstatThrow.arm(1, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
     await expect(resolveOutputPath('guarded.pdf', 'x.pdf')).rejects.toThrow(/EACCES/);
   });

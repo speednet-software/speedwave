@@ -73,12 +73,7 @@ describe('page-tools metadata', () => {
     ]);
   });
 
-  // SITE-POLICY-BY-OMISSION REGRESSION TEST (ADR-060).
-  //
-  // The whole point of this invariant is that the model never picks a site.
-  // Any future tool that grows a `site_id` property must fail loudly here so
-  // we re-think the security model rather than silently widen the attack
-  // surface to "model can target any SharePoint site the worker can reach".
+  // Regression: no page tool accepts site_id (security invariant per ADR-060).
   it('NO page tool accepts site_id from the model', () => {
     for (const tool of PAGE_TOOL_SCHEMAS) {
       const schema = tool.inputSchema as {
@@ -588,8 +583,7 @@ describe('page-tools handlers — happy paths', () => {
     expect(getDriveItem).toHaveBeenCalledWith('Shared Documents/hero.jpg');
 
     const [, , body] = localGraph.mock.calls[1];
-    // Body must embed the driveItem ids — those are what SharePoint's UI
-    // image-picker reconciliation checks on Save & Close.
+    // Body embeds driveItem ids for SharePoint UI reconciliation.
     const properties = (
       body as { webPartProperties?: unknown; data?: { properties: Record<string, unknown> } }
     ).data?.properties;
@@ -645,9 +639,7 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart returns COLUMN_OUT_OF_RANGE when the column index does not exist', async () => {
-    // Authors hit this when they invoke addImageWebPart against a layout that
-    // only has one column but pass columnIndex: 1. Without the typed code the
-    // model would retry with random indexes, wasting Graph calls.
+    // Column-index bounds prevent wasted Graph round-trips.
     const driveItem = {
       id: 'item-1',
       webUrl: 'https://example/hero.jpg',
@@ -678,10 +670,7 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart rejects out-of-range section/column indexes before any Graph call', async () => {
-    // The handler validates index bounds against MAX_SECTION / MAX_COLUMN
-    // BEFORE issuing the driveItem lookup, so a typo (sectionIndex: 999)
-    // does not waste a Graph round-trip or surface a confusing
-    // SECTION_OUT_OF_RANGE that callers would interpret as "no such section".
+    // Handler validates index bounds before driveItem lookup.
     const getDriveItem = vi.fn();
     const c = createMockClient(undefined, { getDriveItemForSharePointPath: getDriveItem });
     const tools = createPageTools(c);
@@ -726,10 +715,7 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart wraps unexpected driveItem-lookup errors as ADD_IMAGE_WEBPART_FAILED', async () => {
-    // getDriveItemForSharePointPath can throw from inside callGraphAPI (token
-    // refresh blew up, Graph hiccup, JSON parse failure on retry). All of
-    // those have to surface with a stable error code so the model knows to
-    // retry the tool call rather than treat it as a validation error.
+    // Unexpected driveItem-lookup throws surface with a stable error code.
     const getDriveItem = vi.fn().mockRejectedValue(new Error('Graph 503 Service Unavailable'));
     const c = createMockClient(undefined, {
       getDriveItemForSharePointPath: getDriveItem,
@@ -811,8 +797,7 @@ describe('page-tools handlers — error paths', () => {
     expect(parsed.code).toBe('LIST_PAGES_FAILED');
   });
 
-  // Table-driven Graph-500 error tests for the page tools that wrap their
-  // own `XXX_FAILED` code. Covers every `wrapErr` line in page-tools.ts.
+  // Table-driven Graph-500 error tests covering every wrapErr code.
   it.each([
     ['getPage', { pageId: 'p1' }, 'GET_PAGE_FAILED'],
     ['createPage', { title: 'Hi', name: 'hi.aspx' }, 'CREATE_PAGE_FAILED'],
@@ -890,9 +875,7 @@ describe('page-tools handlers — error paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
   });
 
-  // Per-tool pageId / webPartId validateGraphId rejections. Covers every
-  // `if (idErr) return idErr;` line — without these the Graph URL builders
-  // would receive an injection-prone segment.
+  // Per-tool pageId / webPartId validateGraphId rejections.
   it.each([
     [
       'addWebPart',
@@ -913,9 +896,7 @@ describe('page-tools handlers — error paths', () => {
   });
 
   it('addWebPart rejects malformed section.id from Graph response (defense-in-depth)', async () => {
-    // Graph normally generates safe ids, but the worker still validates them
-    // before stitching into a URL — covers the `if (sectErr)` defensive
-    // branch.
+    // Defense-in-depth: validate Graph ids before URL stitching.
     const graph = vi.fn().mockResolvedValueOnce({
       id: 'p1',
       canvasLayout: {

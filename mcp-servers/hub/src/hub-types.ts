@@ -120,17 +120,7 @@ export type TimeoutClass = 'standard' | 'long';
 export interface ToolMetadata {
   /** Tool name as exposed by the hub (camelCase, used by JS bridge API). */
   name: string;
-  /**
-   * Tool name as exposed by the worker itself (often snake_case, especially
-   * for third-party MCP servers that follow the MCP spec literally, e.g.
-   * `@playwright/mcp`'s `browser_navigate`). Hub uses this verbatim when
-   * issuing `tools/call` so the worker recognises the method; the hub-side
-   * `name` above is only the JS bridge alias.
-   *
-   * Optional for backward compatibility with tests that build metadata
-   * without going through `mergeToolWithMeta`; when absent, callers fall
-   * back to `name`.
-   */
+  /** Tool name as exposed by the worker (often snake_case); falls back to `name` if absent. */
   workerToolName?: string;
   /** Tool description */
   description: string;

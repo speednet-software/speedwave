@@ -112,8 +112,6 @@ describe('refreshGenericToken', () => {
   });
 
   it('actually fires the AbortController callback on the refresh timeout', async () => {
-    // Cover the `() => controller.abort()` arrow passed to setTimeout —
-    // production timer is TIMEOUTS.TOKEN_REFRESH_MS; fake timers fire it in ms.
     vi.useFakeTimers();
     try {
       let observedSignal: AbortSignal | undefined;

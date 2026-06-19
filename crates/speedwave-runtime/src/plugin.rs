@@ -458,16 +458,7 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Returns the base directory for mutable per-plugin state — by default
-/// `~/.speedwave/plugin-state/`. Kept *outside* the signed plugin
-/// directory: markers like `image_pending` (telling the next launch to
-/// retry an image build) used to live inside the plugin tree, but writing
-/// into a tree that we then sign and re-verify is contradictory — any
-/// post-install marker invalidates the digest.
-///
-/// `plugins_dir` ends in `plugins`; we replace that final segment with
-/// `plugin-state` so unit tests pointing `plugins_dir` at a temp dir keep
-/// their state under the same temp root instead of leaking into the user's
-/// real `~/.speedwave/`.
+/// `~/.speedwave/plugin-state/`.
 fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
     plugins_dir
         .parent()
@@ -505,8 +496,7 @@ pub(crate) fn read_persistent_bridge_token_from(plugins_dir: &Path, slug: &str) 
 }
 
 fn read_bridge_token_at(path: &Path) -> Option<String> {
-    // Reject symlinks (`read_to_string` follows them); warn-and-ignore only —
-    // the file is Desktop-owned state, so this passive reader never removes it.
+    // Reject symlinks (`read_to_string` follows them).
     if path
         .symlink_metadata()
         .is_ok_and(|m| m.file_type().is_symlink())
@@ -542,14 +532,7 @@ fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
 }
 
 /// Returns true if the plugin has a pending image build, looking in both
-/// the new state directory and the legacy in-tree location. Legacy-only
-/// markers are still observed so plugins installed before this change
-/// keep building on next launch. The first fail-closed load
-/// (`audit_all` / `list_verified_*`, both via `verify_one_plugin_dir`)
-/// migrates the in-tree marker into `plugin-state/` via
-/// `migrate_legacy_image_pending`, after which only the new location ever
-/// has the marker. The tolerant `list_for_ui` path does *not* migrate —
-/// it must not mutate a tampered tree.
+/// the new state directory and the legacy in-tree location.
 fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
     image_pending_marker_for(plugins_dir, slug).exists()
         || plugin_dir.join(".image_pending").exists()
@@ -573,14 +556,7 @@ fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
 }
 
 /// Moves a legacy marker into the plugin-state dir. Returns `true` only
-/// on a clean relocation. Tries the cheap same-FS `rename` first (which
-/// only re-points the dirent — safe even for a hardlink). On cross-FS
-/// (`rename` fails, e.g. `~/.speedwave/` on a separate volume): Unix
-/// falls back to `write(target) + unlink(legacy)` (hardlinks were ruled
-/// out by the `nlink` check before this is reached); Windows refuses the
-/// fallback entirely because `std::fs::Metadata` exposes no link count,
-/// so an NTFS hardlink can't be excluded. Whenever this returns `false`
-/// the legacy file is still in the tree and audit fails on the next load.
+/// on a clean relocation.
 fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
     if std::fs::rename(legacy, target).is_ok() {
         return true;
@@ -614,22 +590,9 @@ fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
     }
 }
 
-/// Migrates the legacy in-tree `.image_pending` marker out of the
-/// signed plugin tree before the digest is computed. Without this, every
-/// MCP plugin installed under an older Speedwave release fails signature
-/// verification on first launch under a runtime-invariant build — the
-/// in-tree marker was never part of the signed tree, so its presence
-/// changes the digest. Idempotent; missing marker is a no-op.
-///
-/// Only a *root-level, regular-file* `.image_pending` is migrated — a
-/// symlink (or a hardlink, on Unix where we can detect it) is left in
-/// place so the verifier fails loudly rather than us silently relocating
-/// attacker-planted content. Whenever the marker cannot be fully moved
-/// the legacy file stays put and audit fails on the next load; we only
-/// log "migrated" on a clean move.
-///
-/// Run BEFORE every load-side signature check that observes a tree the
-/// user might be upgrading from — `audit_all`, `list_verified_*`.
+/// Migrates the legacy in-tree `.image_pending` marker out of the signed
+/// plugin tree. Idempotent; only root-level regular files, not symlinks.
+/// Run before every load-side signature check (`audit_all`, `list_verified_*`).
 fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let legacy = plugin_dir.join(".image_pending");
     let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
@@ -3296,7 +3259,7 @@ mod tests {
             "container_name: {yaml}"
         );
         assert!(yaml.contains("read_only: true"), "read_only: {yaml}");
-        assert!(yaml.contains(&container_user()), "user: {yaml}");
+        assert!(yaml.contains(container_user()), "user: {yaml}");
         assert!(yaml.contains("ALL"), "cap_drop ALL: {yaml}");
         assert!(
             yaml.contains("no-new-privileges:true"),
@@ -8052,11 +8015,8 @@ mod tests {
             .count();
         assert_eq!(builds, 2, "build retried once after prune");
         let prunes = handle.prune_calls.lock().unwrap();
-        assert!(prunes.iter().any(|p| *p == "system"), "system_prune ran");
-        assert!(
-            prunes.iter().any(|p| *p == "buildkit"),
-            "BuildKit cache pruned"
-        );
+        assert!(prunes.contains(&"system"), "system_prune ran");
+        assert!(prunes.contains(&"buildkit"), "BuildKit cache pruned");
     }
 
     /// Expected content-addressed tag for a plugin dir created by a test.

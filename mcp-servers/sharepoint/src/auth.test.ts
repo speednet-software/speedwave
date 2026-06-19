@@ -1,8 +1,6 @@
 /**
- * SharePoint worker auth wiring tests (SEC-035)
- *
- * Verifies that mcp-sharepoint reads MCP_SHAREPOINT_AUTH_TOKEN and passes it to createMCPServer.
- * Middleware correctness is covered by shared/src/server.test.ts — here we test wiring only.
+ * SharePoint worker auth wiring tests (SEC-035).
+ * Wiring only; middleware correctness covered by shared/src/server.test.ts.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

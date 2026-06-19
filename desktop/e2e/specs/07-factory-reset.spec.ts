@@ -7,8 +7,6 @@
  *   3. Confirm app.restart() fires (WebDriver port comes back up)
  *
  * This spec MUST be the last in the suite — it destroys all state.
- * No WebDriver reconnect is attempted; the session dies with the old
- * process and that is the expected final state.
  */
 
 import * as http from 'node:http';
@@ -51,9 +49,7 @@ describe('Factory Reset', function () {
     });
     await nav.click();
 
-    // The legacy active-project info card was removed. Settings is "ready"
-    // when the page heading is rendered; the active project itself is read
-    // from `activeProjectSlug()` (backend ground truth).
+    // Settings is ready when the page heading is rendered; active project from activeProjectSlug().
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({
       timeout: 10_000,
@@ -78,8 +74,7 @@ describe('Factory Reset', function () {
     );
     expect(stateExists).toBe(true);
 
-    // Click factory reset → confirm. app.restart() kills the process,
-    // so the confirm click may throw — that is expected.
+    // Click factory reset → confirm; app.restart() kills the process so the click may throw.
     const resetBtn = await $('[data-testid="settings-reset-btn"]');
     await resetBtn.click();
 
@@ -92,13 +87,10 @@ describe('Factory Reset', function () {
       // Expected: session dies when Tauri process exits
     }
 
-    // Wait for old process to die and release port 4445.
-    // 3s covers TCP TIME_WAIT + process teardown on all platforms.
+    // Wait for old process to die and release port 4445 (TCP TIME_WAIT + teardown).
     await new Promise((resolve) => setTimeout(resolve, 3_000));
 
     // Poll until the restarted app binds port 4445 again.
-    // This proves: factory_reset completed, app.restart() fired,
-    // and the new process is listening.
     await waitForPort(browser.options.port ?? 4445, 150_000);
   });
 });

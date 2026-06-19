@@ -1,19 +1,6 @@
-//! SSOT catalogue of the Whisper transcription models and the speaker-diarization
-//! models the meeting-transcription feature downloads on demand (ADR-056).
-//!
-//! Bumping a model = editing one const here. Nothing else hard-codes a model
-//! filename, URL, or hash. Mirrors the `defaults::ANTHROPIC_MODELS` pattern:
-//! the frontend reads this via the `list_transcription_models` Tauri command
-//! rather than hard-coding model names.
-//!
-//! URLs, sizes, and SHA256 values were established in ADR-056 spike 0C:
-//! - Whisper GGML models come from `ggerganov/whisper.cpp` on Hugging Face
-//!   (NOT `ggml-org/whisper.cpp`, which 401s anonymously). Sizes/SHA256 from
-//!   the HF API; `small`/`medium` SHA256 additionally confirmed by download.
-//! - Diarization models come from k2-fsa's `sherpa-onnx` GitHub releases;
-//!   SHA256 computed locally. The pyannote segmentation conversion is MIT;
-//!   the default embedding model (3D-Speaker CAM++) is Apache-2.0 — both
-//!   redistributable. NeMo TitaNet-small (CC-BY-4.0) remains as a fallback.
+//! SSOT catalogue of Whisper and speaker-diarization models (ADR-056).
+//! Bumping a model = editing one const here. Mirrors `defaults::ANTHROPIC_MODELS`:
+//! the frontend reads it via the `list_transcription_models` Tauri command.
 
 /// Hugging Face repo path the Whisper GGML models are downloaded from.
 pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -23,12 +10,8 @@ pub fn whisper_model_url(file: &str) -> String {
     format!("https://huggingface.co/{WHISPER_HF_REPO}/resolve/main/{file}")
 }
 
-/// Where in the live/offline transcription pipeline a Whisper model is meant
-/// to be used. The default-download set for v1 (ADR-056 decision 8): `Small`
-/// for CPU-only live, `LargeV3Turbo` for live when a GPU/Metal backend was
-/// compiled in, `LargeV3` lazily for the higher-quality offline pass; `Medium`
-/// is the middle ground if Polish quality on `Small`/`Turbo` disappoints;
-/// `Tiny`/`Base` exist mainly for dev/tests and the smallest-footprint case.
+/// Where in the live/offline transcription pipeline a Whisper model is used
+/// (ADR-056 decision 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -212,9 +195,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiarizationModelKind {
-    /// Speaker segmentation (pyannote-3.0, ONNX). The archive also contains an
-    /// `int8` variant; the catalogue points at the archive and the extracted
-    /// file paths are derived after unpacking.
+    /// Speaker segmentation (pyannote-3.0, ONNX).
     Segmentation,
     /// Speaker embedding (NeMo TitaNet-small) — a single `.onnx` file.
     Embedding,
@@ -238,21 +219,12 @@ pub struct DiarizationModelInfo {
     pub sha256: &'static str,
     /// SPDX-ish licence string.
     pub license: &'static str,
-    /// `true` if this is the model the runtime uses by default (the catalogue
-    /// may list alternates for the embedding model — e.g. WeSpeaker — that a
-    /// future version could switch to if Polish quality needs it).
+    /// `true` if this is the model the runtime uses by default.
     pub default: bool,
 }
 
-/// Diarization model catalogue. Default pair: pyannote-segmentation-3.0 +
-/// 3D-Speaker CAM++ (English voxceleb; embeddings are language-agnostic).
-/// CAM++ chosen over TitaNet-small for Apache-2.0 licence and lower EER —
-/// rationale and benchmarks in ADR-056. Sizes/SHA256/licences verified
-/// 2026-05-12.
-///
-/// The URLs below intentionally contain `speaker-recongition-models` (missing
-/// an "i") — that is the actual upstream k2-fsa release tag; verified
-/// 2026-05-12. The correctly-spelt path returns 404.
+/// Diarization model catalogue (ADR-056). The `speaker-recongition-models` URL
+/// segment (missing an "i") is the actual upstream k2-fsa release tag.
 pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
     DiarizationModelInfo {
         key: "pyannote-segmentation-3-0",
@@ -274,8 +246,7 @@ pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
         license: "Apache-2.0",
         default: true,
     },
-    // Non-default fallback: kept so an old recording's metadata that names the
-    // NeMo model still loads (the runtime will let a caller pick a non-default).
+    // Non-default fallback for old recordings that name the NeMo model.
     DiarizationModelInfo {
         key: "nemo-titanet-small",
         kind: DiarizationModelKind::Embedding,
@@ -369,8 +340,7 @@ mod tests {
 
     #[test]
     fn whisper_catalogue_has_the_v1_default_set() {
-        // Decision 8: a CPU-live model, a GPU/Metal-live model, a finalize
-        // model. If any of these disappear, the v1 strategy breaks.
+        // Decision 8: CPU-live, GPU/Metal-live and finalize models are required.
         assert!(
             whisper_model("small").is_some(),
             "v1 needs the `small` CPU-live model"
@@ -482,11 +452,7 @@ mod tests {
 
     #[test]
     fn a_realistic_model_set_fits_under_the_global_dome() {
-        // A realistic worst case: keep one full-precision model per role plus
-        // every diarization model (no point keeping a `full` and its `q5_*`
-        // variant at once — that's the redundant case). This must fit under
-        // the dome in consts.rs with room to spare; if it doesn't, raise the
-        // dome (and revisit whether the catalogue is getting too large).
+        // Worst case: one full-precision model per role plus every diarization model.
         let full_whisper: u64 = WHISPER_MODELS
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))
@@ -501,8 +467,7 @@ mod tests {
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES as f64 / 1_073_741_824.0,
         );
-        // And `large-v3` alone (the single biggest entry) must be allowed —
-        // the dome can't be smaller than the largest model.
+        // The single biggest entry (`large-v3`) must fit under the dome.
         let biggest = WHISPER_MODELS.iter().map(|m| m.approx_bytes).max().unwrap();
         assert!(biggest < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES);
     }

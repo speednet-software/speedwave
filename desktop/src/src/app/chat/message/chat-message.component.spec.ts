@@ -120,16 +120,13 @@ describe('ChatMessageComponent', () => {
 
     const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
     expect(edited).not.toBeNull();
-    // The "user · HH:MM" header was removed — there is no `user-message-time`
-    // element to assert against any more.
+    // The "user · HH:MM" header was removed — no `user-message-time` element.
     const time = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
     expect(time).toBeNull();
   });
 
   it('host stretches messages full-width (terminal-minimal: no role-based alignment)', () => {
-    // The terminal-minimal layout removes role-based horizontal alignment —
-    // both user and assistant messages stretch to the column width with the
-    // mono meta line as the visual differentiator instead of a bubble.
+    // Terminal-minimal layout removes role-based alignment; both roles stretch full-width.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
@@ -152,10 +149,7 @@ describe('ChatMessageComponent', () => {
   });
 
   it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
-    // After Unit 8 (refactor: extract chat header, list, user-message), user
-    // messages render via <app-user-message> in terminal-minimal style — no
-    // sized "bubble" with w-fit/max-w-[85%]. This replaces the prior bubble
-    // test which assumed both roles shared the same wrapper styling.
+    // User messages render via <app-user-message>, no sized bubble.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
@@ -164,9 +158,7 @@ describe('ChatMessageComponent', () => {
   });
 
   it('assistant role renders without a bubble (terminal-minimal: plain article)', () => {
-    // After the terminal-minimal redesign, assistant messages are plain
-    // articles — no max-width, no border, no rounded background. The mono
-    // `speedwave · model · time` meta line is the only visual delimiter.
+    // Assistant messages are plain articles — no max-width, border, or rounded background.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
@@ -181,9 +173,7 @@ describe('ChatMessageComponent', () => {
   });
 
   it('shows the block-level cursor when streaming and last block is NOT text', () => {
-    // The per-text-block streaming caret renders inside <app-text-block>;
-    // the parent block-level cursor is suppressed when the last block is a
-    // text block to avoid a double-cursor visual bug.
+    // Per-text-block caret renders in <app-text-block>; block-level cursor suppressed when last block is text.
     fixture.componentRef.setInput('blocks', [
       {
         type: 'tool_use',
@@ -310,8 +300,7 @@ describe('ChatMessageComponent', () => {
     let emitted: { toolId: string; questionIdx: number; value: string } | null = null;
     component.questionAnswered.subscribe((e) => (emitted = e));
 
-    // Drive the child ask-user-block via its real option + send buttons —
-    // exercises the `(answered)` binding path.
+    // Drive the child ask-user-block via its real option + send buttons.
     const el = fixture.nativeElement as HTMLElement;
     const optionBtn = el.querySelector(
       '[data-testid="ask-option-btn"]'

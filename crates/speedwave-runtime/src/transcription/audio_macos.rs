@@ -1,7 +1,6 @@
 //! macOS audio capture: spawns the bundled `audio-capture-cli` (CoreAudio
 //! process taps, macOS 14.4+) and parses its framed stdout protocol. The CLI
-//! ships its own embedded Info.plist so TCC sees `NSAudioCaptureUsageDescription`
-//! / `NSMicrophoneUsageDescription` when we spawn it (ADR-056, ADR-049 lesson).
+//! carries its own embedded Info.plist for TCC permissions (ADR-056, ADR-049).
 //!
 //! Protocol (frozen — must match `native/macos/audio-capture/Sources/AudioCaptureCLI.swift`):
 //!   one UTF-8 JSON header line, then length-prefixed chunks:
@@ -50,10 +49,8 @@ struct ProcessListEntry {
     _object_id: i64,
 }
 
-/// Header line emitted once at the start of a `--record` stream. `streams` tells
-/// us whether the CLI is emitting a mic stream alongside the system one (so we
-/// know to mix); `started_at_ns` is informational (offsets are relative) — kept
-/// underscored so serde accepts it.
+/// Header line emitted once at the start of a `--record` stream. `streams` lists
+/// the emitted streams (>1 = mix mic with system); `started_at_ns` is informational.
 #[derive(Debug, Deserialize)]
 struct StreamHeader {
     sample_rate: u32,
@@ -66,8 +63,7 @@ struct StreamHeader {
 
 impl AudioCapture for MacOsAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
-        // The CLI enforces macOS 14.4 and surfaces a clean error on older
-        // systems (ADR-056 decision 2/3 for the permission model).
+        // The CLI enforces macOS 14.4 and surfaces a clean error on older systems.
         CaptureCapabilities {
             supports_per_process: true,
             supports_system_audio: true,
@@ -206,20 +202,15 @@ impl AudioCapture for MacOsAudioCapture {
     }
 }
 
-/// Reads the CLI child's framed stdout: a JSON header (already consumed by
-/// `start()`), then `<u32 stream> <u32 nframes> <u64 offset_ns> <f32 * nframes>`
-/// chunks. Owns the child; on drop it's killed (graceful via `try_wait` first,
-/// then SIGKILL if still running).
+/// Reads the CLI child's framed stdout chunks (the JSON header is already consumed
+/// by `start()`). Owns the child; killed gracefully on drop.
 struct CliRawReader {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
     done: bool,
 }
 
-/// A `nframes`/`offset_ns` past this is a desynced or corrupt stream — kill the
-/// CLI rather than try to allocate gigabytes (`nframes`) or buffer hours of
-/// silence (`offset_ns` → see `MixBuffer`'s own cap). 5 s of 16 kHz audio is a
-/// generous upper bound on a single chunk; 24 h is a generous session length.
+/// Detects desynced or corrupt stream state. 5 s of 16 kHz = MAX_FRAME_SAMPLES; 24 h = MAX_SESSION_NS.
 const MAX_FRAME_SAMPLES: usize = super::audio::SAMPLE_RATE_HZ as usize * 5;
 const MAX_SESSION_NS: u64 = 24 * 3600 * 1_000_000_000;
 
@@ -373,12 +364,7 @@ impl AudioStream for MixedCliStream {
 }
 
 /// Maps an `AudioSource` to the CLI's `--source` / `--mic` argument strings.
-/// `Microphone` → `mic-only` (the CLI uses the public AVCaptureDevice consent
-/// API and emits the mic on stream 0). `SystemWide`/`Process` tap the system
-/// with `--mic none`. `Mixed { system, mic }` taps `system` and adds `--mic`,
-/// so the CLI emits stream 0 (system) + stream 1 (mic); `CliAudioStream` sums
-/// them. The inner `system` must itself be `SystemWide`/`Process` (not a nested
-/// `Mixed` or a `Microphone`).
+/// `Mixed`'s inner `system` must be `SystemWide`/`Process` (not nested `Mixed`/`Microphone`).
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
@@ -604,10 +590,8 @@ mod tests {
         out
     }
 
-    /// Builds a `CliRawReader` whose stdout is `bytes`, by piping a tiny `cat`
-    /// over a temp file (no real `audio-capture-cli` needed). The JSON header is
-    /// NOT included — these tests exercise `read_frame`, which is called *after*
-    /// `start()` has consumed the header.
+    /// Builds a `CliRawReader` whose stdout is `bytes` via `cat` over a temp file.
+    /// No JSON header — these tests exercise `read_frame` (called after the header).
     fn raw_reader_over(bytes: &[u8]) -> CliRawReader {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -616,8 +600,7 @@ mod tests {
             .unwrap()
             .write_all(bytes)
             .unwrap();
-        // Keep the tempdir alive for the child's lifetime by leaking it — the
-        // process exits at end of test, the OS reclaims it.
+        // Leak tempdir; OS reclaims it after test.
         std::mem::forget(dir);
         let mut child = std::process::Command::new("cat")
             .arg(&path)

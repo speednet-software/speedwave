@@ -60,14 +60,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   memoryError = '';
   /**
    * Current git branch of the active project's working tree, or `null` when
-   * the project is not a git repo. Re-read after each turn finishes because
-   * the assistant may have switched branches via a shell tool.
+   * the project is not a git repo. Re-read after each turn finishes.
    */
   readonly gitBranch = signal<string | null>(null);
   /**
    * Index of the most recent assistant message in `messagesFromState()`;
-   * `-1` when none. A `computed` so the per-row `isLastAssistant` lookup is
-   * O(1) and recomputes lazily whenever the state-tree projection changes.
+   * `-1` when none.
    */
   readonly lastAssistantIndex = computed(() => {
     const msgs = this.chat.messagesFromState();
@@ -78,11 +76,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   });
   private resumeInProgress = false;
 
-  /**
-   * Composer reference used to refocus the textarea after parent-driven
-   *  state resets (new conversation, etc.) — autofocus on mount happens
-   *  inside the composer's own `ngAfterViewInit`.
-   */
+  /** Composer reference used to refocus the textarea after parent-driven state resets. */
   @ViewChild('composer') private composer?: { focusInput: () => void };
 
   readonly chat = inject(ChatStateService);
@@ -105,10 +99,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Optimistic session id stamped the moment the user clicks a row in the
-   * conversations drawer. The backend may take a turn or two to surface the
-   * resumed session id in `chat.sessionStats`, so we keep this local override
-   * to drive the drawer's accent indicator without flickering.
+   * Optimistic session id stamped when the user clicks a row in the
+   * conversations drawer.
    */
   private optimisticSessionId: string | null = null;
 
@@ -122,10 +114,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
-    // Refresh the branch chip on every streaming -> idle transition so a
-    // turn that ran `git checkout` updates the status strip without a full
-    // page reload. The effect re-runs whenever the state-tree's streaming
-    // projection flips; `markForCheck` keeps OnPush in sync with the signal.
+    // Refresh branch on streaming->idle to catch mid-turn git checkout.
     let wasStreaming = false;
     effect(() => {
       const streaming = this.chat.isStreamingFromState();
@@ -137,9 +126,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
-    // Decouple data loading from the toggle source so the keyboard shortcut
-    // (⌘B in shell.component, which only flips the signal) loads data the
-    // same way the History button does.
+    // Decouple toggle from data load so keyboard shortcut works like button.
     effect(() => {
       if (this.ui.sidebarOpen()) void this.loadConversations();
     });
@@ -150,8 +137,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    // Independent — running in parallel saves one git-fork's latency on
-    // cold start.
+    // Run init and branch read in parallel; they are independent.
     await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
 
@@ -168,8 +154,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
-      // Bypass the TTL — switching projects is a strong signal the branch
-      // could be different.
+      // Bypass TTL: project switch is a strong signal the branch could be different.
       await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
@@ -180,11 +165,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * Min interval between two `get_git_branch` IPC roundtrips. Branches
-   * rarely change mid-session; a short TTL eliminates 90%+ of forks
-   * during rapid turns without making the chip feel stale.
-   */
+  /** Min interval between two `get_git_branch` IPC roundtrips. */
   private static readonly GIT_BRANCH_TTL_MS = 1500;
   /** Epoch-ms of the last branch read; `0` forces the next call. */
   private gitBranchLastReadAt = 0;
@@ -297,9 +278,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Returns true when the assistant entry at `index` is the most recent
-   * assistant message — used to gate the per-message Retry button. Reads the
-   * `lastAssistantIndex` computed, so the per-row template lookup is O(1).
+   * Returns true when the assistant entry is the most recent message; gates Retry.
    * @param index - Index into `messagesFromState()` of the entry under test.
    */
   isLastAssistant(index: number): boolean {
@@ -337,13 +316,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Resumes a session in live chat mode. The drawer click is the primary
-   * action — there is no longer a "view transcript" intermediate step.
-   *
-   * Flow: clear local state -> fetch the persisted transcript and surface its
-   * messages immediately (Claude Code's `--resume` reuses the session but
-   * does not replay history on the stream-json channel) -> invoke
-   * `resume_conversation` so subsequent user turns continue the same session.
+   * Resumes a session in live chat mode. Clears local state, fetches transcript, surfaces messages.
    * @param sessionId - session UUID to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
@@ -351,9 +324,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.resumeInProgress = true;
 
     this.chat.resetForNewConversation();
-    // Stamp the active session id immediately so the drawer's accent
-    // indicator follows the user's click without waiting for the backend
-    // to surface session_id on the next stream chunk.
+    // Stamp session id optimistically so drawer accent follows click without flicker.
     this.optimisticSessionId = sessionId;
     this.ui.closeSidebar();
     this.cdr.markForCheck();
@@ -362,10 +333,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       const project = this.projectState.activeProject;
       if (!project) return;
 
-      // Run transcript fetch and the live-session relaunch in parallel —
-      // the two backend calls are independent (resume_conversation does
-      // not need the transcript). When both resolve we load the messages
-      // even if `resume_conversation` finished first.
+      // Run transcript fetch and resume_conversation in parallel; both independent.
       const transcriptPromise = this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
         .catch((err) => {
@@ -377,8 +345,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (transcript) {
         this.chat.loadMessages(toChatMessages(transcript));
-        // Seed the session id immediately so retry / queue work without
-        // waiting for the next live `Result` event to land.
+        // Seed session id immediately so retry/queue work without waiting for live Result.
         this.chat.seedResumedSession(sessionId);
       }
     } catch (err) {
@@ -408,9 +375,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Deletes a conversation's transcript file. If the active session is the one
-   * being deleted, we reset live chat too — the underlying JSONL is gone, so
-   * resume/retry would fail.
+   * Deletes a conversation's transcript file; resets live chat if currently active.
    * @param sessionId - session UUID to delete.
    */
   async deleteConversation(sessionId: string): Promise<void> {
@@ -442,8 +407,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
-    // Re-focus the composer so the user can start typing right after
-    // hitting "+ new conversation" without an extra click.
+    // Re-focus composer so user can type immediately after clicking new conversation.
     this.composer?.focusInput();
   }
 
@@ -518,12 +482,7 @@ interface HistoryToolResultBlock {
 }
 
 /**
- * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]`
- * shape used by `ChatStateService.loadMessages`.
- *
- * Each transcript entry carries either pre-built `blocks` or a flat `content`
- * string. We prefer `blocks` so tool calls / thinking sections survive the
- * round-trip; otherwise we fall back to a single text block.
+ * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
  * @param transcript - Backend conversation transcript to convert.
  */
 function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
@@ -535,9 +494,7 @@ function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
         : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
     const blocks = normalizeHistoryBlocks(rawBlocks);
     const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
-    // History entries are by definition durable — propagate the JSONL uuid
-    // (when present) and mark it `Committed` so `canRetryLastAssistant`
-    // accepts the resumed conversation as a valid retry anchor (ADR-046).
+    // Propagate JSONL uuid and mark Committed so retry accepts it as anchor (ADR-046).
     const base: ChatMessage = { role, blocks, timestamp };
     if (msg.uuid) {
       base.uuid = msg.uuid;
@@ -548,13 +505,7 @@ function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
 }
 
 /**
- * Converts blocks from the backend history format to the live-chat format.
- *
- * History `tool_use` blocks are flat (`{ type, tool_name, input_json }`),
- * while live-chat blocks nest the tool data inside
- * `{ type: 'tool_use', tool: ToolUseBlock }`. History `tool_result` blocks
- * are consumed and merged into the preceding `tool_use` block — they never
- * appear standalone in the returned array.
+ * Converts blocks from backend history format to live-chat format, merging tool_result into tool_use.
  * @param blocks - Raw blocks from the backend history payload.
  */
 function normalizeHistoryBlocks(

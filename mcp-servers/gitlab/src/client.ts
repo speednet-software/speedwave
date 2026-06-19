@@ -1434,18 +1434,7 @@ export class GitLabClient {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Initializes GitLab client with token from mounted path and host from /tokens/host_url.
- * Reads authentication token from /tokens/token (or TOKENS_DIR env var) and GitLab host URL
- * from /tokens/host_url file. Falls back to GITLAB_URL env var, then https://gitlab.com.
- * Tests connection before returning client instance.
- *
- * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
- * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave` (no subcommand) without configuring all integrations
- * - Healthcheck reports `configured: false` for unconfigured services
- * - Tools return clear "not configured" error when called
- *
- * DO NOT change this to throw - it breaks container startup for unconfigured services.
+ * Initializes GitLab client from /tokens/token and /tokens/host_url (or GITLAB_URL, then https://gitlab.com).
  * @returns Configured GitLabClient instance, or null if token not found/invalid
  */
 export async function initializeGitLabClient(): Promise<GitLabClient | null> {
@@ -1455,8 +1444,7 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
     const token = await loadTokenFile('token');
 
     if (!token) {
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
+      // Graceful degradation: return null, let server start
       console.warn(`${ts()} ${withSetupGuidance('GitLab token is empty or not found.')}`);
       return null;
     }
@@ -1484,9 +1472,7 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
       }
     }
 
-    // Create client. Connection test runs in the background — see comment
-    // on backgroundConnectionTest. The HTTP listener no longer waits on a
-    // slow or unreachable GitLab.
+    // Connection test runs async; see backgroundConnectionTest
     const client = new GitLabClient({ token, host });
     backgroundConnectionTest(
       client.statusTracker,

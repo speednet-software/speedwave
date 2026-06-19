@@ -3,15 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { LoggerService } from './logger.service';
 
-/**
- * The service is a thin wrapper around `@tauri-apps/plugin-log#error`.
- * `vi.mock` of that module is unreliable under `@angular/build:unit-test`
- * (the warning "is not at the top level of the module" surfaces and the
- * factory is occasionally applied AFTER the SUT's static imports), so the
- * test exercises the production code path that the runtime executes by
- * stubbing `__TAURI_INTERNALS__.invoke` — `pluginLogError` ultimately
- * forwards to `invoke('plugin:log|log', …)`.
- */
+/** Stubs `__TAURI_INTERNALS__.invoke`, which the wrapper forwards to via `invoke('plugin:log|log', …)`. */
 describe('LoggerService', () => {
   let service: LoggerService;
   let invokeSpy: ReturnType<typeof vi.fn>;
@@ -33,8 +25,7 @@ describe('LoggerService', () => {
   it('forwards the message to the Rust log pipeline as an error-level entry', async () => {
     service.error('boom');
 
-    // The plugin sends a microtask through `invoke` — yield once so the
-    // wrapper's `.catch(() => {})` chain can settle.
+    // Yield so the wrapper's `.catch(() => {})` chain can settle.
     await Promise.resolve();
     await Promise.resolve();
 
@@ -68,11 +59,7 @@ describe('LoggerService', () => {
   });
 
   // -- info / warn / debug levels --
-  // Each level forwards to the same `invoke('plugin:log|log', { message, level })`
-  // pipeline as `error` but with a different `level` integer. The plugin defines
-  // levels as Trace=1, Debug=2, Info=3, Warn=4, Error=5 (see @tauri-apps/plugin-log
-  // LogLevel enum). These tests pin the level integers so a future plugin
-  // version bump or accidental refactor (e.g. swapping info<>warn) is caught.
+  // LogLevel: Trace=1, Debug=2, Info=3, Warn=4, Error=5.
 
   it('forwards info-level messages with level=3', async () => {
     service.info('hello');

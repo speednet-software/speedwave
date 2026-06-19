@@ -1,10 +1,7 @@
 //! VM provisioning primitives (Lima / WSL2 / nerdctl).
 //!
-//! SSOT for the platform provisioning steps the setup wizard orchestrates:
-//! the Lima VM YAML builder + migration check, WSL2 distro import,
-//! nerdctl-full install, and the `.wslconfig` / `wsl.conf` mergers. Pure Rust,
-//! no Tauri — callers in the desktop crate keep the wizard-state orchestration
-//! and pass plain data in.
+//! SSOT for the Lima VM YAML builder + migration check, WSL2 distro import,
+//! nerdctl-full install, and the `.wslconfig` / `wsl.conf` mergers.
 
 use crate::consts;
 #[cfg(any(target_os = "windows", test))]
@@ -15,13 +12,7 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------------------
 
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
-///
-/// Uses adaptive scaling from [`crate::resources`]:
-/// VM = host_ram / 2, clamped 8–32 GiB (≤50% of host RAM at/above the 16 GiB
-/// minimum supported host; the 8 GiB floor makes the always-on set fit).
-///
-/// Older installs with lower values are auto-migrated by
-/// [`ensure_lima_vm_config`].
+/// Adaptive from [`crate::resources`]: host_ram / 2, clamped 8–32 GiB.
 #[cfg(any(target_os = "macos", test))]
 pub fn desired_lima_vm_memory() -> String {
     let gib = crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
@@ -34,10 +25,8 @@ pub fn desired_lima_vm_cpus() -> u32 {
     crate::resources::desired_vm_cpus(crate::resources::host_logical_cpus())
 }
 
-/// Default Lima VM configuration for Speedwave.
-/// Uses Apple Virtualization Framework (vz) with containerd + nerdctl.
-/// Memory and CPU are adaptive based on host RAM/cores — see
-/// [`desired_lima_vm_memory`] and [`desired_lima_vm_cpus`].
+/// Default Lima VM config: Apple Virtualization Framework (vz) with
+/// containerd + nerdctl; memory and CPU adaptive based on host RAM/cores.
 #[cfg(any(target_os = "macos", test))]
 pub fn lima_config() -> String {
     format!(
@@ -70,24 +59,6 @@ provision:
     script: |
       #!/bin/sh
       # Make eth0 (vzNAT) the preferred default route, not lima0 (usernet).
-      #
-      # Why: Apple VZ NAT on eth0 inherits the macOS host routing table
-      # transparently — both public Internet and every VPN tunnel the host
-      # is connected to (IPSec, WireGuard, Tailscale). Lima's built-in
-      # usernet (lima0) runs a user-mode TCP stack on the host and only
-      # reaches services that need no host VPN; it silently times out on
-      # corporate VPNs and on Tailscale subnet routes.
-      #
-      # Lima's stock netplan ships lima0 metric=100 (preferred) and
-      # eth0 metric=200. We drop in a higher-numbered netplan file that
-      # overrides metrics and disables DHCP-installed default routes on
-      # lima0 — no edits to the lima-managed file, no hard-coded IPs.
-      #
-      # `mode: boot` maps to cloud-init's `bootcmd` — re-runs on every VM
-      # start. Idempotent: the heredoc just rewrites the same file. This
-      # guarantees existing VMs upgrading via `lima_vm_config_needs_update`
-      # pick the fix up on their next restart without needing cloud-init
-      # state reset.
       set -eu
       mkdir -p /etc/netplan
       cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'
@@ -144,9 +115,7 @@ pub fn lima_vm_config_needs_update_with(
     }
     // Whether a `prefix` line exists at all (regardless of parseability).
     let line_present = |prefix: &str| config_content.lines().any(|l| l.trim().starts_with(prefix));
-    // Parse a `memory: "8GiB"` or `cpus: 4` value to u32. `cpus` has no GiB
-    // suffix, so strip it optionally; present-but-unparseable → None (don't
-    // touch a hand-mangled value).
+    // Parse a `memory: "8GiB"` or `cpus: 4` value to u32; unparseable → None.
     let line_val = |prefix: &str| -> Option<u32> {
         config_content.lines().find_map(|line| {
             line.trim().strip_prefix(prefix).and_then(|rest| {
@@ -155,9 +124,7 @@ pub fn lima_vm_config_needs_update_with(
             })
         })
     };
-    // Regenerate if EITHER memory or cpus is absent (the SSOT line was never
-    // written — e.g. a pre-adaptive-cpus config) or drifted from the formula.
-    // Present-but-unparseable → "no drift" (don't clobber a hand-mangled value).
+    // Regenerate if memory or cpus is absent or drifted; unparseable → no drift.
     let needs_update = |prefix: &str, desired: u32| -> bool {
         if !line_present(prefix) {
             return true; // line absent — regenerate to write the SSOT value
@@ -167,12 +134,9 @@ pub fn lima_vm_config_needs_update_with(
     needs_update("memory:", desired_gib) || needs_update("cpus:", desired_cpus)
 }
 
-/// Migrates the Lima VM config on existing installs when it drifts from the
-/// SSOT (memory, cpus, or the VPN netplan drop-in — see
-/// [`lima_vm_config_needs_update`]). Fully regenerates `lima.yaml` from
-/// [`lima_config`] (a generated file — user edits are not preserved, per
-/// ADR-068), rewrites source + instance config, and restarts the VM if running.
-/// No-op on a fresh install (template absent) or when nothing drifted.
+/// Regenerates `lima.yaml` from [`lima_config`] when it drifts from the SSOT
+/// (memory, cpus, or VPN netplan drop-in), rewrites source + instance config,
+/// and restarts the VM if running. No-op on fresh install or no drift. ADR-068.
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     use crate::binary;
@@ -228,10 +192,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Full regeneration from the SSOT `lima_config()` — both `cpus` and
-    // `memory` (and the provision block) always reflect the current formula.
-    // `lima.yaml` is a generated file (like compose.yml); user edits are not
-    // preserved by design.
+    // Full regeneration from the SSOT `lima_config()`.
     let regenerated = lima_config();
     if content.trim() != regenerated.trim() {
         log::warn!(
@@ -437,11 +398,7 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
         attempt_wsl_install()?;
     }
 
-    // Ensure %USERPROFILE%\.wslconfig enables WSL2 mirrored networking before
-    // any distro starts — this is what lets containers see the host's
-    // VPN tunnel. Logs but does not fail setup on error: an older Windows
-    // build without mirrored-mode support still gets a working (if
-    // VPN-incompatible) install.
+    // Enable WSL2 mirrored networking before any distro starts; non-fatal.
     if let Err(e) = ensure_wslconfig_vpn_compat() {
         log::warn!("ensure_wslconfig_vpn_compat failed (non-fatal): {e}");
     }
@@ -466,18 +423,9 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes (or updates) `%USERPROFILE%\.wslconfig` so the `[wsl2]` section
-/// declares `networkingMode=mirrored`, `dnsTunneling=true`, `autoProxy=true`.
-/// These three keys together let WSL2 distros (including Speedwave's
-/// `Speedwave` distro and its containers) reach services on the host's
-/// corporate VPN without manual configuration.
-///
-/// Preserves all other user keys and sections — only the three load-bearing
-/// keys in `[wsl2]` are added or rewritten. Missing file → fresh skeleton.
-///
-/// Requires Windows 11 22H2+. Older builds silently ignore the unknown keys
-/// (legacy NAT mode stays active and VPN-protected services remain
-/// unreachable from inside WSL2 until the user upgrades).
+/// Writes/updates `%USERPROFILE%\.wslconfig` so `[wsl2]` declares
+/// `networkingMode=mirrored`, `dnsTunneling=true`, `autoProxy=true` (Win11
+/// 22H2+). Preserves all other keys/sections; missing file → fresh skeleton.
 #[cfg(target_os = "windows")]
 pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
     let home = dirs::home_dir()
@@ -491,11 +439,7 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
             "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
             path.display()
         );
-        // .wslconfig is read only on WSL2 boot. An existing WSL2 session
-        // won't pick up the new keys until the user runs `wsl --shutdown`
-        // (which restarts ALL WSL distros, not just Speedwave's). We log
-        // a hint rather than triggering the shutdown automatically — it
-        // would surprise users running unrelated WSL workloads.
+        // .wslconfig is read only on WSL2 boot; new keys need `wsl --shutdown`.
         log::warn!(
             ".wslconfig changed — run `wsl --shutdown` from PowerShell to \
              activate mirrored-mode networking (required to reach \
@@ -505,10 +449,8 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classifies a `.wslconfig` read so a non-NotFound failure (UTF-16, EACCES,
-/// EBUSY) bails instead of being treated as empty — an empty merge would
-/// REPLACE the user's global `[wsl2]` memory/processors/kernel for ALL distros.
-/// Only `NotFound` maps to empty (fresh skeleton).
+/// Classifies a `.wslconfig` read: only `NotFound` maps to empty (fresh
+/// skeleton); any other failure (UTF-16, EACCES, EBUSY) bails.
 #[cfg(any(target_os = "windows", test))]
 pub fn read_existing_wslconfig(
     read: std::io::Result<String>,
@@ -613,13 +555,9 @@ pub fn merge_wslconfig_vpn_keys(input: &str) -> String {
     out
 }
 
-/// Verifies that an existing WSL2 distro named [`consts::wsl_distro_name`] was
-/// created by Speedwave, not pre-registered by an attacker.
-///
-/// WSL stores the virtual disk at the install directory passed to `wsl --import`.
-/// Speedwave always imports into `~/.speedwave/wsl/Speedwave/`, so a legitimate
-/// distro will have `ext4.vhdx` at that path. If the file is missing the distro
-/// was registered from somewhere else — bail with a clear security error.
+/// Verifies an existing WSL2 distro [`consts::wsl_distro_name`] was created by
+/// Speedwave by checking for `ext4.vhdx` at the Speedwave install path; bails
+/// with a security error if absent (distro pre-registered elsewhere).
 #[cfg(target_os = "windows")]
 fn verify_wsl_distro_origin() -> anyhow::Result<()> {
     verify_wsl_distro_origin_in(consts::data_dir())
@@ -653,10 +591,8 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
         .join("ext4.vhdx")
 }
 
-/// Attempts to install WSL2 via elevated PowerShell. Always bails: either
-/// with a restart prompt (success) or an installation failure message.
-/// Detection is handled by `os_prereqs::check_os_prereqs()` — this function
-/// only performs the install action.
+/// Installs WSL2 via elevated PowerShell. Always bails: either with a restart
+/// prompt (success) or an installation failure message.
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
     let status = crate::binary::system_command("powershell")
@@ -762,9 +698,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             .lines()
             .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name())
         {
-            // Distro exists but we didn't create it — verify it's ours before
-            // trusting it. An attacker could pre-register a malicious distro
-            // with the same name to hijack the container runtime.
+            // Distro exists but we didn't create it — verify it's ours.
             verify_wsl_distro_origin()?;
             log::warn!(
                 "WSL2 import failed but distro '{}' already exists and is verified — continuing",
@@ -802,11 +736,8 @@ pub fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bo
     }
 }
 
-/// Unwraps a `read_wsl_conf` result, warning before defaulting to empty.
-/// `read_wsl_conf` already maps a missing file to `Ok("")`, so any `Err` here
-/// is a real spawn/IO failure (not NotFound) and must not be silent — empty
-/// triggers a needless wsl.conf rewrite, but the post-write uid re-read still
-/// guards correctness (ADR-052), so we degrade rather than bail.
+/// Unwraps a `read_wsl_conf` result, warning before degrading an `Err` (real
+/// spawn/IO failure) to empty rather than bailing (ADR-052).
 #[cfg(any(target_os = "windows", test))]
 pub fn wsl_conf_or_warn(read: anyhow::Result<String>, distro: &str, when: &str) -> String {
     match read {
@@ -993,8 +924,7 @@ pub fn options_has_uid(options: &str, uid: u32) -> bool {
 pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = String::with_capacity(input.len() + 64);
-    // `Some(true)` = first [automount] (keep its keys); `Some(false)` = a
-    // duplicate [automount] (drop its whole body); `None` = some other section.
+    // `Some(true)` = first [automount]; `Some(false)` = duplicate (dropped); `None` = other.
     let mut in_automount: Option<bool> = None;
     let mut automount_seen = false;
     let mut options_written = false;
@@ -1050,26 +980,9 @@ pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     out
 }
 
-/// Makes the project's `claude-home` tree owned by the container user so the
-/// uid-1000 entrypoint can write `/home/speedwave` (mkdir/ln under `set -e`).
-///
-/// This is the **load-bearing** half of the Windows mount-ownership fix. The
-/// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
-/// default user, and WSL's prepended default-user uid beats the `uid=` automount
-/// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
-/// container exits(1) ("cannot exec in a stopped state"). With `metadata` on,
-/// `chown` writes per-file ownership that drvfs honors for access.
-///
-/// MUST run **after** `compose_up_recreate`: `compose up` auto-creates the
-/// `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge
-/// mount) as ROOT, so a chown done *before* compose is silently undone by the
-/// start. Chowning after the mount-points exist, then letting
-/// `ensure_exec_healthy`'s recovery recreate re-run the entrypoint against the
-/// now-1000-owned tree, is what actually fixes it. Verified on the live distro.
-///
-/// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
-/// compose `user:` field). Idempotent and cheap. Fail-open: a chown failure
-/// only logs.
+/// Chowns the project's `claude-home` tree to [`consts::container_uid_gid`] so
+/// the uid-1000 entrypoint can write `/home/speedwave`. MUST run after
+/// `compose_up_recreate`. Idempotent; fail-open (a chown failure only logs).
 #[cfg(target_os = "windows")]
 pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
     let distro = consts::wsl_distro_name();
@@ -1128,13 +1041,8 @@ fn nerdctl_version_matches_pin(version_line: &str) -> bool {
         .any(|tok| tok == consts::NERDCTL_FULL_VERSION)
 }
 
-/// Installs nerdctl-full (containerd + nerdctl + CNI + BuildKit) inside the
-/// Speedwave WSL2 distribution if the pinned version is not already present.
-/// Checks for a bundled tarball first (offline install), falling back to
-/// download if not found. Re-installs when the in-distro version differs from
-/// `NERDCTL_FULL_VERSION` so an upgrade actually upgrades the guest (ADR-072).
-/// `true` when a failed version probe means nerdctl is genuinely absent
-/// (vs a transient wsl.exe transport error that must not trigger reinstall).
+/// `true` when a failed version probe means nerdctl is genuinely absent (vs a
+/// transient wsl.exe transport error that must not trigger reinstall).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn probe_indicates_absent(code: Option<i32>, stderr: &str) -> bool {
     code == Some(127) || stderr.contains("not found") || stderr.contains("No such file")
@@ -1162,9 +1070,7 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             version_line.trim()
         );
     } else {
-        // Probe failed: distinguish "nerdctl genuinely absent" (exit 127 /
-        // not-found) from a transient wsl.exe transport error — a transient
-        // failure must NOT trigger a daemon-stopping reinstall.
+        // Probe failed: distinguish genuinely-absent from a transient transport error.
         let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
         let absent = probe_indicates_absent(nerdctl_check.status.code(), &stderr);
         if !absent {
@@ -1181,16 +1087,12 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
     }
 
     // Try bundled nerdctl-full tarball first (offline install from NSIS bundle).
-    // If valid, convert its path to WSL and use `cp` instead of `curl` inside the distro.
     let expected_sha256 = nerdctl_sha256_for_arch()?;
     let mut bundled_wsl_path: Option<String> = None;
 
     if let Some(bundled) = find_bundled_resource("wsl/nerdctl-full.tar.gz") {
         if verify_sha256_ps(&bundled, expected_sha256) {
-            // Translate the bundled tarball's host path to its WSL path via the
-            // SSOT (engine_path::to_engine_path) — one path-translation mechanism,
-            // not a second `wslpath` round-trip. On translation failure fall
-            // through to the curl download branch rather than abort the install.
+            // Translate the bundled tarball's host path to WSL via the SSOT.
             match crate::engine_path::to_engine_path(&bundled) {
                 Ok(wsl) => bundled_wsl_path = Some(wsl),
                 Err(e) => log::warn!(
@@ -1230,18 +1132,15 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
   rm -rf /tmp/nerdctl-install
   exit 1
 fi
-# Pre-existing installs carry a unit WITHOUT KillMode=process — stopping it
-# would cgroup-kill every running container. Patch via override BEFORE stop
-# so user containers survive the upgrade (shims keep them; the new daemon
-# re-attaches). No-op on fresh install.
+# Patch KillMode=process via override BEFORE stop so containers survive the
+# upgrade (stopping a unit without it cgroup-kills them). No-op on fresh install.
 if [ -f /etc/systemd/system/containerd.service ]; then
   mkdir -p /etc/systemd/system/containerd.service.d
   printf '[Service]\nKillMode=process\nDelegate=yes\n' > /etc/systemd/system/containerd.service.d/10-speedwave-killmode.conf
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
-# Stop daemons before unpacking — tar over live binaries fails ETXTBSY on a
-# reinstall (ADR-072). No is-system-running gate (skips on `degraded`); pkill
-# covers the `$exec &` non-systemd fallback. No-op on fresh install.
+# Stop daemons before unpacking — tar over live binaries fails ETXTBSY (ADR-072).
+# pkill covers the `$exec &` non-systemd fallback. No-op on fresh install.
 command -v systemctl >/dev/null 2>&1 && systemctl stop buildkit containerd 2>/dev/null || true
 pkill -x buildkitd 2>/dev/null || true
 pkill -x containerd 2>/dev/null || true
@@ -1301,9 +1200,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         sha256_arm64 = consts::NERDCTL_FULL_SHA256_ARM64,
         source_commands = source_commands
     );
-    // Write the install script inside WSL via stdin to avoid argument
-    // length/escaping issues with wsl.exe -- bash -c "...".
-    // Pipe the script through stdin: echo "$script" | wsl bash -s
+    // Write the install script via stdin to avoid wsl.exe arg length/escaping.
     let install = crate::binary::system_command("wsl.exe")
         .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
         .stdin(std::process::Stdio::piped())
@@ -1376,12 +1273,8 @@ mod tests {
         assert!(!nerdctl_version_matches_pin("command not found"));
     }
 
-    /// Structural: the install script must stop the daemons BEFORE `tar`
-    /// unpacks into /usr/local — on a reinstall the live containerd/buildkitd
-    /// binaries would otherwise be overwritten while executing (ETXTBSY),
-    /// failing the upgrade. The stop must precede the unpack, must NOT gate on
-    /// `is-system-running` (false in `degraded` state), and must `pkill` the
-    /// bare-background daemons (install_service's non-systemd `$exec &` path).
+    /// Install script must stop daemons before `tar` (ETXTBSY on reinstall),
+    /// must not gate on `is-system-running`, and must `pkill` bare daemons.
     #[test]
     fn nerdctl_install_stops_services_before_tar() {
         let src = include_str!("provision.rs");
@@ -1393,8 +1286,7 @@ mod tests {
             .expect("old-unit KillMode override must exist");
         assert!(
             killmode_pos < stop_pos,
-            "KillMode override must be written BEFORE the stop, or the first \
-             migration cgroup-kills every running container"
+            "KillMode override must be written BEFORE the stop"
         );
         let pkill_pos = src
             .find("pkill -x containerd")
@@ -1501,9 +1393,8 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Test helper — appends the VPN-aware provision sentinel so fixtures
-    /// model a fully-migrated config; tests focused on memory comparison
-    /// would otherwise also trigger the provision-absent migration branch.
+    /// Appends the VPN provision sentinel so memory/CPU tests don't also
+    /// trigger the provision-absent migration branch.
     fn with_provision_sentinel(base: &str) -> String {
         format!(
             "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n"
@@ -1519,8 +1410,7 @@ mod tests {
 
     #[test]
     fn lima_vm_config_higher_memory_triggers_downgrade() {
-        // After the VM formula was reduced, existing VMs with more RAM than
-        // desired must be migrated down to reclaim host memory.
+        // VMs with more RAM than desired must migrate down to reclaim host memory.
         let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
@@ -1531,10 +1421,8 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Generated lima.yaml must include a provision script that demotes lima0
-    /// (usernet) below eth0 (vzNAT) so traffic flows through vzNAT where the
-    /// macOS host's VPN routing applies. Without this, corporate-VPN-protected
-    /// services are unreachable from inside the VM. See lima-vm/lima#2984.
+    /// Provision script demotes lima0 (usernet) below eth0 (vzNAT) for VPN
+    /// reach. See lima-vm/lima#2984.
     #[test]
     fn lima_config_includes_vpn_aware_provision_script() {
         let yaml = lima_config();
@@ -1542,32 +1430,25 @@ mod tests {
             yaml.contains("provision:"),
             "lima.yaml must declare a provision section"
         );
-        // `mode: boot` maps to cloud-init's bootcmd — re-runs on every VM
-        // start. `mode: system` would only run on first boot, which would
-        // skip the fix for users upgrading an existing VM.
+        // `mode: boot` (cloud-init bootcmd) re-runs on every VM start.
         assert!(
             yaml.contains("mode: boot"),
-            "provision must use `mode: boot` so the fix re-applies on \
-             every VM restart, including post-upgrade existing VMs"
+            "provision must use `mode: boot` so the fix re-applies on every VM restart"
         );
-        // The drop-in netplan file declaratively overrides DHCP route metrics
-        // — eth0 to 100 (preferred), lima0 to 300 with `use-routes: false`.
+        // Drop-in netplan: eth0 metric 100 (preferred), lima0 metric 300.
         assert!(
             yaml.contains("99-speedwave-prefer-vznat.yaml"),
-            "provision must drop in a higher-priority netplan file that \
-             demotes lima0 and promotes eth0 (vzNAT) as default egress"
+            "provision must drop in a netplan file that demotes lima0 and promotes eth0 (vzNAT)"
         );
         assert!(
             yaml.contains("use-routes: false"),
-            "lima0 must have `use-routes: false` so DHCP cannot re-install \
-             a default route through it after renew"
+            "lima0 must have `use-routes: false` so DHCP cannot re-install a default route through it"
         );
         assert!(
             yaml.contains("route-metric: 100"),
             "eth0 must be promoted to route-metric 100 (preferred)"
         );
-        // Sanity: provision must `netplan apply` so changes take effect
-        // without requiring a reboot.
+        // Provision must `netplan apply` so changes take effect without reboot.
         assert!(
             yaml.contains("netplan apply"),
             "provision must apply the new netplan config immediately"
@@ -1579,8 +1460,7 @@ mod tests {
     #[test]
     fn lima_config_does_not_silently_drop_provision_section() {
         let yaml = lima_config();
-        // Both vzNAT and the provision script are load-bearing; removing
-        // either re-introduces the VPN-incompatibility regression.
+        // Both vzNAT and the provision script are load-bearing.
         assert!(yaml.contains("vzNAT: true"));
         assert!(yaml.contains("provision:"));
     }
@@ -1594,8 +1474,7 @@ mod tests {
 
     #[test]
     fn lima_vm_config_unparseable_cpus_no_update() {
-        // Symmetric to the memory case: a present-but-garbage `cpus:` value is a
-        // hand-mangled file, not a missing SSOT line — don't clobber it.
+        // Present-but-garbage `cpus:` value is hand-mangled; don't clobber it.
         let config =
             with_provision_sentinel("vmType: vz\ncpus: lots\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n");
         assert!(!lima_vm_config_needs_update_with(&config, 12, 4));
@@ -1610,8 +1489,7 @@ mod tests {
 
     #[test]
     fn lima_vm_config_downgrade_from_12_to_8() {
-        // 16 GiB host: old formula gave 12 GiB VM, new formula gives 8 GiB.
-        // The migration must trigger to reclaim 4 GiB for the host.
+        // 16 GiB host: old formula 12 GiB VM, new formula 8 GiB → migrate down.
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
         assert!(lima_vm_config_needs_update_with(config, 8, 4));
     }
@@ -1626,8 +1504,7 @@ mod tests {
 
     #[test]
     fn lima_vm_config_cpus_drift_triggers_update() {
-        // Memory matches but cpus drifted (bigger host → desired 8) → migrate
-        // so existing users pick up the adaptive vCPU count on upgrade.
+        // Memory matches but cpus drifted (desired 8) → migrate.
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 8));
@@ -1635,16 +1512,14 @@ mod tests {
 
     #[test]
     fn lima_vm_config_missing_cpus_triggers_update() {
-        // Pre-adaptive-cpus config: no `cpus:` line at all. Absent ≠ "no drift"
-        // — regenerate to write the SSOT vCPU count (matched memory must not mask it).
+        // No `cpus:` line at all: absent ≠ no-drift → regenerate.
         let config = with_provision_sentinel("vmType: vz\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
 
     #[test]
     fn lima_vm_config_missing_memory_triggers_update() {
-        // Symmetric: no `memory:` line — regenerate to write the SSOT value
-        // even though cpus already matches.
+        // No `memory:` line: absent ≠ no-drift → regenerate.
         let config = with_provision_sentinel("vmType: vz\ncpus: 4\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
@@ -1724,9 +1599,7 @@ mod tests {
         assert!(out.contains("bar=baz"));
     }
 
-    /// `networkingMode=NAT` already present → must be **rewritten** to
-    /// `mirrored`. We deliberately overwrite because a stale NAT setting
-    /// re-introduces the VPN-incompatibility regression.
+    /// `networkingMode=NAT` already present → must be rewritten to `mirrored`.
     #[test]
     fn merge_wslconfig_overwrites_stale_networking_mode() {
         let input = "[wsl2]\nnetworkingMode=NAT\nmemory=8GB\n";
@@ -1760,9 +1633,7 @@ mod tests {
         assert_eq!(mirrored_count, 1, "must rewrite, not duplicate: {out}");
     }
 
-    /// `.wslconfig` on Windows is typically CRLF — the merger must produce
-    /// valid output regardless of input line endings and must NOT mix LF and
-    /// CRLF in the result (cosmetic but reviewers care).
+    /// CRLF input must produce valid output and must not mix LF and CRLF.
     #[test]
     fn merge_wslconfig_handles_crlf_line_endings() {
         let input = "[wsl2]\r\nmemory=8GB\r\nnetworkingMode=NAT\r\n";
@@ -2007,8 +1878,7 @@ mod tests {
         assert!(wsl_conf_automount_has_uid(&out, 1000));
     }
 
-    // Interleaved duplicate [automount]: collapse to one, and a key from the
-    // dropped duplicate must NOT be misplaced under the intervening section.
+    // Interleaved duplicate [automount]: collapse to one without misplacing keys.
     #[test]
     fn merge_dedups_duplicate_sections() {
         let input = "[automount]\nenabled=true\n[network]\nx=1\n[automount]\nroot=/m/\n";

@@ -1,8 +1,5 @@
 /**
- * Validation Helpers for Tool Parameters
- *
- * Thin re-exports of the shared Family-A wrapper ({@link withResultValidation})
- * so Slack tools keep importing a local `withValidation`/`ToolResult`.
+ * Validation helpers re-exporting the shared Family-A wrapper.
  */
 
 import {
@@ -16,9 +13,7 @@ import type { SlackClients } from '../client.js';
 export type { ToolResult };
 
 /**
- * NOT_CONFIGURED gate shared by every tool factory: when the worker booted
- * without a token, short-circuit with a clear configuration error instead
- * of calling the handler.
+ * Gate: returns NOT_CONFIGURED when clients._tokensStatus is 'missing'.
  * @param clients - Slack client container
  */
 export function withClients(clients: SlackClients) {

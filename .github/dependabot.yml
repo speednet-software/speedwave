@@ -57,6 +57,20 @@ updates:
           - patch
 
   - package-ecosystem: npm
+    directory: /mcp-servers/playwright
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      npm-playwright-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
     directory: /desktop/src
     target-branch: dev
     schedule:

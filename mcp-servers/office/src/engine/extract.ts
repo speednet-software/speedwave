@@ -38,10 +38,7 @@ export function truncate(text: string, maxChars: number): { content: string; tru
  * @returns A Markdown string covering every sheet.
  */
 function workbookToMarkdown(wb: XLSX.WorkBook): string {
-  // One-pass cell escape for a Markdown-table cell: `\` → `\\`, `|` → `\|`, and any run of
-  // newlines (Excel Alt+Enter) → a single space (so the cell doesn't break the table row).
-  // A single replace with a callback (rather than chained `.replace` calls) keeps the escaping
-  // atomic — there is no intermediate state where `|` is escaped before `\`.
+  // Escape Markdown-table cell: `\` → `\\`, `|` → `\|`, newline runs → space.
   const escape = (cell: unknown): string =>
     (cell == null ? '' : String(cell)).replace(/[\\|]|[\r\n]+/g, (m) =>
       m === '\\' ? '\\\\' : m === '|' ? '\\|' : ' '
@@ -50,8 +47,7 @@ function workbookToMarkdown(wb: XLSX.WorkBook): string {
   for (const name of wb.SheetNames) {
     const sheet = wb.Sheets[name];
     parts.push(`## ${name}`);
-    // Array-of-arrays over the used range — handles cells that contain commas/quotes/newlines
-    // correctly (a CSV round-trip + `split(',')` would corrupt those).
+    // Array-of-arrays over the used range.
     const grid = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false });
     const width = grid.reduce((w, r) => Math.max(w, r.length), 0);
     const rows = grid.map((r) => Array.from({ length: width }, (_, i) => escape(r[i])));
@@ -100,8 +96,7 @@ export async function readDocumentToMarkdown(
     }
     // markitdown ran but produced nothing — fall through to the type-specific fallbacks.
   } catch (err) {
-    // markitdown crashed, timed out, or is missing from the venv (spawn ENOENT). The fallback
-    // engine below will still try; log so a broken venv is diagnosable rather than invisible.
+    // markitdown crashed, timed out, or is missing; the fallback engine below still tries.
     process.stderr.write(`[office] markitdown failed (falling back): ${(err as Error).message}\n`);
   }
 

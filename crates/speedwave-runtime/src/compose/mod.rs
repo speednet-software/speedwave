@@ -85,10 +85,7 @@ use workers::{
     apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
 
-// Test-only override for the bundle build root, so `render_compose_in` resolves
-// the manifest from an injected path instead of the process-global
-// `SPEEDWAVE_RESOURCES_DIR` env var (which other tests mutate). Thread-local so
-// parallel tests don't perturb each other.
+// Test-only bundle build root override; thread-local for parallel test safety.
 #[cfg(test)]
 thread_local! {
     static TEST_BUILD_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -126,10 +123,8 @@ const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
     ("${IMAGE_MCP_CONTEXT7}", build::IMAGE_MCP_CONTEXT7),
 ];
 
-/// One live host-side bridge that compose can advertise to a container
-/// worker. The plugin manifest's `host_bridge` declaration drives both
-/// `slug` (which plugin to match) and the env-var names; the Desktop
-/// process supplies the runtime values (`port`, `auth_token`).
+/// One live host-side bridge compose advertises to a worker. The plugin manifest's
+/// `host_bridge` drives `slug` + env-var names; Desktop supplies `port`/`auth_token`.
 #[derive(Clone)]
 pub struct HostBridgeRegistration {
     /// Plugin slug — matched against `PluginManifest.slug` during
@@ -258,10 +253,8 @@ pub fn render_compose(
     )
 }
 
-/// Env-free core of [`render_compose`]: every data-dir-rooted path is derived
-/// from the explicit `data_dir`, so tests pass a tempdir and never touch the
-/// production `~/.speedwave`. The public no-arg shim resolves `data_dir()` from
-/// the global singleton at the call site.
+/// Env-free core of [`render_compose`]: paths derive from the explicit `data_dir`
+/// (tests pass a tempdir); the public no-arg shim resolves `data_dir()`.
 pub fn render_compose_in(
     data_dir: &Path,
     project_name: &str,
@@ -311,9 +304,7 @@ pub fn render_compose_in(
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
-    // LiteLLM proxy mounts (ADR-073): rendered config (ro) + usage sink (rw).
-    // Both per-project; the config file is rendered here, inside the same
-    // render transaction as the compose file itself.
+    // LiteLLM proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
     litellm::write_litellm_config_in(data_dir, project_name, &resolved_config.llm)?;
     let litellm_config_dir = data_dir.join("litellm").join(project_name);
     std::fs::create_dir_all(&litellm_config_dir)?;
@@ -339,9 +330,7 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
-    // Container resource limits (mem/cpu/tmpfs/shm). SSOT: resources.rs table +
-    // McpServiceDescriptor.resources. Renderer substitutes the placeholders the
-    // template carries instead of YAML literals; drift test enforces parity.
+    // Container resource limits (mem/cpu/tmpfs/shm). SSOT: resources.rs + McpServiceDescriptor.resources.
     yaml = apply_container_resources(&yaml);
 
     // Inject Claude environment variables from resolved config
@@ -350,9 +339,7 @@ pub fn render_compose_in(
     // Handle LLM provider switching
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
 
-    // Ensure plugin images exist (builds pending and missing) before compose generation.
-    // Scoped to plugins enabled for this project — a broken plugin in another project
-    // does not block this one.
+    // Build pending plugin images before compose; scoped to project-enabled plugins.
     if let Some(rt) = runtime {
         let enabled_ids = integrations.enabled_plugin_service_ids();
         plugin::ensure_plugin_images(rt, &enabled_ids)?;
@@ -375,11 +362,7 @@ pub fn render_compose_in(
     let host_tz = crate::tz::detect_host_timezone();
     yaml = inject_host_timezone(&yaml, &host_tz)?;
 
-    // Inject Anthropic API key from secrets if configured.
-    // Skipped when a local LLM provider is active — the dummy
-    // ANTHROPIC_AUTH_TOKEN=sk-no-key-required is all Claude Code needs, and
-    // leaking the real key into a container pointed at a local server would
-    // violate least-privilege for no benefit.
+    // Inject Anthropic API key; skipped when a local LLM provider is active (leak mitigation).
     let provider = resolved_config
         .llm
         .provider
@@ -392,9 +375,7 @@ pub fn render_compose_in(
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config_in(data_dir, &yaml)?;
 
-    // Inject oauth worker URL + per-service bearer mount into OAuth-consuming worker
-    // containers (today: mcp-sharepoint). No-op if the oauth worker is not running
-    // for this project (ADR-060). Hub is NOT touched — the oauth worker is internal.
+    // Inject oauth worker URL + per-service bearer mount; no-op if oauth not running for project (ADR-060).
     yaml = apply_oauth_config_in(data_dir, &yaml, project_name)?;
 
     // Inject per-worker Bearer auth tokens (SEC-035)
@@ -403,15 +384,10 @@ pub fn render_compose_in(
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
 
-    // Per-worker credentials digest — a token rotation must change the
-    // worker's config-hash so idempotent `up` recreates it (SEC: bytes
-    // themselves never enter the YAML, only a SHA-256 prefix).
+    // Per-worker credentials digest: token rotation changes config-hash for idempotent recreate.
     yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
 
-    // Final hardening: re-quote any `environment:` value carrying a YAML flow
-    // indicator (e.g. the `[1m]` 1M-context suffix) that libyaml emits
-    // unquoted but nerdctl's Go YAML parser rejects. Must run last — after
-    // every env-injection pass has contributed its entries.
+    // Re-quote env values with YAML flow indicators (e.g. `[1m]` suffix); must run after all env-injection.
     yaml = harden_env_scalar_quoting(&yaml)?;
 
     Ok(yaml)
@@ -427,11 +403,9 @@ fn format_cpus(cpus: f32) -> String {
     format!("{cpus:.1}")
 }
 
-/// Substitutes every `${…_MEM|_CPUS|_TMPFS|_SHM}` placeholder in the compose
-/// template from the resource SSOT (resources.rs table +
-/// `McpServiceDescriptor.resources`). Memory/tmpfs/shm are always emitted in
-/// MiB (`Nm`) for one canonical format; CPU as one-decimal (`2.0`). The
-/// resource-drift test asserts the template carries exactly these placeholders.
+/// Substitutes every `${…_MEM|_CPUS|_TMPFS|_SHM}` placeholder from the resource SSOT
+/// (resources.rs + `McpServiceDescriptor.resources`). Mem/tmpfs/shm emitted as MiB
+/// (`Nm`), CPU as one-decimal (`2.0`); the resource-drift test pins the placeholders.
 fn apply_container_resources(yaml: &str) -> String {
     use crate::resources::{
         ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, LITELLM_RESOURCES,
@@ -449,10 +423,7 @@ fn apply_container_resources(yaml: &str) -> String {
 
     let mut out = yaml.to_string();
 
-    // Only Claude's mem placeholder is special-cased: it uses the legacy
-    // ${CLAUDE_MEMORY} name, not the uniform ${CLAUDE_MEM} that `apply` emits.
-    // CPUS and TMPFS already match the ${CLAUDE_*} shape, so `apply` handles
-    // them (and its ${CLAUDE_MEM} replace no-ops — that placeholder is absent).
+    // Claude's mem uses the legacy ${CLAUDE_MEMORY}; CPUS/TMPFS use uniform ${CLAUDE_*}.
     out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
     apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
@@ -552,17 +523,10 @@ pub(crate) const UNDEFINED_NETWORK_ERROR_FRAGMENT: &str = "undefined network";
 /// `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose project";
 
-/// SSOT for compose schema/parse error fragments that appear when the VM-side
-/// engine reads a stale or torn virtiofs/9p page — e.g. the networks section
-/// (last in the file) truncated mid-`driver:` yields a null driver ("must be a
-/// string"), or a mid-line cut yields a YAML parse error. Recognised by
-/// `runtime::is_propagation_error` for retry-on-propagation-lag.
+/// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
+/// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // A torn/stale virtiofs page truncates a scalar, so compose-go's schema
-    // validator reports the field as the wrong type. Each fragment is scoped to
-    // a specific generated field (path + type), never the bare "must be a
-    // string" — our renderer always emits valid values, so any of these can
-    // only mean a truncated read, which a retry resolves. See ADR-068.
+    // Field-specific fragments (path + type), never bare "must be a string". See ADR-068.
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
@@ -723,13 +687,8 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
 }
 
-/// Injects the Anthropic API key (legacy credential) into the `claude`
-/// service environment when one is stored at
-/// `secrets/<project>/anthropic_api_key`. OAuth credentials are managed by
-/// Claude Code itself inside the `CLAUDE_HOME` bind-mount — Speedwave never
-/// reads or writes them. On the host they live at
-/// `<data_dir>/claude-home/<project>/.claude/.credentials.json`. See ADR-052.
-/// Resolves the legacy API key path under an explicit data directory.
+/// Injects the legacy Anthropic API key into the `claude` service env when
+/// stored at `secrets/<project>/anthropic_api_key`. See ADR-052.
 pub(crate) fn apply_auth_config_in(
     yaml: &str,
     project: &str,
@@ -791,27 +750,17 @@ pub(crate) fn add_service_env_var(
     Ok(())
 }
 
-/// Injects mcp-os configuration into the mcp-hub container if the
-/// auth token file exists at ~/.speedwave/mcp-os-auth-token.
-/// This allows the hub to forward requests to the mcp-os worker on the host.
-///
-/// Injections into mcp-hub:
+/// Injects mcp-os config into mcp-hub if the auth token file exists. Injections:
 ///   - WORKER_OS_URL env var (platform-specific gateway URL)
 ///   - /secrets/os-auth-token:ro bind-mount (token as file, not env var)
-///
-/// Claude container is NOT modified — it only sees the hub.
-/// Resolves the mcp-os lock/token paths under an explicit data dir so render
-/// under a tempdir never reads the global `~/.speedwave`.
 fn apply_mcp_os_config_in(data_dir: &std::path::Path, yaml: &str) -> anyhow::Result<String> {
     let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
     let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
     apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
 }
 
-/// Test-only alias preserved so existing fixtures keep working. `lock_path`
-/// is the unified `lock.json`; `token_mount_path` is the standalone
-/// token file bind-mounted into the hub (dual-write contract — see
-/// `mcp_os_process::spawn_in`).
+/// Test-only alias. `lock_path` is the unified `lock.json`; `token_mount_path`
+/// is the standalone token file bind-mounted into the hub (see `mcp_os_process::spawn_in`).
 fn apply_mcp_os_config_with_path(
     yaml: &str,
     token_mount_path: &std::path::Path,
@@ -828,15 +777,9 @@ fn apply_mcp_os_config_with_path(
     )
 }
 
-/// Inject `WORKER_OAUTH_URL` + per-service bearer mount into each OAuth-consuming
-/// worker container if the oauth worker is up for this project. The consumer
-/// list is derived from `McpServiceDescriptor::uses_oauth_refresh` — adding a
-/// new OAuth-using integration is a one-line flag flip on its descriptor (ADR-060
-/// §"Compose injection"). Hub is not touched — the oauth worker is internal.
-///
-/// Per-service bearer: each consumer gets its own bearer at
-/// `/secrets/oauth-auth-token-<config_key>:ro`. The bearer values come from
-/// `<oauth-state-dir>/.bearer-map.json` (bearer → service).
+/// Inject `WORKER_OAUTH_URL` + per-service bearer mount into each OAuth-consuming worker if oauth is up
+/// (consumers from `McpServiceDescriptor::uses_oauth_refresh`, ADR-060). Bearer at
+/// `/secrets/oauth-auth-token-<config_key>:ro` from `<oauth-state-dir>/.bearer-map.json`.
 fn apply_oauth_config_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -855,11 +798,7 @@ fn apply_oauth_config_with_paths(
     lock_path: &std::path::Path,
     bearer_map_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // A Desktop hard-kill (kill -9 / crash) orphans the VM but never runs the
-    // graceful `cleanup_files()` path, so `lock.json` survives pointing at a
-    // dead worker. Injecting that stale port would make every container-side
-    // OAuth refresh hit connection-refused — worse than the "not configured"
-    // state. Gate on PID liveness: a dead/absent worker is treated as absent.
+    // Stale lock.json survives a dead Desktop; gate on PID liveness to avoid injecting a dead port.
     let lock = match crate::host_mcp_process::lock::read(
         lock_path,
         crate::host_mcp_process::lock::LockService::Oauth,
@@ -879,10 +818,7 @@ fn apply_oauth_config_with_paths(
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    // Inject for every consumer in the bearer-map. The map is the SSOT for who
-    // consumes oauth — the supervisor writes it from the spawn consumer list
-    // (built-ins AND plugins), so this loop needs no hardcoded service list and
-    // covers plugins through the same code path.
+    // Inject for every bearer-map consumer; the map is SSOT and covers plugins dynamically.
     for (bearer, service_id) in &bearer_map {
         let compose_service = oauth_consumer_compose_name(service_id);
         let bearer_file = state_dir.join(format!("bearer-{service_id}"));
@@ -916,10 +852,8 @@ pub fn oauth_consumer_compose_name(service_id: &str) -> String {
         .unwrap_or_else(|| crate::plugin::derive_compose_name(service_id))
 }
 
-/// The OAuth consumer service ids enabled for a project: built-ins with
-/// `uses_oauth_refresh` plus plugins whose manifest declares `oauth`. SSOT for
-/// the spawn consumer list — the same set the bearer-map (and thus compose
-/// injection) is built from, so spawn-decision and injection cannot diverge.
+/// OAuth consumer service ids for a project: built-ins with `uses_oauth_refresh`
+/// plus plugins declaring `oauth`. SSOT for the spawn consumer list + bearer-map.
 pub fn oauth_consumer_service_ids(
     resolved: &crate::config::ResolvedIntegrationsConfig,
     enabled_plugins: &[crate::plugin::PluginManifest],
@@ -952,40 +886,22 @@ fn read_oauth_bearer_map(
     Some(map)
 }
 
-/// Returns the UID:GID to set as `user:` in compose services.
-///
-/// Both supported platforms (macOS via Lima, Windows via WSL2) run containerd
-/// as root inside a VM, so UID 1000 maps directly to UID 1000 inside the
-/// container — no user-namespace remapping. We always use the unprivileged
-/// user as defense-in-depth.
+/// Returns the unprivileged `user:` (UID:GID) for compose services. Both platforms
+/// run containerd as root in a VM, so UID 1000 maps 1:1 — no user-namespace remapping.
 pub fn container_user() -> &'static str {
     consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
 }
 
-/// Returns the hostname Claude Code should use for IDE WebSocket connections.
-/// Set as `CLAUDE_CODE_IDE_HOST_OVERRIDE` in the container environment.
-/// Overrides Claude Code's hardcoded `ws://127.0.0.1` so it reaches the IDE
-/// Bridge on the host via the gateway alias resolved by `extra_hosts`.
+/// Returns the IDE WebSocket host (set as `CLAUDE_CODE_IDE_HOST_OVERRIDE`),
+/// overriding Claude Code's hardcoded `ws://127.0.0.1` to reach the host IDE
+/// Bridge via the gateway alias in `extra_hosts`.
 fn ide_host_override() -> &'static str {
     consts::HOST_GATEWAY_ALIAS
 }
 
-/// Verifies that a plugin's `claude-resources` directory and every entry
-/// underneath it is a real, non-symlink path inside the canonicalised
-/// plugin directory. Bind-mounting `claude-resources` into the claude
-/// container makes every file beneath it readable from inside; without
-/// this check, an attacker could:
-///
-///   - replace `claude-resources` itself with a symlink to `/etc`, so
-///     the container sees host configuration files at
-///     `/speedwave/plugins/<slug>/`, or
-///
-///   - drop `claude-resources/skills/foo.md → ~/.ssh/id_rsa` so the
-///     mount surfaces user secrets one level deeper.
-///
-/// The plugin signing model has no notion of legitimate symlinks, so
-/// any encountered symlink is fatal — same invariant as
-/// `compute_plugin_digest` in `signing.rs`.
+/// Verifies a plugin's `claude-resources` dir and every entry beneath is a real,
+/// non-symlink path inside the canonicalised plugin dir; any symlink is fatal
+/// (same invariant as `compute_plugin_digest` in `signing.rs`).
 pub(crate) fn ensure_resources_dir_safe(plugin_dir: &Path, resources: &Path) -> anyhow::Result<()> {
     use std::fs;
     let resources_meta = fs::symlink_metadata(resources)?;
@@ -1092,11 +1008,9 @@ pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
     add_service_volume(doc, "mcp-hub", mount)
 }
 
-/// Idempotently ensures `<service>.extra_hosts` contains an entry mapping
-/// `HOST_GATEWAY_ALIAS` to the host gateway IP. Called AFTER `${HOST_GATEWAY}`
-/// substitution — inserts a literal IP, not a placeholder.
-/// Idempotency by hostname prefix: replaces an existing canonical entry (any IP)
-/// rather than appending a duplicate.
+/// Ensures `<service>.extra_hosts` maps `HOST_GATEWAY_ALIAS` to the gateway IP.
+/// Called after `${HOST_GATEWAY}` substitution (literal IP). Idempotent by
+/// hostname prefix: replaces an existing entry rather than appending a duplicate.
 pub(crate) fn ensure_host_gateway_extra_host(
     doc: &mut serde_yaml_ng::Value,
     service: &str,
@@ -1153,6 +1067,7 @@ pub(crate) fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, valu
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use strum::IntoEnumIterator;
@@ -1170,10 +1085,8 @@ mod tests {
             .to_path_buf()
     }
 
-    /// Isolated `render_compose` for tests: roots every data-dir path at the
-    /// caller's `data_dir` (a tempdir) and resolves the bundle manifest from the
-    /// repo build root via `TEST_BUILD_ROOT` — so the test touches neither the
-    /// production `~/.speedwave` nor the global `SPEEDWAVE_RESOURCES_DIR` env.
+    /// Isolated `render_compose` for tests: roots data-dir paths at the caller's tempdir
+    /// and resolves the bundle manifest via `TEST_BUILD_ROOT` — no global `~/.speedwave` or env.
     fn render_compose_isolated(
         data_dir: &Path,
         project_name: &str,
@@ -1204,11 +1117,8 @@ mod tests {
         )
     }
 
-    /// Render the same compose template via `render_compose` with a local
-    /// LLM provider + multi-line custom_headers token, and check the result
-    /// re-parses. This is the production code path; if it diverges from
-    /// `inject_claude_env_multiline_value_keeps_yaml_parseable`, the bug
-    /// is elsewhere in the pipeline (token reader, env merger, host_tz, …).
+    /// Renders via `render_compose` with a local LLM provider + multi-line
+    /// custom_headers and checks the result re-parses (production code path).
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
@@ -1252,15 +1162,10 @@ mod tests {
         )
         .expect("render must succeed");
 
-        // Sanitised in the panic message — the rendered YAML contains the
-        // injected ANTHROPIC_AUTH_TOKEN, which CodeQL flags as cleartext
-        // secret logging. The parse error alone identifies the regression.
+        // Sanitise panic message: rendered YAML carries cleartext ANTHROPIC_AUTH_TOKEN (CodeQL).
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
             .unwrap_or_else(|e| panic!("rendered compose YAML must re-parse: {e}"));
-        // Custom headers must survive intact AND be on a single line —
-        // nerdctl/docker-compose YAML parsers reject block literals inside
-        // an `environment:` sequence (manifested as `line N: could not find
-        // expected ':'`), so the headers are joined with `, ` separators.
+        // Custom headers must be single-line: nerdctl/docker-compose reject block literals in environment.
         let env_seq = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
@@ -1275,9 +1180,7 @@ mod tests {
         );
         assert!(header_entry.contains("X-Tenant-ID: foo"));
         assert!(header_entry.contains("X-Subscription-ID: bar"));
-        // The rendered scalar must also be a plain scalar in the raw YAML —
-        // a block literal (`|-`, `>`) would still parse via serde_yaml_ng but
-        // breaks nerdctl-compose, which is what triggered the original bug.
+        // Rendered scalar must be plain in raw YAML: block literals break nerdctl-compose.
         assert!(
             !yaml.contains("ANTHROPIC_CUSTOM_HEADERS=\n")
                 && !yaml.contains("- |-")
@@ -1292,13 +1195,8 @@ mod tests {
         let _ = std::fs::remove_dir(&tokens_dir);
     }
 
-    /// Regression for the unquoted `[1m]` 1M-context suffix that nerdctl's Go
-    /// YAML parser rejected with `could not find expected ":"`. The default
-    /// Anthropic provider injects `ANTHROPIC_DEFAULT_OPUS_MODEL=<id>[1m]`; the
-    /// rendered file must (a) re-parse and (b) carry the bracketed entry as a
-    /// quoted scalar so a strict parser accepts it. The pre-existing
-    /// substring/`from_str` tests missed this because serde_yaml_ng's libyaml
-    /// emitter leaves the bracket unquoted and re-reads it without complaint.
+    /// Regression for the unquoted `[1m]` suffix nerdctl's Go YAML parser rejects;
+    /// rendered file must re-parse and carry the bracketed entry as a quoted scalar.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_quotes_bracketed_model_env_and_round_trips() {
@@ -1351,12 +1249,8 @@ mod tests {
             "1M-context suffix must survive intact, got: {opus:?}"
         );
 
-        // (b) Across EVERY service, each `environment:` entry that carries a
-        // YAML flow indicator must be a quoted scalar in the RAW serialized
-        // form — the property the Go parser needs and the old tests never
-        // checked. Scope to env values (via the parsed doc) so non-env lines
-        // that legitimately contain flow indicators (e.g. the tmpfs mount
-        // `/tmp:noexec,nosuid,size=512m`) are not mistaken for env entries.
+        // (b) Across every service, each env entry with a flow indicator must be a
+        // quoted scalar in raw YAML; scoped to env values only (not tmpfs mounts etc).
         let services = doc["services"].as_mapping().expect("services mapping");
         for (_, svc) in services {
             let Some(env) = svc.get("environment").and_then(|e| e.as_sequence()) else {
@@ -1441,10 +1335,8 @@ mod tests {
         let _ = std::fs::remove_dir(&tokens_dir);
     }
 
-    /// Repro for the broken compose YAML observed when a user saves custom
-    /// HTTP headers for a local LLM. Multi-line `ANTHROPIC_CUSTOM_HEADERS`
-    /// values must serialise as a quoted scalar so the YAML parser does not
-    /// treat the second line as a new top-level key.
+    /// Multi-line `ANTHROPIC_CUSTOM_HEADERS` must serialise as a quoted scalar so the
+    /// YAML parser does not treat the second line as a new top-level key.
     #[test]
     fn inject_claude_env_multiline_value_keeps_yaml_parseable() {
         let yaml = "services:\n  claude:\n    image: x\n    environment:\n    - PORT=4000\n";
@@ -1489,10 +1381,7 @@ mod tests {
             .map(|s| s[prefix.len()..].to_string())
     }
 
-    /// Returns VALID_COMPOSE with hardcoded user values replaced by the value
-    /// from `container_user()` ("1000:1000" on both supported platforms).
-    /// Kept as a helper so the existing fixture string stays the SSOT for the
-    /// rest of the compose shape.
+    /// Returns VALID_COMPOSE with user values replaced by `container_user()` ("1000:1000").
     fn valid_compose_yaml() -> String {
         VALID_COMPOSE.replace(
             "user: \"1000:1000\"",
@@ -1891,9 +1780,7 @@ services:
     #[test]
     fn test_security_check_external_llm_keys_covers_major_providers() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Each prefix on its own line — one violation per leaked key. We assert the
-        // rule fires for every major third-party LLM vendor, not just the four
-        // originally hard-coded.
+        // One violation per leaked key; covers every major third-party LLM vendor.
         for key in [
             "OPENAI_API_KEY=sk-x",
             "AZURE_OPENAI_API_KEY=az-x",
@@ -2169,10 +2056,8 @@ services:
             crate::consts::PORT_WORKER
         );
 
-        // ADR-062: mcp-playwright resolves `host.docker.internal` to the platform
-        // gateway IP so Claude and plugins can navigate to host-local services
-        // (e.g. local dev servers). Verifies the rendered compose — not the
-        // template — so the `${HOST_GATEWAY}` substitution must have occurred.
+        // ADR-062: mcp-playwright resolves host.docker.internal to the gateway IP.
+        // Verifies the rendered compose, not the template (${HOST_GATEWAY} substituted).
         let extra_hosts = pw
             .get("extra_hosts")
             .and_then(|v| v.as_sequence())
@@ -2369,9 +2254,7 @@ services:
     }
 
     /// mcp-github must render with the standard worker hardening, the read-only
-    /// project-scoped `/tokens` mount, and `PORT=PORT_WORKER`. Its memory cap
-    /// comes from the SSOT (McpServiceDescriptor.resources) and is guarded by
-    /// `resources_render_from_ssot`, not duplicated here.
+    /// project-scoped `/tokens` mount, and `PORT=PORT_WORKER` (mem cap guarded by `resources_render_from_ssot`).
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_github_service_present() {
@@ -2497,8 +2380,10 @@ services:
     /// and the `WORKER_GITHUB_URL` hub env entry.
     #[test]
     fn test_apply_integrations_filter_disables_github() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.github = false;
+        let integrations = ResolvedIntegrationsConfig {
+            github: false,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -2507,7 +2392,7 @@ services:
 
         let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())),
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-github".into())),
             "mcp-github must be removed when disabled"
         );
         let hub_env = get_hub_env_seq(&doc);
@@ -2521,8 +2406,10 @@ services:
     /// the WORKER_PLAYWRIGHT_URL hub env entry.
     #[test]
     fn test_apply_integrations_filter_disables_playwright() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.playwright = false;
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: false,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -2531,7 +2418,7 @@ services:
 
         let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-playwright".into())),
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-playwright".into())),
             "mcp-playwright must be removed when disabled"
         );
 
@@ -2635,9 +2522,7 @@ services:
         let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
         for (name_value, svc) in services {
             let name = name_value.as_str().unwrap_or("");
-            // Only workers have PORT=; claude does not define PORT, and
-            // litellm listens on a fixed port baked into its entrypoint
-            // (ADR-073) — it is not an MCP worker.
+            // Only workers define PORT; claude and litellm do not (litellm uses a fixed entrypoint port, ADR-073).
             if name == "claude" || name == "mcp-hub" || name == "litellm" {
                 continue;
             }
@@ -2682,11 +2567,7 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
-                    // WORKER_OS_URL is a host-side gateway (host.docker.internal)
-                    // with a dynamically assigned port — the worker runs on the
-                    // host, not in the compose network. ADR-038's "every
-                    // WORKER_*_URL points at :PORT_WORKER" rule applies only to
-                    // in-cluster (containerized) workers.
+                    // WORKER_OS_URL is a host-side gateway with a dynamic port; ADR-038 applies only to in-cluster workers.
                     if key == "WORKER_OS_URL" {
                         continue;
                     }
@@ -2932,10 +2813,7 @@ services:
 
     #[test]
     fn test_compose_template_all_services_have_pull_policy_never() {
-        // All images are built locally — nerdctl must never attempt to pull from a
-        // remote registry. Without `pull_policy: never`, nerdctl resolves unqualified
-        // image names (e.g. `speedwave-mcp-hub:tag`) as `docker.io/library/...` and
-        // fails with "pull access denied".
+        // Images built locally; without `pull_policy: never` nerdctl pulls unqualified names from docker.io/library.
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(COMPOSE_TEMPLATE).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         for (name, svc) in services {
@@ -3004,9 +2882,7 @@ services:
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        // Expected paths must derive from the SAME data_dir the render used —
-        // `compute()` reads the production singleton, which diverges from the
-        // tempdir-rooted tokens mount (litellm always mounts tokens/<p>/llm).
+        // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
@@ -3050,10 +2926,7 @@ services:
         );
     }
 
-    /// Second call with the same key must REPLACE, not duplicate. Both claude and
-    /// hub receive ENABLED_SERVICES via this helper; re-renders would otherwise
-    /// accumulate stale entries in env sequences. Test both services so a future
-    /// regression that breaks the replace-path for one container is caught.
+    /// Second call with the same key must REPLACE, not duplicate; tested on both claude and hub.
     #[test]
     fn test_inject_env_into_idempotent() {
         for service in ["mcp-hub", "claude"] {
@@ -3466,9 +3339,7 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Default anthropic (legacy direct path): the litellm SERVICE exists in
-        // every rendered compose (ADR-073) but the claude container's env must
-        // not be redirected at it until the proxy injection path is active.
+        // Default anthropic: litellm service always exists (ADR-073) but claude env is not redirected until proxy injection active.
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
@@ -3714,10 +3585,9 @@ services:
             .collect()
     }
 
-    /// ADR-073: the litellm service renders in every compose with the locally
-    /// built image, hardened mounts (config ro, tokens ro, usage rw), no host
-    /// ports, and the per-project network — and its host-side mount dirs are
-    /// created by the renderer.
+    /// ADR-073: litellm renders in every compose with the local image, hardened mounts
+    /// (config ro, tokens ro, usage rw), no host ports, the per-project network, and
+    /// renderer-created mount dirs.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_litellm_service_rendered() {
@@ -4022,10 +3892,7 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_custom_provider_rejected_after_removal() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Regression guard: the `custom` provider value was removed end-to-end.
-        // Any lingering config that still sets `provider = "custom"` must now
-        // fall through to the same unknown-provider path used by any other
-        // unsupported value (e.g. `openrouter`), not a bespoke `custom` branch.
+        // Regression guard: provider="custom" removed end-to-end; falls through to the unknown-provider path.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4067,9 +3934,7 @@ services:
         assert_eq!(strip_trailing_v1("http://x:8080"), "http://x:8080");
         assert_eq!(strip_trailing_v1(""), "");
         assert_eq!(strip_trailing_v1("http://x:8080/v1/v1"), "http://x:8080/v1");
-        // Regression: trailing slash without /v1 must be stripped too,
-        // otherwise ANTHROPIC_BASE_URL ends with '/' and produces
-        // double-slash request paths.
+        // Regression: trailing slash without /v1 must be stripped too, else double-slash request paths.
         assert_eq!(strip_trailing_v1("http://x:8080/"), "http://x:8080");
         assert_eq!(strip_trailing_v1("http://x:8080///"), "http://x:8080");
     }
@@ -4191,9 +4056,7 @@ services:
 
     #[test]
     fn compose_template_claude_has_canonical_host_gateway_entry() {
-        // Static template guard — `claude` and `mcp-playwright` must list the
-        // canonical host gateway alias in extra_hosts (ADR-062). Other services
-        // receive it dynamically through `ensure_host_gateway_extra_host`.
+        // Static template guard: claude and mcp-playwright must list the host gateway alias in extra_hosts (ADR-062).
         let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
         assert!(
             COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
@@ -4233,10 +4096,7 @@ services:
         }
     }
 
-    /// ADR-062: the `mcp-playwright` block in the template must declare
-    /// the canonical `extra_hosts` entry so Claude and plugins can navigate
-    /// to host-local services. This guard catches removal of the alias from
-    /// the template, independent of the rendered-compose test.
+    /// ADR-062: the `mcp-playwright` template block must declare the canonical `extra_hosts` entry.
     #[test]
     fn mcp_playwright_section_has_extra_hosts_in_template() {
         let needle = "\n  mcp-playwright:\n";
@@ -4250,9 +4110,7 @@ services:
             .unwrap_or(COMPOSE_TEMPLATE.len());
         let pw_block = &COMPOSE_TEMPLATE[pw_start..next_service];
         let expected = format!(r#"- "{}:${{HOST_GATEWAY}}""#, consts::HOST_GATEWAY_ALIAS);
-        // Match an actual YAML list item, not the same string inside a comment.
-        // `lines().any(|l| l.trim() == expected)` rejects commented-out lines
-        // (they start with `#` after trim), unlike `contains()` on the whole block.
+        // Match an actual YAML list item, not the string inside a comment; lines().any() rejects commented-out lines.
         assert!(
             pw_block.lines().any(|l| l.trim() == expected),
             "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
@@ -4266,11 +4124,7 @@ services:
     }
 
     // --- Resource SSOT works (ADR-068) -----------------------------------------
-    // One test proving the centralization holds: the renderer fills every
-    // container's mem/cpu/tmpfs/shm from the SSOT (resources.rs table +
-    // McpServiceDescriptor.resources), and no resource placeholder is left
-    // behind. If the renderer stops reading the SSOT, a service's value drifts,
-    // or a placeholder is misnamed, this fails.
+    // Renderer fills every container's mem/cpu/tmpfs/shm from the SSOT, no placeholder left (ADR-068).
 
     /// Reads a service's mem/cpu/tmpfs/shm out of the rendered doc and asserts
     /// they equal its SSOT entry. Iterating callers stay literal-free.
@@ -4315,9 +4169,7 @@ services:
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
         }
-        // No RESOURCE placeholder left unsubstituted. Only the families this
-        // function owns — other ${…} (IMAGE_*, NETWORK_NAME, …) are filled by
-        // later render stages and are intentionally still present here.
+        // No resource placeholder left unsubstituted; IMAGE_*, NETWORK_NAME are filled later.
         for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
             assert!(
                 !yaml.contains(marker),
@@ -4325,9 +4177,7 @@ services:
             );
         }
 
-        // The RAW template must carry a placeholder for each worker's mem/cpu —
-        // catches a regression where a literal equal to the SSOT value is
-        // hardcoded back in (which the rendered-value check above would miss).
+        // Raw template must carry a placeholder for each worker's mem/cpu; catches a re-hardcoded literal.
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             let prefix = svc.compose_name.to_ascii_uppercase().replace('-', "_");
             assert!(
@@ -4340,19 +4190,13 @@ services:
                 "{}: template must carry ${{{prefix}_CPUS}}, not a literal",
                 svc.compose_name
             );
-            // tmpfs is the axis most prone to a silent re-hardcode (SSOT value
-            // often equals the literal, e.g. size=64m), so it needs the same
-            // raw-template presence guard as _MEM/_CPUS — the rendered-value
-            // check alone would not catch a literal that coincidentally matches.
+            // tmpfs is most prone to a silent re-hardcode; needs the same raw-template guard as _MEM/_CPUS.
             assert!(
                 COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_TMPFS}}")),
                 "{}: template must carry ${{{prefix}_TMPFS}}, not a literal",
                 svc.compose_name
             );
-            // A `_SHM` placeholder must exist in the template IFF the descriptor
-            // sets shm_mib. A descriptor with Some(shm) but no placeholder would
-            // silently never apply (apply() no-ops); a placeholder with None
-            // would survive as a leftover marker. Assert both directions.
+            // _SHM placeholder must exist IFF the descriptor sets shm_mib; assert both directions.
             assert_eq!(
                 COMPOSE_TEMPLATE.contains(&format!("${{{prefix}_SHM}}")),
                 svc.resources.shm_mib.is_some(),
@@ -4361,9 +4205,7 @@ services:
             );
         }
 
-        // Same raw-template guard for the always-on containers — a literal
-        // equal to the SSOT value passes the rendered check, only the
-        // placeholder proves the template still defers. (claude mem is legacy.)
+        // Same raw-template guard for the always-on containers (claude mem is legacy).
         for placeholder in [
             "${CLAUDE_MEMORY}",
             "${CLAUDE_CPUS}",
@@ -4567,10 +4409,7 @@ services:
         );
     }
 
-    // SSOT-definition guards: literal expected values for each local provider.
-    // Render tests above use `default_base_url()` to avoid drift; these tests
-    // pin the actual literal so that breaking BOTH the function AND the render
-    // assertion in lockstep would still fail here.
+    // SSOT-definition guards: pin the literal expected base_url for each local provider.
 
     #[test]
     fn test_default_base_url_ollama_returns_canonical_url() {
@@ -4599,11 +4438,7 @@ services:
     #[test]
     fn test_anthropic_with_model_injects_anthropic_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Settings → LLM Provider → Model dropdown writes the chosen value
-        // into claude.llm.model. compose must translate that into the
-        // ANTHROPIC_MODEL env var so Claude Code respects the user's pick
-        // (without this, the dropdown was silently ignored — Claude Code
-        // kept falling back to its built-in default).
+        // claude.llm.model must translate into the ANTHROPIC_MODEL env var so Claude Code respects the pick.
         let llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
@@ -4678,12 +4513,8 @@ services:
     #[test]
     fn test_anthropic_injects_default_alias_env_vars() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Workaround for anthropics/claude-code#34083 — without
-        // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pointing to the
-        // `[1m]` variant, Max/Team subscribers see their 1M models capped
-        // at 200k. compose must inject these regardless of whether the
-        // user pinned an explicit model, because the alias resolution is
-        // what unlocks the upgraded window.
+        // Workaround for anthropics/claude-code#34083: inject ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+        // `[1m]` variants regardless of an explicit pinned model.
         let llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: None,
@@ -5188,10 +5019,7 @@ services:
 
     #[test]
     fn test_mcp_os_config_skipped_when_token_path_does_not_exist() {
-        // The desktop process can delete and recreate ~/.speedwave/mcp-os-*
-        // files at any moment (mcp-os respawn). Treat a missing token file
-        // the same as an empty/absent config — never bubble up `os error 2`
-        // and abort `render_compose`.
+        // A missing mcp-os token file is treated as absent config; never abort render_compose with os error 2.
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("does-not-exist");
         let port_path = tmp.path().join("does-not-exist-port");
@@ -5414,10 +5242,7 @@ services:
 
     #[test]
     fn test_oauth_config_injects_into_plugin_consumer() {
-        // A plugin slug in the bearer-map must get WORKER_OAUTH_URL + bearer
-        // mount on its derived compose service (`mcp-<slug>`), with no built-in
-        // descriptor entry — the injection loop is bearer-map-driven, not
-        // descriptor-driven.
+        // A plugin slug in the bearer-map gets WORKER_OAUTH_URL + bearer mount on its derived service (mcp-<slug>), no descriptor entry.
         let compose = r#"
 services:
   mcp-hub:
@@ -5568,11 +5393,7 @@ services:
         }
     }
 
-    /// Negative-injection test (plan §PR2:259):
-    /// `apply_oauth_config` must NOT touch services other than SharePoint.
-    /// Without this fixture (slack + redmine alongside sharepoint), the
-    /// happy-path test only proves "hub is untouched" — a regression that
-    /// blanket-injects WORKER_OAUTH_URL into every worker would still pass.
+    /// Negative-injection test: `apply_oauth_config` must NOT touch services other than SharePoint.
     #[test]
     fn test_oauth_config_injects_url_and_bearer_into_slack_consumer() {
         // ADR-071: slack consumes the host oauth worker exactly like sharepoint.
@@ -5680,10 +5501,7 @@ services:
         }
     }
 
-    /// Regression guard: after a Desktop hard-kill the graceful cleanup never
-    /// runs, so `lock.json` survives pointing at a dead PID. The injection path
-    /// must treat that as absent (no `WORKER_OAUTH_URL`) instead of wiring up a
-    /// dead port that fails every container-side refresh with connection-refused.
+    /// Regression guard: a stale `lock.json` with a dead PID is treated as absent (no `WORKER_OAUTH_URL`).
     #[test]
     fn test_oauth_config_skipped_when_worker_pid_is_dead() {
         // Reap a real child so its PID is deterministically dead (not merely
@@ -5910,8 +5728,7 @@ services:
     #[test]
     fn test_security_check_wrong_user_value() {
         let data_dir = tempfile::tempdir().unwrap();
-        let yaml = format!(
-            r#"
+        let yaml = r#"
 version: "3"
 services:
   evil-addon:
@@ -5922,7 +5739,7 @@ services:
     security_opt:
       - no-new-privileges:true
 "#
-        );
+        .to_string();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -6524,11 +6341,13 @@ services:
 
         // Verify mcp-slack exists before filtering
         let services = doc.get("services").unwrap().as_mapping().unwrap();
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())));
 
         // Disable slack
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.slack = false;
+        let integrations = ResolvedIntegrationsConfig {
+            slack: false,
+            ..Default::default()
+        };
 
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let filtered =
@@ -6538,16 +6357,18 @@ services:
         let filtered_services = filtered_doc.get("services").unwrap().as_mapping().unwrap();
 
         // mcp-slack should be removed
-        assert!(!filtered_services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())));
+        assert!(!filtered_services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())));
         // claude and mcp-hub must remain
-        assert!(filtered_services.contains_key(&serde_yaml_ng::Value::String("claude".into())));
-        assert!(filtered_services.contains_key(&serde_yaml_ng::Value::String("mcp-hub".into())));
+        assert!(filtered_services.contains_key(serde_yaml_ng::Value::String("claude".into())));
+        assert!(filtered_services.contains_key(serde_yaml_ng::Value::String("mcp-hub".into())));
     }
 
     #[test]
     fn test_integrations_filter_removes_worker_url_from_hub() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.gitlab = false;
+        let integrations = ResolvedIntegrationsConfig {
+            gitlab: false,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -6575,11 +6396,13 @@ services:
 
     #[test]
     fn test_integrations_filter_injects_enabled_services() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.slack = true;
-        integrations.sharepoint = true;
-        integrations.gitlab = true;
-        integrations.os_calendar = true;
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            sharepoint: true,
+            gitlab: true,
+            os_calendar: true,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -6630,17 +6453,19 @@ services:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("claude".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-hub".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("claude".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-hub".into())));
         // No MCP worker services should remain
-        assert!(!services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())));
+        assert!(!services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())));
     }
 
     #[test]
     fn test_integrations_filter_disabled_os_services_injected() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.os_calendar = true;
-        integrations.os_notes = true;
+        let integrations = ResolvedIntegrationsConfig {
+            os_calendar: true,
+            os_notes: true,
+            ..Default::default()
+        };
         // reminders and mail remain false (default)
 
         let filtered =
@@ -6659,11 +6484,13 @@ services:
 
     #[test]
     fn test_integrations_filter_no_disabled_os_when_all_os_enabled() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.os_reminders = true;
-        integrations.os_calendar = true;
-        integrations.os_mail = true;
-        integrations.os_notes = true;
+        let integrations = ResolvedIntegrationsConfig {
+            os_reminders: true,
+            os_calendar: true,
+            os_mail: true,
+            os_notes: true,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -6690,7 +6517,7 @@ services:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         let services = doc.get("services").unwrap().as_mapping().unwrap();
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-office".into())));
         let office_nets: Vec<&str> = services
             .get(serde_yaml_ng::Value::String("mcp-office".into()))
             .and_then(|s| s.get("networks"))
@@ -6727,7 +6554,7 @@ services:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
         let services = doc.get("services").unwrap().as_mapping().unwrap();
-        assert!(!services.contains_key(&serde_yaml_ng::Value::String("mcp-office".into())));
+        assert!(!services.contains_key(serde_yaml_ng::Value::String("mcp-office".into())));
         assert!(doc
             .get("networks")
             .and_then(|n| n.get("speedwave_test_network_office"))
@@ -6754,11 +6581,13 @@ services:
             flags: default_flags(),
             llm: LlmConfig::default(),
         };
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.sharepoint = true;
-        integrations.gitlab = true;
-        integrations.github = true;
-        integrations.os_calendar = true;
+        let integrations = ResolvedIntegrationsConfig {
+            sharepoint: true,
+            gitlab: true,
+            github: true,
+            os_calendar: true,
+            ..Default::default()
+        };
         // slack, redmine remain disabled (default)
         // os_reminders, os_mail, os_notes remain disabled (default)
 
@@ -6780,18 +6609,18 @@ services:
 
         // mcp-slack should be removed (disabled by default)
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())),
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())),
             "mcp-slack should be removed when slack is disabled"
         );
 
         // claude and mcp-hub must still be present
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("claude".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-hub".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("claude".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-hub".into())));
 
         // Enabled services should be present
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-sharepoint".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-gitlab".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-github".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-sharepoint".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-gitlab".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-github".into())));
 
         // ENABLED_SERVICES should be in hub env
         let env = get_hub_env_seq(&doc);
@@ -6840,15 +6669,15 @@ services:
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
         // No MCP worker services should remain
-        assert!(!services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())));
+        assert!(!services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())));
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-sharepoint".into()))
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-sharepoint".into()))
                 || !VALID_COMPOSE.contains("mcp-sharepoint")
         );
 
         // claude and mcp-hub must remain
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("claude".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-hub".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("claude".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-hub".into())));
 
         let env = get_hub_env_seq(&doc);
 
@@ -6919,8 +6748,10 @@ services:
 
     #[test]
     fn test_single_enabled_keeps_only_that_service() {
-        let mut integrations = ResolvedIntegrationsConfig::default();
-        integrations.slack = true;
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
 
         let filtered =
             apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
@@ -6929,12 +6760,12 @@ services:
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
         // mcp-slack should remain
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-slack".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-slack".into())));
 
         // Other MCP services in VALID_COMPOSE should be gone (only mcp-slack was in template)
         // claude and mcp-hub must remain
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("claude".into())));
-        assert!(services.contains_key(&serde_yaml_ng::Value::String("mcp-hub".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("claude".into())));
+        assert!(services.contains_key(serde_yaml_ng::Value::String("mcp-hub".into())));
 
         let env = get_hub_env_seq(&doc);
 
@@ -7703,7 +7534,7 @@ services:
         // Verify the service appears
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         assert!(
-            services.contains_key(&serde_yaml_ng::Value::String("mcp-example-plugin".into())),
+            services.contains_key(serde_yaml_ng::Value::String("mcp-example-plugin".into())),
             "Enabled plugin service mcp-example-plugin should appear in compose"
         );
     }
@@ -7765,7 +7596,7 @@ services:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-example-plugin".into())),
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-example-plugin".into())),
             "Disabled plugin service should NOT appear in compose"
         );
     }
@@ -7775,7 +7606,7 @@ services:
         // Simulate apply_plugins injecting WORKER_EXAMPLE_PLUGIN_URL into mcp-hub
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         let worker_env = plugin::derive_worker_env("example-plugin");
-        let url = format!("http://mcp-example-plugin:4010");
+        let url = "http://mcp-example-plugin:4010".to_string();
         inject_worker_env(&mut doc, &worker_env, &url);
 
         let env = get_hub_env_seq(&doc);
@@ -7791,7 +7622,7 @@ services:
     fn test_apply_plugins_speedwave_plugins_env() {
         // Simulate apply_plugins setting SPEEDWAVE_PLUGINS in claude container
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        let slugs = vec!["example-plugin".to_string(), "analytics".to_string()];
+        let slugs = ["example-plugin".to_string(), "analytics".to_string()];
         add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
@@ -8333,17 +8164,16 @@ services:
         // Verify no mcp-* service was added
         let services = doc.get("services").unwrap().as_mapping().unwrap();
         assert!(
-            !services.contains_key(&serde_yaml_ng::Value::String("mcp-skills-pack".into())),
+            !services.contains_key(serde_yaml_ng::Value::String("mcp-skills-pack".into())),
             "resource-only plugin should NOT have a compose service"
         );
     }
 
-    // Note: these tests verify the `service_id.unwrap_or(slug)` key lookup
-    // used in apply_plugins (compose.rs:325). We test the components (is_plugin_enabled
-    // + key derivation) rather than calling apply_plugins directly because apply_plugins
-    // reads from ~/.speedwave/plugins/ on the filesystem.
+    // Verify the `service_id.unwrap_or(slug)` key lookup via its components (is_plugin_enabled + key derivation),
+    // not apply_plugins directly (it reads the plugins filesystem).
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
         // A plugin without service_id should be toggled by slug.
         // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
@@ -8362,6 +8192,7 @@ services:
     }
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_disabled_by_slug_excluded() {
         // A plugin without service_id should be excluded when disabled.
         let integrations = ResolvedIntegrationsConfig {
@@ -8378,6 +8209,7 @@ services:
     }
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_absent_from_config_is_disabled() {
         // A freshly installed plugin not in config should be disabled.
         let integrations = ResolvedIntegrationsConfig::default();
@@ -9509,15 +9341,11 @@ services:
 
     #[test]
     fn test_security_check_run_delegates_without_panic() {
-        // Calls run() which uses consts::data_dir() internally.
-        // Verifies the delegation from run() to run_with_data_dir() works
-        // without panicking. On dev machines, real files may exist and produce
-        // violations — that's fine, we only check that it doesn't crash.
+        // Verifies run() delegates to run_with_data_dir() without panicking (real files may produce violations).
         let yaml = valid_compose_yaml();
         let _violations =
             SecurityCheck::run(&yaml, "nonexistent-project", &[], &test_expected_paths());
-        // No assertion on violations — dev machines may have real files with
-        // various permissions. The test verifies the delegation path works.
+        // No assertion on violations — dev machines may have real files.
     }
 
     #[cfg(unix)]
@@ -10353,12 +10181,7 @@ services:
         assert!(err.to_string().contains("symlink"));
     }
 
-    /// `claude-resources/` must be a real directory on disk, not a
-    /// regular file dressed up as the resources root. Without this,
-    /// `add_claude_volume` would still emit a bind-mount entry whose
-    /// host source is a single file — and depending on the engine
-    /// either fails opaquely at start, or surfaces the file in place
-    /// of a directory inside the container.
+    /// `claude-resources/` must be a real directory on disk, not a regular file.
     #[test]
     fn test_ensure_resources_dir_safe_rejects_non_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -10645,13 +10468,8 @@ services:
         assert!(dbg.contains("60123"));
     }
 
-    /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
-    /// fields would now fail the (potentially stricter) ruleset is
-    /// rejected at render time, not silently rendered. We can't
-    /// hand-craft a "post-install rule violation" without breaking
-    /// other tests, so we verify the call chain by passing a
-    /// manifest with a value that would fail the cap (`mem_limit`
-    /// above PLUGIN_MEM_LIMIT_MAX_MIB).
+    /// `apply_plugins` re-runs `validate_manifest`, rejecting at render time a manifest
+    /// that fails the ruleset (here: `mem_limit` above PLUGIN_MEM_LIMIT_MAX_MIB).
     #[test]
     fn test_apply_plugins_revalidates_manifest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -10676,25 +10494,14 @@ services:
         assert!(err.to_string().contains("exceeds maximum"));
     }
 
-    /// `apply_plugins` MUST reject a plugin whose derived compose name
-    /// would overwrite an existing `services.<name>` entry. Without
-    /// this check, `serde_yaml_ng`'s mapping insert silently replaces
-    /// the built-in entry — defeating the hub's zero-token guarantee.
-    /// The slug-collision rule in `validate_manifest` already blocks
-    /// the obvious "slug: hub" case at install, so the render-time
-    /// check is defence in depth — but a regression in either layer
-    /// is invisible without a test that pins the contract.
+    /// `apply_plugins` MUST reject a plugin whose derived compose name would overwrite an
+    /// existing `services.<name>` entry (defence in depth beyond `validate_manifest`).
     #[test]
     fn test_apply_plugins_rejects_compose_name_collision() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("decoy");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        // We can't construct a manifest with `slug: "hub"` —
-        // `validate_manifest` rejects it. Instead, hand-build YAML
-        // that already contains the service name a plugin would
-        // produce, and pass a plugin whose service_id derives that
-        // name. Pre-populating `services.mcp-decoy` simulates the
-        // race where two render passes try to claim the same name.
+        // Hand-built YAML pre-populating a plugin-produced service name, plus a plugin whose service_id derives it.
         let yaml = r#"
 services:
   claude:
@@ -10728,11 +10535,7 @@ services:
         );
     }
 
-    /// Sanity: a verified plugin not blocked by validate_manifest and
-    /// not colliding renders successfully. Pins the happy path so a
-    /// regression that always returns Err (e.g. someone tightening
-    /// validate_manifest in a way that breaks all in-tree manifests)
-    /// is caught here rather than at the user's first launch.
+    /// Sanity: a verified plugin that passes validate_manifest and doesn't collide renders (happy path).
     #[test]
     fn test_apply_plugins_renders_enabled_plugin() {
         let tmp = tempfile::tempdir().unwrap();
@@ -10760,13 +10563,8 @@ services:
         assert!(yaml.contains("SPEEDWAVE_PLUGINS=ok-plugin"));
     }
 
-    /// If the canonical resolution of `claude-resources` escapes the
-    /// canonical plugin tree, the helper bails. We can't trivially
-    /// build such a path without symlinks (which `walk_reject_symlinks`
-    /// already catches), but we can at least pin the invariant by
-    /// verifying that a deeply-nested real directory tree IS accepted
-    /// — regression test for "I broke the canonicalize check by
-    /// being too strict".
+    /// A deeply-nested real directory tree under `claude-resources` is accepted
+    /// (the canonicalize check must not be over-strict).
     #[test]
     fn test_ensure_resources_dir_safe_accepts_deep_nesting() {
         let tmp = tempfile::tempdir().unwrap();
@@ -11228,12 +11026,8 @@ services:
         assert_eq!(provider_display_label("local"), "Local");
     }
 
-    /// Crash recovery invariant: if `update_llm_config` writes the token file
-    /// but a crash kills the process before `save_user_config` flips the
-    /// `has_api_key=true` flag, the orphaned token file is left on disk with
-    /// `has_api_key=false` in config. `apply_llm_config` must **ignore the
-    /// orphaned file** and fall back to the documented dummy. Otherwise an
-    /// abandoned token could silently leak into a future container render.
+    /// Crash recovery: with an orphaned token file but `has_api_key=false` in config,
+    /// `apply_llm_config` must ignore the file and fall back to the dummy.
     #[test]
     fn apply_llm_config_ignores_orphaned_token_when_flag_is_false() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11277,22 +11071,12 @@ services:
         let _ = std::fs::remove_dir(&dir);
     }
 
-    /// CRITICAL: multi-line `ANTHROPIC_CUSTOM_HEADERS` (one `Name: Value` per
-    /// line in the on-disk token file) must be flattened to a single-line,
-    /// comma-separated env entry before injection. nerdctl-compose / Docker
-    /// Compose YAML parsers reject block literals inside an `environment:`
-    /// sequence — a multi-line scalar produces `yaml: line N: could not find
-    /// expected ':'` and `compose up` fails. Claude Code's
-    /// `ANTHROPIC_CUSTOM_HEADERS` parser accepts both newline- and
-    /// comma-separated forms, so flattening is lossless.
-    ///
-    /// Test guarantees:
+    /// Multi-line `ANTHROPIC_CUSTOM_HEADERS` must flatten to a single-line,
+    /// comma-separated env entry (nerdctl-compose rejects block literals). Guarantees:
     /// 1. The injected env var value is present in the YAML environment list.
-    /// 2. The value is a single line (no `\n`), with each header joined by
-    ///    `, ` separators.
+    /// 2. The value is a single line (no `\n`), headers joined by `, `.
     /// 3. Every original header survives intact.
-    /// 4. The rendered YAML re-parses cleanly (defensive check against future
-    ///    regressions that might re-introduce block-literal serialisation).
+    /// 4. The rendered YAML re-parses cleanly.
     #[test]
     fn apply_llm_config_multiline_custom_headers_survives_yaml_roundtrip() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11558,10 +11342,7 @@ networks:
 
     #[test]
     fn save_compose_read_back_io_error_has_actionable_context() {
-        // Inject an IO error via the test seam by setting FORCE_DISK_GARBAGE
-        // to an empty string (which is valid YAML but parseable to an empty
-        // doc — so validate_compose_network_refs passes); then assert that
-        // *valid* disk content does NOT fail the read-back branch.
+        // Inject FORCE_DISK_GARBAGE = empty string (valid YAML); assert valid disk content does not fail read-back.
         let project = format!("save-readback-ok-{}", std::process::id());
         let valid_yaml = r#"
 services:

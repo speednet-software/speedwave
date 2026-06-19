@@ -395,18 +395,19 @@ Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (m
 
 ## Files Involved
 
-| File                                            | Role                                                           |
-| ----------------------------------------------- | -------------------------------------------------------------- |
-| `release-please-config.json`                    | release-please configuration — extra-files, changelog sections |
-| `.release-please-manifest.json`                 | Current version tracker for release-please                     |
-| `.github/workflows/release-please.yml`          | Runs release-please on push to main, triggers builds           |
-| `.github/workflows/release-please-lockfile.yml` | Regenerates Cargo.lock on release-please PRs                   |
-| `.github/workflows/desktop-release.yml`         | Matrix build, code signing, CLI cross-compile, publish         |
-| `.github/workflows/desktop-build.yml`           | PR/push CI build (unsigned)                                    |
-| `.github/workflows/backmerge.yml`               | Automated main → dev backmerge after release publish           |
-| `.github/workflows/merge-strategy-check.yml`    | Enforces conventional commit PR titles on PRs to main          |
-| `desktop/src-tauri/src/updater.rs`              | Stable endpoint, version comparator, auto-check loop           |
-| `desktop/src-tauri/tauri.conf.json`             | Tauri config — updater pubkey, default stable endpoint         |
+| File                                                | Role                                                           |
+| --------------------------------------------------- | -------------------------------------------------------------- |
+| `release-please-config.json`                        | release-please configuration — extra-files, changelog sections |
+| `.release-please-manifest.json`                     | Current version tracker for release-please                     |
+| `.github/workflows/release-please.yml`              | Runs release-please on push to main, triggers builds           |
+| `.github/workflows/release-please-lockfile.yml`     | Regenerates Cargo.lock on release-please PRs                   |
+| `.github/workflows/release-please-npm-lockfile.yml` | Regenerates npm package-lock.json files on release-please PRs  |
+| `.github/workflows/desktop-release.yml`             | Matrix build, code signing, CLI cross-compile, publish         |
+| `.github/workflows/desktop-build.yml`               | PR/push CI build (unsigned)                                    |
+| `.github/workflows/backmerge.yml`                   | Automated main → dev backmerge after release publish           |
+| `.github/workflows/merge-strategy-check.yml`        | Enforces conventional commit PR titles on PRs to main          |
+| `desktop/src-tauri/src/updater.rs`                  | Stable endpoint, version comparator, auto-check loop           |
+| `desktop/src-tauri/tauri.conf.json`                 | Tauri config — updater pubkey, default stable endpoint         |
 
 ## Verifying a Release
 

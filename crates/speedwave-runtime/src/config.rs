@@ -68,15 +68,9 @@ pub struct LlmActive {
     pub model: Option<String>,
 }
 
-/// LLM provider selection and model settings.
-///
-/// Two coexisting shapes (ADR-073 migration):
-/// - **v1 (legacy, flat)**: `provider`/`model`/`base_url`/`context_tokens`/
-///   `has_api_key`/`has_custom_headers`. Still WRITTEN on save for one
-///   release so an older Speedwave reads the config without losing the
-///   active selection (downgrade story).
-/// - **v2**: `providers` list + `active` selection + `schema_version=2`.
-///   [`migrate_llm_to_v2`] lifts v1 data into v2 on resolve.
+/// LLM provider selection and model settings (ADR-073 migration).
+/// v1 (legacy, flat): `provider`/`model`/`base_url`/`context_tokens`/`has_api_key`/`has_custom_headers`.
+/// v2: `providers` list + `active` selection + `schema_version=2`.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
     /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
@@ -85,12 +79,7 @@ pub struct LlmConfig {
     pub model: Option<String>,
     /// Base URL for a local Anthropic-Messages server (user-only).
     pub base_url: Option<String>,
-    /// Context window of the active model, in tokens.
-    /// For Anthropic this is resolved from the static SSOT
-    /// (`defaults::ANTHROPIC_MODELS`); for local providers it comes from the
-    /// real provider API and is persisted alongside the model id so the
-    /// chat footer can render an honest `used / max` ratio without keeping a
-    /// duplicate hard-coded table on the frontend.
+    /// Context window of the active model, in tokens; persisted per provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u32>,
     /// True when an API key file exists at `tokens/<project>/local-llm/api_key`.
@@ -175,9 +164,7 @@ pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
     }
     llm.schema_version = Some(LLM_SCHEMA_VERSION);
 
-    // Repo `.speedwave.json` may suggest a model (merge_llm_repo writes the
-    // flat field only) — lift it into the active selection when the user has
-    // not pinned one. Also covers the v1→v2 lift for user-set legacy models.
+    // Lift model suggestion into active selection when user has not pinned.
     if let Some(active) = &mut llm.active {
         if active.model.is_none() && llm.model.is_some() {
             active.model.clone_from(&llm.model);
@@ -229,8 +216,7 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.has_api_key = false;
             llm.has_custom_headers = false;
         }
-        // No v1 equivalent — an older Speedwave treats these as anthropic
-        // (its safest default); the v2 fields keep the real selection.
+        // No v1 equivalent — legacy fields set to anthropic; v2 fields keep the real selection.
         LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
@@ -612,17 +598,10 @@ pub fn resolve_project_config(
         }
     }
 
-    // Lift the merged result into the v2 provider-list shape (ADR-073). The
-    // anthropic-secret presence decides AnthropicApiKey vs AnthropicOauth for
-    // legacy `provider=anthropic` configs.
+    // Lift merged result into v2 shape (ADR-073).
     migrate_llm_to_v2(&mut llm, anthropic_secret_exists(project_name));
 
-    // Local LLMs receive the full default Claude Code system prompt (Unsloth-style
-    // routing). Modern local models commonly ship with 32K-128K context windows
-    // that absorb the ~30K-token baseline (system prompt + tool definitions). This
-    // also lets `outputStyle` from settings.json reach local LLMs uniformly with
-    // Anthropic-hosted models. The model itself is selected via `ANTHROPIC_MODEL`
-    // env injected by `compose::apply_llm_config` — no per-provider CLI flags here.
+    // Local LLMs get the full default Claude Code system prompt.
     let flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
         .map(|s| s.to_string())
@@ -754,15 +733,12 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    // Durable atomic write (fsync data + parent dir) — bare write+rename was the
-    // torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    // Durable atomic write (fsync data + parent dir).
     crate::fs_perms::write_restricted_file_atomic(path, &content)
 }
 
-/// Acquires an exclusive file lock on `<data_dir>/config.lock` and runs the
-/// closure `f` while the lock is held.  This prevents race conditions between
-/// concurrent processes (CLI vs Desktop) that read-modify-write `config.json`.
-///
+/// Runs `f` while holding an exclusive lock on `<data_dir>/config.lock`
+/// (serialises CLI/Desktop read-modify-write of `config.json`).
 /// Testable variant that accepts an explicit data directory.
 pub fn with_config_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
 where
@@ -812,11 +788,9 @@ const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
 
-/// Strips security-class keys from a repo-layer `claude.env` overlay before it
-/// is merged. Removes the Anthropic auth/routing keys plus every
-/// `consts::RESERVED_ENV_KEYS` linker/runtime/shell hijack vector. Comparison is
-/// case-insensitive — the env-injection point is case-sensitive but a cloned
-/// repo shipping `Ld_Preload` would still be a hijack. User config is unaffected.
+/// Strips security-class keys from a repo-layer `claude.env` overlay before
+/// merge (Anthropic auth/routing + every `consts::RESERVED_ENV_KEYS` vector),
+/// case-insensitively. User config is unaffected.
 fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
     env.map(|mut map| {
         map.retain(|key, _| !repo_env_key_is_denied(key));
@@ -866,25 +840,17 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     }
 }
 
-/// Merge LLM config from repo source (.speedwave.json).
-/// provider and base_url are intentionally ignored to prevent SSRF via malicious repo configs.
-/// Only model is merged, allowing repos to suggest a default model name.
-/// The v2 fields (`providers`, `active`, `schema_version`) are equally
-/// ignored — a repo must never add providers, redirect base URLs, or switch
-/// the active provider (ADR-073 keeps the ADR-040 rule). The model
-/// suggestion reaches `active.model` via the lift in [`migrate_llm_to_v2`]
-/// only when the user has not pinned a model.
+/// Merge LLM config from repo source; provider/base_url/v2-fields ignored (SSRF prevention).
+/// Only model is merged as a suggestion; see ADR-073 for the full SSRF policy.
 fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.model.is_some() {
         base.model.clone_from(&overlay.model);
     }
 }
 
-/// Removes the obsolete `log_level` field from `<data_dir>/config.json` if
-/// present. Returns `Ok(true)` when the field was removed, `Ok(false)` when
-/// nothing needed to change. Operates on `serde_json::Value` so unknown
-/// future fields are semantically preserved (re-serialised through
-/// `to_string_pretty` — key order and whitespace follow serde-json defaults).
+/// Removes the obsolete `log_level` field from `<data_dir>/config.json`.
+/// `Ok(true)` = field removed, `Ok(false)` = nothing changed; unknown future
+/// fields are preserved (operates on `serde_json::Value`).
 pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
     with_config_lock_in(data_dir, || {
         let path = data_dir.join("config.json");
@@ -925,9 +891,7 @@ mod tests {
 
     #[test]
     fn llm_provider_kind_matches_ts_union() {
-        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
-        // the TS union must list exactly the Rust serde strings, so the
-        // provider-save wire contract can't drift.
+        // TS union must list exactly the Rust serde strings (cf. allowed_auth_field_types_match_ts_union).
         let all = [
             LlmProviderKind::AnthropicOauth,
             LlmProviderKind::AnthropicApiKey,
@@ -1034,9 +998,7 @@ mod tests {
 
     #[test]
     fn repo_config_cannot_enable_transcription() {
-        // Decision 13: a checked-in repo .speedwave.json must not turn on host-
-        // audio recording. ProjectRepoConfig has no `transcription` field, so
-        // any unknown `transcription` key in a repo file is silently ignored.
+        // ProjectRepoConfig has no `transcription` field, so a repo key is dropped.
         let repo_json = r#"{
             "claude": null,
             "integrations": null,
@@ -1122,10 +1084,7 @@ mod tests {
 
     #[test]
     fn test_is_local_provider_matches_local_providers_const() {
-        // Regression guard: `is_local_provider` and `LOCAL_PROVIDERS` must
-        // stay in sync. Callers (e.g. the `update_llm_config` model-required
-        // guard in desktop/src-tauri/src/containers_cmd.rs) iterate the
-        // const and expect every element to satisfy the predicate.
+        // `is_local_provider` and `LOCAL_PROVIDERS` must stay in sync.
         for name in LOCAL_PROVIDERS {
             assert!(
                 is_local_provider(Some(name)),
@@ -1210,8 +1169,7 @@ mod tests {
                 claude: Some(ClaudeOverrides {
                     env: Some(HashMap::from([
                         ("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), "0".to_string()),
-                        // A user who prefers the legacy renderer (or no clipboard
-                        // shim) must be able to override the base_env default.
+                        // User can override the base_env default.
                         ("WAYLAND_DISPLAY".to_string(), "".to_string()),
                     ])),
                     settings: None,
@@ -1284,8 +1242,7 @@ mod tests {
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User config wins over repo config. The v1→v2 migration (ADR-073)
-        // normalises the legacy `ollama` alias to `local` on resolve.
+        // User config wins; v1→v2 migration normalises `ollama` to `local`.
         assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(
@@ -1324,9 +1281,7 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // provider and base_url from repo config must be ignored (SSRF
-        // prevention — ADR-040, upheld by ADR-073). Post-migration the
-        // default resolves to anthropic, NOT the repo's "ollama".
+        // Repo provider/base_url ignored (SSRF, ADR-040); default resolves to anthropic.
         assert_eq!(resolved.llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(resolved.llm.base_url, None);
         let active = resolved.llm.active.as_ref().expect("active set");
@@ -1830,18 +1785,15 @@ mod tests {
         assert_eq!(loaded.active_project, Some("test".to_string()));
     }
 
-    /// Durability guard: both config writers must route through the durable
-    /// SSOT helper (`fs_perms::write_restricted_file_atomic` — fsync data +
-    /// parent dir) instead of a bare `fs::write(tmp) + rename`, which is the
-    /// torn-write pattern that corrupted compose.yml on APFS/virtiofs.
+    /// Both config writers must route through the durable SSOT helper
+    /// `fs_perms::write_restricted_file_atomic` (fsync data + parent dir).
     #[test]
     fn test_config_writers_use_durable_helper() {
         let source = include_str!("config.rs");
         for func in ["fn save_user_config_to(", "fn migrate_drop_log_level_in("] {
             let start = source.find(func).expect("function must exist");
             let body = &source[start..];
-            // Bound the slice to this function: stop at the next top-level item
-            // or the test module, whichever comes first.
+            // Bound the slice to this function (stop at next top-level item or test module).
             let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
                 .iter()
                 .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
@@ -1972,14 +1924,7 @@ mod tests {
 
     #[test]
     fn resolve_does_not_inject_provider_specific_flags_for_local_provider() {
-        // Local providers are configured entirely through env vars injected by
-        // `compose::apply_llm_config` (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL,
-        // ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_MODEL_OPTION*, etc.) — no
-        // CLI flags are added here. In particular --system-prompt-file and
-        // --append-system-prompt must stay out so `outputStyle` reaches the
-        // local LLM and the KV cache stays warm. --model is also dropped:
-        // ANTHROPIC_MODEL is the primary mechanism per Claude Code docs and
-        // CLI --model would only set a per-session override.
+        // Local providers are configured via env vars (compose::apply_llm_config), not CLI flags.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -2051,13 +1996,8 @@ mod tests {
         assert_all_integrations_disabled(&resolved);
     }
 
-    /// Regression guard: `apply_integrations_layer` must propagate *every*
-    /// service listed in `TOGGLEABLE_MCP_SERVICES` to the resolved config.
-    /// If a new descriptor is added to `consts::TOGGLEABLE_MCP_SERVICES` but
-    /// its corresponding `apply_toggle` call is forgotten in
-    /// `apply_integrations_layer`, the toggle gets saved to disk but is
-    /// silently ignored at compose-render time — the exact bug that hit
-    /// Playwright in PR2.
+    /// `apply_integrations_layer` must propagate every service in
+    /// `TOGGLEABLE_MCP_SERVICES` to the resolved config.
     #[test]
     fn test_apply_integrations_layer_propagates_every_toggleable_service() {
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
@@ -2092,21 +2032,15 @@ mod tests {
         }
     }
 
-    /// Upgrade path: a user on an older Speedwave version has a `config.json`
-    /// that pre-dates the `playwright` field. After update, deserializing that
-    /// config must still succeed (with `playwright: None`), the UI toggle must
-    /// be able to flip it to enabled, and the save → load round-trip must
-    /// preserve the new value.
-    ///
-    /// If this test breaks, every existing user loses their config on upgrade
-    /// — a silent regression.
+    /// Upgrade path: a `config.json` pre-dating the `playwright` field still
+    /// deserializes (`playwright: None`), the toggle flips it, and the
+    /// save → load round-trip preserves the new value.
     #[test]
     fn test_existing_user_config_accepts_new_integration() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
-        // Simulate an on-disk config written by an older Speedwave that had no
-        // `playwright` field. Only slack is configured.
+        // On-disk config with no `playwright` field; only slack configured.
         let legacy_json = r#"{
             "projects": [
                 {
@@ -2286,8 +2220,7 @@ mod tests {
 
         let mut resolved = ResolvedIntegrationsConfig::default();
         apply_integrations_layer(&mut resolved, &integrations);
-        // The legitimate `slack` toggle still applies; the legacy `hostExec`
-        // block enables nothing (the field no longer exists).
+        // `slack` toggle still applies; legacy `hostExec` enables nothing.
         assert!(resolved.slack, "slack toggle still resolves");
         assert!(
             resolved.plugins.is_empty(),
@@ -2951,10 +2884,7 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_errs_when_root_is_not_object() {
-        // Cover every non-object JSON root shape — array, null, number, string,
-        // bool — to make sure none of them are silently accepted (a user with
-        // a manually-corrupted config must see an actionable error, not a
-        // no-op success).
+        // Every non-object JSON root shape (array/null/number/string/bool) must error, not be accepted.
         for original in [
             r#"["unexpected","array","root"]"#,
             "null",
@@ -2985,11 +2915,7 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_cleans_orphan_tmp_on_rename_failure() {
-        // Simulate the post-condition: even if rename fails, no `.tmp` orphan
-        // is left behind. We can't easily force `rename` to fail, but we can
-        // verify that under normal operation the function does not LEAVE a
-        // `.tmp` file behind on the happy path (sanity check that we always
-        // clean up).
+        // No `.tmp` orphan is left behind on the happy path.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.json");
         std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
@@ -3021,9 +2947,7 @@ mod tests {
         restore.set_mode(0o755);
         std::fs::set_permissions(tmp.path(), restore).unwrap();
 
-        // Either the migration refused (Err) or the read-only dir prevented
-        // the temp-rename pair from running. In neither case may the file
-        // shed `log_level` silently — the user's config must survive.
+        // On failure the file must not silently shed `log_level`; the config must survive.
         match result {
             Err(_) => {}
             Ok(false) => {}

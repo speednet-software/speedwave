@@ -1,9 +1,5 @@
 /**
- * Tests for Context7 REST client.
- *
- * Uses undici's built-in MockAgent — same approach as official undici docs,
- * no extra dependency on msw/nock. Each test creates a fresh mock and pins
- * it as the client's dispatcher so global state never leaks between tests.
+ * Tests for Context7 REST client. Uses undici's built-in MockAgent.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -72,8 +68,7 @@ describe('Context7Client.searchLibraries', () => {
       })
       .reply(200, JSON.stringify({ results: [] }));
 
-    // If the header was missing, the intercept would not match and undici
-    // would throw "no matching interceptor" — assertion via behaviour.
+    // Assertion via intercept — if header missing, undici throws.
     await client.searchLibraries('react', 'h');
   });
 
@@ -468,8 +463,7 @@ describe('Context7Client misc', () => {
 
   it('aborts when response body exceeds MAX_RESPONSE_BYTES — OOM regression guard', async () => {
     const { client, mock } = makeClient();
-    // 6 MiB of payload — over the 5 MiB cap. The mock streams it as one chunk;
-    // readBodyLimited must reject before buffering the whole thing.
+    // 6 MiB payload — over the 5 MiB cap.
     const oversized = 'x'.repeat(6 * 1024 * 1024);
     mock
       .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })

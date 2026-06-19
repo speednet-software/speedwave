@@ -1,9 +1,4 @@
-/**
- * Validation Helper Tests
- *
- * Tests for withValidation wrapper: parameter validation, success path,
- * error path, and handler exceptions.
- */
+/** Tests for withValidation wrapper. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { withValidation, ToolResult } from './validation.js';

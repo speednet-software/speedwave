@@ -77,11 +77,7 @@ const DEFAULT_LIMIT = 100;
 const MAX_PER_PAGE = 100;
 
 /**
- * `true` if `url` is a syntactically valid absolute `https://` URL. Used to keep
- * GitHub-supplied download URLs (`Location` headers, `archive_download_url`) from
- * carrying a `file://`, `http://`, or metadata-service address to the model — see
- * `.claude/rules/security.md`. (Inert in v1 since the API base is github.com, but
- * preemptively closes the vector if GHES / a config-driven base URL is ever added.)
+ * `true` if `url` is a syntactically valid absolute `https://` URL.
  * @param url - Candidate URL string
  * @returns Whether the string parses as an `https:` URL
  */
@@ -94,15 +90,9 @@ function isHttpsUrl(url: string): boolean {
 }
 
 /**
- * Extracts the redirect target URL from an Octokit response fetched with
- * `request: { redirect: 'manual' }` (logs/artifact download endpoints). The URL
- * is in the `Location` header; older Octokit versions also exposed it as `res.url`.
- * Throws if neither is present, or if it isn't an `https://` URL — better a clear
- * error than handing Claude an empty or unsafe `download_url` it can't act on
- * (would only happen if GitHub changes the redirect behaviour, a future Octokit
- * version stops exposing it, or a GHES/config-driven base URL is added later).
+ * Extracts the redirect target URL from an Octokit response (status 302).
  * @param res - Octokit response object (status 302)
- * @param what - What was being downloaded, for the error message (e.g. "workflow run logs")
+ * @param what - What was being downloaded, for the error message
  * @returns The non-empty `https://` redirect URL
  */
 function extractRedirectUrl(res: unknown, what: string): string {
@@ -119,9 +109,6 @@ function extractRedirectUrl(res: unknown, what: string): string {
 
 /**
  * Decodes the body of a `mediaType: { format: 'diff' }` response to a string.
- * Octokit returns a `string` when the response carries a textual content-type, but
- * falls back to an `ArrayBuffer`/`Buffer` otherwise — guard against that so we never
- * return the literal `"[object ArrayBuffer]"`.
  * @param data - The `response.data` from a diff-format request
  * @returns The diff as a UTF-8 string
  */
@@ -153,10 +140,7 @@ type ErrorCategory =
   | 'unknown';
 
 /**
- * Classifies an Octokit-style error into a coarse {@link ErrorCategory}, the single place
- * that knows which HTTP status / message substring means what. `formatError` turns the
- * category (plus the raw error) into a user-facing string; `testConnection` exposes it
- * directly so callers can branch on `auth` vs `network` etc.
+ * Classifies an Octokit-style error into a coarse {@link ErrorCategory}.
  * @param error - The thrown value (an Octokit RequestError or anything else)
  * @returns The matched error category
  */
@@ -458,8 +442,7 @@ export class GitHubClient {
       id: Number(a.id),
       name: String(a.name || ''),
       size_in_bytes: Number(a.size_in_bytes || 0),
-      // Drop anything that isn't a plain https:// URL — never hand a file://, http://,
-      // or metadata-service address to the model (see isHttpsUrl).
+      // Drop any non-https:// URL (see isHttpsUrl).
       archive_download_url: isHttpsUrl(downloadUrl) ? downloadUrl : '',
       expired: Boolean(a.expired),
     };
@@ -601,8 +584,7 @@ export class GitHubClient {
       console.error(`${ts()} GitHub connection test failed:`, errorMessage);
 
       const category = classifyOctokitError(error);
-      // `validation` / `server` aren't expected for getAuthenticated() and aren't part of
-      // ConnectionTestResult's narrower set — fold them into 'unknown'.
+      // Fold `validation` / `server` into 'unknown' (not in ConnectionTestResult's set).
       const errorType: ConnectionTestResult['errorType'] =
         category === 'validation' || category === 'server' ? 'unknown' : category;
 
@@ -1396,8 +1378,7 @@ export class GitHubClient {
         });
         sha = existing.sha;
       } catch (error) {
-        // Only "file does not exist yet" (404) is expected — re-throw anything else
-        // (permission errors, network failures, "path is a directory", etc.).
+        // 404 means the file does not exist yet; re-throw anything else.
         if ((error as OctokitErrorLike)?.status !== 404) {
           throw error;
         }
@@ -1895,19 +1876,8 @@ export class GitHubClient {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Initializes the GitHub client with a token from the mounted token path.
- * Reads the authentication token from /tokens/token (or TOKENS_DIR env var) and tests
- * connectivity before returning the client. github.com only in v1 — there is no
- * host_url file (unlike GitLab); the API base URL stays at its default
- * (https://api.github.com). If a future version adds GHES support, read base_url here.
- *
- * IMPORTANT: Returns null (not throws) when the token is missing or invalid.
- * This enables "graceful degradation" - the server starts even without config:
- * - User can run `speedwave` (no subcommand) without configuring all integrations
- * - Healthcheck reports the service as unconfigured
- * - Tools return a clear "not configured" error when called
- *
- * DO NOT change this to throw - it breaks container startup for unconfigured services.
+ * Initializes the GitHub client with a token from /tokens/token.
+ * Returns null (not throws) when token is missing or invalid (graceful degradation).
  * @returns Configured GitHubClient instance, or null if the token is not found / invalid
  */
 export async function initializeGitHubClient(): Promise<GitHubClient | null> {
@@ -1934,8 +1904,6 @@ export async function initializeGitHubClient(): Promise<GitHubClient | null> {
     console.log(`${ts()} ✅ GitHub client initialized, connection test scheduled`);
     return client;
   } catch (error) {
-    // Broad catch is intentional (graceful degradation), but surface the full error —
-    // a permissions error on /tokens/token must be distinguishable from a missing token.
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
     console.warn(`${ts()} Failed to initialize GitHub client: ${detail}`);
     return null;

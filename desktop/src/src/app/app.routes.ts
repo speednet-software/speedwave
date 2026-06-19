@@ -18,9 +18,7 @@ export const routes: Routes = [
       { path: '', redirectTo: 'chat', pathMatch: 'full' },
       {
         path: 'chat',
-        // No authRequiredGuard — the chat view itself surfaces an inline
-        // "auth required" block (mockup-aligned) so the user can still see
-        // where they are and one-click jump to Settings.
+        // No authRequiredGuard — chat surfaces an inline "auth required" block
         loadComponent: () => import('./chat/chat.component').then((m) => m.ChatComponent),
       },
       {

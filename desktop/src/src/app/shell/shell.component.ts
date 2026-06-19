@@ -23,12 +23,8 @@ import { SpinIconComponent } from '../shared/spin-icon.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
 
 /**
- * Application shell — hosts the left icon rail, the routed main content, and
- * the global keyboard shortcuts (⌘1/⌘2/⌘3/⌘L for view nav, ⌘B for the
- * conversations drawer, ⌘K for the command palette).
- *
- * Blocking overlays (loading / check-failed / restart-required / error banner)
- * live here because they must cover the rail and the routed content alike.
+ * Application shell — hosts the icon rail, routed content, global keyboard
+ * shortcuts, and the blocking overlays (loading / check-failed / restart / error).
  */
 @Component({
   selector: 'app-shell',
@@ -238,14 +234,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   private readonly currentUrlSignal = signal<string>(this.router.url);
   private readonly statusSignal = signal(this.projectState.status);
 
-  /**
-   * Catalog of nav entries to render. The chat icon stays visible regardless
-   * of project status — when the user lands on `/chat` while authentication
-   * is missing, the view itself surfaces the `auth required` block + a link
-   * back to Settings instead of silently disappearing from the rail.
-   * Meeting transcription is a beta-gated surface: hidden until the user
-   * enables beta features in the tray (ADR-058/056).
-   */
+  /** Nav entries to render: chat always visible; meeting-transcription beta-gated (ADR-058/056). */
   readonly visibleEntries = computed(() =>
     this.beta.enabled()
       ? this.entryCatalog
@@ -294,11 +283,8 @@ export class ShellComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Global keyboard shortcuts. Wired via `host: { '(document:keydown)': … }` —
-   * the `HostListener` decorator is forbidden by the project's best-practices
-   * rules.
-   * @param event - keyboard event from the document; consumed (preventDefault)
-   *   on every match so the platform doesn't apply the default action.
+   * Global keyboard shortcuts.
+   * @param event - keyboard event; consumed via preventDefault on every match.
    */
   onKeydown(event: KeyboardEvent): void {
     const cmd = event.metaKey || event.ctrlKey;

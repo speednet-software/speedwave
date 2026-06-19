@@ -29,9 +29,7 @@ function statusLabel(s: TranscriptStatus): string {
 }
 
 /**
- * The recordings list (left pane of the Meeting transcription tab): open /
- * delete, status badge, and "discard audio" per session (frees disk; makes
- * re-transcription impossible). No auto-cleanup in v1 — the user manages it.
+ * Recordings list: open, delete, status badge, and discard audio per session.
  */
 @Component({
   selector: 'app-session-list',

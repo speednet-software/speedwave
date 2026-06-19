@@ -22,10 +22,7 @@ import SharedCLI
 /// 16 kHz mono float32 — the only output format. Whisper expects this rate.
 let kSampleRate: Double = 16_000.0
 
-/// Owns all stdout writes (header + binary chunks). CoreAudio IOProc threads
-/// and the mic-engine tap only hand it already-copied raw frames and let the
-/// resample + write happen here — never on a real-time audio thread (a full
-/// stdout pipe blocking the audio path would glitch the whole system).
+/// Owns all stdout writes (header + binary chunks); never runs on an audio thread.
 final class WriterQueue {
     static let shared = WriterQueue()
     private let queue = DispatchQueue(label: "pl.speedwave.audio-capture.writer")
@@ -38,9 +35,7 @@ final class WriterQueue {
 
     /// Writes the JSON header line synchronously (called once, before any chunk).
     func writeHeader(streams: [String]) {
-        // `started_at_ns` uses wall-clock; per-chunk `offset_ns` is a monotonic
-        // mach-time delta. They are in different clock domains — the Rust reader
-        // ignores `started_at_ns`, so this is informational only.
+        // `started_at_ns` is wall-clock; the Rust reader ignores it (per-chunk offset is monotonic).
         let startedAtNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
         let header: [String: Any] = [
             "sample_rate": Int(kSampleRate), "channels": 1, "format": "f32le",
@@ -73,9 +68,7 @@ final class WriterQueue {
                   let inBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: inFrames)
             else { return }
             inBuf.frameLength = inFrames
-            // Copy the raw interleaved samples into the input buffer. The input
-            // format we hand the converter is always non-interleaved float (we
-            // build it that way in the callers), so write one channel at a time.
+            // Copy raw samples into the input buffer (non-interleaved float per channel).
             if format.isInterleaved {
                 if let dst = inBuf.floatChannelData?[0] {
                     interleaved.withUnsafeBufferPointer { src in
@@ -140,9 +133,7 @@ func logErr(_ message: String) {
 // MARK: - Argument parsing
 
 /// Source for `--record --source`. `all` = system-wide tap; `pid:N` = single
-/// process; `all-except:N` = system minus one process; `mic-only` = no system
-/// tap at all, just the microphone (uses the public AVCaptureDevice consent
-/// API, so the OS prompt fires — unlike CoreAudio process taps).
+/// process; `all-except:N` = system minus one process; `mic-only` = microphone only.
 enum AudioSource {
     case all
     case pid(pid_t)
@@ -212,10 +203,8 @@ func parseRecordOptions(_ args: [String]) -> RecordOptions? {
 
 // MARK: - Process enumeration (--list)
 
-/// Looks up `kAudioHardwarePropertyProcessObjectList` and emits a JSON array
-/// of running audio processes on stdout, one element per pid that the OS
-/// currently treats as an "audio object". Used by the Desktop UI to populate
-/// the per-app source picker.
+/// Emits a JSON array of running audio processes (one element per pid) on stdout
+/// from `kAudioHardwarePropertyProcessObjectList`.
 @available(macOS 14.4, *)
 func listAudioProcesses() throws -> Data {
     var addr = AudioObjectPropertyAddress(
@@ -434,9 +423,8 @@ func runRecord(_ opts: RecordOptions) {
         return
     }
 
-    // System tap path. The system-audio TCC prompt has no public trigger, so
-    // request it via the private API first — without it the tap silently
-    // delivers zeroed buffers (ADR-056 decision 3).
+    // System tap path: request system-audio TCC consent via the private API first
+    // (no public trigger; ADR-056 decision 3).
     guard preflightSystemAudioConsent() else {
         logErr(
             "system audio recording permission denied — grant it in System Settings → Privacy & Security → System Audio Recording Only")
@@ -565,10 +553,7 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
     session.aggregateId = aggId
 
-    // The aggregate device's input stream format tells us the *real* sample
-    // rate + channel count CoreAudio will deliver — never assume 48 kHz. A tap
-    // mixdown arrives as one interleaved float buffer, so we hand the writer
-    // queue an interleaved float format matching it.
+    // Query the aggregate device's real input format; the tap mixdown arrives interleaved.
     let inputFormat = inputStreamFormat(of: aggId)
     let inChannels = max(1, inputFormat.mChannelsPerFrame)
     guard let avInFormat = AVAudioFormat(
@@ -580,9 +565,8 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
             userInfo: [NSLocalizedDescriptionKey: "could not build input AVAudioFormat (rate \(inputFormat.mSampleRate))"])
     }
 
-    // IOProc runs on a real-time CoreAudio thread: it only copies the buffer's
-    // float samples into a Swift array and hands them to the writer queue. No
-    // resampling, no stdout, no locking on the audio path.
+    // IOProc runs on a real-time CoreAudio thread: copy samples to the writer queue only,
+    // no resampling/stdout/locking on the audio path.
     var procId: AudioDeviceIOProcID?
     let procStatus = AudioDeviceCreateIOProcIDWithBlock(
         &procId, aggId, nil
@@ -640,12 +624,8 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
     return fallback
 }
 
-/// Requests the "System Audio Recording" (TCC `kTCCServiceAudioCapture`) consent
-/// via the private `TCCAccessRequest` API — there is no public trigger for this
-/// prompt (decision 3, ADR-056). `dlopen`/`dlsym`-guarded: if the symbol is
-/// missing on a future macOS, returns `false` and the caller exits "permission
-/// unavailable" (the UI then deep-links the user to System Settings) — it does
-/// not crash. Blocks for the prompt result. Returns `true` if granted.
+/// Requests system-audio (TCC `kTCCServiceAudioCapture`) consent via the private
+/// `TCCAccessRequest` API (dlopen/dlsym-guarded). Blocks; returns `true` if granted.
 func preflightSystemAudioConsent() -> Bool {
     typealias TCCRequestFn = @convention(c) (
         CFString, @escaping @convention(block) (Bool) -> Void
@@ -673,11 +653,8 @@ func preflightSystemAudioConsent() -> Bool {
     return granted
 }
 
-/// Requests microphone consent via the public `AVCaptureDevice` API. This DOES
-/// show the macOS consent prompt (the embedded `NSMicrophoneUsageDescription`
-/// supplies the text) — unlike CoreAudio process taps, which have no public
-/// trigger. Blocks until the user responds (or, if already decided, returns
-/// immediately). Returns `true` if access is granted.
+/// Requests microphone consent via the public `AVCaptureDevice` API (shows the
+/// macOS prompt). Blocks until decided; returns `true` if granted.
 func requestMicrophoneAccess() -> Bool {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized:
@@ -711,10 +688,7 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
         let frames = Int(buf.frameLength)
         let channels = Int(buf.format.channelCount)
         guard frames > 0, let chan = buf.floatChannelData else { return }
-        // Interleave the engine's non-interleaved channels into one array, then
-        // hand a matching interleaved format to the writer queue (which will
-        // deinterleave + down-mix + resample). Keeping it simple: the engine's
-        // float format is what we pass through unchanged otherwise.
+        // Interleave engine channels for the writer queue; engine float format unchanged.
         var interleaved = [Float](repeating: 0, count: frames * channels)
         for f in 0..<frames {
             for c in 0..<channels { interleaved[f * channels + c] = chan[c][f] }
@@ -729,9 +703,7 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             offsetNs: offset)
     }
 
-    // The `selector` is plumbed so a future iteration can route to a named
-    // device UID via `kAudioDevicePropertyDeviceUID`; today we honor the
-    // engine default. We log the selector for transparency.
+    // Device routing not yet wired; the selector is logged for transparency.
     switch selector {
     case .device(let uid):
         logErr("mic selector device='\(uid)' (default device used; named routing not yet wired)")

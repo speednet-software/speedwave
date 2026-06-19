@@ -168,8 +168,7 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('per-field clear is confirm-gated (first click stages, Yes emits)', () => {
-    // H9 — per-field clear is destructive, so it requires a confirm. First
-    // click shows inline Yes/Cancel; only Yes emits the clearField event.
+    // First click stages confirm; only Yes emits clearField.
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
@@ -267,8 +266,7 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('renders a typed input for oauth_flow client fields and emits their value on save', () => {
-    // An oauth_flow:true client field (e.g. client_id) must be typeable AND be
-    // submitted, so save_plugin_credentials can route it to the off-mount seed.
+    // An oauth_flow:true client field must be typeable and submitted.
     fixture.componentRef.setInput('authFields', [
       {
         key: 'client_id',
@@ -520,8 +518,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
 
-    // Synthetic event with a non-input target (e.g. a div). Must not
-    // write undefined into the buffer or hasAnyValue() would throw on trim.
+    // Synthetic event with a non-input target (e.g. a div).
     const fakeEvent = { target: document.createElement('div') } as unknown as Event;
     component.onFieldInput('example_pat', fakeEvent);
 
@@ -663,8 +660,7 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('rejects a partial match — the pattern is anchored full-match', () => {
-    // Author pattern is intentionally un-anchored; the component wraps it in
-    // ^(?:…)$ so a value that merely contains a match is still rejected.
+    // Author pattern is un-anchored; component wraps it in ^(?:…)$.
     fixture.componentRef.setInput('authFields', [
       {
         key: 'example_pat',

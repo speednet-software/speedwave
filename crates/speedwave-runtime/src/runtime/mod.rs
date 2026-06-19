@@ -1167,6 +1167,7 @@ impl Drop for TermGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod test_support {
     use super::CommandRunner;
 
@@ -1262,9 +1263,11 @@ pub(crate) mod test_support {
         }
     }
 
+    type RecordedCall = (String, Vec<String>, Option<std::time::Duration>);
+
     pub struct SequentialMockRunner {
         pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
-        pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
+        pub calls: std::sync::Mutex<Vec<RecordedCall>>,
     }
 
     impl SequentialMockRunner {
@@ -2481,6 +2484,7 @@ services:
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane
     fn compose_validate_retry_window_is_long_enough_for_virtiofs_lag() {
         // Regression: 3 attempts / 300 ms total was too short — the guest saw a
         // stale compose.yml past the window. Pin the wider window + capped delay.

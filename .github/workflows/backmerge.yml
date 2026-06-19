@@ -1,13 +1,4 @@
-# Backmerge main → dev after a release is published
-#
-# Resets dev to match main exactly (force-push). This prevents ghost commits
-# from accumulating on dev due to SHA divergence from squash merges.
-#
-# If dev has commits not yet on main (someone merged between release and
-# backmerge), falls back to a regular merge via PR for manual resolution.
-#
-# Force-push is allowed by the dev branch ruleset which grants bypass to
-# admin role (used by RELEASE_TOKEN).
+# Backmerge main → dev after release: force-push dev=main, or fall back to a merge PR if dev has new commits
 
 name: Backmerge
 
@@ -50,23 +41,7 @@ jobs:
             exit 0
           fi
 
-          # Check if dev has genuinely new work not on main.
-          #
-          # We cannot use `git log dev --not main` because ghost commits
-          # (squash-merged to main with different SHAs) also appear there.
-          # We cannot use commit timestamps because commits merged to dev
-          # between the squash merge and the release tag would be lost.
-          #
-          # Instead, compare file trees: after squash merge dev→main, both
-          # have identical content. Main then gets a version bump (release-
-          # please), so we exclude version/release files from the diff.
-          # Any remaining difference = genuinely new work on dev.
-          #
-          # The per-package version files are derived at runtime from
-          # release-please-config.json `extra-files` (the SSOT — see CLAUDE.md),
-          # so adding a worker there needs no edit here. Only files release-
-          # please bumps but does NOT list in extra-files stay inline below
-          # (its own manifest/config/workflow, lockfiles, CHANGELOG).
+          # Compare file trees excluding version files (extra-files from release-please-config.json SSOT + static files below)
           mapfile -t RP_EXTRA_FILES < <(
             jq -r '.packages["."]["extra-files"][] | if type=="string" then . else .path end' \
               release-please-config.json
@@ -78,6 +53,7 @@ jobs:
             CHANGELOG.md
             package-lock.json
             mcp-servers/package-lock.json
+            mcp-servers/playwright/package-lock.json
             Cargo.lock
             desktop/src-tauri/Cargo.lock
           )
@@ -115,11 +91,7 @@ jobs:
           else
             echo "Merge conflicts detected — attempting auto-resolution of version files"
 
-            # Auto-resolve version files (main wins — it has the latest release
-            # version). Same SSOT as VERSION_EXCLUDES above: extra-files from
-            # release-please-config.json plus the static files release-please
-            # bumps but does not list (manifest/config/workflow, lockfiles,
-            # CHANGELOG). Adding a worker to extra-files needs no edit here.
+            # Auto-resolve version files (main wins); same SSOT as VERSION_EXCLUDES above
             AUTO_RESOLVE_FILES=("${RP_EXTRA_FILES[@]}" "${STATIC_VERSION_FILES[@]}")
 
             for f in "${AUTO_RESOLVE_FILES[@]}"; do

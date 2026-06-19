@@ -1,17 +1,6 @@
 import { Injectable, signal, type Signal } from '@angular/core';
 
-/**
- * SSOT for transient UI state shared across shell/chat views.
- *
- * Holds view-state signals that span components (conversations sidebar, memory
- * panel). Per terminal-minimal implementation prompt (Signals architecture):
- * view toggles live in a dedicated UI-state service with `providedIn: 'root'`.
- *
- * Consumers:
- * - `ShellComponent` binds the ⌘B / Ctrl+B keyboard shortcut to `toggleSidebar()`.
- * - `ChatComponent` renders `<app-memory-panel>` and `<app-conversations-sidebar>`
- *   driven by `memoryOpen()` / `sidebarOpen()`.
- */
+/** SSOT for transient UI state shared across shell/chat views (sidebar, memory, palette, project switcher toggles). */
 @Injectable({ providedIn: 'root' })
 export class UiStateService {
   private readonly sidebarOpenSignal = signal<boolean>(false);
@@ -31,11 +20,7 @@ export class UiStateService {
   /** Read-only signal reflecting the project switcher dropdown's open state. */
   readonly projectSwitcherOpen: Signal<boolean> = this.projectSwitcherOpenSignal.asReadonly();
 
-  /**
-   * Flips the conversations sidebar drawer between open and closed.
-   * Closes the memory drawer first — both share the left-edge anchor and
-   * cannot be open simultaneously without overlapping.
-   */
+  /** Flips the conversations sidebar drawer; closes the memory drawer first (shared left-edge anchor). */
   toggleSidebar(): void {
     this.sidebarOpenSignal.update((open) => {
       const next = !open;
@@ -44,10 +29,7 @@ export class UiStateService {
     });
   }
 
-  /**
-   * Flips the memory panel drawer between open and closed.
-   * Closes the conversations drawer first — both share the left-edge anchor.
-   */
+  /** Flips the memory panel drawer; closes the conversations drawer first (shared left-edge anchor). */
   toggleMemory(): void {
     this.memoryOpenSignal.update((open) => {
       const next = !open;

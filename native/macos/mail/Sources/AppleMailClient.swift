@@ -38,9 +38,7 @@ enum AppleMailClient {
             mailboxClause = "inbox"
         }
 
-        // Iterate with counter to avoid out-of-range errors.
-        // Access each message individually — Apple Mail doesn't support
-        // bulk property fetch for dates.
+        // Access each message individually; Apple Mail has no bulk property fetch.
         let script = """
         tell application "Mail"
             set output to ""

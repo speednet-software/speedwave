@@ -201,7 +201,7 @@ const updateTimeEntryTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Builds the Redmine time-entry tool definitions.
  * @param client - Redmine client instance
  */
 export function createTimeEntryTools(client: RedmineClient | null): ToolDefinition[] {

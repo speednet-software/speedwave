@@ -1,8 +1,5 @@
 #!/usr/bin/env bats
-# Tests for scripts/validate-pr-title-main.sh
-#
-# Regression: issue #371 — `chore` as PR title to main makes release-please
-# ignore the merge, collapsing feat/fix commits into an invisible release.
+# Tests for scripts/validate-pr-title-main.sh — regression guard for issue #371
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/validate-pr-title-main.sh"
 

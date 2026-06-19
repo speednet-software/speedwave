@@ -1,17 +1,9 @@
 //! Mixing two 16 kHz mono PCM streams (system loopback + microphone) into one,
 //! shared by the macOS and Windows capture backends (ADR-056 decision 15).
 //!
-//! The two sources don't arrive in lock-step — a muted mic delivers nothing, a
-//! silent system delivers near-zero, and OS buffering means one can run ahead of
-//! the other. `MixBuffer` accumulates samples per source by absolute sample
-//! index (offset → index, at 16 kHz) and pops the next chunk once *both* have
-//! reached that far, or — once `finish()` has been called — drains whatever is
-//! left (so a quiet side never stalls the stream forever). Overlapping samples
-//! are summed with a fixed 0.5/0.5 gain and clamped to `[-1.0, 1.0]`.
-//!
-//! `poll_mixed_chunk` is the shared `next_chunk` body for the Windows mixed
-//! stream (cpal feeds the buffer from background threads behind a Mutex);
-//! macOS owns its `MixBuffer` directly and drives it inline instead.
+//! `MixBuffer` accumulates samples by absolute index and pops once both have
+//! reached that point, or drains remaining once `finish()` is called. Overlapping
+//! samples are summed with 0.5/0.5 gain and clamped.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -54,9 +46,7 @@ pub enum MixSource {
 }
 
 /// A bounded buffer that mixes two 16 kHz mono streams keyed by absolute sample
-/// index. One per mixed capture. "Bounded" = `MAX_BUFFERED_SAMPLES` per side; a
-/// push that would exceed it is dropped (the consumer fell too far behind, or a
-/// timestamp is bogus).
+/// index. One per mixed capture; capped at `MAX_BUFFERED_SAMPLES` per side.
 pub struct MixBuffer {
     /// System samples not yet popped, starting at sample index `base`.
     sys: Vec<f32>,
@@ -98,11 +88,8 @@ impl MixBuffer {
     }
 
     /// Pushes `samples` for `source`, declared to start at `offset_ns` from the
-    /// recording start. Samples before `base` (already popped) are dropped;
-    /// samples are placed by index so a reordered or gapped delivery still lands
-    /// correctly (gaps stay zero). A push that would grow the side past
-    /// `MAX_BUFFERED_SAMPLES` is dropped entirely (with the watermark still
-    /// bumped so a stall isn't inferred).
+    /// recording start. Samples are placed by index; those before `base` or past
+    /// `MAX_BUFFERED_SAMPLES` are dropped (the watermark is still bumped).
     pub fn push(&mut self, source: MixSource, offset_ns: u64, samples: &[f32]) {
         if samples.is_empty() {
             return;
@@ -113,16 +100,14 @@ impl MixBuffer {
         let keep_from = start.max(self.base);
         let skip = (keep_from - start) as usize;
         if skip >= samples.len() {
-            // Entirely in the past — but still advance the "filled" watermark so
-            // a late tiny buffer doesn't make us think the stream stalled.
+            // Entirely in the past, but advance watermark to avoid false stall detection.
             self.bump_filled(source, end);
             return;
         }
         let rel = (keep_from - self.base) as usize; // offset into sys/mic Vec
         let needed = rel + (samples.len() - skip);
         if needed > MAX_BUFFERED_SAMPLES {
-            // Consumer fell minutes behind, or `offset_ns` is bogus. Drop the
-            // payload but record the watermark — we don't allocate gigabytes.
+            // Consumer too far behind or timestamp bogus; drop payload but record watermark.
             log::warn!(
                 target: "transcription::mix",
                 "{source:?} push at offset {offset_ns}ns would buffer {needed} samples (cap {MAX_BUFFERED_SAMPLES}) — dropped"
@@ -167,10 +152,7 @@ impl MixBuffer {
     }
 
     /// Pops the next mixed chunk of up to `max_samples`, or `None` if fewer than
-    /// `min_samples` are ready (unless finished, in which case it returns
-    /// whatever is left and then `None`). The returned chunk's first sample is at
-    /// absolute index `base` *before* the call — the caller tracks the running
-    /// offset itself.
+    /// `min_samples` are ready (unless finished, then it returns the remainder).
     pub fn pop(&mut self, min_samples: usize, max_samples: usize) -> Option<Vec<f32>> {
         debug_assert!(
             min_samples <= max_samples,
@@ -181,10 +163,7 @@ impl MixBuffer {
             return None;
         }
         let take = available.min(max_samples);
-        // Both sides are pre-sliced to `take` (or to their length if shorter);
-        // anything past a side's length is silence (zero-padded). `has_mic` was
-        // removed — a MixBuffer always carries both sides; a dead/quiet side is
-        // simply an all-zero `mic` (or `sys`) region.
+        // Pre-slice both to `take` (shorter sides zero-padded); dead/quiet side is all-zero.
         let sys = &self.sys[..take.min(self.sys.len())];
         let mic = &self.mic[..take.min(self.mic.len())];
         let mut out = Vec::with_capacity(take);
@@ -208,15 +187,8 @@ impl MixBuffer {
 }
 
 /// The shared `AudioStream::next_chunk` body for a mixed capture whose two
-/// sources feed `buf` from background threads (Windows cpal callbacks; macOS
-/// uses the bundled `audio-capture-cli` stdout reader). Polls for a full
-/// `CHUNK_SAMPLES`-sized
-/// chunk; once `STALL_GIVE_UP` elapses with nothing arriving — either both
-/// sources stopped without an EOF, or the buffer is poisoned — it drains
-/// whatever is left and then returns `Err(CaptureError::Failed)` so the driver
-/// surfaces a "capture stalled" message rather than ending silently. A clean
-/// EOF (a reader calling `buf.finish()` and the buffer fully drained) returns
-/// `Ok(None)`.
+/// sources feed `buf` from background threads. Polls for a full chunk; drains the
+/// tail and errors after `STALL_GIVE_UP`, or returns `Ok(None)` on a clean EOF.
 pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, CaptureError> {
     let want = CHUNK_SAMPLES;
     let mut waited = Duration::ZERO;
@@ -224,8 +196,7 @@ pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, Ca
         match buf.lock() {
             Ok(mut b) => {
                 let start_ns = b.offset_ns();
-                // While running we want full chunks; on a stall, drain whatever
-                // is left first so the tail isn't lost.
+                // On stall, drain tail first so it isn't lost.
                 let chunk = b
                     .pop(want, want)
                     .or_else(|| (waited >= STALL_GIVE_UP).then(|| b.pop(1, want)).flatten());
@@ -235,8 +206,7 @@ pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, Ca
                         offset: Duration::from_nanos(start_ns),
                     }));
                 }
-                // Empty + nothing more coming (a reader marked it finished) is a
-                // clean end of stream.
+                // Empty + finished = clean end of stream.
                 let drained_and_finished = b.is_finished_and_empty();
                 drop(b);
                 if drained_and_finished {
@@ -244,8 +214,7 @@ pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, Ca
                 }
             }
             Err(_) => {
-                // A reader thread panicked while holding the lock. Treat it as a
-                // dead capture — don't spin forever.
+                // Reader thread panicked; treat capture as dead.
                 log::warn!(target: "transcription::mix", "mix buffer poisoned — capture stopped");
                 return Err(CaptureError::Failed("mix buffer poisoned".to_string()));
             }

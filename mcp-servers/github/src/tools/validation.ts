@@ -1,11 +1,4 @@
-/**
- * Validation Helpers for GitHub Tool Parameters
- *
- * `withValidation` delegates to the shared Family-B wrapper
- * ({@link withClientValidation}): not-configured gate + error mapping. The
- * unexpected-error hook logs anything that isn't an Octokit-style error (a
- * programming bug in a handler) so it doesn't masquerade as a "GitHub API error".
- */
+/** Validation helpers for GitHub tool parameters (via shared {@link withClientValidation}). */
 
 import {
   withClientValidation,

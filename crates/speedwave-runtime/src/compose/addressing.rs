@@ -95,6 +95,7 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
 
 /// Test-only: inject a fixture computer. Pair with `#[serial_test::serial]`.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
     *COMPUTER.write().expect("COMPUTER write lock") = Some(computer);
     invalidate_host_addressing_cache();
@@ -102,6 +103,7 @@ pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAd
 
 /// Test-only: restore the platform default computer.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub fn reset_host_addressing_computer_for_test() {
     *COMPUTER.write().expect("COMPUTER write lock") = None;
     invalidate_host_addressing_cache();
@@ -247,6 +249,7 @@ mod host_addressing_impls {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod resolver_tests {
     use super::*;
 
@@ -318,10 +321,6 @@ mod resolver_tests {
         reset_host_addressing_computer_for_test();
     }
 
-    // FailingComputer is exercised directly (not via the global slot) so this
-    // test cannot poison concurrent render_compose tests that consume the
-    // production computer through host_gateway_ip(). The Err propagation path
-    // in host_addressing() is identical regardless of which computer raised.
     #[test]
     fn failing_computer_returns_err() {
         let computer = FailingComputer("wsl probe failed".into());
@@ -366,7 +365,7 @@ mod resolver_tests {
         }
         let n = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            n >= 1 && n <= 4,
+            (1..=4).contains(&n),
             "computer called {n} times — expected 1..=4 (one wins; losers see cached or recompute under race)"
         );
 

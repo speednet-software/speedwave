@@ -100,20 +100,11 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # --- Dependency freshness ---
-#
-# Delegates to `make install-deps` (= setup-dev) — the Makefile is the SSOT for
-# provisioning the workspace: cargo fetch + npm install in every npm subproject
-# including mcp-servers/* sub-packages where tsc lives. A hand-rolled npm-ci
-# loop would miss those and fail at build-mcp. The state file caches the
-# aggregate hash of all package-lock.json files; reruns skip when nothing
-# changed.
+# Delegates to `make install-deps`; state file caches aggregate package-lock.json hash.
 
 LOCK_STATE_FILE=""
 
-# Portable SHA-256: prefer sha256sum (coreutils, default on Linux), fall back
-# to shasum -a 256 (macOS / systems shipping Perl's shasum). Resolved once at
-# start; the absence of both yields an empty SHA_CMD, which aggregate_lock_hash
-# treats as "state unknown → reinstall".
+# Portable SHA-256: prefer sha256sum (Linux), fall back to shasum -a 256 (macOS).
 if command -v sha256sum >/dev/null 2>&1; then
     SHA_CMD="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then
@@ -325,11 +316,8 @@ CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 TMPDIR_LOOP=$(mktemp -d)
 RESULT_FILE="$TMPDIR_LOOP/result.json"
 
-# Per-run npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent npm ci
-# across parallel plan-loops, regardless of --no-worktree/--impl-only mode.
-# Stored in TMPDIR_LOOP (unique per run via mktemp -d, auto-cleaned on exit).
-# CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
-# ./target/debug/ paths in cp rules.
+# Per-run npm cache in TMPDIR_LOOP (unique per run) avoids concurrent npm ci races.
+# CARGO_TARGET_DIR not overridden: Makefile hard-codes ./target/debug/ paths.
 export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
 
 WRITER_SESSION_ID=""
@@ -424,22 +412,9 @@ else
 fi
 
 # --- Project context injection ---
-#
-# Every headless agent must see the same authoritative project context: CLAUDE.md
-# and every file in .claude/rules/. We cannot rely on the agent reading these on
-# its own — `claude -p` does not auto-load CLAUDE.md the same way as interactive
-# sessions, and rules with `paths:` frontmatter are not pulled in headless either.
-# Inlining the content into the system prompt makes the contract identical for
-# writer, reviewer, implementer, verifier, and every code-review subagent.
-#
-# Discovery is glob-based (no hardcoded list) so newly added rule files reach
-# every agent automatically — no skill edits required.
+# Inlines CLAUDE.md + .claude/rules/ (glob-based) into the system prompt for every agent.
 
-# Random delimiter prevents prompt injection: a malicious CLAUDE.md cannot
-# forge an "END" marker because it doesn't know this run's nonce.
-# Try openssl first, fall back to xxd, fall back to od (POSIX-mandated).
-# An empty nonce would make markers identical across runs and forgeable, so
-# we hard-fail rather than running with a degraded security argument.
+# Random delimiter nonce: try openssl, fall back to xxd, fall back to od.
 CONTEXT_NONCE="$(
     openssl rand -hex 16 2>/dev/null \
     || head -c 16 /dev/urandom 2>/dev/null | xxd -p -c 32 2>/dev/null \
@@ -454,9 +429,7 @@ CONTEXT_END_MARKER="===END_PROJECT_CONTEXT_${CONTEXT_NONCE}==="
 RULE_FILE_MARKER_PREFIX="--- BEGIN_RULE_FILE_${CONTEXT_NONCE}: "
 RULE_FILE_MARKER_SUFFIX=" ---"
 
-# Pure context-building helpers (emit_file_block, list_rule_files,
-# build_project_context, validate_rules_compliance) are sourced from a
-# sibling file so they can be unit-tested in isolation.
+# Pure context-building helpers sourced from a sibling file for unit-test isolation.
 # shellcheck source=plan-loop-context.sh
 source "$SCRIPT_DIR/plan-loop-context.sh"
 
@@ -737,10 +710,8 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     PREV_FINDINGS="$findings"
     PREV_HIGH_COUNT="$high_count"
 
-    # Sanity check: reviewer may return READY_TO_IMPLEMENT while also reporting
-    # blockers (schema does not enforce the correlation). Reject that combo — a
-    # plan with BLOCKERS is never ready to implement regardless of what the
-    # model claims in the verdict field.
+    # Sanity check: schema cannot express verdict↔blocker correlation; reject
+    # READY_TO_IMPLEMENT with blockers.
     if [[ "$verdict" == "READY_TO_IMPLEMENT" && "$blocker_count" -gt 0 ]]; then
         printf "\n  ${RED}[sanity] Reviewer returned READY_TO_IMPLEMENT with $blocker_count blocker(s) — demoting to NEEDS_REVISION${NC}\n"
         verdict="NEEDS_REVISION"
@@ -759,10 +730,7 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
             printf "  ${RED}Demoting verdict from READY_TO_IMPLEMENT to NEEDS_REVISION${NC}\n"
             verdict="NEEDS_REVISION"
         fi
-        # Surface to the writer so the next iteration fixes it explicitly.
-        # Append to `findings` only — REVIEW_FEEDBACK is rebuilt from `findings`
-        # at the end of the loop body (see end of `while` body), so writing to
-        # it directly here would be overwritten before the next iteration.
+        # Append to `findings` only; REVIEW_FEEDBACK is rebuilt from it at loop end.
         findings="${findings}
 
 ORCHESTRATOR POST-VALIDATION (rules_compliance):
@@ -933,10 +901,7 @@ $IMPL_FEEDBACK" \
     v_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
     v_steps=$(jq -r '.structured_output.steps_verified // 0' "$RESULT_FILE" 2>/dev/null)
     v_total=$(jq -r '.structured_output.steps_total // 0' "$RESULT_FILE" 2>/dev/null)
-    # New 3-state enum: PASSED / FAILED / UNKNOWN. Legacy boolean fields
-    # (make_check_passed / make_test_passed) are honored as a fallback so an
-    # older verifier that still emits the boolean form does not blow up the
-    # orchestrator — true→PASSED, false→FAILED, missing→UNKNOWN.
+    # 3-state enum PASSED/FAILED/UNKNOWN; legacy booleans map true→PASSED, false→FAILED, missing→UNKNOWN.
     v_check=$(jq -r '.structured_output.make_check_status // (if .structured_output.make_check_passed == true then "PASSED" elif .structured_output.make_check_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
     v_test=$(jq -r '.structured_output.make_test_status // (if .structured_output.make_test_passed == true then "PASSED" elif .structured_output.make_test_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
     v_gaps=$(jq -r '.structured_output.gaps_summary // ""' "$RESULT_FILE" 2>/dev/null)
@@ -948,16 +913,11 @@ $IMPL_FEEDBACK" \
     echo "  make check: $v_check"
     echo "  make test:  $v_test"
 
-    # Sanity check: demote VERIFIED if model contradicts itself (e.g. reports
-    # VERIFIED with missing steps or failing checks). The JSON schema cannot
-    # express these correlations, so the orchestrator enforces them.
-    #
+    # Orchestrator enforces verdict↔step/check correlations.
     # Verdict routing:
-    #   VERIFIED  — both check and test PASSED AND all steps done → accept
-    #   UNKNOWN   — verifier could not confirm one or both of check/test
-    #               (e.g., make test timed out). Retry the verifier on the
-    #               next loop iteration instead of treating as failure.
-    #   GAPS_FOUND — verifier confirmed a real failure or missing step
+    #   VERIFIED   — check+test PASSED AND all steps done → accept
+    #   UNKNOWN    — check/test unconfirmed (e.g. timeout) → retry verifier
+    #   GAPS_FOUND — confirmed failure or missing step
     if [[ "$v_verdict" == "VERIFIED" ]]; then
         if [[ "$v_check" != "PASSED" || "$v_test" != "PASSED" ]]; then
             printf "\n  ${RED}[sanity] Verifier returned VERIFIED with check=$v_check test=$v_test — demoting${NC}\n"
@@ -982,10 +942,7 @@ $IMPL_FEEDBACK" \
         break
     fi
 
-    # UNKNOWN → don't ask the implementer to change code. Retry verification
-    # on the next iteration of this loop (same working tree, fresh verifier
-    # context). An implementer fix driven by an inconclusive verdict can
-    # corrupt a perfectly good working tree.
+    # UNKNOWN: retry verification next iteration, do not change code.
     if [[ "$v_verdict" == "UNKNOWN" ]]; then
         printf "\n  ${YELLOW}[verifier] Result inconclusive — will retry without touching the implementation${NC}\n"
         IMPL_FEEDBACK=""
@@ -1160,11 +1117,7 @@ $cr_findings" \
 
     printf "  ${CYAN}[verifier]${NC} Re-verifying after code review fixes...\n"
 
-    # Re-verify with an inner retry for UNKNOWN verdicts. An inconclusive
-    # verifier (e.g., make test hit the 15-min cap mid-run) is NOT a signal
-    # to ask the implementer to touch the code — the implementer just did.
-    # Retry the verifier up to RV_MAX_RETRIES times with a fresh context on
-    # each attempt before escalating to "stop Phase 3".
+    # Retry verifier on UNKNOWN up to RV_MAX_RETRIES; do not touch code.
     RV_MAX_RETRIES=2
     rv_attempt=0
     rv_verdict="UNKNOWN"
@@ -1214,8 +1167,7 @@ $cr_findings" \
         printf "  ${GREEN}[verifier] Done${NC} ($((rv_end - rv_start))s)\n"
         echo "  Verdict: $rv_verdict  check: $rv_check  test: $rv_test"
 
-        # Conclusive result (VERIFIED or GAPS_FOUND): exit the retry loop and
-        # let the surrounding code-review-loop logic decide what to do next.
+        # Conclusive result (VERIFIED or GAPS_FOUND): exit the retry loop.
         if [[ "$rv_verdict" != "UNKNOWN" ]]; then
             break
         fi
@@ -1230,9 +1182,8 @@ $cr_findings" \
     fi
 
     if [[ "$rv_verdict" == "UNKNOWN" ]]; then
-        # All RV retries returned UNKNOWN. Treat as a warning, not a hard
-        # failure — the user can run make check/test themselves. Don't block
-        # them from seeing the diff.
+        # All retries returned UNKNOWN: treat as warning (user verifies manually),
+        # not a hard failure.
         printf "\n  ${YELLOW}Re-verification remained inconclusive after $RV_MAX_RETRIES retries. Treating as warning — user must run 'make check' and 'make test' manually to confirm.${NC}\n"
         break
     fi
@@ -1252,9 +1203,7 @@ if [[ "$phase3_error" == "true" ]]; then
     exit 1
 fi
 
-# Warning banner if we broke out of the review loop with an UNKNOWN verdict.
-# Implementation is NOT broken — the verifier just could not confirm (e.g.
-# make test timed out). The user needs to run check/test themselves.
+# Warning banner if the review loop broke out with an UNKNOWN verdict.
 if [[ "${rv_verdict:-VERIFIED}" == "UNKNOWN" ]]; then
     printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
     printf "${YELLOW}║  Phase 3: INCONCLUSIVE — verifier could not confirm${NC}\n"
@@ -1277,10 +1226,7 @@ fi # end of Phase 3 (skipped if --skip-review)
 # DONE — print next steps
 # ═══════════════════════════════════════════════════════════════
 
-# Green banner only when code review came back CLEAN or was skipped.
-# If Phase 3 ran and ended with HAS_ISSUES (max iter exhausted), use a neutral
-# yellow "done with warnings" banner so the prior warning is not visually
-# cancelled by a green "ALL PHASES COMPLETE".
+# Green banner only when code review came back CLEAN or was skipped; else yellow.
 if [[ "$SKIP_REVIEW" == "true" || "${cr_verdict:-UNKNOWN}" == "CLEAN" ]]; then
     banner_color="$GREEN"
     banner_title="ALL PHASES COMPLETE"

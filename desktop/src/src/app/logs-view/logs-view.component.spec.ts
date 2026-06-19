@@ -70,9 +70,7 @@ describe('LogsViewComponent', () => {
     const times = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="logs-time"]')
     ) as HTMLElement[];
-    // formatTime() prefixes bracketed `HH:MM:SS` stamps with today's date so
-    // the time column always carries a day. The raw bracketed value is kept
-    // in the `title` attribute for hover.
+    // formatTime() prefixes bracketed `HH:MM:SS` with today's date; raw value kept in `title`.
     expect(times[0].textContent?.trim()).toMatch(/^\d{4}-\d{2}-\d{2} 14:34:02$/);
     expect(times[0].getAttribute('title')).toBe('14:34:02.814');
 
@@ -99,11 +97,7 @@ describe('LogsViewComponent', () => {
   });
 
   it("prefixes today's date when the log line only carries HH:MM:SS", async () => {
-    // Reproduces the user-reported regression where the time column showed
-    // `11:32:56` with no day. Application-level logs inside the container
-    // emit `[HH:MM:SS]` and that often reaches the parser before any
-    // compose-level ISO stamp does. The fallback dates them with the host's
-    // current day so two entries from different days cannot collide.
+    // `[HH:MM:SS]`-only lines are dated with the host's current day.
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? 'mcp_hub | [11:32:56] INFO  hello' : undefined;
     vi.spyOn(component as unknown as { todayIso(): string }, 'todayIso').mockReturnValue(
@@ -119,10 +113,7 @@ describe('LogsViewComponent', () => {
   });
 
   it('renders an ISO timestamp in the host local timezone, raw value in title', async () => {
-    // `nerdctl compose logs --timestamps` is UTC `Z`; Speedwave loggers carry
-    // an offset. Either way the column shows local time (`YYYY-MM-DD HH:MM:SS`)
-    // — so a UTC `Z` stamp and a `+02:00` stamp for the same instant render
-    // identically. `[title]` keeps the raw value (micros + offset).
+    // Column shows local time; UTC `Z` and `+02:00` for the same instant render identically.
     const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO  hello` : undefined;
@@ -130,8 +121,7 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    // Expected = the same instant, formatted with the test process's local
-    // getters — `formatTime` must agree with a plain `new Date(...)`.
+    // `formatTime` must agree with a plain `new Date(...)`.
     const d = new Date(raw);
     const p2 = (n: number) => String(n).padStart(2, '0');
     const expected =
@@ -254,9 +244,7 @@ describe('LogsViewComponent', () => {
 
   it('shows "No active project" error when activeProject is null and the lifecycle has settled', async () => {
     projectState.activeProject = null;
-    // Mark the lifecycle as settled (any non-loading status works) so the
-    // banner is allowed to surface — during boot the view stays in a quiet
-    // loading state instead.
+    // Mark the lifecycle as settled (any non-loading status) so the banner can surface.
     projectState.status = 'error';
 
     await component.ngOnInit();
@@ -279,9 +267,7 @@ describe('LogsViewComponent', () => {
   });
 
   it('refetches logs once the project lifecycle settles after mount', async () => {
-    // Simulate the boot race: component mounts before the shell has had a
-    // chance to load `activeProject`. The view should pick up the project as
-    // soon as `onProjectSettled` fires and stop showing the loading state.
+    // Boot race: component mounts before `activeProject` loads; picks it up on `onProjectSettled`.
     projectState.activeProject = null;
     projectState.status = 'loading';
     await component.ngOnInit();
@@ -290,13 +276,11 @@ describe('LogsViewComponent', () => {
 
     projectState.activeProject = 'test';
     projectState.status = 'ready';
-    // The mock service exposes a notify hook through onProjectSettled
-    // listeners — emulate a settled event by calling all registered callbacks.
+    // Emulate a settled event by calling all registered onProjectSettled callbacks.
     (projectState as unknown as { settledListeners: Array<() => void> }).settledListeners.forEach(
       (cb) => cb()
     );
-    // The settled callback fires `void this.refresh()` — let the queued
-    // microtask resolve before asserting on the new state.
+    // The settled callback fires `void this.refresh()`; let the microtask resolve.
     await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1025,12 +1009,7 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('schedules a scroll-to-bottom write after each successful fetch', async () => {
-    // Reproduces the user-visible bug where opening /logs landed on top of
-    // the stream. The component delegates the actual scroll to
-    // `afterNextRender({ write })` so the browser commits DOM first; that
-    // hook does not flush in the jsdom test runtime. We assert the contract
-    // instead — `scrollToBottom` is invoked after `lines.set(...)` so the
-    // render hook has work to do once Angular commits.
+    // `scrollToBottom` is invoked after `lines.set(...)`.
     const scrollSpy = vi.spyOn(
       component as unknown as { scrollToBottom(): void },
       'scrollToBottom'
@@ -1044,12 +1023,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   // -- Unified logs view (get_all_logs) --
-  //
-  // The component now invokes `get_all_logs` instead of `get_compose_logs`
-  // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
-  // mcp-os.log, claude-session.log) in addition to compose containers. These
-  // tests pin the new behaviour so a future refactor cannot silently revert
-  // to compose-only output.
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -1176,16 +1149,7 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('renders desktop bracketed level as INFO/WARN level chip after Rust reformatting', async () => {
-    // Rust `prefix_lines` rewrites `[INFO]` → `INFO` so Angular `LEVEL_RE`
-    // (which expects unbracketed) hits and the line shows up in the level
-    // chip. Without that rewrite the line would default to `info` for every
-    // bracketed-level line — covering up real WARN/ERROR signals.
-    // The mock simulates what Rust `prefix_lines("desktop", …)` produces —
-    // the bracketed `[WARN]` from tauri-plugin-log is rewritten to `WARN ` (with
-    // trailing space, required by Angular `LEVEL_RE = /^LEVEL\s+/`) before
-    // the `desktop | ` prefix is added. The timestamp is now the colon-offset
-    // RFC-3339 form `log_ts::log_timestamp()` emits. If the Rust rewrite ever
-    // drops the trailing space, this test fails — which is the regression we want.
+    // Mock simulates Rust `prefix_lines("desktop", …)`: `[WARN]` rewritten to `WARN ` (trailing space required by `LEVEL_RE = /^LEVEL\s+/`).
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return 'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail';

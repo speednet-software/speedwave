@@ -1,9 +1,6 @@
 #!/usr/bin/env bats
 # Verifies that every version-bearing file listed in release-please-config.json
 # agrees with .release-please-manifest.json["."].
-#
-# All validation logic lives in scripts/check-version-consistency.py so the
-# script is independently runnable by developers.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 FIXTURES="$REPO_ROOT/_tests/desktop/fixtures/version-consistency"

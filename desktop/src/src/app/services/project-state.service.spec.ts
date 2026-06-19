@@ -923,8 +923,7 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // justEnabled is null when no integration was just toggled — backend
-      // accepts an Option<String> and rolls back only the named service.
+      // justEnabled is null when no integration was just toggled.
       expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
         project: 'test',
         justEnabled: null,
@@ -969,9 +968,7 @@ describe('ProjectStateService', () => {
       };
 
       const promise = service.restartContainers();
-      // restartContainers preloads worker-image estimates and registers an
-      // event listener before invoking the restart command; allow those
-      // microtasks to settle so resolveInvoke is bound.
+      // Allow microtasks to settle so resolveInvoke is bound.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
@@ -1051,15 +1048,10 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // Slash cache must be invalidated so the next slash-menu open
-      // re-runs discovery — otherwise the chat composer keeps the
-      // pre-restart skill list (10-min cache).
+      // Slash cache must be invalidated before the next slash-menu open.
       expect(spy).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'test' });
-      // onProjectReady must fire so the composer + chat re-fetch their
-      // per-project state with the new container set.
+      // onProjectReady/onProjectSettled fire so consumers re-fetch per-project state.
       expect(readyCallback).toHaveBeenCalled();
-      // onProjectSettled must fire too — integrations.component and
-      // project-switcher refresh through this listener path, not ready.
       expect(settledCallback).toHaveBeenCalled();
     });
 
@@ -1080,20 +1072,14 @@ describe('ProjectStateService', () => {
       await service.restartContainers();
 
       expect(service.restartError).toBe('boom');
-      // The post-success steps (cache invalidate + ready/settled fanout)
-      // MUST NOT run when the restart itself failed: state has not
-      // advanced, and firing ready could mask the error or trigger
-      // consumers to refetch stale data.
+      // Post-success steps must not run when restart fails — state has not advanced.
       expect(spy).not.toHaveBeenCalledWith('invalidate_slash_cache', expect.anything());
       expect(readyCallback).not.toHaveBeenCalled();
       expect(settledCallback).not.toHaveBeenCalled();
     });
 
     it('restartContainers still fires onProjectReady when invalidate_slash_cache itself fails', async () => {
-      // Regression guard: a future refactor that moves `restartedOk = true`
-      // inside the inner try would silently break the "ready fires even
-      // when invalidation fails" guarantee. The cache eventually expires,
-      // so the invalidate call is best-effort.
+      // Regression guard: ensures ready fires even when invalidation fails.
       service.requestRestart();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'invalidate_slash_cache') {

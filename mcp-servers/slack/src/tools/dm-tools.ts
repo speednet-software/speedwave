@@ -1,7 +1,5 @@
 /**
  * Direct-Message Tools — listing and opening DM conversations (im + mpim).
- * Reading and sending ride the existing channel tools with a `D…` conversation
- * ID; these tools only discover and create the conversations.
  */
 
 import {

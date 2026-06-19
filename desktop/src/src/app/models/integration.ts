@@ -21,13 +21,7 @@ export interface IntegrationStatusEntry {
   current_values: Record<string, string>;
   mappings?: Record<string, unknown>;
   badge?: string;
-  /**
-   * Reason the integration needs the user's attention even though it is
-   * configured (OAuth-refresh services: SharePoint, Slack) — granted scopes
-   * are a strict subset of the required set, the state is stale, or the
-   * Slack refresh token aged out. The UI shows a "Re-authorize" banner.
-   * Undefined = no action required.
-   */
+  /** Re-authorize reason for OAuth-refresh services; undefined = no action. */
   oauth_action_required?: string;
   /** "Connected to <workspace>" hint (Slack: teamName · authedUserId). */
   oauth_identity?: string;
@@ -63,12 +57,8 @@ export interface DeviceCodeInfo {
 }
 
 /**
- * Progress event emitted by an OAuth flow. The host emits
- * awaiting_redirect/exchanging/success/error/cancelled/expired (Rust SSOT:
- * `ProgressStatus` in `desktop/src-tauri/src/oauth_flow.rs`, test-pinned);
- * `starting` and `polling` are frontend-local UI states never sent by the
- * host. `message` carries the redirect URI on `awaiting_redirect`, otherwise
- * a human-readable detail.
+ * OAuth flow progress event (Rust SSOT: `ProgressStatus` in
+ * `desktop/src-tauri/src/oauth_flow.rs`; `starting`/`polling` are UI-only).
  */
 export interface OAuthProgressEvent {
   status:
@@ -84,20 +74,12 @@ export interface OAuthProgressEvent {
   request_id: string;
 }
 
-/**
- * OAuth flow status — use this for component state/inputs so status string
- *  comparisons stay compiler-checked against the union above.
- */
+/** OAuth flow status union for compiler-checked comparisons. */
 export type OAuthFlowStatus = OAuthProgressEvent['status'];
 
 /**
- * Result of validating one OS integration against macOS TCC at startup.
- * Returned by `validate_os_integrations_on_startup` for each integration that
- * was previously `enabled=true` in config but whose live TCC state denies the
- * permission. The frontend renders a notice so users know the toggle was
- * auto-flipped to OFF and what to do next (re-click to trigger the prompt).
- *
- * Mirrors `OsIntegrationValidation` in `desktop/src-tauri/src/integrations_cmd.rs`.
+ * OS integration TCC validation result (mirrors `OsIntegrationValidation` in
+ * `desktop/src-tauri/src/integrations_cmd.rs`).
  */
 export interface OsIntegrationValidation {
   service: string;

@@ -26,18 +26,14 @@ NODE_VERSION="$(cat "$(dirname "$0")/../.node-version")"
 
 # -- Helper functions ----------------------------------------------------------
 
-# Run a PowerShell script on the Windows host via SSH.
-# Writes the script to a .ps1 temp file via scp, then executes via -File.
-# This is necessary because `powershell.exe -Command -` (reading from stdin)
-# ignores $ErrorActionPreference and does not propagate non-zero exit codes.
+# Run a PowerShell script on the Windows host via SSH (temp .ps1 + -File).
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
     ps_script=$(cat)
     tmpname="e2e-setup-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # UTF-8 BOM — PowerShell on Windows defaults to the system locale
-    # (e.g., Windows-1252) when reading .ps1 files without a BOM.
+    # UTF-8 BOM — PowerShell reads .ps1 in the system locale without it.
     printf '\xEF\xBB\xBF%s\n' "$ps_script" > "$tmpfile_local"
     # shellcheck disable=SC2086
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -90,12 +86,7 @@ SCRIPT
     echo "[windows] Installing CMake (Kitware — required by whisper-rs-sys)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
-# whisper-rs-sys uses the `cmake` Rust crate to drive a real cmake invocation
-# (Visual Studio's bundled cmake is not on PATH and the crate spawns
-# `cmake.exe` from PATH, not from VS's private layout). Install the official
-# Kitware build so `cmake.exe` lives in `C:\Program Files\CMake\bin` and is
-# on the Machine PATH for every process started afterwards.
-# Idempotent: skip if cmake.exe already present at the expected path.
+# whisper-rs-sys needs cmake.exe on PATH; install Kitware to Machine PATH.
 $cmakeBin = 'C:\Program Files\CMake\bin'
 if (Test-Path "$cmakeBin\cmake.exe") {
     Write-Host "CMake already installed: $cmakeBin"
@@ -116,8 +107,7 @@ if (Test-Path "$cmakeBin\cmake.exe") {
         exit 1
     }
 }
-# Belt-and-braces: ensure Machine PATH contains the cmake bin (the msi flag
-# usually does this, but verify so subsequent SSH sessions inherit it).
+# Ensure Machine PATH contains the cmake bin.
 $currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
 if (-not $currentPath.Contains($cmakeBin)) {
     [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$cmakeBin", 'Machine')
@@ -129,7 +119,6 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
 # whisper-rs-sys (ADR-056) uses bindgen, which requires libclang.dll.
-# Idempotent: skip if libclang.dll already present at the expected path.
 $llvmBin = 'C:\Program Files\LLVM\bin'
 if (Test-Path "$llvmBin\libclang.dll") {
     Write-Host "LLVM already installed: $llvmBin"
@@ -218,24 +207,18 @@ SCRIPT
     windows_ps <<SCRIPT
 \$ErrorActionPreference = 'Stop'
 \$distro = '${wsl_distro}'
-# wsl.exe -l -q emits UTF-16 LE. PowerShell over SSH receives the raw bytes
-# as null-interlaced ASCII (e.g. "U\0b\0u\0n\0t\0u\0"), so a naive -match
-# against the plain distro name never hits. Strip nulls before matching.
+# wsl.exe -l -q output arrives null-interlaced over SSH; strip nulls before matching.
 \$installed = (wsl.exe -l -q 2>\$null) -replace "\`0","" | Where-Object { \$_ -match [regex]::Escape(\$distro) }
 if (\$installed) {
     Write-Host "WSL2 distro \$distro already installed"
 } else {
     Write-Host "Installing \$distro..."
-    # --no-launch skips first-boot user creation. This is fine — the E2E
-    # scripts only use this distro for file operations via /mnt/c.
+    # --no-launch skips first-boot user creation.
     wsl.exe --install -d \$distro --no-launch
     if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install WSL2 distro \$distro"; exit 1 }
     Write-Host "WSL2 distro \$distro installed"
 }
-# bzip2 is required by scripts/lib/fetch-sherpa-onnx-md.sh (`tar -xjf` of the
-# sherpa-onnx MD-Release archive — ADR-061). Ubuntu minimal images ship
-# without it. Run as root via `-u root` so we don't hang on an interactive
-# sudo password prompt when the distro has a non-NOPASSWD default user.
+# bzip2 required by fetch-sherpa-onnx-md.sh (ADR-061); install as root.
 Write-Host "Ensuring bzip2 is available inside \$distro..."
 wsl.exe -d \$distro -u root -- bash -c "command -v bzip2 >/dev/null 2>&1 || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bzip2; }"
 if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install bzip2 in \$distro"; exit 1 }

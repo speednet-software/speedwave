@@ -1,8 +1,5 @@
 /**
- * Tool-handler wrapper for the Atlassian worker: short-circuits to a
- * "not configured" error when the client is absent, and turns any thrown error
- * into a sanitized {@link errorResult} via {@link AtlassianClient.formatError}.
- * Named `withValidation` for consistency with the other workers.
+ * Tool-handler wrapper for the Atlassian worker.
  * @module mcp-atlassian/tools/validation
  */
 
@@ -16,8 +13,7 @@ import { AtlassianClient } from '../client.js';
 import type { StorageBodyInput } from '../adf.js';
 
 /**
- * Wrap a tool handler with client-presence and error handling (shared Family-B
- * wrapper {@link withClientValidation}).
+ * Wrap a tool handler with client-presence and error handling.
  * @template T - The tool's parsed input params type.
  * @param client - The Atlassian client (or `null` when the service is unconfigured).
  * @param handler - The handler, invoked only when `client` is non-null.
@@ -37,10 +33,7 @@ export function withValidation<T>(
 }
 
 /**
- * Map a Confluence body tool input (`{ bodyStorage?, bodyText? }`) to the domain
- * {@link StorageBodyInput} shape (`{ storage?, text? }`). `bodyStorage` (raw
- * storage-representation XHTML) takes precedence; otherwise `bodyText` is used
- * (an absent text body becomes the empty string).
+ * Map a Confluence body tool input to the domain {@link StorageBodyInput} shape.
  * @param p - The tool input fragment.
  * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
  * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).

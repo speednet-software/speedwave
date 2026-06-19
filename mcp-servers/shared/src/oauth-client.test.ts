@@ -235,8 +235,7 @@ describe('refreshAccessToken', () => {
   });
 
   it('throws on unparseable content text (JSON.parse fail)', async () => {
-    // The tool returns content[0].text that is NOT a JSON object — covers
-    // the catch around JSON.parse in oauth-client.ts:175.
+    // content[0].text is NOT a JSON object — covers the JSON.parse catch.
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -295,8 +294,6 @@ describe('refreshAccessToken', () => {
 
   it('defaults bearerPath to /secrets/oauth-auth-token-<service> when omitted', async () => {
     // Covers `bearerPath = options.bearerPath ?? …` default-arg branch.
-    // We force the readFile to fail (file does not exist) so we observe the
-    // exact path the implementation tried.
     const fetchImpl = vi.fn();
     let observedPath: string | undefined;
     try {
@@ -313,10 +310,7 @@ describe('refreshAccessToken', () => {
   });
 
   it('defaults fetchImpl to globalThis.fetch when omitted', async () => {
-    // Covers `const fetchImpl = options.fetchImpl ?? fetch;` default-arg
-    // branch. We replace globalThis.fetch so the test does not hit the
-    // network; the call must still go through that injection (proving the
-    // fallback was selected).
+    // Covers `const fetchImpl = options.fetchImpl ?? fetch;` default-arg branch.
     const stubFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -339,9 +333,7 @@ describe('refreshAccessToken', () => {
   });
 
   it('treats missing result.content as empty text (covers the ?? fallback)', async () => {
-    // result.content is undefined → text falls back to ''. Without the
-    // fallback the indexing would throw; with it, the worker's
-    // `isError` branch sees an empty body and returns the generic error.
+    // result.content is undefined → text falls back to ''.
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -376,9 +368,7 @@ describe('refreshAccessToken', () => {
   });
 
   it('wraps TCP refused as OAuthRefreshError(worker_unreachable)', async () => {
-    // undici/Node's fetch throws TypeError("fetch failed") when the host-side
-    // oauth worker port is dead (common when WORKER_OAUTH_URL points at a
-    // stale ephemeral port after a worker respawn).
+    // undici/Node fetch throws TypeError("fetch failed") on a dead port.
     const tcpError = new TypeError('fetch failed');
     const fetchImpl = vi.fn().mockRejectedValue(tcpError);
     await expect(

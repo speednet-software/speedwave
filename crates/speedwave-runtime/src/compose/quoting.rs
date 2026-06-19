@@ -1,14 +1,8 @@
 //! Final compose-YAML hardening pass that re-quotes `environment:` scalars
 //! carrying YAML flow indicators libyaml emits unquoted but nerdctl rejects.
 
-/// YAML flow indicators that are legal inside a *block-context* plain scalar
-/// per the YAML 1.2 spec, so libyaml (serde_yaml_ng's emitter) leaves them
-/// unquoted — but nerdctl's Go YAML parser (gopkg.in/yaml.v3 via compose-go)
-/// rejects them, failing the whole file with `could not find expected ":"`
-/// several lines later. Any env value containing one of these MUST be emitted
-/// as an explicitly quoted scalar. `[`/`]` cover the documented `[1m]`
-/// 1M-context suffix (anthropics/claude-code#34083 workaround); the rest make
-/// the rule general so any future value (`{`, `}`, `,`) is safe too.
+/// YAML flow indicators libyaml leaves unquoted in plain scalars but nerdctl's
+/// Go parser rejects. Env values containing one MUST be emitted quoted.
 const YAML_PLAIN_UNSAFE_CHARS: &[char] = &['[', ']', '{', '}', ','];
 
 /// True when `entry` (a `KEY=VALUE` env line) would round-trip through every
@@ -18,17 +12,9 @@ pub(crate) fn env_entry_needs_quoting(entry: &str) -> bool {
     entry.contains(YAML_PLAIN_UNSAFE_CHARS)
 }
 
-/// Final SSOT pass over rendered compose YAML: re-quotes every `environment:`
-/// sequence entry whose value contains a YAML flow indicator that libyaml
-/// emits unquoted but nerdctl's stricter Go parser rejects.
-///
-/// Scoped to `environment:` blocks (tracked by indentation) so it never
-/// touches images, volumes, or networks. The replacement scalar is produced
-/// with `serde_json::to_string`, whose escaping is a valid YAML 1.2
-/// double-quoted scalar (YAML is a JSON superset) — no hand-rolled escaping.
-/// Idempotent: already-quoted entries (those that don't re-parse as a bare
-/// `KEY=VALUE` plain scalar) are left untouched. Assumes the renderer emits no
-/// YAML comments inside `environment:` (a same-indent `#` line closes the block).
+/// Re-quotes `environment:` sequence entries whose value carries a YAML flow
+/// indicator nerdctl's Go parser rejects. Scoped to `environment:` blocks by
+/// indentation; uses `serde_json::to_string` escaping; idempotent.
 pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
     let mut out = String::with_capacity(yaml.len());
     // Indentation (column) of the active `environment:` key, if inside one.
@@ -38,11 +24,7 @@ pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
         let indent = body.len() - body.trim_start().len();
         let trimmed = body.trim_start();
 
-        // Leaving the active environment block. Compose renders sequence
-        // items at the SAME column as the `environment:` key (`- ITEM`
-        // aligned under `environment:`), so same-indent `- ` lines stay in
-        // the block; any non-sequence line, or a line indented less than the
-        // key, closes it.
+        // Close the block on an outdent or any non-sequence line.
         if let Some(env_col) = env_indent {
             let is_seq_item = trimmed.starts_with("- ") || trimmed == "-";
             if !body.trim().is_empty() && (indent < env_col || !is_seq_item) {
@@ -59,8 +41,7 @@ pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
         if env_indent.is_some() {
             if let Some(rest) = trimmed.strip_prefix("- ") {
                 let value = rest.trim();
-                // Only touch bare (unquoted) `KEY=VALUE` plain scalars that
-                // carry an unsafe char; quoted/escaped entries are skipped.
+                // Only touch bare unquoted `KEY=VALUE` plain scalars.
                 let is_bare_plain = !value.starts_with('"')
                     && !value.starts_with('\'')
                     && !value.starts_with('|')
@@ -83,6 +64,7 @@ pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -92,14 +74,11 @@ mod tests {
         assert!(!env_entry_needs_quoting("ANTHROPIC_MODEL=claude-opus-4-8"));
         assert!(!env_entry_needs_quoting("PORT=4000"));
         assert!(!env_entry_needs_quoting("TZ=Europe/Warsaw"));
-        // A single `: ` mid-scalar is plain-safe (the Go parser accepts it);
-        // no flow indicator means no quoting.
+        // A `: ` mid-scalar has no flow indicator, so no quoting.
         assert!(!env_entry_needs_quoting(
             "ANTHROPIC_CUSTOM_HEADERS=X-Tenant-ID: foo"
         ));
-        // …but the multi-header flattened form joins with `, ` — the comma is
-        // a flow indicator, so it must now be quoted too (defends the same
-        // nerdctl-compose breakage the multiline headers fix addressed).
+        // The flattened multi-header form joins with `, ` — comma needs quoting.
         assert!(env_entry_needs_quoting(
             "ANTHROPIC_CUSTOM_HEADERS=X-Tenant-ID: foo, X-Subscription-ID: bar"
         ));
@@ -144,9 +123,7 @@ mod tests {
 
     #[test]
     fn harden_env_scalar_quoting_is_idempotent_and_scoped() {
-        // Already-quoted entries and non-environment flow indicators (the
-        // `networks: {}` mapping, an image with no brackets) are untouched;
-        // running twice is a no-op.
+        // Already-quoted entries and non-environment flow indicators stay untouched; idempotent.
         let yaml = "services:\n  claude:\n    image: registry/x:1\n    environment:\n    \
                     - \"ALREADY=quoted[1m]\"\n    - PLAIN=ok\n    volumes:\n    \
                     - /a:/b\nnetworks:\n  net: {}\n";
@@ -167,9 +144,7 @@ mod tests {
 
     #[test]
     fn harden_env_scalar_quoting_reopens_block_for_second_service() {
-        // Two services, each with a bracketed env value separated by the first
-        // service's `networks`/`image` lines: the block must CLOSE after svc-a's
-        // env and RE-OPEN for svc-b's, so both bracketed values get quoted.
+        // Block closes after svc-a's env and re-opens for svc-b's; both get quoted.
         let yaml = "services:\n  a:\n    environment:\n    \
                     - MODEL_A=x[1m]\n    image: reg/a:1\n  b:\n    environment:\n    \
                     - MODEL_B=y[1m]\nnetworks: {}\n";

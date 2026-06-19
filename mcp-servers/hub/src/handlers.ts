@@ -18,8 +18,7 @@ interface HandlerConfig {
 }
 
 /**
- * Convert data to JSON text for MCP response
- * Handles undefined/null: JSON.stringify(undefined) returns undefined, not a string!
+ * Convert data to JSON text for MCP response. Coerces undefined/null → null.
  * @param data - Data to convert to JSON string
  * @returns JSON string representation
  */
@@ -87,15 +86,13 @@ function validateTimeout(paramValue: unknown, configDefault: number, maxTimeout:
 }
 
 /**
- * Factory function to create code executor handlers
- * Uses dependency injection pattern for testability
+ * Factory to create code executor handlers.
  * @param config - Handler configuration including default timeout
- * @returns Object containing handler functions for all three meta-tools
+ * @returns Object containing handler functions
  */
 export function createCodeExecutorHandlers(config: HandlerConfig) {
   /**
-   * search_tools - Progressive discovery handler
-   * Searches available tools by keyword with configurable detail levels
+   * search_tools - searches available tools by keyword with detail levels.
    * @param params - Search parameters
    * @returns MCP tool call result
    */
@@ -148,8 +145,7 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
   };
 
   /**
-   * execute_code - JavaScript execution in sandbox
-   * Executes user code with access to tool imports
+   * execute_code - executes user JavaScript in sandbox with tool imports.
    * @param params - Code execution parameters
    * @returns MCP tool call result
    */

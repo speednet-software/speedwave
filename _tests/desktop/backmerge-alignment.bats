@@ -1,12 +1,6 @@
 #!/usr/bin/env bats
-# Verifies that .github/workflows/backmerge.yml derives its version-file lists
-# (VERSION_EXCLUDES / AUTO_RESOLVE_FILES) from release-please-config.json
-# `extra-files` at runtime, so they can never drift out of sync. Only files
-# release-please bumps but does NOT list in extra-files (its own
-# manifest/config/workflow, lockfiles, CHANGELOG) may be hardcoded inline.
-#
-# Before this derivation, both lists were ~30-entry hand-synced arrays that
-# silently broke the backmerge on every new worker. See CLAUDE.md SSOT note.
+# Verifies backmerge.yml derives VERSION_EXCLUDES/AUTO_RESOLVE_FILES from
+# release-please-config.json extra-files. See CLAUDE.md SSOT note.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 CONFIG="$REPO_ROOT/release-please-config.json"
@@ -27,7 +21,7 @@ for item in cfg['packages']['.']['extra-files']:
 }
 
 # Paths hardcoded in the STATIC_VERSION_FILES bash array in the YAML.
-# Use [[:space:]] (not \s) so BSD awk on macOS matches the closing paren line.
+# Use [[:space:]] (not \s) for BSD awk macOS compatibility.
 _static_version_files() {
     awk '
         /STATIC_VERSION_FILES=\(/ { capture=1; next }
@@ -73,6 +67,7 @@ _static_version_files() {
         CHANGELOG.md
         package-lock.json
         mcp-servers/package-lock.json
+        mcp-servers/playwright/package-lock.json
         Cargo.lock
         desktop/src-tauri/Cargo.lock
     )

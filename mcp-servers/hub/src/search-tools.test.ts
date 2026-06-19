@@ -1,12 +1,4 @@
-/**
- * Comprehensive tests for search-tools.ts
- * Baseline tests to ensure behavior is preserved during refactoring
- *
- * Tests cover:
- * - searchTools: query matching, service filtering, detail levels, deferred loading
- * - getServiceTools: retrieving all tools for a service
- * - getToolMetadata: retrieving specific tool metadata
- */
+/** Tests for searchTools, getServiceTools, getToolMetadata in search-tools.ts. */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
@@ -329,8 +321,7 @@ describe('searchTools edge cases', () => {
   });
 
   it('skips a service that has an empty tool list', async () => {
-    // Add an enabled service with zero tools — searchTools should skip it (line 84 continue)
-    // without returning any matches from it.
+    // Add an enabled service with zero tools — searchTools should skip it.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, unknown>>;
     mutableRegistry['emptysvc'] = {};
     // Must also add to SERVICE_NAMES so the service appears in servicesToSearch
@@ -350,8 +341,6 @@ describe('searchTools edge cases', () => {
 
   it('matches a tool by keyword when name and description do not match', async () => {
     // Insert a tool whose name/description don't contain 'xkeyword', but keywords does.
-    // This exercises the `keywords.some((k) => k.toLowerCase().includes(queryLower))` branch
-    // and the arrow-function body inside it.
     const mutableRegistry = TOOL_REGISTRY as Record<
       string,
       Record<

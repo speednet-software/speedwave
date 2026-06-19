@@ -1,10 +1,5 @@
 /**
- * Tests for {@link ./site-client.ts} — the shared `GraphRequester` interface
- * and base-URL helper used by the per-domain Graph clients.
- *
- * `SharePointClient` implements `GraphRequester` directly; here we only assert
- * the contract is small and stable. A consumer that imports this module must
- * be able to wire any object that provides `getSiteId` + `graphRequest`.
+ * Tests for {@link ./site-client.ts} — `GraphRequester` interface and `graphV1BaseUrl`.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { graphV1BaseUrl, type GraphRequester } from './site-client.js';

@@ -20,8 +20,7 @@ pub(super) static LOCK_ACQUISITIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// RAII: inserts the project into `HELD_LOCKS` on construction and removes it
-/// on drop (even on panic). Insertion is atomic with guard creation — there
-/// is no window where the thread-local marker exists without a live drop guard.
+/// on drop (even on panic).
 struct HeldGuard {
     project: String,
 }
@@ -447,9 +446,7 @@ mod tests {
 
     #[test]
     fn builder_construction_yields_locked_wrapper() {
-        // Smoke-test that the test-support builder produces a working
-        // `LockedRuntime`. All transaction tests above rely on this; this
-        // test pins the basic constructor contract on its own.
+        // Smoke-test that the test-support builder produces a working `LockedRuntime`.
         let (rt, _) = MockRuntimeBuilder::new().build();
         assert!(rt.is_available());
     }

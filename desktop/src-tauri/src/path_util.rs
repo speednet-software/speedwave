@@ -13,9 +13,7 @@ pub(crate) fn which_in_path_var(path_var: &OsStr, name: &str) -> Option<PathBuf>
 }
 
 /// Minimal `which` — looks for `name` on the process `$PATH`. Returns
-/// `Some(path)` of the first directory entry that is a file. (Does not check
-/// the executable bit; on Windows that is not a meaningful test, and on Unix
-/// the caller spawns the binary anyway and will see the failure.)
+/// `Some(path)` of the first directory entry that is a file.
 pub(crate) fn which_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     which_in_path_var(&path, name)
