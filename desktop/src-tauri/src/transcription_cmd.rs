@@ -52,61 +52,7 @@ fn short_id(id: Uuid) -> String {
     s
 }
 
-// ---- 1) feature-toggle commands (top-level user config, ADR-056 §13) ------
-
-// Synchronous file I/O for the four toggle commands is wrapped in
-// `spawn_blocking` so it never stalls the Tokio runtime thread.
-
-#[tauri::command]
-pub async fn transcription_enabled() -> Result<bool, String> {
-    tokio::task::spawn_blocking(|| {
-        speedwave_runtime::config::load_user_config().map(|c| c.transcription_enabled())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_transcription_enabled(enabled: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
-        let mut tr = cfg.transcription.unwrap_or_default();
-        tr.enabled = Some(enabled);
-        cfg.transcription = Some(tr);
-        speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-}
-
-/// Returns the full meeting-transcription preferences block (defaults if unset).
-#[tauri::command]
-pub async fn get_transcription_config(
-) -> Result<speedwave_runtime::config::TranscriptionConfig, String> {
-    tokio::task::spawn_blocking(|| {
-        speedwave_runtime::config::load_user_config().map(|c| c.transcription.unwrap_or_default())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-    .map_err(|e| e.to_string())
-}
-
-/// Persists the meeting-transcription preferences block (whole replace).
-#[tauri::command]
-pub async fn set_transcription_config(
-    config: speedwave_runtime::config::TranscriptionConfig,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
-        cfg.transcription = Some(config);
-        speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-}
-
-// ---- 2) capability + source listing ---------------------------------------
+// ---- 1) capability + source listing ---------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitiesAck {
@@ -645,6 +591,55 @@ pub struct ModelsAck {
     pub total_bytes_used: u64,
 }
 
+/// The single model Speedwave recommends for this hardware (the only one the UI
+/// offers): `large-v3` on GPU builds, `large-v3-turbo` on CPU-only.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedModelAck {
+    /// Catalogue key to download.
+    pub key: String,
+    /// Human-readable model name.
+    pub display_name: String,
+    /// Download/on-disk size in bytes.
+    pub size_bytes: u64,
+    /// `true` if already downloaded.
+    pub downloaded: bool,
+    /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
+    pub accel_label: String,
+}
+
+/// Short acceleration label from the compiled backends (highest tier wins).
+fn accel_label() -> String {
+    let backends = transcription::compiled_backends();
+    if backends.contains(&Backend::Metal) {
+        "Metal (GPU)".to_string()
+    } else if backends.contains(&Backend::Cuda) {
+        "CUDA (GPU)".to_string()
+    } else if backends.contains(&Backend::Vulkan) {
+        "Vulkan (GPU)".to_string()
+    } else {
+        "CPU".to_string()
+    }
+}
+
+#[tauri::command]
+pub async fn recommended_transcription_model(
+    models: tauri::State<'_, ModelStoreHandle>,
+) -> Result<RecommendedModelAck, String> {
+    let best = transcription::best_model_for_this_build();
+    let status = models
+        .whisper_status()
+        .into_iter()
+        .find(|m| m.key == best.key)
+        .ok_or_else(|| format!("recommended model '{}' missing from catalogue", best.key))?;
+    Ok(RecommendedModelAck {
+        key: best.key.to_string(),
+        display_name: best.display_name.to_string(),
+        size_bytes: status.size_bytes,
+        downloaded: status.downloaded,
+        accel_label: accel_label(),
+    })
+}
+
 #[tauri::command]
 pub async fn list_transcription_models(
     models: tauri::State<'_, ModelStoreHandle>,
@@ -725,6 +720,38 @@ mod tests {
     fn short_id_truncates_to_eight_hex_chars() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(short_id(id), "550e8400");
+    }
+
+    #[test]
+    fn accel_label_matches_the_compiled_backend_tier() {
+        let label = accel_label();
+        let expected = if transcription::has_gpu_backend() {
+            "(GPU)"
+        } else {
+            "CPU"
+        };
+        assert!(
+            label.contains(expected),
+            "label '{label}' should reflect the build's backend"
+        );
+    }
+
+    #[test]
+    fn recommended_model_status_is_present_in_the_catalogue() {
+        // The recommended key must resolve to a whisper_status entry — the same
+        // lookup the command does, minus the Tauri State wrapper.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        let best = transcription::best_model_for_this_build();
+        let found = store
+            .whisper_status()
+            .into_iter()
+            .find(|m| m.key == best.key);
+        assert!(found.is_some(), "best model '{}' missing", best.key);
+        assert!(
+            !found.unwrap().downloaded,
+            "nothing downloaded in a tmp dir"
+        );
     }
 
     /// Driving Tauri commands fully requires a `tauri::State` wrapper that

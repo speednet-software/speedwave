@@ -82,6 +82,26 @@ pub fn recommended_live_model_for_this_build() -> &'static WhisperModelInfo {
     recommended_live_model(&compiled_backends())
 }
 
+/// The single best model to download for `backends`: `large-v3` (best Polish)
+/// when a GPU backend is compiled in — the GPU keeps the live window real-time
+/// at full quality — else `large-v3-turbo`, the best live-capable model on CPU.
+pub fn best_model_for_backends(backends: &[Backend]) -> &'static WhisperModelInfo {
+    let want = if backends.iter().any(|b| b.is_gpu()) {
+        ModelRole::Finalize
+    } else {
+        ModelRole::GpuLive
+    };
+    WHISPER_MODELS
+        .iter()
+        .find(|m| m.role == want && matches!(m.quantization, Quantization::Full))
+        .unwrap_or(&WHISPER_MODELS[0])
+}
+
+/// The best model to download for this build's compiled backends.
+pub fn best_model_for_this_build() -> &'static WhisperModelInfo {
+    best_model_for_backends(&compiled_backends())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -135,6 +155,41 @@ mod tests {
                 ModelRole::GpuLive
             } else {
                 ModelRole::CpuLive
+            }
+        );
+    }
+
+    #[test]
+    fn best_model_gpu_is_large_v3_cpu_is_turbo() {
+        assert_eq!(
+            best_model_for_backends(&[Backend::Cpu, Backend::Metal]).key,
+            "large-v3"
+        );
+        assert_eq!(
+            best_model_for_backends(&[Backend::Cpu]).key,
+            "large-v3-turbo"
+        );
+        // Any GPU backend → the full-quality finalize model.
+        assert_eq!(
+            best_model_for_backends(&[Backend::Cuda]).role,
+            ModelRole::Finalize
+        );
+        assert_eq!(
+            best_model_for_backends(&[Backend::Vulkan]).role,
+            ModelRole::Finalize
+        );
+    }
+
+    #[test]
+    fn best_model_is_full_precision_and_consistent_with_this_build() {
+        let m = best_model_for_this_build();
+        assert!(matches!(m.quantization, Quantization::Full));
+        assert_eq!(
+            m.key,
+            if has_gpu_backend() {
+                "large-v3"
+            } else {
+                "large-v3-turbo"
             }
         );
     }

@@ -1247,10 +1247,6 @@ fn main() {
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
             // Meeting transcription (ADR-056)
-            transcription_cmd::transcription_enabled,
-            transcription_cmd::set_transcription_enabled,
-            transcription_cmd::get_transcription_config,
-            transcription_cmd::set_transcription_config,
             transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
@@ -1261,6 +1257,7 @@ fn main() {
             transcription_cmd::delete_transcript,
             transcription_cmd::discard_transcript_audio,
             transcription_cmd::get_transcript_markdown,
+            transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
             transcription_cmd::delete_transcription_model,

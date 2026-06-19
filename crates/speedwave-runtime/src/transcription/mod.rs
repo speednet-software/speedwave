@@ -16,7 +16,9 @@ pub mod transcript;
 pub mod transcript_driver;
 pub mod transcript_store;
 
-pub use accel::{compiled_backends, has_gpu_backend, recommended_live_model, Backend};
+pub use accel::{
+    best_model_for_this_build, compiled_backends, has_gpu_backend, recommended_live_model, Backend,
+};
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,

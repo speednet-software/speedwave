@@ -330,7 +330,6 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
@@ -490,7 +489,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 

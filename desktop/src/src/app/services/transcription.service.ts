@@ -8,10 +8,10 @@ import type {
   DownloadProgress,
   Language,
   ModelsAck,
+  RecommendedModelAck,
   StartAck,
   SubscribeAck,
   TranscriptEvent,
-  TranscriptionConfig,
   TranscriptSession,
 } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
@@ -38,32 +38,6 @@ export class TranscriptionService {
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
-
-  /** `true` if the user toggled meeting transcription on in Settings. */
-  isEnabled(): Promise<boolean> {
-    return this.tauri.invoke<boolean>('transcription_enabled');
-  }
-
-  /**
-   * Persists the on/off toggle.
-   * @param enabled - `true` to enable, `false` to disable.
-   */
-  setEnabled(enabled: boolean): Promise<void> {
-    return this.tauri.invoke<void>('set_transcription_enabled', { enabled });
-  }
-
-  /** Reads the full meeting-transcription preferences block. */
-  getConfig(): Promise<TranscriptionConfig> {
-    return this.tauri.invoke<TranscriptionConfig>('get_transcription_config');
-  }
-
-  /**
-   * Persists the full meeting-transcription preferences block (whole replace).
-   * @param config - the new preferences.
-   */
-  setConfig(config: TranscriptionConfig): Promise<void> {
-    return this.tauri.invoke<void>('set_transcription_config', { config });
-  }
 
   /** Capture capabilities + compiled whisper.cpp backends for this build. */
   getCapabilities(): Promise<CapabilitiesAck> {
@@ -166,6 +140,11 @@ export class TranscriptionService {
   async sendToChat(sessionId: string): Promise<void> {
     const md = await this.getMarkdown(sessionId);
     await this.chatState.sendMessage(md, 'Meeting transcript');
+  }
+
+  /** The single best model for this hardware + its download state. */
+  recommendedModel(): Promise<RecommendedModelAck> {
+    return this.tauri.invoke<RecommendedModelAck>('recommended_transcription_model');
   }
 
   /** Status of all Whisper models on disk. */

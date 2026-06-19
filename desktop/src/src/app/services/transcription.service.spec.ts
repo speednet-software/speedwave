@@ -99,16 +99,18 @@ describe('TranscriptionService', () => {
     });
   });
 
-  describe('isEnabled / setEnabled', () => {
-    it('reads the toggle via transcription_enabled', async () => {
-      mockTauri.invokeHandler = async (cmd) => (cmd === 'transcription_enabled' ? true : undefined);
-      expect(await svc.isEnabled()).toBe(true);
-    });
-
-    it('persists via set_transcription_enabled', async () => {
-      const spy = vi.spyOn(mockTauri, 'invoke');
-      await svc.setEnabled(false);
-      expect(spy).toHaveBeenCalledWith('set_transcription_enabled', { enabled: false });
+  describe('recommendedModel', () => {
+    it('reads the recommended model via recommended_transcription_model', async () => {
+      const ack = {
+        key: 'large-v3',
+        display_name: 'Large v3',
+        size_bytes: 3_100_000_000,
+        downloaded: false,
+        accel_label: 'Metal (GPU)',
+      };
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'recommended_transcription_model' ? ack : undefined;
+      expect(await svc.recommendedModel()).toEqual(ack);
     });
   });
 

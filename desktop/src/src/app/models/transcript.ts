@@ -114,7 +114,6 @@ export interface ModelStatusEntry {
   downloaded: boolean;
   size_bytes: number;
   path: string | null;
-  recommendation?: 'final_quality' | 'live' | null;
 }
 
 /** `list_transcription_models` command return type. */
@@ -123,21 +122,18 @@ export interface ModelsAck {
   total_bytes_used: number;
 }
 
+/** `recommended_transcription_model` — the single best model for this hardware. */
+export interface RecommendedModelAck {
+  key: string;
+  display_name: string;
+  size_bytes: number;
+  downloaded: boolean;
+  accel_label: string;
+}
+
 /** Per-update payload of the `transcription_model_status` Tauri event. */
 export interface DownloadProgress {
   model_key: string;
   downloaded_bytes: number;
   total_bytes: number | null;
-}
-
-/**
- * Meeting-transcription preferences (top-level user config, ADR-056 §13 —
- * repo `.speedwave.json` cannot set these). All fields optional; `null`/absent
- * means "use the default".
- */
-export interface TranscriptionConfig {
-  enabled: boolean | null;
-  default_live_model: string | null;
-  default_language: Language | null;
-  keep_audio_after_finalize: boolean | null;
 }

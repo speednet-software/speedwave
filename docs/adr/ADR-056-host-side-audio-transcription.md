@@ -4,10 +4,12 @@
 > **Context:** Record a meeting (Slack / Teams / Meet / any app), transcribe it locally, then optionally hand the transcript to Claude — a host capability that cannot live in Claude's token-free container.
 >
 > **Amendment:** Speaker diarization was later removed, and the sherpa-onnx dependency it relied on with it — see [ADR-075](ADR-075-remove-speaker-diarization.md). The diarization-specific content of this ADR was pruned in that change; the product ships a clean timestamped transcript with no speaker attribution. All Whisper transcription and audio-capture decisions below still apply.
+>
+> **Amendment 2:** The per-feature opt-in toggle and the model picker were removed. The tab stays beta-gated (ADR-058) but has no second on/off switch; the feature does nothing until the user presses Record, so the toggle only added friction. Configuration moved entirely into Settings → Meeting transcription, which offers a single auto-selected model — `large-v3` on builds with a GPU backend (the GPU keeps the live window real-time at full quality), `large-v3-turbo` on CPU-only builds — chosen by `accel::best_model_for_this_build()`. `default_language` / `default_live_model` / `keep_audio_after_finalize` are gone: language is picked per-recording, audio is always kept (deleted per-recording from the list). `TranscriptionConfig` and `transcription_enabled()` were dropped from the config.
 
 ## Decision
 
-Build "Meeting transcription" as a **built-in, opt-in Desktop module**, off by default, enabled only via a top-level user setting. All non-UI logic lives in `crates/speedwave-runtime/src/transcription/` behind a Cargo feature `audio-transcription`; the Tauri command layer is thin; the UI is a new top-level Angular tab. Transcription uses whisper.cpp (via `whisper-rs`); audio inference is fully local — only the final transcript text leaves the machine, and only when the user explicitly sends it to Claude.
+Build "Meeting transcription" as a **built-in Desktop module** behind the beta-features gate (ADR-058). All non-UI logic lives in `crates/speedwave-runtime/src/transcription/` behind a Cargo feature `audio-transcription`; the Tauri command layer is thin; the UI is a new top-level Angular tab. Transcription uses whisper.cpp (via `whisper-rs`); audio inference is fully local — only the final transcript text leaves the machine, and only when the user explicitly sends it to Claude.
 
 The supporting sub-decisions:
 
@@ -16,12 +18,12 @@ The supporting sub-decisions:
 - **macOS permissions.** Microphone uses the public `AVCaptureDevice.requestAccess(for: .audio)` (shows a prompt). The system-audio consent prompt has no public trigger, so the native CLI uses the private TCC API (`TCCAccessRequest`, service `kTCCServiceAudioCapture`) behind a `dlopen`/`dlsym`-guarded path that degrades gracefully; a System-Settings deep-link plus silence-detection is the fallback if it reports denied.
 - **Windows capture = WASAPI loopback.** Per-process loopback on build 20348+; system-wide loopback as the universal fallback on older builds, with the UI hiding the process picker accordingly.
 - **Transcription engine** = whisper.cpp (MIT) via `whisper-rs`; acceleration backends are compile-time, so the runtime reports which backends were compiled in. v1 ships CPU (all platforms) + Metal (macOS); CUDA/Vulkan deferred.
-- **PL/EN strategy** = forced language (never auto-detected), two tiers: a fast live model plus a higher-quality `large-v3` offline re-pass after recording stops. The promise is "local best-effort live + higher-quality offline final pass", not "perfect Polish/English".
+- **PL/EN strategy** = forced language (never auto-detected, picked per-recording), with a live pass plus a higher-quality offline re-pass after recording stops. A single model is downloaded per the hardware (see Amendment 2); on GPU builds the live and offline passes share `large-v3`. The promise is "local best-effort live + higher-quality offline final pass", not "perfect Polish/English".
 - **Model store** = download-on-demand, SHA256-verified, streamed to disk, into `<data_dir>/models/`. Hugging Face and GitHub `302`-redirect downloads to signed CDN URLs, so the downloader uses a redirect-host allowlist rather than `redirect::Policy::none()`. Otherwise it reuses the ADR-041 host-HTTP hardening.
 - **Live-transcript transport** = an append-only event stream with a monotonic `seq` plus snapshot recovery, reusing the _delivery semantics_ of `MsgStore::history_plus_stream()` (ADR-043) — not the full JSON-patch protocol (ADR-042).
 - **Mixed capture (system loopback + microphone) is the product default** — both streams are summed to one 16 kHz mono stream before the engine sees them, so the transcription driver is platform-agnostic.
-- **Opt-in toggle** = a field on the top-level user config only, default off, **not** resolvable from a repo `.speedwave.json` (same spirit as why repo config cannot override `provider`/`base_url` in ADR-040/ADR-041).
-- **Audio retention** = WAV kept by default with manual "delete transcript" / "discard audio" controls; no automatic expiry in v1 (YAGNI).
+- **No per-feature toggle** (Amendment 2). Access is governed by the beta gate (ADR-058); a checked-in repo `.speedwave.json` was never able to enable host-audio recording and still cannot (it carries no transcription field).
+- **Audio retention** = WAV always kept, with manual "delete transcript" / "discard audio" controls per recording; no automatic expiry (YAGNI).
 
 ## Why
 
@@ -33,10 +35,10 @@ The supporting sub-decisions:
 ## Where it lives in code
 
 - **Runtime SSOT (feature-gated)** — `crates/speedwave-runtime/src/transcription/` (`mod.rs`, `audio.rs`, `audio_macos.rs`, `audio_windows.rs`, `mix.rs`, `transcriber.rs`, `transcript_driver.rs`, `transcript_store.rs`, `transcript.rs`).
-- **Compiled backend reporting** — `crates/speedwave-runtime/src/transcription/accel.rs` (`compiled_backends()`, `recommended_live_model()`).
+- **Compiled backend reporting + model selection** — `crates/speedwave-runtime/src/transcription/accel.rs` (`compiled_backends()`, `recommended_live_model()`, `best_model_for_this_build()`).
 - **Model catalog SSOT** — `crates/speedwave-runtime/src/transcription/model_catalog.rs` (the Whisper GGML model entries; see [ADR-075](ADR-075-remove-speaker-diarization.md) for the removal of the former speaker-embedding/segmentation entries).
 - **Download/verify** — `crates/speedwave-runtime/src/transcription/model_store.rs` (streamed download, on-the-fly SHA256, atomic rename, redirect-host allowlist).
-- **Opt-in config** — `crates/speedwave-runtime/src/config.rs` (top-level `TranscriptionConfig`, read via `transcription_enabled()`; not resolved from repo config).
+- **Settings UI** — `desktop/src/src/app/settings/transcription-section/` (acceleration label + single download/remove control, driven by the `recommended_transcription_model` command).
 - **Feature wiring** — `crates/speedwave-runtime/Cargo.toml` (`audio-transcription` feature) and `desktop/src-tauri/Cargo.toml` (Desktop enables it).
 - **Tauri command layer** — `desktop/src-tauri/src/transcription_cmd.rs`.
 - **macOS capture CLI** — `native/macos/audio-capture/` (embedded `Info.plist` with `NSAudioCaptureUsageDescription` + `NSMicrophoneUsageDescription` via the `-sectcreate __TEXT __info_plist` linker flag). It is signed by `scripts/sign-bundled-binaries.sh`, which calls `codesign --sign` _without_ an explicit `--identifier` — the signing identifier comes from the embedded `CFBundleIdentifier`, and the script then verifies that identifier equals `pl.speedwave.desktop.audio-capture` (so TCC binds the row to the right identifier, per ADR-049). Bundle membership is the `tauri.macos.conf.json` ↔ `sign-bundled-binaries.sh` SSOT-alignment pair.
