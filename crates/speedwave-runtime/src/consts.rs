@@ -177,7 +177,7 @@ pub const NERDCTL_FULL_SHA256_ARM64: &str =
     "55d68d2613b5f065021146bac21f620cde9e7fdd4bd3eff74cd324f5462e107a";
 
 /// Ubuntu rootfs download URLs for WSL2 import (per-architecture); SHA256 below pins the version.
-/// `current` is rolling: a "Failed to verify Ubuntu rootfs" on clean dev/CI means bump the SHA256.
+/// `current` is rolling: a "Failed to download or verify Ubuntu rootfs" on clean dev/CI means bump the SHA256.
 /// Self-built rootfs migration tracked in issue #183.
 /// amd64 Ubuntu WSL rootfs download URL.
 pub const WSL_ROOTFS_URL_AMD64: &str =
