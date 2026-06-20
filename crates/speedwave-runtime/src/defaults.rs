@@ -146,9 +146,9 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     "--strict-mcp-config",
     "--thinking-display",
     "summarized",
-    // Auto-connect to the IDE bridge via the lock at ~/.claude/ide/ — the
-    // lock-file path, complementing CLAUDE_CODE_AUTO_CONNECT_IDE (which only
-    // forces the integrated-terminal path). Skipped silently when absent.
+    // Triggers lock-file auto-connect to the IDE bridge (~/.claude/ide/),
+    // complementing CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the
+    // integrated-terminal path). Skipped silently when no lock is present.
     "--ide",
 ];
 
