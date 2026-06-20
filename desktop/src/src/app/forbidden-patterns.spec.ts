@@ -1,8 +1,5 @@
 /**
  * Static guardrail — fails CI if any forbidden pattern reappears in src/.
- *
- * The patterns below represent legacy Angular or TypeScript idioms that
- * the project has phased out. Keeping this spec prevents regressions.
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -18,26 +15,9 @@ interface ForbiddenPattern {
 }
 
 /**
- * Locate the `desktop/src/src` source root.
- *
- * Using `__dirname + '..'` is unreliable: under `ng test --coverage` the
- * test bundle is rewritten such that `__dirname` resolves one or two
- * levels higher than expected (`desktop/src/` or even `desktop/`). A naive
- * walker then descends into `node_modules/@angular/`, `e2e/helpers/`, or
- * `src-tauri/build-context/mcp-servers/` which contain forbidden patterns
- * in their docstrings.
- *
- * The recovery walks upward until we find a directory containing both
- * this spec at the canonical relative path AND the `services/` directory
- * — the combination is unique to `desktop/src/src`. If no such directory
- * is found within ten levels we panic rather than scan a wrong tree.
+ * Locate the `desktop/src/src` source root, handling __dirname resolution variance under coverage.
  */
 function findSrcRoot(): string {
-  // Try several candidate roots starting from __dirname and walking upward.
-  // Under coverage, __dirname can resolve to `desktop/src/src/app`,
-  // `desktop/src/src`, or `desktop/src` depending on bundling. The
-  // canonical root is `desktop/src/src`, identified by containing both
-  // this spec under `app/` and the `app/services/` directory.
   const candidates: string[] = [];
   let dir = __dirname;
   for (let depth = 0; depth < 6; depth++) {
@@ -65,12 +45,7 @@ function findSrcRoot(): string {
 
 const SRC_ROOT = findSrcRoot();
 /**
- * Directory names skipped during the recursive scan. `node_modules` is the
- * obvious one; `e2e`, `src-tauri`, and `coverage` show up because some
- * `__dirname` resolutions under coverage walk land above the canonical
- * `src` root, and those siblings contain forbidden patterns in code we
- * don't own (Playwright fixtures, vendored MCP servers under
- * `build-context/`).
+ * Directory names skipped during the recursive scan.
  */
 const EXCLUDED_DIRS: readonly string[] = [
   'node_modules',

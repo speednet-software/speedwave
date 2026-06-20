@@ -41,10 +41,10 @@ export const TIMEOUT_STANDARD_MS = parsePositiveInt(process.env.OFFICE_TIMEOUT_S
 /** Per-subprocess wall-time timeout (ms) for LibreOffice conversions (slow cold start + render). */
 export const TIMEOUT_LIBREOFFICE_MS = parsePositiveInt(process.env.OFFICE_TIMEOUT_LO_MS, 120_000);
 
-/** Cap on captured stdout/stderr per subprocess (bytes) — without this, a chatty tool can exhaust worker memory. */
+/** Cap on captured stdout/stderr per subprocess (bytes). */
 export const MAX_SUBPROCESS_OUTPUT_BYTES = 10 * 1024 * 1024;
 
-/** Default `maxChars` for text previews returned by read/convert tools — keeps large documents out of the model context. */
+/** Default `maxChars` for text previews returned by read/convert tools. */
 export const DEFAULT_MAX_CHARS = 4000;
 
 /**

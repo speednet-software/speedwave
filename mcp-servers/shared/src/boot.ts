@@ -1,16 +1,5 @@
 /**
- * Declarative worker boot — SSOT for the ~identical `main()` in every built-in
- * worker's `src/index.ts`. Collapses the repeated boilerplate (auth-token gate,
- * client init + retry, the two-line "not configured" warning that appeared 18×,
- * health-check wiring, port announcement, fatal-error trap) into one call.
- *
- * Legit per-worker variance is encoded as explicit params, not divergent files:
- * - `authTokenEnv` undefined → no auth gate (none today; all set auth).
- * - `initClient` undefined → no client (office); returns null → "not configured".
- * - `onNotConfigured: 'warn' | 'fail'` → graceful (slack/gitlab/…) vs fail-fast
- *   (sharepoint, whose OAuth refresh cannot be deferred).
- * - `isConfigured` → slack returns a non-null object with `_tokensStatus`, so
- *   "configured" is not just "non-null" — this predicate decides.
+ * Declarative worker boot — SSOT for every built-in worker's `main()`.
  * @module shared/boot
  */
 
@@ -34,10 +23,7 @@ export interface BootWorkerOptions<C> {
   displayName?: string;
   /** Env var holding the required Bearer token. When unset, no auth gate is applied. */
   authTokenEnv?: string;
-  /**
-   * Bind host. Containers pass `'0.0.0.0'`; host-side workers (os) omit it so
-   * `createMCPServer` falls back to `MCP_LISTEN_HOST ?? '127.0.0.1'`.
-   */
+  /** Bind host. Containers pass `'0.0.0.0'`; host-side workers omit it. */
   host?: string;
   /** Initialize the service client. Omit for credential-free workers (office). */
   initClient?: () => Promise<C | null>;
@@ -54,9 +40,7 @@ export interface BootWorkerOptions<C> {
 }
 
 /**
- * Boot a worker: validate auth, init the client (with retry), wire tools +
- * health check, start listening, announce the port on stdout, and install the
- * fatal-error trap. Returns the actual listening port.
+ * Boot a worker and return the actual listening port.
  * @template C - Service client type.
  * @param opts - Declarative boot configuration.
  */

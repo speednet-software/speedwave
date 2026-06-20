@@ -1,24 +1,18 @@
-//! Startup self-heal of legacy/partial `oauth/<project>/<service>.json` whose
-//! IdP identity (`clientId` / `tenantId`) sits at top level instead of nested
-//! under `providerData` (ADR-060 §addendum). Shape-only; never fabricates or
-//! moves secrets. Best-effort, idempotent.
+//! Startup self-heal of legacy `oauth/<project>/<service>.json` whose IdP
+//! identity sits at top level instead of nested under `providerData`
+//! (ADR-060 §addendum). Shape-only, best-effort, idempotent.
 
 use std::path::Path;
 
 use crate::consts;
 
-/// Top-level keys lifted into `providerData` — the SSOT for the IdP identity
-/// keys this module (and the Desktop credential-save path) nest. These are the
-/// only `FieldStorage::OAuthStateProviderData` identity keys today (Microsoft);
-/// the nesting rule is provider-agnostic. Pinned to the descriptor SSOT by
+/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys,
+/// pinned to the descriptor SSOT by
 /// `identity_keys_match_oauth_state_provider_data_descriptors`.
 pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
 
-/// Run migration once at startup. Best-effort: each healed file and every
-/// per-file failure is logged from inside the module (path only, never content).
-/// Returns the count of files rewritten — callers must NOT log this return value:
-/// CodeQL traces it back through the oauth.json reads and flags
-/// rust/cleartext-logging (false positive on an integer count).
+/// Run migration once at startup; returns the count of files rewritten.
+/// Callers must NOT log this return value (CodeQL cleartext-logging).
 pub fn run_oauth_state_migration_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
@@ -92,10 +86,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
     migrated
 }
 
-/// Migrate one file. Returns `true` if it was rewritten. Leaves the file
-/// untouched (no rewrite) when it is already well-shaped, unparseable, not a
-/// JSON object, or carries no recoverable top-level identity — never destroys
-/// data.
+/// Migrate one file. Returns `true` if it was rewritten; never destroys data.
 fn migrate_file(path: &Path) -> bool {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -171,17 +162,14 @@ fn nest_identity(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     true
 }
 
-/// snake_case descriptor key → camelCase property name used in `oauth.json`.
-/// SSOT for the mapping; the Desktop oauth-state read/write paths delegate here.
-/// An unknown key with an underscore signals a missing arm (debug-assert in dev,
-/// warn in release) rather than silently producing a snake_case JSON key.
+/// snake_case descriptor key → camelCase property name in `oauth.json`.
+/// SSOT for the mapping; the Desktop oauth-state paths delegate here.
 pub fn oauth_json_key_for(key: &str) -> &str {
     match key {
         "client_id" => "clientId",
         "tenant_id" => "tenantId",
         "refresh_token" => "refreshToken",
-        // Never interpolate `other` — it may carry caller-supplied values
-        // (CodeQL cleartext-logging false positive otherwise).
+        // Never interpolate `other` — may carry caller-supplied values (CodeQL false positive).
         other => {
             debug_assert!(
                 !other.contains('_'),
@@ -196,12 +184,8 @@ pub fn oauth_json_key_for(key: &str) -> &str {
     }
 }
 
-/// Guarantee `providerData` is a plain object, healing the legacy ADR-060 layout
-/// in place. If it is already an object, no-op. Otherwise replace it with a fresh
-/// object, lifting any top-level [`IDENTITY_KEYS`] strings into it and dropping
-/// the top-level copies (so a re-save heals the file instead of orphaning them).
-/// Shared SSOT for both the startup migration and the Desktop credential-save
-/// path (`integrations_cmd::merge_oauth_state_json`).
+/// Heal legacy ADR-060 layout in place: ensure `providerData` is a plain object,
+/// lifting [`IDENTITY_KEYS`] strings into it. SSOT for startup + Desktop save.
 pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if obj.get("providerData").is_some_and(|v| v.is_object()) {
         return;
@@ -243,11 +227,9 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    /// Drift guard: `IDENTITY_KEYS` must equal the camelCase JSON keys of every
-    /// `OAuthStateProviderData`-tagged descriptor field across all services — the
-    /// true SSOT (`consts::TOGGLEABLE_MCP_SERVICES`) — mapped through the same
-    /// `oauth_json_key_for` the production code uses. If a new providerData field
-    /// is added to a descriptor, this fails until `IDENTITY_KEYS` is updated.
+    /// Drift guard: `IDENTITY_KEYS` must match the camelCase JSON keys of every
+    /// `OAuthStateProviderData`-tagged descriptor field, mapped through
+    /// `oauth_json_key_for`.
     #[test]
     fn identity_keys_match_oauth_state_provider_data_descriptors() {
         let mut expected: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
@@ -308,8 +290,7 @@ mod tests {
 
     #[test]
     fn migrates_partial_identity_without_refresh_token() {
-        // The `presales` shape: only identity, no refreshToken. Nest what
-        // exists; fabricate nothing.
+        // The `presales` shape: only identity, no refreshToken (fabricate nothing).
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "presales");
         write(
@@ -421,8 +402,7 @@ mod tests {
 
     #[test]
     fn leaves_file_with_no_recoverable_identity_untouched() {
-        // providerData absent and no top-level identity: truly unrecoverable.
-        // Migration must not touch it — Part C surfaces the re-auth banner.
+        // providerData absent and no top-level identity: must not touch it.
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "p");
         let original = r#"{"provider": "microsoft", "refreshToken": "rt"}"#;
@@ -468,8 +448,7 @@ mod tests {
 
     #[test]
     fn migrates_non_sharepoint_service_json() {
-        // The shape rule is provider-agnostic — a future OAuth service file
-        // with the same legacy layout is healed too.
+        // The shape rule is provider-agnostic, not SharePoint-specific.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp
             .path()
@@ -540,9 +519,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn does_not_crash_on_read_only_project_dir() {
-        // A read-only project dir blocks the rewrite (tempfile create fails);
-        // migration must log + skip, not panic. Perms restored so tempdir
-        // cleanup can recurse.
+        // A read-only project dir blocks the rewrite: migration must log + skip, not panic.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "ro");

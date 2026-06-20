@@ -85,8 +85,6 @@ fn check_wsl() -> Vec<PrereqViolation> {
 
 /// Returns non-blocking OS warnings (e.g. low memory, nested virtualization).
 /// Separate from `check_os_prereqs()` which returns blocking errors.
-///
-/// Warnings are logged by callers — they do not block container operations.
 pub fn check_os_warnings() -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -102,9 +100,7 @@ pub fn check_os_warnings() -> Vec<String> {
 }
 
 /// Warns when the Windows build is older than 22H2 (build 22621), where
-/// `.wslconfig` `networkingMode=mirrored` is silently ignored — corporate
-/// VPN routes never propagate into WSL2 distros. Not a blocker; Speedwave
-/// works otherwise.
+/// `.wslconfig` `networkingMode=mirrored` is silently ignored.
 #[cfg(target_os = "windows")]
 fn check_wsl_mirrored_mode_supported() -> Vec<String> {
     let build = match windows_build_number() {
@@ -172,13 +168,7 @@ fn parse_vm_info(json: &str) -> Option<(String, String)> {
 }
 
 /// Returns `true` if the WMI Model/Manufacturer strings indicate a virtual machine.
-///
-/// Case-insensitive matching. Checks both fields to catch all major hypervisors:
-/// - VMware: model contains "vmware"
-/// - VirtualBox: model contains "virtualbox" OR manufacturer contains "innotek"
-/// - Hyper-V: model contains "virtual machine" AND manufacturer contains "microsoft"
-///   (requires both to avoid false positives on Microsoft Surface hardware)
-/// - QEMU/KVM: manufacturer contains "qemu" (model is generic, e.g. "Standard PC")
+/// Case-insensitive matching against VMware/VirtualBox/Hyper-V/QEMU markers.
 #[cfg(any(target_os = "windows", test))]
 fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
     let model_lower = model.to_ascii_lowercase();
@@ -205,8 +195,6 @@ fn check_nested_virt() -> Vec<String> {
         .stderr(std::process::Stdio::null());
 
     // No explicit timeout — cmd.output() blocks until PowerShell exits.
-    // PowerShell startup is ~2-3s; the Get-CimInstance query is fast.
-    // If WMI hangs, the warning is skipped (fail-open) on the next startup.
     let output = match cmd.output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(_) | Err(_) => return Vec::new(), // Fail open

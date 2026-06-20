@@ -1,8 +1,5 @@
 /**
- * Serialization queue for LibreOffice (`soffice`) invocations.
- * `soffice --headless` is not reentrant — two concurrent conversions on the same
- * machine corrupt each other's output even with separate `-env:UserInstallation`
- * profiles in practice — so every conversion goes through this single-slot queue.
+ * Single-slot serialization queue for LibreOffice (`soffice`) invocations.
  * @module mcp-office/lo-queue
  */
 
@@ -18,8 +15,6 @@ class SerialQueue {
    */
   run<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.tail.then(fn, fn);
-    // Keep the chain alive regardless of this task's outcome; swallow here so an
-    // unhandled rejection on `tail` is impossible (the caller still sees it via `result`).
     this.tail = result.then(
       () => undefined,
       () => undefined

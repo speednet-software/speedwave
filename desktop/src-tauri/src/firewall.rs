@@ -1,16 +1,6 @@
 //! Windows firewall rules (ADR-067) — Desktop runtime fallback.
-//!
 //! Ensures both firewall layers exist before any host listener binds the WSL
-//! adapter IP: the Hyper-V rule (container↔host reachability) and host WDF
-//! per-program allow rules that suppress the "allow an app" prompt for the
-//! bundled node.exe workers + this exe. perUser NSIS installs run un-elevated
-//! so the install-time hook cannot create the (admin-only) rules — this is the
-//! fallback. Runs at most once per process via `FIREWALL_RULE_ONCE`. Fail-open:
-//! never blocks startup.
-//!
-//! No "declined" state is persisted: rule presence is the only source of truth,
-//! checked live each session. The `Once` caps the prompt at one per app launch,
-//! so an accidental "No" is not a permanent lock-out — the next launch retries.
+//! adapter IP. Runs at most once per process; fail-open, never blocks startup.
 
 /// Outcome of one `firewall.ps1 -Mode ensure` invocation.
 #[cfg(any(target_os = "windows", test))]
@@ -88,11 +78,8 @@ mod windows_impl {
         }
     }
 
-    /// Full paths of the host listeners that must be pre-authorized at the WDF
-    /// layer to suppress the per-binary "allow access" prompt: the bundled
-    /// node.exe (mcp-os / oauth workers) and this desktop exe.
-    /// Resolved relative to the running exe so they match the actual install
-    /// location (perUser dir or C:\Speedwave) — WDF needs exact paths.
+    /// Full paths of the host listeners pre-authorized at the WDF layer: the
+    /// bundled node.exe and this exe, resolved relative to the running exe.
     fn host_listener_programs() -> Vec<String> {
         let mut progs = Vec::new();
         if let Ok(exe) = std::env::current_exe() {
@@ -101,9 +88,7 @@ mod windows_impl {
                 let node = dir
                     .join(speedwave_runtime::consts::NODEJS_SUBDIR)
                     .join("node.exe");
-                // Only authorize node.exe if it actually exists — a rule for an
-                // absent binary gives false "firewall configured" confidence and
-                // never matches the real worker.
+                // Only authorize node.exe if it actually exists.
                 if node.is_file() {
                     progs.push(node.to_string_lossy().into_owned());
                 } else {
@@ -117,18 +102,11 @@ mod windows_impl {
         progs
     }
 
-    /// Self-elevates `firewall.ps1 -Mode install-elevated` via UAC. The inner
-    /// PowerShell wraps `Start-Process -Verb RunAs` in try/catch and emits an
-    /// explicit launcher exit code so the outcome is deterministic regardless
-    /// of how PowerShell surfaces a UAC cancellation (verified on Windows:
-    /// 0 = elevated child ran, 10 = UAC cancelled / elevation refused). We
-    /// persist nothing — `Once` already caps this to one prompt per launch.
+    /// Self-elevates `firewall.ps1 -Mode install-elevated` via UAC. Launcher
+    /// exit codes: 0 = elevated child ran, 10 = UAC cancelled / refused.
     fn attempt_elevated_install(script: &std::path::Path, programs: &[String]) {
         let powershell = system_powershell_path();
-        // Build the elevated child's -ArgumentList: fixed flags + the program
-        // paths. Each element is single-quoted for PowerShell; embedded single
-        // quotes are doubled. Windows paths have no single quotes in practice,
-        // but we escape defensively.
+        // Build the elevated child's -ArgumentList; each element PS-quoted.
         let mut args = vec![
             "'-NoProfile'".to_string(),
             "'-NonInteractive'".to_string(),
@@ -149,15 +127,13 @@ mod windows_impl {
             ps = ps_quote(&powershell.to_string_lossy()),
             argv = args.join(","),
         );
-        // system_command applies CREATE_NO_WINDOW so the launcher PowerShell does
-        // not flash a console; the elevated child uses -WindowStyle Hidden above.
+        // system_command applies CREATE_NO_WINDOW so the launcher shows no console.
         let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
             .arg(&inner)
             .status();
         match result.map(|s| s.code()) {
-            // Launcher ran the elevated child; verify by PRESENCE (the child
-            // itself fail-opens, so its exit code is not authoritative).
+            // Launcher ran the elevated child; verify by rule PRESENCE.
             Ok(Some(0)) => {
                 if matches!(
                     run_firewall_mode(script, "ensure", programs),
@@ -170,8 +146,7 @@ mod windows_impl {
                     );
                 }
             }
-            // UAC cancelled / elevation refused. Not persisted — the next app
-            // launch will try once more (no permanent lock-out on a misclick).
+            // UAC cancelled / elevation refused.
             Ok(Some(10)) => {
                 log::warn!("firewall: UAC declined — WDF prompts may appear until granted")
             }
@@ -191,8 +166,7 @@ mod windows_impl {
         programs: &[String],
     ) -> EnsureOutcome {
         let powershell = system_powershell_path();
-        // system_command applies CREATE_NO_WINDOW so PowerShell does not flash a
-        // console window over the Desktop UI (SSOT: binary.rs).
+        // system_command applies CREATE_NO_WINDOW (SSOT: binary.rs).
         let mut cmd = speedwave_runtime::binary::system_command(&powershell.to_string_lossy());
         cmd.args([
             "-NoProfile",
@@ -204,8 +178,7 @@ mod windows_impl {
         .arg(script)
         .args(["-Mode", mode]);
         if !programs.is_empty() {
-            // Semicolon-separated single string — PowerShell -File cannot bind a
-            // multi-element array; the script splits on ';' (illegal in paths).
+            // Semicolon-separated single string; -File cannot bind an array.
             cmd.arg("-Programs").arg(programs.join(";"));
         }
         match cmd.status() {
@@ -223,16 +196,8 @@ mod windows_impl {
         format!("'{}'", s.replace('\'', "''"))
     }
 
-    /// True when the process runs in an interactive session that can render a
-    /// UAC consent dialog. Avoids hanging on `-Verb RunAs` in headless/SCCM
-    /// contexts. `SESSIONNAME` is set for interactive (`Console`/`RDP-*`)
-    /// sessions and absent for service/non-interactive launches.
-    ///
-    /// Known edge case: a Session-0 System-account launch (SCCM/Intune device
-    /// scope) can have `SESSIONNAME="Console"` with no interactive user, so this
-    /// returns `true` and a `RunAs` would block. The process-wide `Once` guard
-    /// caps the damage to one blocking call per launch; a CreateProcess timeout
-    /// would be the fuller fix if this ever proves a real deployment problem.
+    /// True when the process can render a UAC consent dialog, detected via the
+    /// `SESSIONNAME` env var (set for interactive sessions, absent for services).
     fn is_interactive_session() -> bool {
         std::env::var_os("SESSIONNAME").is_some()
     }

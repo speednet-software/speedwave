@@ -1,7 +1,5 @@
 /**
- * Confluence pages — CQL search (v1), and page CRUD via the v2 API. `update`
- * needs the current `version.number` (+1), which this client fetches
- * automatically so callers never have to.
+ * Confluence pages — CQL search (v1), and page CRUD via the v2 API.
  * @module mcp-atlassian/domains/confluence-pages
  */
 
@@ -17,9 +15,8 @@ type FullPage = ConfluencePage & { version: number };
 /** Client for Confluence page operations. */
 export interface ConfluencePagesClient {
   /**
-   * Search content with CQL (Confluence Query Language) via the v1 search API
-   * (v2 has no CQL equivalent). Returns matched pages, normalised to v2 shape
-   * where possible (best-effort — search results omit version/body).
+   * Search content with CQL via the v1 search API. Returns matched pages
+   * normalised to v2 shape (best-effort — search results omit version/body).
    */
   search(params: { cql: string; limit?: number }): Promise<ConfluencePage[]>;
   /** Get a page by ID (v2), optionally including the storage-format body. */
@@ -68,9 +65,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       if (key) spaceKeyCache.set(spaceId, key);
       return key;
     } catch (error) {
-      // A 404 just means the space isn't visible (treat as unresolvable). Any
-      // other error (401/403/429/timeout) is surfaced via the log so a flaky
-      // network doesn't masquerade as a "space not allowed" configuration error.
+      // 404 means the space isn't visible (unresolvable); other errors are logged.
       const status = (error as { response?: { status?: number } })?.response?.status;
       if (status !== 404) {
         console.warn(
@@ -113,8 +108,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       const pages = (res.results ?? [])
         .map(mapV1SearchResult)
         .filter((p): p is ConfluencePage => p !== null);
-      // Best-effort space-key enforcement: v1 search results carry a space key,
-      // so drop any whose space is outside the allowlist.
+      // Best-effort space-key enforcement on v1 search results.
       return filterByAllowlist(pages, (p) => p.space_key, client.confluenceSpaceKeys);
     },
 
@@ -175,8 +169,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     },
 
     async getChildren(pageId, options = {}) {
-      // Enforce the space allowlist before listing children: this is a pageId
-      // read like every other Confluence pageId op, so it must be scoped too.
+      // Enforce the space allowlist before listing children.
       if (client.confluenceSpaceKeys.length > 0) {
         await enrich(
           mapV2Page(await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`))

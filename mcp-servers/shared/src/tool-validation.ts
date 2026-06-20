@@ -98,11 +98,7 @@ export interface ClientValidationOptions {
   serviceName: string;
   /** Map a thrown error to a user-facing string (e.g. `Client.formatError`). */
   formatError: (error: unknown) => string;
-  /**
-   * Optional hook invoked when a caught error is NOT a recognised API error
-   * (a programming bug in the handler) — used to log it at error level so it
-   * does not masquerade as a plain API error. Return value is ignored.
-   */
+  /** Optional hook for an error that is not a recognised API error; return value ignored. */
   onUnexpectedError?: (error: unknown) => void;
 }
 

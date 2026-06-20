@@ -1,20 +1,6 @@
 //! Process manager for the singleton mcp-os Node MCP worker.
-//!
-//! Thin wrapper: `McpOsProcess` is a type alias over
-//! [`crate::host_mcp_process::HostMcpProcess`] with `McpOsSpec` as the
-//! per-worker `WorkerSpec`. All spawn/stop/respawn/cleanup lifecycle is
-//! handled by the generic struct; this module only carries:
-//!
-//! - `McpOsSpec` — env vars, lock file name, the External liveness
-//!   probe that reads `mcp-os.lock.json` from `data_dir`.
-//! - `spawn()` — singleton entry-point used by Desktop (`main.rs`) and
-//!   the CLI startup helpers.
-//! - `is_mcp_os_alive()` / `is_mcp_os_alive_in()` — SSOT health probe
-//!   re-exported to `desktop::health` and the watchdog.
-//! - `McpOsSpec::pre_spawn` writes the standalone `mcp-os-auth-token`
-//!   mount file (hub bind-mounts it at `/secrets/os-auth-token:ro`).
-//!   Order matters: token lands on disk *before* lock.json so a crash
-//!   in between leaves either zero files or a complete pair.
+//! `McpOsProcess` is a type alias over [`crate::host_mcp_process::HostMcpProcess`]
+//! with `McpOsSpec` as the per-worker `WorkerSpec`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,13 +29,7 @@ impl WorkerSpec for McpOsSpec {
             .env("MCP_OS_AUTH_TOKEN", ctx.auth_token);
     }
     /// Write the standalone token mount file *before* the generic spawn
-    /// writes `lock.json`. Order matters for crash-safety: if the process
-    /// dies between pre_spawn and lock::write, the next start sees no
-    /// lock.json, kill_stale_node runs against nothing, and a fresh spawn
-    /// overwrites the orphan token. If we instead wrote the token AFTER
-    /// lock.json (the previous design), a crash mid-write would leave the
-    /// hub bind-mounting a stale token against a worker expecting a new
-    /// one — every subsequent request 401s until manual cleanup.
+    /// writes `lock.json` (crash-safety order).
     fn pre_spawn(&self, ctx: &SpawnContext) -> anyhow::Result<()> {
         let token_mount_path = ctx.data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
         crate::fs_perms::write_restricted_file(&token_mount_path, ctx.auth_token)
@@ -65,11 +45,8 @@ impl WorkerSpec for McpOsSpec {
     }
 }
 
-/// Static probe wrapper expected by [`LivenessProbe::Custom`]. The
-/// closure-incompatible `fn` pointer means we cannot capture
-/// `data_dir`; instead, the custom probe reads from
-/// `consts::data_dir()` directly. Tests can still inject a temp dir
-/// via [`is_mcp_os_alive_in`] called from the test path.
+/// Static probe wrapper for [`LivenessProbe::Custom`]; the `fn` pointer
+/// cannot capture `data_dir`, so it reads `consts::data_dir()` directly.
 fn is_mcp_os_alive_static(_state_dir: &Path) -> bool {
     is_mcp_os_alive()
 }
@@ -87,10 +64,7 @@ impl McpOsProcess {
     /// Test-only entry point; lets tests redirect lock + audit log to
     /// a temp directory without poking the global `data_dir()` OnceLock.
     pub(crate) fn spawn_with_data_dir(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {
-        // Idempotent upgrade-time migration: collapse the legacy
-        // 3-file layout (`mcp-os-port`, `mcp-os-pid`,
-        // `mcp-os-auth-token`) into `mcp-os.lock.json`. No-op once
-        // the JSON exists.
+        // Idempotent migration: collapse legacy 3-file layout into `mcp-os.lock.json`.
         let _ = lock::migrate_legacy_with_target(
             data_dir,
             LockService::McpOs,
@@ -100,10 +74,6 @@ impl McpOsProcess {
             consts::MCP_OS_AUTH_TOKEN_FILE,
         );
 
-        // The standalone `mcp-os-auth-token` mount file is written by
-        // `McpOsSpec::pre_spawn` *before* lock.json, so any crash leaves
-        // either zero files or a complete pair — never a stale-token
-        // mismatch against the running worker.
         HostMcpProcess::spawn_with_spec(
             McpOsSpec,
             data_dir,
@@ -146,7 +116,7 @@ pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::host_mcp_process::drain::test_support::write_fake_worker;
@@ -194,9 +164,7 @@ mod tests {
 
     #[test]
     fn pre_spawn_writes_token_mount_before_lock_json() {
-        // Crash-safety contract: standalone token mount file must be on
-        // disk *before* lock.json. Tests the WorkerSpec hook directly so
-        // it covers both the order and the on-disk content.
+        // Token mount file must be on disk *before* lock.json.
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
         let log_path = tmp.path().join("log");
@@ -282,13 +250,8 @@ mod tests {
         drop(listener);
     }
 
-    /// Regression: an earlier version of `respawn` only cleared
-    /// `lock_path` on the old `self`, so when `*self = new` dropped
-    /// the old instance, `cleanup_files` still walked `data_dir` +
-    /// `extra_cleanup_files` and deleted the freshly-written token
-    /// mount belonging to the replacement. The hub then bind-mounted
-    /// a missing file. Fix: `respawn` disarms `cleanup_on_drop` on
-    /// the old self before the assignment.
+    /// Regression: `respawn` must not let the dropped old instance delete
+    /// the replacement's freshly-written token mount.
     #[cfg(unix)]
     #[test]
     #[serial(env)]
@@ -323,11 +286,8 @@ mod tests {
         proc.stop().unwrap();
     }
 
-    /// End-to-end migration test: a state dir with the legacy 3-file
-    /// layout is silently collapsed into `lock.json` when the singleton
-    /// spawns. Uses a fake stdout-only
-    /// node script (no listening server) so we only verify the
-    /// migration side; full alive-listening probe is covered above.
+    /// Migration e2e: a legacy 3-file layout is collapsed into `lock.json`
+    /// when the singleton spawns.
     #[cfg(unix)]
     #[test]
     #[serial(env)]
@@ -370,10 +330,7 @@ mod tests {
             );
             assert!(
                 !tmp.path().join("mcp-os-auth-token").exists()
-                    // Dual write recreates auth-token under the SAME name
-                    // (legacy const reused). If it exists, it must be the
-                    // standalone mount file with the new token, not the
-                    // legacy migrated content.
+                    // Dual-write reuses the legacy name with the fresh token.
                     || std::fs::read_to_string(tmp.path().join("mcp-os-auth-token"))
                         .map(|s| s != "legacy-token")
                         .unwrap_or(true),
@@ -383,15 +340,8 @@ mod tests {
         }
     }
 
-    /// Full upgrade-path e2e: migration against the *real* bundled mcp-os
-    /// worker (Express server with all routes), not the stub
-    /// `FAKE_WORKER_JS`. Gated behind the `mcp-os-bundle-e2e` feature (not
-    /// `#[ignore]`, which nothing in the test pipeline runs) because it
-    /// depends on the staged desktop bundle. `make test-mcp-os-bundle`
-    /// stages the bundle then runs it under the feature. PID 1 in the
-    /// legacy fixture is the safe stale-PID choice — `kill_stale_node`'s
-    /// `is_node_process` gate ignores init/launchd, keeping the test
-    /// hermetic against the host system.
+    /// Upgrade-path e2e: migration against the *real* bundled mcp-os worker.
+    /// Gated behind `mcp-os-bundle-e2e` (run via `make test-mcp-os-bundle`).
     #[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]
     #[test]
     #[serial(env)]

@@ -1,9 +1,7 @@
 import EventKit
 
 /// Resolves calendars by ID first, falling back to name match.
-/// Returns all matches — caller decides usage (filter predicate vs single pick).
-/// If multiple calendars share the same name, all are returned; create operations use [0].
-/// Throws CLIError.notFound if filter matches nothing.
+/// Returns all matches; throws CLIError.notFound if filter matches nothing.
 public func resolveCalendars(
     for entityType: EKEntityType,
     filter: String,

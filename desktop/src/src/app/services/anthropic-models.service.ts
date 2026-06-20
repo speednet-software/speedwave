@@ -4,25 +4,12 @@ import { LoggerService } from './logger.service';
 import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 import { setPricingCatalog, type PricedAnthropicModel } from '../chat/pricing';
 
-/**
- * Model-id prefixes for the premium tiers the everyday-placeholder hint skips
- * (Opus and Fable cost noticeably more than the balanced Sonnet tier). Add a
- * prefix here when a new premium family ships.
- */
+/** Model-id prefixes for the premium tiers the everyday-placeholder hint skips. */
 const PREMIUM_MODEL_ID_PREFIXES = ['claude-opus-', 'claude-fable-'] as const;
 
 /**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
- * backend (`list_anthropic_models` Tauri command, sourced from
- * `speedwave_runtime::defaults::ANTHROPIC_MODELS`).
- *
- * The list never changes within a session, so we fetch it once and reuse the
- * cached promise — every call to `list()` returns the same in-memory array,
- * and `contextTokensFor()` is synchronous after the first call settles.
- *
- * On a transient backend failure the cache is left `null` (not `[]`) so the
- * next call retries — caching an empty list would permanently empty the model
- * dropdown and cost meter after one flaky invoke.
+ * backend (`list_anthropic_models`, from `defaults::ANTHROPIC_MODELS`).
  */
 @Injectable({ providedIn: 'root' })
 export class AnthropicModelsService {
@@ -32,10 +19,8 @@ export class AnthropicModelsService {
   private inflight: Promise<AnthropicModel[]> | null = null;
 
   /**
-   * Returns the model catalog. Fetches from the backend on first call;
-   * subsequent successful calls reuse the cached result. On failure (browser
-   * dev mode, transient IPC error) returns an empty list WITHOUT caching it,
-   * so a later call retries rather than being stuck with an empty catalog.
+   * Returns the model catalog, caching the first successful fetch. On failure
+   * returns an empty list WITHOUT caching, so a later call retries.
    */
   async list(): Promise<AnthropicModel[]> {
     if (this.cache) return this.cache;
@@ -45,13 +30,11 @@ export class AnthropicModelsService {
         const result = await this.tauri.invoke<AnthropicModel[]>('list_anthropic_models');
         if (Array.isArray(result)) {
           this.cache = result;
-          // Feed the cost meter's pricing index from the same SSOT payload —
-          // no model rates are hard-coded in the frontend.
+          // Feed the cost meter's pricing index from the same SSOT payload.
           setPricingCatalog(result as unknown as PricedAnthropicModel[]);
           return result;
         }
-        // Non-array payload is a contract violation — log and retry next call
-        // rather than poisoning the cache with a bad value.
+        // Non-array payload is a contract violation; not caching.
         this.logger.warn(
           `list_anthropic_models returned a non-array payload (${typeof result}); not caching`
         );
@@ -82,9 +65,7 @@ export class AnthropicModelsService {
     if (!trimmed) return null;
     const direct = this.cache.find((m) => m.id === trimmed);
     if (direct) return direct.context_tokens;
-    // Claude Code's session metadata sometimes carries the short form
-    // (`opus-4.7` instead of `claude-opus-4-7`). Try both shapes before
-    // giving up.
+    // Session metadata may carry the short form (`opus-4.7`); try prefixed too.
     const candidate = trimmed.startsWith('claude-')
       ? trimmed
       : `claude-${trimmed.replace('.', '-')}`;
@@ -104,13 +85,9 @@ export class AnthropicModelsService {
   }
 
   /**
-   * The model id the Settings free-text placeholder should hint at for the
-   * Anthropic provider: the latest non-premium entry (a Sonnet, the everyday
-   * balanced default) so we don't nudge users toward the costly premium tiers
-   * (`PREMIUM_MODEL_ID_PREFIXES`). Falls back to the first `latest` entry,
-   * then the first entry. Returns `null` while the catalog is loading (or
-   * empty) so the caller renders a blank placeholder rather than a stale
-   * hard-coded string.
+   * The Settings placeholder hint: the latest non-premium entry
+   * (`PREMIUM_MODEL_ID_PREFIXES`), falling back to the first `latest` then the
+   * first entry. Returns `null` while the catalog is loading or empty.
    */
   latestEverydayModelId(): string | null {
     if (!this.cache || this.cache.length === 0) return null;

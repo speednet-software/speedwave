@@ -20,11 +20,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /**
- * Drains pending microtasks. After triggering `ngOnInit`, the component fires
- * `loadConfig` as fire-and-forget; chained awaits inside it (auto-probe via
- * `discoverModels`) require multiple microtask cycles before the discovery
- * state settles. `whenStable` only flushes Zone tasks — these promises live
- * outside Zone in vitest, so we drain them explicitly.
+ * Drains pending non-Zone microtasks.
  * @param cycles - How many `await Promise.resolve()` ticks to drain.
  */
 async function flushMicrotasks(cycles = 10): Promise<void> {
@@ -218,8 +214,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('returns an empty Anthropic placeholder while the SSOT catalog is loading', () => {
-    // No catalog yet (reset in beforeEach) — must not flash a stale hard-coded
-    // model id; the hint is derived from the backend SSOT, blank until loaded.
+    // No catalog yet (reset in beforeEach) — placeholder is blank until the SSOT loads.
     component.provider = 'anthropic';
     expect(component.modelPlaceholder()).toBe('');
   });
@@ -339,9 +334,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('hot-reloads the proxy with the input-signal project, not projectState', async () => {
-    // T10 regression: saveConfig must read the active project from the
-    // activeProject() input, not ProjectStateService. When the active
-    // selection is unchanged, it hot-reloads litellm for that project.
+    // T10 regression: saveConfig reads the active project from the activeProject() input, not ProjectStateService.
     fixture.componentRef.setInput('activeProject', 'proj-from-input');
     const projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'wrong-project';
@@ -367,8 +360,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('writes provider keys before the config and aborts the config on key failure', async () => {
-    // T11 regression: a per-provider key write must precede update_llm_config,
-    // so a key failure leaves config and keys consistent (neither applied).
+    // T11 regression: a per-provider key write must precede update_llm_config.
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
 
@@ -539,8 +531,7 @@ describe('LlmProviderComponent', () => {
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
-    // The unified-list redesign (ADR-073) drops the read-only base_url
-    // field for anthropic — routing is the proxy's concern, not the user's.
+    // The unified-list redesign (ADR-073) drops the read-only base_url field for anthropic.
     const baseUrlInput = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
     );
@@ -552,10 +543,7 @@ describe('LlmProviderComponent', () => {
     const options = Array.from(modelEl.querySelectorAll('option')).map(
       (o) => (o as HTMLOptionElement).value
     );
-    // Default option (empty value, "let Claude Code choose") plus every
-    // catalog id served by the backend SSOT — the component must not add
-    // or drop entries on its own. Order mirrors the catalog: latest first,
-    // legacy after.
+    // Default option plus every backend-SSOT catalog id, latest first then legacy.
     expect(options).toEqual([
       '',
       'claude-fable-5',
@@ -568,13 +556,10 @@ describe('LlmProviderComponent', () => {
     const defaultLabel = (
       modelEl.querySelector('option[value=""]') as HTMLOptionElement
     )?.textContent?.trim();
-    // Default option carries the SSOT-resolved Opus family label so the
-    // user knows which model the alias-mode actually steers toward. The
-    // exact string is verified by the dedicated tests below.
+    // Default option carries the SSOT-resolved Opus family label (exact string verified below).
     expect(defaultLabel?.toLowerCase()).toContain('default');
 
-    // Latest entries land in an optgroup labelled "Latest" so users see
-    // the recommended families at the top.
+    // Latest entries land in an optgroup labelled "Latest".
     const latestGroup = modelEl.querySelector('optgroup[label="Latest"]') as HTMLOptGroupElement;
     expect(latestGroup).not.toBeNull();
     const latestIds = Array.from(latestGroup.querySelectorAll('option')).map(
@@ -595,8 +580,7 @@ describe('LlmProviderComponent', () => {
     );
     expect(legacyIds).toEqual(['claude-opus-4-7', 'claude-opus-4-6']);
 
-    // Labels carry the family + context window so users see the same
-    // ctx value the chat footer reports (1M for Opus 4.8, 200k for Haiku).
+    // Labels carry family + context window (1M for Opus 4.8, 200k for Haiku).
     const opus48Label = (
       modelEl.querySelector('option[value="claude-opus-4-8"]') as HTMLOptionElement
     )?.textContent?.trim();
@@ -609,10 +593,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('preserves a previously-saved model id that is no longer in the SSOT catalog', async () => {
-    // A user might have persisted a model id that has since been pulled
-    // from the catalog (deprecated, retired). Surface it as a stand-alone
-    // option marked "(not in catalog)" instead of silently resetting the
-    // selection — the UI must reflect what is actually in their config.
+    // A persisted-but-retired model id is surfaced as a "(not in catalog)" option, not reset.
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -649,10 +630,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('renders dynamic Default — <family> label when backend returns a label', async () => {
-    // Backend SSOT returns the Opus family label so the dropdown surfaces
-    // what `(default)` actually steers toward (alias mode → Opus 4.8 today).
-    // Anything but the dynamic form would hide the resolved model from the
-    // user — exactly the regression this PR fixes.
+    // Backend SSOT returns the Opus family label that `(default)` resolves to.
     component.ngOnInit();
     await fixture.whenStable();
     await flushMicrotasks();
@@ -669,9 +647,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('falls back to the generic placeholder when backend returns null', async () => {
-    // Older backends (or backends in dev mode without the new command)
-    // may return null. The component must keep the generic placeholder
-    // wording rather than render a broken half-string.
+    // When the backend returns null, the generic placeholder wording is kept.
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -910,9 +886,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
-    // While a probe is in-flight against URL X, a second trigger with the
-    // same URL must be deduped (return without invoking). Use a hanging
-    // promise so we can issue the second trigger before the first resolves.
+    // While a probe is in-flight against URL X, a second same-URL trigger is deduped.
     let resolveFirst: (v: string[]) => void = () => {};
     const hanging = new Promise<string[]>((resolve) => {
       resolveFirst = resolve;
@@ -933,8 +907,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('discards_stale_response_on_rapid_blur', async () => {
-    // First blur is slow; change URL; second blur returns fast. Final state
-    // must reflect the second URL, not the first.
+    // On rapid URL change, final state reflects the latest URL, not the stale slow response.
     let resolveFirst: (v: string[]) => void = () => {};
     const slow = new Promise<string[]>((r) => {
       resolveFirst = r;

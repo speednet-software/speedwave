@@ -111,9 +111,8 @@ pub enum TranscribeError {
 }
 
 /// A speech-to-text engine. `transcribe()` is the offline/finalize path (whole
-/// buffer); `feed()` is the live path (a growing decode window — tail segments
-/// may change as more context arrives). One transcriber per recording (Whisper
-/// state is single-threaded).
+/// buffer); `feed()` is the live path (a growing decode window). One transcriber
+/// per recording.
 pub trait Transcriber: Send {
     /// Transcribe `pcm` (16 kHz mono `f32`, `[-1, 1]`) in one shot.
     fn transcribe(
@@ -318,8 +317,7 @@ impl Transcriber for MockTranscriber {
 mod tests {
     use super::*;
 
-    // `WhisperCppTranscriber` has no `Debug` (it wraps a `WhisperContext`), so
-    // `unwrap_err()` won't compile — pattern-match the error out.
+    // `WhisperCppTranscriber` has no `Debug`; pattern-match the error out.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
         match WhisperCppTranscriber::load(path, label) {
             Ok(_) => panic!("expected load() to fail"),
@@ -438,6 +436,5 @@ mod tests {
         }
     }
 
-    // Real whisper.cpp inference (needs a ≥75 MiB model + the C++ engine) is an
-    // opt-in CI job, not a unit test — verified end-to-end in ADR-056 spike 0A.
+    // Real whisper.cpp inference is an opt-in CI job, not a unit test.
 }

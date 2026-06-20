@@ -199,8 +199,7 @@ describe('LlmUsageComponent metrics', () => {
 
   it('clamps cache hit rate to 100% when cache_read exceeds reported prompt tokens', async () => {
     const c = await makeComponent();
-    // Anthropic streamed records: prompt_tokens excludes cached → ratio could
-    // exceed 1 without the prompt+cache denominator and the clamp.
+    // Anthropic streamed records: prompt_tokens excludes cached.
     expect(c.cacheHitRate(bucket({ prompt_tokens: 100, cache_read: 20_000 }))).toBeLessThanOrEqual(
       1
     );

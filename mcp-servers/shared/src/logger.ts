@@ -11,15 +11,7 @@ function pad2(n: number): string {
   return String(Math.abs(n)).padStart(2, '0');
 }
 
-/**
- * Returns `[<ISO 8601 with local offset>]` for log-line prefixes — local time
- * (the container's `TZ`, injected from the host by `speedwave-runtime`'s
- * `tz::detect_host_timezone`), so log timestamps match the host clock and line
- * up with the Rust SSOT (`speedwave-runtime`'s `log_ts::log_timestamp()`).
- * @example
- * console.log(`${ts()} 🔧 Tool registered: ${tool.name}`);
- * // Output: [2026-05-12T14:34:02.814+02:00] 🔧 Tool registered: get_tree
- */
+/** Returns `[<ISO 8601 with local offset>]` for log-line prefixes (local time, container `TZ`). */
 export function ts(): string {
   const d = new Date();
   // `getTimezoneOffset()` is minutes *behind* UTC, so negate it for the sign.

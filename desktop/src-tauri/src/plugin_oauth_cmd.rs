@@ -64,8 +64,7 @@ pub async fn start_plugin_oauth(
             oauth.grant_type.as_str()
         ));
     }
-    // Credentials + per-instance base URL come from the seed saved by
-    // save_plugin_credentials, not from the command args.
+    // Credentials + per-instance base URL come from the saved seed, not args.
     let seed = read_oauth_seed(&project, &slug)?;
     let client_id = seed
         .get(&oauth.client_id_field)
@@ -76,8 +75,7 @@ pub async fn start_plugin_oauth(
         .as_ref()
         .and_then(|k| seed.get(k).cloned());
 
-    // Static endpoints from the manifest, or per-instance ones resolved (and
-    // SSRF-validated) from the seed's base URL. See ADR-069.
+    // Static manifest endpoints, or per-instance SSRF-validated ones from the seed. See ADR-069.
     let (resolved_authorize, token_url) = resolve_endpoints(oauth, &seed)?;
     let authorize_url =
         resolved_authorize.ok_or_else(|| "oauth.authorize_url missing".to_string())?;
@@ -89,8 +87,7 @@ pub async fn start_plugin_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    // Bind the loopback callback server on 127.0.0.1 (browser-side). Fixed port
-    // if the manifest demands a registered redirect URI; else an ephemeral port.
+    // Loopback callback server on 127.0.0.1; manifest port, else ephemeral.
     let bind_port = oauth.redirect_port.unwrap_or(0);
     // SSOT-allow: browser-side OAuth redirect URI is 127.0.0.1, not the container-reach host_bind_address (WSL adapter IP on Windows). See ADR-069.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", bind_port))
@@ -119,9 +116,7 @@ pub async fn start_plugin_oauth(
     )
     .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
 
-    // Own everything the spawned task needs; the command returns request_id
-    // immediately so the UI can correlate progress events (the flow may block
-    // on the browser callback for up to 300s — it must not block the command).
+    // Command returns request_id immediately; the flow runs in a spawned task.
     let oauth = oauth.clone();
     let seed = seed.clone();
     let resp = PluginOAuthResult {
@@ -196,8 +191,7 @@ pub async fn start_plugin_oauth(
                 return;
             }
         };
-        // Re-check after the exchange — reqwest ignores the CancellationToken,
-        // so a superseding flow could have started during the round-trip.
+        // Re-check after the exchange (reqwest ignores the CancellationToken).
         if oauth_flow::superseded(&FLOW_STATE, my_generation, &request_id) {
             return;
         }
@@ -217,8 +211,7 @@ pub async fn start_plugin_oauth(
             oauth_flow::emit_terminal(&app, &FLOW_STATE, ProgressStatus::Error, &e, &request_id);
             return;
         }
-        // A freshly-authorized OAuth plugin is now ready, so auto-enable it (the
-        // user still applies via the restart banner). Best-effort. See ADR-069.
+        // Auto-enable the freshly-authorized plugin, best-effort. See ADR-069.
         if let Err(e) = crate::plugin_cmd::set_plugin_enabled_in_config(&project, &slug, true) {
             log::warn!("oauth[{slug}]: authorized but auto-enable failed: {e}");
         }
@@ -240,11 +233,7 @@ pub fn cancel_plugin_oauth() {
 #[tauri::command]
 pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> {
     check_project(&project)?;
-    // Cancel any in-flight flow first, else it would re-create the files we
-    // delete here when the user completes sign-in after disconnecting.
-    // Intentionally global: the singleton FLOW_STATE holds at most one flow
-    // across all plugins, so disconnecting plugin B also cancels plugin A's
-    // in-flight flow (terminates with the quiet `cancelled` status).
+    // Cancel any in-flight flow first; FLOW_STATE is a singleton across all plugins.
     FLOW_STATE.cancel();
     crate::plugin_cmd::remove_oauth_offmount(&project, &slug)?;
     let access = access_token_path(&project, &slug)?;
@@ -455,10 +444,7 @@ mod tests {
         }
     }
 
-    // A successful authorization auto-enables the plugin (before emitting
-    // success), so the user doesn't have to toggle it on manually.
-    // Limitation: a source-order check, not behavioral (the real ordering
-    // needs a Tauri AppHandle) — it pins statement ORDER, not execution.
+    // Auto-enable must precede the success event; source-order check, not behavioral.
     #[test]
     fn start_plugin_oauth_auto_enables_on_success() {
         let src = include_str!("plugin_oauth_cmd.rs");
@@ -710,8 +696,7 @@ mod tests {
         let _ = handle.await;
     }
 
-    // An IdP returning an access token without refresh_token must fail loudly
-    // — silently authorizing without durable state strands the user in 1h.
+    // An access token without refresh_token must fail loudly.
     #[test]
     fn persist_state_rejects_missing_refresh_token() {
         let token = TokenResponse {
@@ -733,8 +718,7 @@ mod tests {
         assert!(err.contains("no refresh_token"), "got: {err}");
     }
 
-    // The worker's generic refresh reads these exact keys (GenericProviderData
-    // in generic.ts) — a renamed key breaks refresh after the first hour.
+    // The worker's generic refresh reads these exact keys (GenericProviderData in generic.ts).
     #[test]
     fn build_provider_data_carries_worker_contract_keys() {
         let data =

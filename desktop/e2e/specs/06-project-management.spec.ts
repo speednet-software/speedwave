@@ -36,8 +36,7 @@ describe('Project Management', function () {
     it('should open the project switcher dropdown', async function () {
       this.timeout(60_000);
 
-      // Setup wizard finalize → settings redirect can leave the shell briefly
-      // in `auth_required` (blocking-overlay up) before settling to ready.
+      // Wait for the blocking-overlay to clear after setup-wizard finalize.
       await waitForShellReady();
 
       const pill = await $('[data-testid="project-pill"]');
@@ -70,8 +69,7 @@ describe('Project Management', function () {
     it('should fill the create-project modal and add the project', async function () {
       this.timeout(180_000);
 
-      // Stub the OS folder picker before clicking browse — the native dialog
-      // cannot be driven by WebDriver.
+      // Stub the OS folder picker; WebDriver cannot drive the native dialog.
       await mockDialogOpen(SECOND_PROJECT_DIR);
 
       const modal = await $('[data-testid="create-project-modal"]');
@@ -96,11 +94,7 @@ describe('Project Management', function () {
       });
       await submitBtn.click();
 
-      // Adding a project triggers the full switch lifecycle:
-      //   project_switch_started → containers up → project_switch_succeeded
-      // After project_switch_succeeded, list_projects returns the new active
-      // project. Use the Tauri command as the SSOT — DOM updates lag behind
-      // and the modal-error testid is the only DOM signal we trust.
+      // active_project (Tauri SSOT) becomes the new slug after add_project completes.
       await browser.waitUntil(
         async () => {
           const errorBanner = await modal.$('[data-testid="create-project-error"]');
@@ -122,9 +116,7 @@ describe('Project Management', function () {
     it('should list both projects in the dropdown', async function () {
       this.timeout(60_000);
 
-      // After `add_project`, projectState transitions through
-      // starting → ready (or auth_required), with the blocking-overlay up.
-      // Wait for it to clear before clicking the pill.
+      // Wait for the blocking-overlay to clear before clicking the pill.
       await waitForShellReady();
 
       const pill = await $('[data-testid="project-pill"]');
@@ -133,9 +125,7 @@ describe('Project Management', function () {
       const dropdown = await $('[data-testid="project-switcher-dropdown"]');
       await dropdown.waitForExist({ timeout: 5_000 });
 
-      // The switcher refreshes its list on `onProjectSettled` — that callback
-      // is async, so the dropdown can appear with the stale list before the
-      // refresh fires. Poll until both items render rather than reading once.
+      // Switcher list refresh (onProjectSettled) is async; poll until both items render.
       await browser.waitUntil(
         async () => {
           const a = await $('[data-testid="project-switcher-item-e2e-test"]').isExisting();
@@ -164,12 +154,10 @@ describe('Project Management', function () {
     it('should switch back to e2e-test project', async function () {
       this.timeout(180_000);
 
-      // Wait for the previous switch's blocking-overlay to clear before
-      // attempting another pill click — the overlay covers the header.
+      // Wait for the blocking-overlay to clear before the pill click.
       await waitForShellReady();
 
-      // The previous test may have closed the switcher mid-animation; click
-      // until the dropdown actually appears (defensive against pill toggling).
+      // Retry the pill click until the dropdown opens.
       const pill = await $('[data-testid="project-pill"]');
       const dropdown = await $('[data-testid="project-switcher-dropdown"]');
       await browser.waitUntil(
@@ -184,8 +172,7 @@ describe('Project Management', function () {
       const firstProject = await $('[data-testid="project-switcher-item-e2e-test"]');
       await firstProject.click();
 
-      // Wait for switch_project to complete — list_projects active_project is
-      // the definitive signal (updates after project_switch_succeeded).
+      // active_project (Tauri SSOT) is the definitive switch-complete signal.
       await browser.waitUntil(async () => (await activeProjectSlug()) === 'e2e-test', {
         timeout: 150_000,
         timeoutMsg: 'active_project did not become e2e-test — switch_project did not complete',
@@ -198,13 +185,11 @@ describe('Project Management', function () {
       const nav = await $('[data-testid="nav-settings"]');
       await nav.click();
 
-      // Settings ready signal — page heading replaces the legacy active
-      // project info card; project ground truth comes from `activeProjectSlug()`.
+      // Settings-ready signal: page heading.
       const title = await $('[data-testid="settings-title"]');
       await title.waitForExist({ timeout: 10_000 });
 
-      // Defer to Tauri SSOT instead of comparing rendered text — the settings
-      // copy embeds the slug in human-readable text that may change.
+      // Use Tauri SSOT, not rendered text (settings slug copy may change).
       await browser.waitUntil(async () => (await activeProjectSlug()) === 'e2e-test', {
         timeout: 10_000,
         timeoutMsg: 'list_projects active_project did not stabilise on e2e-test',

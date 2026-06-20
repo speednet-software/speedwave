@@ -53,18 +53,7 @@ interface DecoratedItem extends PaletteItem {
   readonly index: number;
 }
 
-/**
- * Command palette modal — ⌘K.
- *
- * Visibility is wired to {@link UiStateService.paletteOpen} via an effect
- * that opens/closes a CDK Dialog instance. CDK Dialog gives us focus trap,
- * backdrop, scroll lock, and Escape handling for free. The list itself is a
- * `cdkListbox` with `cdkListboxUseActiveDescendant`, so arrow keys, Home/End,
- * and Enter are handled natively without manual `(document:keydown.*)`
- * bindings — we mirror the slash-menu pattern by forwarding the same keys
- * from the search input (which retains focus) into the active-descendant
- * signal.
- */
+/** Command palette modal (⌘K) wired to {@link UiStateService.paletteOpen}. */
 @Component({
   selector: 'app-command-palette',
   imports: [A11yModule, CdkListbox, CdkOption],
@@ -160,12 +149,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   /** Current search query. */
   readonly query = signal<string>('');
 
-  /**
-   * Index of the highlighted item in `filteredItems()`. Driven by the search
-   * input via {@link onSearchKeydown} — the input keeps focus, so the
-   * `cdkListbox` keyboard manager never owns the keystrokes itself; we mirror
-   * the active-descendant pattern with this signal instead.
-   */
+  /** Index of the highlighted item in `filteredItems()`. */
   readonly activeIndex = signal<number>(0);
 
   /** Live list of projects fetched on init and refreshed on settled events. */
@@ -184,11 +168,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   private readonly positionBuilder = inject(OverlayPositionBuilder);
 
   private dialogRef: DialogRef<unknown, unknown> | null = null;
-  /**
-       True while we are programmatically closing the dialog (signal flipped to
-      false). Prevents the `closed` subscription from re-calling
-      `closePalette()` and looping.
-   */
+  /** True while programmatically closing the dialog, to prevent re-entry. */
   private closingProgrammatically = false;
 
   private unsubProjectSettled: (() => void) | null = null;
@@ -299,12 +279,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
     });
   });
 
-  /**
-   * Wires three effects:
-   *  1. open/close the CDK Dialog in response to `paletteOpen()` flipping;
-   *  2. reset the query and active index on each fresh open;
-   *  3. clamp the active index when the filtered list shrinks.
-   */
+  /** Wires effects for dialog visibility, query/index reset, and index clamping. */
   constructor() {
     effect(() => {
       if (this.ui.paletteOpen()) {
@@ -357,9 +332,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Forwards arrow / Home / End / Enter keystrokes from the search input
-   * down to the active-descendant signal so the user can navigate the list
-   * while keeping focus on the input.
+   * Forwards arrow/Home/End/Enter keys from the search input to the active-descendant signal.
    * @param event - Keydown from the search input.
    */
   onSearchKeydown(event: KeyboardEvent): void {
@@ -394,9 +367,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Escape closes the palette. CDK Dialog already handles Escape by default,
-   * but we keep this explicit handler so the signal flips first — preventing
-   * a brief render of an "empty" dialog before the effect catches up.
+   * Escape closes the palette.
    * @param event - Keyboard event for the Escape press.
    */
   onEscape(event: Event): void {
@@ -405,9 +376,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * CdkListbox value-change handler. Single-select listbox, so `event.value`
-   * is a 0- or 1-length array; treat any non-empty value as "user picked
-   * this item".
+   * CdkListbox value-change handler; invokes the picked item.
    * @param event - CdkListbox change event.
    */
   onListboxChange(event: ListboxValueChangeEvent<unknown>): void {
@@ -468,8 +437,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
     });
     this.dialogRef.closed.subscribe(() => {
       this.dialogRef = null;
-      // CDK Dialog closed via Escape, backdrop click, or programmatic close.
-      // If we did not initiate it, sync the signal back so the next ⌘K reopens.
+      // Sync signal back if closed externally (Escape, backdrop, or dialog.close).
       if (!this.closingProgrammatically && this.ui.paletteOpen()) {
         this.ui.closePalette();
       }
@@ -497,8 +465,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke('check_for_update');
     } catch {
-      // Outside Tauri or backend rejected — silent fail; the dedicated
-      // settings/Update panel surfaces the error path.
+      // Silent fail — error surfaces in the settings/Update panel.
     }
   }
 

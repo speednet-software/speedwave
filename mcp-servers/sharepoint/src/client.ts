@@ -104,12 +104,7 @@ export interface DriveItemMetadata {
   eTag?: string;
 }
 
-/**
- * Projection of `driveItem` used by image web part composition. Holds the
- * exact fields SharePoint requires for the picker validator to accept the
- * payload on "Save & Close": `sharepointIds` (siteId/webId/listId/
- * listItemUniqueId) + `image` (width/height).
- */
+/** Projection of `driveItem` with the fields image web part composition requires. */
 export interface DriveItemForImage {
   id: string;
   name: string;
@@ -156,12 +151,7 @@ export class SharePointClient {
   private refreshLock = new RefreshLock();
   /** Connection status tracker — surfaces siteId resolve / token health. */
   public readonly statusTracker = new ConnectionStatusTracker();
-  /**
-   * Memoized lazy resolve of composite siteId — reuses the shared
-   * {@link memoizedPromise} helper (`shared/promise-memo.ts`). First call
-   * does the Graph lookup + token re-read + mutates `this.config.siteId`
-   * to composite form. Subsequent calls share the cached promise.
-   */
+  /** Memoized lazy resolve of composite siteId via {@link memoizedPromise}. */
   private readonly _resolveSiteIdMemo = memoizedPromise<void>({
     fetch: () => this._resolveSiteIdOnce(),
   });
@@ -180,13 +170,8 @@ export class SharePointClient {
   }
 
   /**
-   * Inner resolve: Graph lookup + token re-read + mutate `this.config.siteId`
-   * to composite form. Updates the status tracker. Throws on failure so the
-   * shared {@link memoizedPromise} clears its cache for retry.
-   *
-   * Path-form siteIds still work against Graph during the warm-up window
-   * (most file/page endpoints accept both forms), so tools called before
-   * resolve completes degrade gracefully.
+   * Resolve path-form siteId to composite; updates the status tracker.
+   * Throws on failure so the memoized cache clears for retry.
    */
   private async _resolveSiteIdOnce(): Promise<void> {
     if (!this.config.siteId.includes(':')) {
@@ -223,12 +208,7 @@ export class SharePointClient {
     }
   }
 
-  /**
-   * Fire-and-forget warm-up from `initializeSharePointClient`. The HTTP
-   * listener is never blocked — resolve runs in the background, mutating
-   * `this.config.siteId` once Graph responds. Subsequent calls share the
-   * cached promise from {@link memoizedPromise} (shared SSOT).
-   */
+  /** Fire-and-forget background siteId resolution; mutates config.siteId once Graph responds. */
   warmupSiteId(): void {
     void this._resolveSiteIdMemo().catch(() => {
       // Failure already logged + tracker updated in _resolveSiteIdOnce.
@@ -253,12 +233,7 @@ export class SharePointClient {
     this.tokenManager.clearTokenSaveError();
   }
 
-  /**
-   * Get health status. Returns the shared HealthStatus shape extended with
-   * SharePoint's `tokenSaveError` (ADR-060) so a single shape covers both the
-   * connection-test pattern used by other workers and SharePoint's
-   * token-refresh-aware health check.
-   */
+  /** Get health status including `tokenSaveError` (ADR-060). */
   getHealthStatus(): HealthStatus {
     const { tokenSaveError } = this.tokenManager.getHealthStatus();
     return {
@@ -649,12 +624,7 @@ export class SharePointClient {
   }
 
   /**
-   * Fetch a driveItem by its path under the site's default drive. Used by
-   * page tools that need `sharepointIds` (siteId/webId/listId/listItemUniqueId)
-   * + image dimensions to compose an image web part body — SharePoint's UI
-   * "Save & Close" reconciliation drops external image URLs that lack these
-   * ids, so the worker must pin every image to a real Site Assets / Documents
-   * file before pushing the web part.
+   * Fetch a driveItem by its path under the site's default drive.
    * @param sharepointPath - path relative to the drive root (e.g. "speedwave-hero.jpg")
    * @returns driveItem id, sharepointIds, image dimensions, webUrl, name
    * @throws {Error} If path is invalid or the driveItem is not found
@@ -866,23 +836,12 @@ export type ResolveResult =
   | { ok: false; reason: 'validation' | 'transient' | 'not_found' | 'network'; detail: string };
 
 /**
- * Resolve a path-form site id (`{hostname}:/sites/{path}:`) to its composite
- * id (`{hostname},{site-guid},{web-guid}`). Composite is accepted by every
- * Graph endpoint; path-form has documented support for `/sites/{path}` and
- * `/sites/{path}:/drive` but surfaces as 400 on some sub-endpoints (notably
- * `/drive/root/children`). One authorised lookup at startup sidesteps the
- * whole class of bugs and adds no new trust surface — the token is already
- * present in `/tokens`.
- *
- * Defence in depth: the function re-validates `siteId` through
- * `validateGraphSiteId` even though `initializeSharePointClient` already
- * does so. The helper is exported, so a future caller that forgets the
- * validator would otherwise interpolate user-controlled data into a URL.
+ * Resolve a path-form site id to its composite id; re-validates via `validateGraphSiteId`.
  * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
  * @param accessToken - bearer token used for the lookup
  * @param opts - cold-start refresh tuning
  * @param opts.tokensDir - tokens mount path (default {@link defaultTokensDir}); only read when refreshing
- * @param opts.refreshOn401 - on a 401, refresh via `authedRequest` and retry once (default true). Set false in unit tests that don't mock the refresh worker.
+ * @param opts.refreshOn401 - on a 401, refresh via `authedRequest` and retry once (default true)
  * @returns the composite id (or untouched value if already composite), or a typed error
  */
 export async function resolveCompositeSiteId(
@@ -986,10 +945,7 @@ export async function resolveCompositeSiteId(
 }
 
 /**
- * Reject anything that isn't a Graph site id. Fail-closed: no URL normalization
- * in the worker — the token mount sits at a trust boundary and a parser bug
- * could send the bearer to a wrong tenant. Accept only the two Graph-native
- * forms (composite, path) and let setup-time tooling produce them.
+ * Validate a Graph site id, fail-closed (accept only composite or path form).
  * @param siteId - raw value loaded from `/tokens/site_id`
  * @returns user-facing error message, or `null` when the value is acceptable
  */
@@ -1025,13 +981,7 @@ export function validateGraphSiteId(siteId: string): string | null {
 }
 
 /**
- * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
- * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave up` without configuring all integrations
- * - Healthcheck reports `configured: false` for unconfigured services
- * - Tools return clear "not configured" error when called
- *
- * DO NOT change this to throw - it breaks container startup for unconfigured services.
+ * Initialize the SharePoint client; returns null (not throws) when tokens are missing/invalid.
  * @returns Configured SharePointClient instance, or null if tokens not found/invalid
  */
 export async function initializeSharePointClient(): Promise<SharePointClient | null> {

@@ -1,10 +1,5 @@
-//! Cross-language drift guard: the Desktop cost meter prices turns purely from
-//! `list_anthropic_models` (the serialized `ANTHROPIC_MODELS`), so a Rust-side
-//! model bump that ships an entry without usable pricing — or a 1M-context
-//! family missing its `[1m]` rate — silently leaves the frontend unable to
-//! price the served id. These assertions fail the build before that reaches
-//! the UI. They complement the in-module unit tests in `defaults.rs` from the
-//! public-API surface the frontend actually consumes.
+//! Drift guard: every `ANTHROPIC_MODELS` entry (and each 1M family's `[1m]`
+//! variant) must carry usable pricing the serialized catalog exposes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -37,8 +32,7 @@ fn assert_priced(model_id: &str, label: &str, p: &ModelPricing) {
 
 #[test]
 fn every_catalog_entry_is_priced() {
-    // The frontend derives pricing at runtime from this catalog; a price-less
-    // entry would surface a turn with no cost. Guard the base rate of every id.
+    // Guard the base rate of every catalog id.
     assert!(
         !ANTHROPIC_MODELS.is_empty(),
         "catalog must not be empty — the cost meter has nothing to price"
@@ -50,10 +44,7 @@ fn every_catalog_entry_is_priced() {
 
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
-    // The served id for a 1M family carries the `[1m]` suffix
-    // (`anthropic_default_models_env`); without `pricing_1m` the cost meter
-    // cannot price that id. Require the variant exactly when (and only when)
-    // the family is 1M-context.
+    // Require `pricing_1m` exactly when the family is 1M-context.
     for m in ANTHROPIC_MODELS {
         let is_million = m.context_tokens >= 1_000_000;
         match (&m.pricing_1m, is_million) {
@@ -73,9 +64,7 @@ fn million_context_entries_have_a_priced_1m_variant() {
 
 #[test]
 fn catalog_serializes_pricing_for_the_frontend() {
-    // `list_anthropic_models` serializes the catalog to JSON for the webview;
-    // every entry's wire form must carry `input`/`output` under both `pricing`
-    // and (for 1M families) `pricing_1m`, since the frontend reads those keys.
+    // Wire form must carry `input`/`output` under `pricing` (and `pricing_1m` for 1M families).
     let value =
         serde_json::to_value(ANTHROPIC_MODELS).expect("catalog must serialize for the frontend");
     let entries = value.as_array().expect("catalog serializes as an array");

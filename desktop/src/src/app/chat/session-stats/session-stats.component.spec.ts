@@ -93,7 +93,6 @@ describe('SessionStatsComponent', () => {
       fixture.detectChanges();
       const txt = rootText();
       // in: = input_tokens only (new uncached input), NOT input + cache.
-      // cache_read (22,562 = re-sent history) must NOT inflate `in:`.
       expect(txt).toContain('in:');
       expect(txt).toContain('1,234');
       expect(txt).not.toContain('23,871'); // 1234 + 22562 + 75 — the old (wrong) totalInput
@@ -159,10 +158,7 @@ describe('SessionStatsComponent', () => {
   // ── regression: `in:` must not echo the context numerator ───────────────
   describe('in: vs ctx separation (regression)', () => {
     it('reproduces the screenshot: short chat shows small `in:` but full ctx gauge', () => {
-      // Real session: a tiny new message (181 input) on top of a large
-      // re-sent prompt served from cache (181,532). The ctx gauge correctly
-      // shows the full occupancy (~182k / 1M = 18%), but `in:` must show only
-      // the 181 new tokens — NOT the 181,713 it used to echo from the gauge.
+      // `in:` shows only the 181 new tokens, not the 181,713 gauge numerator.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.5,
@@ -188,8 +184,7 @@ describe('SessionStatsComponent', () => {
     });
 
     it('does not sum input across turns — gauge reflects only the latest turn', () => {
-      // Each turn re-sends history, so cache_read grows turn over turn. The
-      // gauge must track the LATEST turn (replacement), never the running sum.
+      // Gauge tracks the latest turn (replacement), never the running sum.
       const set = (cacheRead: number) =>
         fixture.componentRef.setInput('stats', {
           session_id: 'abc',
@@ -212,8 +207,7 @@ describe('SessionStatsComponent', () => {
     });
 
     it('handles a local model (no prompt cache): in: equals the whole prompt', () => {
-      // Local LLM has no prompt cache — cache fields are absent. `in:` then
-      // equals input_tokens (the whole prompt), and the gauge matches it.
+      // No prompt cache → `in:` equals input_tokens and the gauge matches it.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -280,8 +274,7 @@ describe('SessionStatsComponent', () => {
     });
 
     it('renders in/out without cr/cw breakdown when cache tokens are absent', () => {
-      // The terminal-minimal layout collapses cr/cw into the `in:` total —
-      // cr/cw are no longer surfaced as their own segments.
+      // cr/cw collapse into the `in:` total, not surfaced as own segments.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.05,

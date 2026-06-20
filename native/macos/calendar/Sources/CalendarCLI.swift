@@ -27,8 +27,7 @@ struct CalendarCLI {
         "check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event"
 
     static func main() {
-        // Shared store: the access guard requests permission, then the command
-        // handlers operate on the same store. check_permission uses its own gate.
+        // Shared store for access guard and handlers; check_permission uses its own gate.
         let store = EKEventStore()
         runCLI(
             cliName: "calendar-cli",

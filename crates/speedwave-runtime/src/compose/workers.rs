@@ -18,13 +18,10 @@ use crate::plugin;
 /// - Injects `MCP_<SERVICE>_AUTH_TOKEN=<token>` env var into the worker container
 /// - Mounts the token file as `/secrets/<service>-auth-token:ro` into the hub
 ///
-/// Hub reads tokens from `/secrets/` files (auth-tokens.ts), not env vars.
-/// Workers read tokens from env vars. This asymmetry is enforced by `check_no_tokens_in_hub`.
-/// Creates the per-project secrets dir under an explicit data dir so render
-/// under a tempdir never writes the global `~/.speedwave/secrets`.
-/// Injects `SPW_CREDENTIALS_DIGEST` into every enabled MCP worker so a
-/// credential rotation changes that worker's config-hash and idempotent
-/// `compose up` recreates exactly it (token bytes never enter the YAML).
+/// Hub reads tokens from `/secrets/` files (auth-tokens.ts); workers from env
+/// vars — asymmetry enforced by `check_no_tokens_in_hub`.
+/// Injects `SPW_CREDENTIALS_DIGEST` into every enabled MCP worker so credential
+/// rotation changes its config-hash (token bytes never enter the YAML).
 pub(crate) fn apply_credentials_digests_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -49,8 +46,7 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         })
         .unwrap_or_default();
     for name in service_names {
-        // strip_prefix once — trim_start_matches would over-strip a plugin
-        // service_id that itself starts with "mcp-" (compose name mcp-mcp-x).
+        // strip_prefix once — not trim_start_matches (over-strips mcp-mcp-x).
         let key = name.strip_prefix("mcp-").unwrap_or(&name);
         match credentials_digest(&tokens_root.join(key)) {
             Ok(Some(digest)) => {
@@ -148,11 +144,7 @@ fn ensure_worker_auth_token(
     let token_file_name = format!("{token_key}-auth-token");
     let token_path = secrets_dir.join(&token_file_name);
 
-    // Reject symlinks before is_file() — is_file() follows symlinks and would
-    // return true for a symlink pointing at a regular file, letting an
-    // attacker with write access to the secrets dir substitute the auth
-    // token. Falls through to the cleanup branch which logs and removes the
-    // planted symlink.
+    // Reject symlinks before is_file() — is_file() follows symlinks.
     let token = if !token_path.is_symlink() && token_path.is_file() {
         let content = std::fs::read_to_string(&token_path)?.trim().to_string();
         if content.is_empty() {
@@ -181,9 +173,7 @@ fn ensure_worker_auth_token(
         uuid::Uuid::new_v4().to_string()
     };
 
-    // Atomic write with 0o600 permissions (pattern from update.rs).
-    // Use a unique suffix to avoid collisions when multiple callers write
-    // the same token file concurrently (e.g., parallel tests or processes).
+    // Atomic write with 0o600; unique suffix avoids concurrent-write collisions.
     let tmp_name = format!("{}.{}.tmp", token_file_name, uuid::Uuid::new_v4());
     let tmp_path = secrets_dir.join(&tmp_name);
     std::fs::write(&tmp_path, &token)?;
@@ -313,9 +303,7 @@ pub(crate) fn apply_integrations_filter(
             }
         }
         remove_env_from(&mut doc, "mcp-hub", svc.worker_env);
-        // An egress-less worker (e.g. office, ADR-055) has its own internal network
-        // `{NETWORK_NAME}_{config_key}`; when it is disabled, drop that network and the
-        // hub's attachment to it so the rendered compose has no dangling internal network.
+        // Disabled egress-less worker (ADR-055): drop its internal network + hub attachment.
         if svc.egress_less {
             let net = format!("{network_name}_{}", svc.config_key);
             if let Some(map) = doc.get_mut("networks").and_then(|n| n.as_mapping_mut()) {
@@ -391,8 +379,7 @@ pub(crate) fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env
 
 /// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
 /// into the hub iff `lock.json` is readable and the mount-token file exists.
-/// No-op (returns unchanged YAML) when files absent — any read failure is
-/// treated as not running (avoids TOCTOU vs runtime respawn).
+/// No-op (unchanged YAML) when files absent; any read failure is treated as not running.
 pub(crate) fn apply_worker_config(
     yaml: &str,
     label: &str,
@@ -402,8 +389,7 @@ pub(crate) fn apply_worker_config(
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    // PID-liveness gate (symmetric to apply_oauth_config_with_paths): a stale
-    // lock.json after a Desktop hard-kill would inject a dead WORKER_*_URL.
+    // PID-liveness gate: a stale lock.json must not inject a dead WORKER_*_URL.
     let port = match crate::host_mcp_process::lock::read(lock_path, service) {
         Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
         _ => return Ok(yaml.to_string()),
@@ -463,7 +449,7 @@ mod credentials_digest_tests {
     const YAML: &str = "services:\n  mcp-hub:\n    image: hub\n  mcp-slack:\n    image: slack\n  mcp-github:\n    image: gh\n";
     const YAML2: &str = "services:\n  mcp-hub:\n    image: hub\n  mcp-sharepoint:\n    image: sp\n";
 
-    fn env_of<'a>(yaml: &'a str, svc: &str) -> Option<String> {
+    fn env_of(yaml: &str, svc: &str) -> Option<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         let env = doc["services"][svc].get("environment")?;
         env.as_sequence()?
@@ -536,9 +522,7 @@ mod credentials_digest_tests {
     #[test]
     #[cfg(unix)]
     fn transient_unreadable_dir_skips_worker_not_whole_render() {
-        // A permission error on one worker's token dir must not abort the entire
-        // compose render — other services must still start. The affected worker
-        // runs without SPW_CREDENTIALS_DIGEST for this session.
+        // One token dir's permission error must not abort the whole render.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let tokens = tmp.path().join("tokens");
@@ -590,10 +574,7 @@ mod credentials_digest_tests {
 
     #[test]
     fn write_in_progress_tmp_file_does_not_change_digest() {
-        // writeRestrictedSecret (mcp-servers/shared) writes access_token.tmp.<pid>.<rand>
-        // then renames to access_token. A digest walk that catches the tmp file mid-rename
-        // would spuriously flip SPW_CREDENTIALS_DIGEST and force a worker recreate on every
-        // routine OAuth refresh. Verify that .tmp. files are excluded from the digest.
+        // Verify .tmp. write-in-progress files are excluded from the digest.
         let tmp = tempfile::tempdir().unwrap();
         let tokens = tmp.path().join("tokens");
         let slack_dir = tokens.join("slack");

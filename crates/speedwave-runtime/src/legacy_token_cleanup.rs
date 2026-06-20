@@ -17,10 +17,8 @@ pub fn run_legacy_token_cleanup_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
 
-/// Inner entry point parameterised by the data dir. Production goes through
-/// `run_legacy_token_cleanup_at_startup`; tests pass an explicit tmp dir to
-/// avoid the `consts::data_dir()` `OnceLock` cache shared across the
-/// `cargo test` binary.
+/// Inner entry point parameterised by the data dir. Tests pass an explicit
+/// tmp dir to bypass the cached `consts::data_dir()`.
 fn run_with_data_dir(data_dir: &Path) -> usize {
     let tokens_root = data_dir.join("tokens");
     if !tokens_root.exists() {
@@ -132,8 +130,7 @@ mod tests {
 
     #[test]
     fn does_not_create_oauth_json_during_cleanup() {
-        // Cleanup ≠ migration: the host-only `oauth/<project>/sharepoint.json`
-        // must NOT be created. The user must re-authorize manually.
+        // Cleanup must not create the host-only `oauth/<project>/sharepoint.json`.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-a").join("sharepoint");
@@ -169,8 +166,7 @@ mod tests {
 
     #[test]
     fn handles_partial_legacy_state() {
-        // Only refresh_token exists — other two missing. Cleanup removes what
-        // is present and reports the project as cleaned.
+        // Only refresh_token exists — other two missing.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-c").join("sharepoint");
@@ -216,10 +212,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn does_not_crash_on_read_only_sharepoint_dir() {
-        // Sanitation must be best-effort: a read-only sp_dir prevents
-        // `remove_file` from succeeding, but cleanup must keep going (log + skip)
-        // rather than panic. The chmod is reverted before the test ends so the
-        // tempdir cleanup that runs on drop can remove the tree.
+        // A read-only sp_dir must not panic cleanup; perms restored before drop.
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
@@ -229,10 +222,7 @@ mod tests {
 
         std::fs::set_permissions(&sp_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        // Must not panic. Return value is best-effort; we accept either 0
-        // (remove_file failed, no file actually removed) or 1 (the FS allowed
-        // the unlink despite ro dir mode bits on some platforms — root /
-        // certain CI sandboxes).
+        // Must not panic; return value is best-effort (0 or 1 both accepted).
         let _ = run_with_data_dir(data_dir);
 
         // Restore writable perms so tempdir cleanup can recurse.
@@ -264,8 +254,7 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_files_in_sharepoint_dir() {
-        // A future field added to credential_files (e.g. base_path) must not
-        // be touched by this cleanup — only the SSOT-listed legacy files.
+        // Only the SSOT-listed legacy files are touched; other files survive.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-e").join("sharepoint");

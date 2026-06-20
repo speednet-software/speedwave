@@ -62,9 +62,6 @@ const DRAIN_PREFIX_RE = /^(?:STDOUT|STDERR): (.*)$/;
 
 /**
  * Parse a single compose-log line into `LogLine`. Tolerant — never throws.
- * Backend (`container_logs_cmd::prefix_lines`) already strips the
- * `speedwave_<project>_` container prefix, so we render whatever source token
- * arrives — no client-side heuristic.
  * @param raw - A single log line as emitted by `get_all_logs`.
  */
 export function parseLogLine(raw: string): LogLine {
@@ -115,10 +112,6 @@ function normalizeLevel(raw: string): LogLevel {
 
 /**
  * Interleave per-source blocks into one chronological stream.
- * Lines without a parseable time inherit the *previous* line's instant; if
- * a line has no parseable time AND no prior line set one (file starts with
- * untimestamped content), it inherits the *next* line's instant so it sits
- * with its block rather than sinking to epoch zero.
  * @param lines - Parsed log lines in backend (block) order.
  */
 export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
@@ -138,10 +131,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
     }
   }
   const keyed = lines.map((line, i) => ({ line, key: keys[i] }));
-  // `Array.prototype.sort` is stable (ES2019+) — equal keys keep input order.
-  // Lines that remain NaN (no parseable timestamp anywhere in their block) sort
-  // BEFORE all timestamped lines — matches the historical epoch-zero placement
-  // so banner/header lines stay at the top of the view, not hidden at the bottom.
+  // Stable sort (ES2019+); NaN keys sort before timestamped lines.
   return keyed
     .sort((a, b) => {
       if (Number.isNaN(a.key) && Number.isNaN(b.key)) return 0;
@@ -726,18 +716,11 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   private lastRaw = '';
 
   /**
-   * Kicks off the initial log fetch + health refresh + polling. Re-runs the
-   * fetch whenever the project lifecycle settles so the view recovers from
-   * the boot race where the shell loads `activeProject` after this component
-   * has already mounted (without this, the user sees a "No active project"
-   * banner even though the project pill in the header reads correctly).
+   * Kicks off the initial log fetch + health refresh + polling, re-running when the project settles.
    */
   async ngOnInit(): Promise<void> {
     await this.refresh();
-    // SystemHealthService owns the polling loop and the project-settled
-    // health refresh; we just kick it off and read its `health` signal.
-    // Await so the initial snapshot is committed before view tests assert
-    // on it.
+    // SystemHealthService owns polling and the project-settled refresh; we read its `health` signal.
     await this.systemHealth.ensurePolling();
     // Live-tail: silent refresh on the health cadence; sticky-scroll if at bottom.
     this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
@@ -864,11 +847,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Copies the diagnostics path to the clipboard and flips the primary button
-   * label to `copied ✓` for a short moment. Falls back to the error banner if
-   * the clipboard API rejects (e.g. permission denied).
-   */
+  /** Copies the diagnostics path to the clipboard; on rejection surfaces the error banner. */
   protected async copyDiagnosticsPath(): Promise<void> {
     const path = this.diagnosticsPath();
     if (!path) return;
@@ -969,9 +948,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * If the active source filter no longer appears in the latest log set
-   * (container stopped, name changed), fall back to `all` so the empty
-   * "no logs match" state can't be triggered by stale selection alone.
+   * Fall back to `all` if the active source filter no longer appears in the latest log set.
    * @param lines - Most recent parsed log batch.
    */
   private reconcileSourceFilter(lines: readonly LogLine[]): void {

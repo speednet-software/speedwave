@@ -55,8 +55,7 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
         }
         // Closing brace of a sibling top-level item — stop scanning back.
         if l == "}" && lines[i].starts_with('}') {
-            // Top-level close. We've passed the start of an item; if we
-            // haven't seen a test marker by here, this isn't test code.
+            // Top-level close before any test marker: not test code.
             return false;
         }
     }
@@ -71,8 +70,7 @@ fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
 /// (upstream IDE WebSocket, plugin local-UI URL, etc.). Reviewed at landing
 /// time; new entries require justification in the PR.
 const ALLOWLISTED_FILES: &[&str] = &[
-    // Host→host: WS URL Tauri uses to dial the external IDE (VSCode/Cursor)
-    // running on the same machine. Not container-facing.
+    // Host→host: WS URL Tauri uses to dial the external IDE (VSCode/Cursor).
     "desktop/src-tauri/src/bridges/ide_bridge.rs",
     // Host→host: local UI URL returned to the Angular webview.
     "desktop/src-tauri/src/bridges/plugin_host_bridge.rs",

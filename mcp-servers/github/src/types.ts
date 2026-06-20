@@ -1,14 +1,9 @@
 /**
- * GitHub MCP Server Type Definitions
- *
- * Extracted from client.ts for better modularity.
- * Field names mirror the GitHub REST API (mostly snake_case); the client
- * mappers normalize raw responses to these shapes defensively.
+ * GitHub MCP Server type definitions; field names mirror the GitHub REST API.
  */
 
 /**
  * GitHub API client configuration.
- * Contains the authentication token and an optional API base URL.
  * @interface GitHubConfig
  */
 export interface GitHubConfig {

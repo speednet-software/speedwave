@@ -1,6 +1,5 @@
 /**
  * SSOT for user-facing error messages across all MCP workers.
- * All servers import from here — no hardcoded "speedwave setup" strings elsewhere.
  * @module shared/errors
  */
 

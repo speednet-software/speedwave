@@ -23,8 +23,7 @@ function mockMatchMedia(prefersDark: boolean): {
     matches: prefersDark,
     media: '(prefers-color-scheme: dark)',
     onchange: null,
-    // Honour `options.signal` like a real EventTarget so AbortController-based
-    // teardown is exercised faithfully by the tests.
+    // Honour `options.signal` like a real EventTarget.
     addEventListener: (
       _: string,
       fn: (e: MediaQueryListEvent) => void,
@@ -58,14 +57,7 @@ function mockMatchMedia(prefersDark: boolean): {
   };
 }
 
-/**
- * Build a fresh in-memory `Storage`-shaped object for each test. Some test
- * runner / Node combinations (notably odd-numbered Node releases under the
- * `--localstorage-file` experimental flag) leave the global `localStorage`
- * accessor with an unusable shape — `getItem` / `setItem` may be missing or
- * throw. Installing our own implementation per-test removes that variance
- * and gives us deterministic state regardless of jsdom version.
- */
+/** Build a fresh in-memory `Storage`-shaped object for each test. */
 function makeMemoryStorage(): Storage {
   const data = new Map<string, string>();
   return {
@@ -363,8 +355,7 @@ describe('ThemeService', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
     });
 
-    // Pins the literal the anti-FOUC script in index.html depends on — a rename
-    // of MODE_STORAGE_KEY without updating index.html would flash on every boot.
+    // Pins the literal the anti-FOUC script in index.html depends on.
     it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
       expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
     });

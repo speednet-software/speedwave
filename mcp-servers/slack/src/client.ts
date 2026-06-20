@@ -221,7 +221,7 @@ const AUTH_EXPIRED_ERRORS = new Set(['token_expired', 'invalid_auth']);
 /**
  * True when a thrown `@slack/web-api` error indicates a stale access token.
  * Terminal states (`token_revoked`, `account_inactive`) deliberately return
- * false — a refresh cannot heal them and would burn the rate window.
+ * false — a refresh cannot heal them.
  * @param err - error thrown by a WebClient call
  */
 export function isSlackAuthExpiredError(err: unknown): boolean {
@@ -230,10 +230,7 @@ export function isSlackAuthExpiredError(err: unknown): boolean {
 }
 
 /**
- * Run a WebClient call with rotating-token semantics: on a stale-token error,
- * `authedSdkCall` refreshes once via the oauth worker (single-flight) and
- * retries once. The WebClient binds its token at construction, so it is
- * recreated whenever the token on disk rotated.
+ * Run a WebClient call with rotating-token refresh-and-retry on stale errors.
  * @param clients - the client container
  * @param fn - the SDK call to execute
  */
@@ -266,8 +263,7 @@ export async function slackCall<T>(
  * @returns {string} Formatted, user-friendly error message
  */
 export function formatSlackError(error: unknown): string {
-  // Refresh-path failures (oauth worker): an invalid_grant class means the
-  // refresh token is dead (30-day expiry, revocation) — only a new sign-in helps.
+  // invalid_grant: refresh token dead (revocation or 30-day expiry) — only new sign-in helps.
   if (error instanceof OAuthRefreshError) {
     if (error.message.includes('invalid_grant')) {
       return withSetupGuidance(
@@ -327,11 +323,7 @@ export function formatSlackError(error: unknown): string {
 // Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * `conversations.list` pages may carry FAR fewer entries than `limit`
- * (Slack returns ~200 even with limit=1000), so a single call silently
- * drops channels — iterate `next_cursor` until exhausted.
- */
+// conversations.list may return far fewer entries than limit; iterate next_cursor until exhausted.
 const CHANNEL_LIST_PAGE_LIMIT = 1000;
 
 /** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
@@ -724,8 +716,7 @@ export async function getFileContent(
         'Download it into the workspace with downloadFile instead.'
     );
   }
-  // Buffering is bounded — the worker container has 128 MiB total, so a huge
-  // text file must be rejected from metadata, not buffered then truncated.
+  // Reject oversized files from metadata — bounded worker buffer.
   if (meta.size !== undefined && meta.size > MAX_DOWNLOAD_BYTES) {
     throw new Error(
       `File '${meta.name}' is ${meta.size} bytes — too large to read. ` +

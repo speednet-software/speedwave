@@ -50,8 +50,6 @@ class TestHostComponent {
 
 /**
  * Query the dialog content rendered into the CDK overlay container.
- * CDK Dialog renders the template into a portal attached to `document.body`,
- * not inside the host fixture, so we query the global document.
  * @param sel CSS selector to locate the element under document.
  */
 function q(sel: string): HTMLElement | null {

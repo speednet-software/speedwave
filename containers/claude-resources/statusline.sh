@@ -1,15 +1,6 @@
 #!/bin/bash
-# Speedwave statusline for Claude Code — displays model, context usage,
-# rate limits, and cost. Reads JSON from stdin (Claude Code pipes
-# conversation state). Outputs a single line for the status bar.
-#
-# Security: no network calls, no token access, no credentials — safe for the
-# Speedwave container (cap_drop: ALL, no-new-privileges). Reads .git for
-# branch name only (no secrets in .git/HEAD).
-#
-# JSON parsing: regex-based, no jq dependency. Handles flat and 2-level
-# nested keys. Input is collapsed to a single line before extraction
-# to handle both minified and pretty-printed JSON from Claude Code.
+# Speedwave statusline for Claude Code — reads JSON state from stdin, outputs
+# a single status-bar line (model, context usage, rate limits, cost).
 
 set -f
 
@@ -26,9 +17,7 @@ WHITE='\033[37m'
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-# build_bar <percent> → colored bar "██░░░" (5 chars)
-# Sets global BAR_COLOR for caller to reuse on percentage text.
-# Thresholds: <50% green, 50-75% yellow, 76-90% red, >90% bold red.
+# build_bar <percent> → colored bar "██░░░" (5 chars); sets global BAR_COLOR.
 BAR_COLOR=""
 build_bar() {
     local pct="$1"
@@ -76,15 +65,12 @@ if [ ! -t 0 ]; then
     INPUT="$(cat)"
 fi
 
-# Collapse to single line — makes regex extraction safe for both
-# minified and pretty-printed JSON. This is the key simplification:
-# instead of building a multi-line-aware parser, normalize the input.
+# Collapse to single line for regex extraction.
 INPUT="$(printf '%s' "$INPUT" | tr '\n' ' ')"
 
 # ── JSON extraction helpers ──────────────────────────────────────────────────
 
-# Safe JSON field extraction using regex — no jq dependency.
-# Works on single-line JSON (input is collapsed above).
+# JSON field extraction via regex, no jq — operates on single-line input.
 extract_json_string() {
     local json="$1" key="$2"
     local pattern="\"${key}\"[[:space:]]*:[[:space:]]*\""
@@ -110,9 +96,8 @@ extract_json_float() {
     fi
 }
 
-# extract_block "json" "key" → returns content between { and } for "key": { ... }
-# Limitation: handles 1 level of nesting only. Sufficient for rate_limits.five_hour
-# and cost objects. If Claude Code ever nests deeper, this needs revisiting.
+# extract_block "json" "key" → content between { and } for "key": { ... }
+# Handles 1 level of nesting only.
 extract_block() {
     local json="$1" key="$2"
     local pattern="\"${key}\"[[:space:]]*:[[:space:]]*\{"
@@ -143,9 +128,7 @@ used_pct_raw="$(extract_json_float "$INPUT" "used_percentage")"
 used_pct="${used_pct_raw%%.*}"
 used_pct="${used_pct:-0}"
 
-# Rate limits — detect presence of rate_limits key, then extract five_hour/seven_day
-# directly from INPUT. Extracting sub-blocks directly avoids the %%\}* limitation
-# (which would stop at the first } inside a nested object when extracting rl_block).
+# Rate limits — detect rate_limits key, then extract five_hour/seven_day from INPUT.
 has_rl_key=false
 rl_pattern='"rate_limits"[[:space:]]*:[[:space:]]*\{'
 if [[ "$INPUT" =~ $rl_pattern ]]; then
@@ -187,10 +170,8 @@ if [[ -z "$total_cost" ]]; then
 fi
 
 # ── Git branch ───────────────────────────────────────────────────────────────
-# Read current branch from workspace if it's a git repo. Graceful fallback:
-# no git, no repo, worktree, detached HEAD — all handled silently.
-# Skips the [ -d .git ] check: in git worktrees .git is a file, not a dir.
-# STATUSLINE_WORKSPACE_DIR allows tests to override the workspace path.
+# No [ -d .git ] check: in git worktrees .git is a file, not a dir.
+# STATUSLINE_WORKSPACE_DIR overrides the workspace path (tests).
 
 WORKSPACE="${STATUSLINE_WORKSPACE_DIR:-/workspace}"
 git_branch=""

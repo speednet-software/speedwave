@@ -30,8 +30,7 @@ describe('NativeThemeAdapter', () => {
   });
 
   it('attempts the native call when running inside Tauri', () => {
-    // Presence of the internals object flips the guard; the dynamic import of
-    // the window API then rejects under jsdom and is swallowed via .catch.
+    // Internals object flips the guard; dynamic import rejects under jsdom, swallowed via .catch.
     (window as unknown as Record<string, unknown>)['__TAURI_INTERNALS__'] = { invoke: vi.fn() };
     expect(() => adapter.syncWindowTheme('light')).not.toThrow();
   });

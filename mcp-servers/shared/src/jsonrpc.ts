@@ -1,7 +1,4 @@
-/**
- * JSON-RPC 2.0 Message Handler for MCP
- * Provides a generic handler that can be configured with tools
- */
+/** JSON-RPC 2.0 message handler for MCP, configurable with tools */
 
 import type {
   JSONRPCRequest,
@@ -22,10 +19,7 @@ import { ts } from './logger.js';
 /** Page size for tools/list pagination */
 const TOOLS_LIST_PAGE_SIZE = 100;
 
-/**
- * JSON-RPC Error Builder
- * Creates standardized error objects
- */
+/** Builds standardized JSON-RPC error objects */
 export class JSONRPCErrorBuilder {
   /**
    * Creates a parse error (code -32700) for malformed JSON
@@ -83,10 +77,7 @@ export class JSONRPCErrorBuilder {
   }
 }
 
-/**
- * Configuration options for creating a JSON-RPC handler instance.
- * Used to identify the server in initialization responses.
- */
+/** Configuration options for creating a JSON-RPC handler instance */
 export interface JSONRPCHandlerOptions {
   /** Server name */
   name: string;
@@ -192,8 +183,7 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Handle JSON-RPC notifications (messages without id).
-   * Per JSON-RPC spec, notifications produce no response.
+   * Handle JSON-RPC notifications (messages without id, no response).
    * @param method - Notification method name
    * @param params - Optional notification parameters
    */

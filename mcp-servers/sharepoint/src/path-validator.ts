@@ -1,16 +1,9 @@
-/**
- * Path Validation Module - Security validation for SharePoint and local paths
- * @module sharepoint/path-validator
- */
+/** Path validation for SharePoint and local paths. */
 
 import path from 'path';
 import { ts } from '@speedwave/mcp-shared';
 
-/**
- * Paths that are denied within /workspace to protect sensitive project files.
- * Each entry is matched as a prefix: the path must equal the entry or start with entry + '/'.
- * Exception: '/workspace/.env' is an exact match only (blocks .env but allows .envrc).
- */
+/** Denied paths within /workspace; prefix-matched except '/workspace/.env' which is exact-match only. */
 const DENYLIST: string[] = [
   '/workspace/.git',
   '/workspace/.env',
@@ -21,15 +14,10 @@ const DENYLIST: string[] = [
   '/workspace/.kube',
 ];
 
-/**
- * Validates paths for security to prevent path traversal attacks and unauthorized access
- * @class PathValidator
- */
+/** Validates paths against traversal, absolute paths, null bytes, and URL-encoded attacks. */
 export class PathValidator {
   /**
-   * Validate SharePoint path (security: prevent traversal)
-   * Checks for path traversal attempts, absolute paths, null bytes,
-   * and URL-encoded traversal sequences (%2e%2e)
+   * Validate SharePoint path: rejects traversal, absolute paths, null bytes, URL-encoded sequences.
    * @param {string} pathStr - Path to validate
    * @returns {boolean} True if path is safe, false otherwise
    */
@@ -112,10 +100,7 @@ export class PathValidator {
   }
 
   /**
-   * Validate local path for security.
-   * Accepts paths within /workspace only (wide mount).
-   * Rejects paths targeting sensitive locations via denylist (.git, .env, .speedwave).
-   * Claude and MCP workers share the same mount, so no path translation needed.
+   * Validate local path: must be within /workspace and not on the denylist.
    * @param {string} localPath - Local path to validate
    * @returns {boolean} True if path is safe, false otherwise
    */

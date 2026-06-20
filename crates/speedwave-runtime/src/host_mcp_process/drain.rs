@@ -1,14 +1,6 @@
-//! Stdout/stderr drain shared by every host MCP worker manager.
-//!
-//! After spawning the Node child, the manager must:
-//! 1. Read the first stdout line as `{"port": N}` to learn the OS-assigned port.
-//! 2. Keep draining stdout/stderr for the rest of the child's lifetime — if
-//!    either pipe blocks or closes, Node dies (SIGPIPE / write block).
-//!
-//! Both pipes are appended to a per-worker audit log. The drain handles
-//! returned by `drain_and_read_port` must be joined by the caller in
-//! `stop()` so the log-file handles are released before the file is
-//! truncated or rotated.
+//! Stdout/stderr drain shared by every host MCP worker manager: reads
+//! the `{"port": N}` line, keeps draining both pipes, and appends them to
+//! a per-worker audit log. Drain handles must be joined by the caller.
 
 use std::io::BufRead;
 use std::path::Path;
@@ -32,13 +24,12 @@ pub fn parse_port_line(line: &str) -> Option<u16> {
     u16::try_from(port).ok()
 }
 
-/// Spawn background threads to drain both stdout and stderr of the
-/// child, then wait for the `{"port": N}` JSON line on stdout.
-/// Returns the port and the join handles for both drain threads so the
-/// caller can join them on stop.
+/// Spawn background threads to drain both stdout and stderr of the child,
+/// wait for the `{"port": N}` JSON line on stdout, and return the port plus
+/// the join handles for both drain threads.
 ///
-/// `service_tag` is included in `log::debug`/`log::warn` output and in
-/// the log-file row prefix so multi-worker logs are diagnosable.
+/// `service_tag` is included in `log::debug`/`log::warn` output and in the
+/// log-file row prefix.
 pub fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
@@ -115,9 +106,7 @@ pub(crate) mod test_support {
     use std::process::{Child, Stdio};
 
     /// Spawn a `bash -c` child whose stdout emits the given lines (one
-    /// per `printf '%s\n'`). Test-only fixture shared by every worker's
-    /// drain tests; lets them exercise `drain_and_read_port` without
-    /// pulling Node into the test binary.
+    /// per `printf '%s\n'`).
     pub fn spawn_stdout_lines(lines: &[&str]) -> Child {
         let mut script = String::new();
         for line in lines {
@@ -134,11 +123,8 @@ pub(crate) mod test_support {
             .unwrap()
     }
 
-    /// Minimal Node "fake worker" used by every host MCP worker manager's
-    /// spawn tests. Binds 127.0.0.1 on an OS-assigned port, announces it
-    /// on stdout as `{"port":N}` (the universal handshake — see
-    /// [`super::parse_port_line`]), then sleeps so the parent can probe
-    /// PID / port / lock.json before the child exits.
+    /// Minimal Node "fake worker": binds 127.0.0.1 on an OS-assigned port,
+    /// announces it on stdout as `{"port":N}`, then sleeps.
     pub const FAKE_WORKER_JS: &str = r#"
 const http = require('http');
 const srv = http.createServer((_, r) => { r.end('ok'); });
@@ -157,10 +143,6 @@ setTimeout(() => {}, 60000);
     }
 
     /// Block (up to ~1 s) until `is_node_process(pid)` reports true.
-    /// Linux CI has a fork/execve race where the child PID exists but
-    /// `/proc/<pid>/comm` is still the parent shell briefly; this
-    /// pollster lets stale-detection tests skip past that window
-    /// instead of asserting under the race.
     pub fn wait_for_node_comm(pid: u32) {
         for _ in 0..40 {
             if super::super::stale::is_node_process(pid) {
@@ -172,7 +154,7 @@ setTimeout(() => {}, 60000);
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::test_support::spawn_stdout_lines;
     use super::*;
@@ -259,14 +241,9 @@ mod tests {
     }
 
     // ── test_support smoke tests ────────────────────────────────────────
-    // These keep the shared fixtures (FAKE_WORKER_JS, write_fake_worker,
-    // wait_for_node_comm) compiling and exercised until the per-worker
-    // managers consume them directly.
 
     #[test]
     fn fake_worker_js_announces_a_port_and_is_picked_up_by_drain() {
-        // End-to-end smoke: write the fake worker, spawn Node on it,
-        // and confirm `drain_and_read_port` reads a non-zero port.
         // Skips when Node is not on PATH (e.g. a stripped CI image).
         if std::process::Command::new("node")
             .arg("--version")
@@ -298,10 +275,7 @@ mod tests {
 
     #[test]
     fn wait_for_node_comm_returns_quickly_for_definitely_not_node_pid() {
-        // PID 1 is init/launchd on every Unix and System on Windows —
-        // never node. `wait_for_node_comm` polls up to ~1 s; this test
-        // confirms it returns without hanging when the PID will never
-        // match. We do not assert timing — only that it returns.
+        // PID 1 is never node; this confirms it returns without hanging.
         super::test_support::wait_for_node_comm(1);
     }
 }

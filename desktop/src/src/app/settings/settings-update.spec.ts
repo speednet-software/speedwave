@@ -36,10 +36,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     component = fixture.componentInstance;
   });
 
-  // toggleAutoCheck/setCheckInterval were removed alongside the UI controls.
-  // Auto-check is now hard-coded to true with a 12 h interval; the component
-  // self-rewrites persisted state on init when it drifts (covered by the
-  // dedicated update-section.component.spec.ts).
+  // Auto-check state is self-rewritten by the component per update-section.component.spec.ts
 
   describe('installUpdate()', () => {
     it('calls install_update_and_reconcile with expectedVersion', async () => {

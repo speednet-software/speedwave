@@ -2,12 +2,7 @@
  * Append-only audit log for OAuth refresh/forget events (ADR-060 §"Threat model").
  *
  * One line per event, ISO-8601 timestamp, no token contents. Log file mode 0o600.
- *
- * Rotation: when the live file exceeds {@link DEFAULT_MAX_BYTES} we rename it
- * to `<logPath>.1` (overwriting any older `.1`) and start a fresh file. KISS —
- * only one historical copy is kept; we are not building a logging framework.
- * The cost is one extra `stat` per append, which dominates nothing compared to
- * the refresh HTTP round-trip these events accompany.
+ * Rotates to `<logPath>.1` when it exceeds {@link DEFAULT_MAX_BYTES}.
  */
 import { appendFile, chmod, rename, stat } from 'node:fs/promises';
 
@@ -25,17 +20,11 @@ export interface AuditEvent {
   outcome: AuditOutcome;
 }
 
-/**
- * Rotation threshold. 1 MiB ≈ tens of thousands of audit lines — enough to
- * see the cadence of a noisy worker without growing unbounded across months
- * of background refreshes. The previous file is kept as `<logPath>.1`.
- */
+/** Rotation threshold in bytes; one historical copy kept as `<logPath>.1`. */
 export const DEFAULT_MAX_BYTES = 1 * 1024 * 1024;
 
 /**
- * Rotate `<logPath>` to `<logPath>.1` when it grows past `maxBytes`. Best
- * effort: any error (missing file, EACCES) leaves the live log in place and
- * the next append continues into it.
+ * Rotate `<logPath>` to `<logPath>.1` when it grows past `maxBytes`. Best-effort.
  * @param logPath - the live log path
  * @param maxBytes - rotate when current size strictly exceeds this value
  */
@@ -59,9 +48,7 @@ export async function rotateIfNeeded(logPath: string, maxBytes: number): Promise
 }
 
 /**
- * Append a single event to the audit log. Best-effort: a write failure is
- * logged to stderr but does not block the refresh/forget operation itself
- * (the caller has already mutated state by then).
+ * Append a single event to the audit log. Best-effort: write failures go to stderr.
  * @param logPath - absolute path to the audit log file
  * @param event - the event to record (timestamps generated at call site)
  * @param maxBytes - optional rotation threshold (override for tests)
@@ -76,8 +63,7 @@ export async function appendAuditEvent(
   await rotateIfNeeded(logPath, maxBytes);
   try {
     await appendFile(logPath, line, { mode: 0o600 });
-    // chmod again — appendFile mode only applies on file creation. Any
-    // chmod failure falls through to the outer catch (logged best-effort).
+    // chmod again — appendFile mode only applies on file creation.
     await chmod(logPath, 0o600);
   } catch (err) {
     console.error(

@@ -1,8 +1,6 @@
-//! Drift detector: every host→engine path must be produced by the SSOT in
-//! `engine_path` (`to_engine_path` / `str_to_engine_path` / `vm_path_join`).
-//! No hand-rolled WSL translation, no `PathBuf::join` on an engine-side path,
-//! no second `wslpath` mechanism, no `windows_to_wsl_path` outside the runtime
-//! crate. Bypass a false positive with `// SSOT-allow: <reason>`.
+//! Drift detector: every host→engine path must use the SSOT in `engine_path`
+//! (`to_engine_path` / `str_to_engine_path` / `vm_path_join`).
+//! Bypass a false positive with `// SSOT-allow: <reason>`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -33,10 +31,9 @@ fn manifest_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `.join(` invoked on a binding whose name signals it already holds an
-/// engine-side path — the exact shape of the `examplePluginContainerfile` bug. Use
-/// `vm_path_join` instead. (A chained `prepare_build_context(...).join(...)` is
-/// caught by the `CHAINED_JOIN` rule below, not here.)
+/// `.join(` on a binding signaling an engine-side path (e.g. `vm_root.join(`) —
+/// use `vm_path_join`. Chained `prepare_build_context(...).join(...)` caught by
+/// the `CHAINED_JOIN` rule.
 const JOIN_ON_ENGINE_PATTERNS: &[&str] = &[
     "vm_root.join(",
     "wsl_path.join(",
@@ -60,12 +57,6 @@ const WSLPATH_PATTERNS: &[&str] = &["\"wslpath\""];
 /// downstream crate (desktop/cli) may call it — they go through the SSOT.
 const PRIMITIVE_PATTERNS: &[&str] = &["windows_to_wsl_path"];
 
-// Heuristic: scan backward for a test marker, stopping at the first column-0
-// `}` (a top-level item close). Limitation: a column-0 `}` between the
-// violation and its enclosing `mod tests` (e.g. a nested `impl` close at column
-// 0 inside the module) could end the scan early and mis-classify a test-module
-// line as production — a possible false negative. Acceptable: the worst case is
-// the detector flagging real test code, which a `// SSOT-allow:` clears.
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
     for i in (0..idx).rev() {
         let l = lines[i].trim_start();
@@ -145,8 +136,7 @@ fn line_matches(rule: &Rule, line: &str) -> bool {
 
 #[test]
 fn engine_paths_go_through_ssot() {
-    // Self-verify the hard-coded index: if a rule is inserted before it, the
-    // primitive-rule exemption would silently apply to the wrong rule.
+    // Self-verify the hard-coded index against PRIMITIVE_PATTERNS.
     assert_eq!(
         RULES[PRIMITIVE_RULE_IDX].patterns, PRIMITIVE_PATTERNS,
         "PRIMITIVE_RULE_IDX no longer points at the PRIMITIVE_PATTERNS rule — update it"
@@ -179,9 +169,7 @@ fn engine_paths_go_through_ssot() {
                 continue;
             }
             for (ri, rule) in RULES.iter().enumerate() {
-                // SSOT files (engine_path.rs, wsl.rs) own the join/translate/mnt
-                // logic, so rules 0-3 don't apply to them. The primitive rule
-                // never fires inside the runtime crate at all.
+                // SSOT files own the join/translate logic; non-SSOT files must route through engine_path.
                 if is_ssot {
                     continue;
                 }

@@ -1,10 +1,6 @@
 #!/usr/bin/env node
 /**
- * MCP Context7 Worker
- *
- * Wraps the Context7 REST API (`https://context7.com/api/v2/*`) as an MCP
- * worker discoverable by the hub. Anonymous mode supported — see
- * docs/architecture/security.md for the privacy and rate-limit caveats.
+ * MCP Context7 Worker: wraps the Context7 REST API as an MCP worker, anonymous mode supported.
  * @module mcp-context7
  */
 
@@ -12,21 +8,13 @@ import { bootWorker, loadTokenFile, ts } from '@speedwave/mcp-shared';
 import { Context7Client } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-/**
- * Try to load the optional Context7 API key from `/tokens/api_key`.
- *
- * Returns `undefined` (anonymous mode) when the file is missing or empty;
- * propagates other errors so genuine misconfigurations (EACCES on a present
- * file) surface in startup logs rather than being silently swallowed.
- */
+/** Load optional Context7 API key from `/tokens/api_key`; returns undefined (anonymous) if missing/empty. */
 async function loadOptionalApiKey(): Promise<string | undefined> {
   try {
     const key = await loadTokenFile('api_key');
     return key.length > 0 ? key : undefined;
   } catch (e) {
-    // `loadToken` re-throws with `{ cause: originalErrnoException }`, so the fs
-    // errno is reachable as `e.cause.code` — anything other than ENOENT
-    // (EACCES, EISDIR, …) propagates so real misconfigs surface.
+    // fs errno is at `e.cause.code`; non-ENOENT propagates.
     const cause = (e as { cause?: NodeJS.ErrnoException }).cause;
     if (cause?.code === 'ENOENT') {
       return undefined;
@@ -35,9 +23,7 @@ async function loadOptionalApiKey(): Promise<string | undefined> {
   }
 }
 
-// context7 always constructs a client (anonymous mode is valid, not "not
-// configured"), so initClient never returns null. No healthCheck: probing
-// Context7 here would burn the anonymous quota (index.test.ts guards this).
+// Anonymous mode is valid; no healthCheck (would burn anonymous quota).
 bootWorker<Context7Client>({
   serverName: 'mcp-context7',
   version: '0.1.0',

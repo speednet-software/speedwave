@@ -1,12 +1,5 @@
 /**
- * Project/space scope enforcement for the Atlassian worker.
- *
- * The worker authenticates as a real Atlassian account, so by default it can
- * reach everything that account can. The optional `jira_project_keys` /
- * `confluence_space_keys` allowlists narrow that surface: when configured, any
- * operation whose project/space is not in the list — or whose project/space
- * cannot be determined — is rejected with {@link ScopeError}. An empty allowlist
- * means "unrestricted".
+ * Project/space scope enforcement. Optional allowlists narrow surface; empty = unrestricted.
  * @module mcp-atlassian/scope
  */
 
@@ -14,7 +7,7 @@
 export class ScopeError extends Error {
   /**
    * Create a scope-violation error.
-   * @param message - Human-readable explanation of the violation.
+   * @param message - Human-readable violation detail.
    */
   constructor(message: string) {
     super(message);
@@ -23,10 +16,7 @@ export class ScopeError extends Error {
 }
 
 /**
- * Throw {@link ScopeError} if `allowlist` is non-empty and `key` is not in it.
- * Comparison is case-insensitive (Atlassian keys are upper-case). A missing/empty
- * `key` with a configured allowlist is also rejected — callers must resolve the
- * key before the check.
+ * Check if key is in allowlist (case-insensitive). Reject if missing or not in allowlist.
  * @param key - Project/space key to check (may be `undefined`).
  * @param allowlist - Configured allowed keys (empty = unrestricted).
  * @param kind - `'Jira project'` or `'Confluence space'`, for the error message.
@@ -76,12 +66,7 @@ export function assertConfluenceSpaceAllowed(
 }
 
 /**
- * Enforce the Jira project allowlist for an issue ref. When `issueIdOrKey` is a
- * `PROJ-123`-style key the project is parsed directly; when it is a bare numeric
- * ID the key cannot be derived from the string, so — if an allowlist is
- * configured — the operation is rejected with {@link ScopeError} (callers that
- * need numeric-ID support with an allowlist must resolve the issue key first).
- * No-op when no allowlist is configured.
+ * Enforce allowlist for issue key. Numeric IDs rejected if allowlist is configured; callers must resolve key first.
  * @param issueIdOrKey - The Jira issue key (e.g. `PROJ-123`) or numeric ID.
  * @param allowlist - Configured allowed project keys (empty = unrestricted).
  */
@@ -95,8 +80,7 @@ export function assertJiraIssueKeyAllowed(
 }
 
 /**
- * Filter a list of items to those whose key is in the allowlist. When the
- * allowlist is empty the list passes through unchanged.
+ * Filter items by allowlist keys (case-insensitive). Empty allowlist = no filtering.
  * @param items - Items to filter.
  * @param keyOf - Extracts the project/space key from an item.
  * @param allowlist - Configured allowed keys (empty = unrestricted).

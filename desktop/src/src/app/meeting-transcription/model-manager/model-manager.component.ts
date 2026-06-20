@@ -28,11 +28,7 @@ interface ProgressState {
   total: number | null;
 }
 
-/**
- * Whisper + diarization model list with download / delete. Downloads use the
- * network — the line at the bottom says so. The UI reads the catalogue from the
- * backend (`list_transcription_models`) and never hard-codes model names.
- */
+/** Whisper + diarization model list with download / delete. */
 @Component({
   selector: 'app-model-manager',
   standalone: true,
@@ -94,10 +90,7 @@ interface ProgressState {
 export class ModelManagerComponent implements OnInit {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
-  /**
-   * Emitted after the model list changes (download/delete) so the parent can
-   *  re-check whether recording is now possible.
-   */
+  /** Emitted after the model list changes (download/delete). */
   readonly changed = output<void>();
 
   /** Whisper catalogue entries + on-disk status. */
@@ -200,9 +193,7 @@ export class ModelManagerComponent implements OnInit {
   }
 
   /**
-   * Short text for the row's action cell. The template can't host complex
-   * controls per row in a one-liner, so this returns a status string and the
-   * actual download/delete are invoked from the (templated) buttons below.
+   * Action status text for a model row (downloading %, downloaded, or not downloaded).
    * @param m - the model row.
    */
   rowAction(m: ModelStatusEntry): string {

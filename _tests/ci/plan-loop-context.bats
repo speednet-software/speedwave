@@ -1,12 +1,6 @@
 #!/usr/bin/env bats
-# Tests for .claude/scripts/plan-loop-context.sh — the pure helpers that
-# build the AUTHORITATIVE PROJECT CONTEXT block injected into every
-# plan-loop agent's system prompt.
-#
-# These helpers are load-bearing: a bug here means agents either miss
-# rules (security regression) or read corrupted concatenated text
-# (correctness regression). The plan-loop orchestrator mode is hard to
-# test end-to-end, so we cover the helpers in isolation.
+# Tests for .claude/scripts/plan-loop-context.sh — helpers that build the
+# PROJECT CONTEXT block injected into plan-loop agent system prompts.
 
 LIB="$BATS_TEST_DIRNAME/../../.claude/scripts/plan-loop-context.sh"
 
@@ -151,8 +145,6 @@ teardown() {
     printf 'b body\n' > "$TMP/.claude/rules/b.md"
     out="$(build_project_context "$TMP")"
     # The marker for b.md must appear on its own line, not glued to "newline".
-    # Two newlines between file body and next marker means the marker line
-    # starts at column 1.
     [[ "$out" == *"no trailing newline"*$'\n\n'*"b.md"*"$RULE_FILE_MARKER_SUFFIX"* ]]
 }
 
@@ -182,8 +174,7 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 write_result() {
-    # Helper: write a fake reviewer result file with a rules_compliance array.
-    # Args: path, then JSON array string (or "[]" for empty).
+    # Args: result path, JSON array string (or "[]").
     cat > "$1" <<EOF
 { "structured_output": { "rules_compliance": $2 } }
 EOF
@@ -258,13 +249,7 @@ EOF
 }
 
 @test "validate_rules_compliance: malformed JSON does not crash UNDER set -euo pipefail" {
-    # Defensive coverage. plan-loop.sh runs with `set -euo pipefail` and
-    # consumes this function via command substitution: `rc_issues=$(…)`.
-    # In stock bash (no `inherit_errexit`) command substitutions do NOT
-    # propagate `set -e`, so a non-zero exit inside `$(…)` is currently
-    # absorbed. If anyone later adds `shopt -s inherit_errexit` (recommended
-    # by ShellCheck SC2310), the function MUST still be safe — that is
-    # exactly the scenario this test pins.
+    # Pins safety under `set -euo pipefail` + `shopt -s inherit_errexit`.
     printf 'not json at all' > "$TMP/r.json"
     run bash -c "
         set -euo pipefail

@@ -1,7 +1,6 @@
 //! Per-project compose transaction lock — in-process Mutex + cross-process
 //! file lock (`<data_dir>/compose/<project>/compose.lock`). Innermost layer of
-//! `LockedRuntime::transaction()`; serialises every compose-touching op per
-//! project across threads and processes.
+//! `LockedRuntime::transaction()`.
 
 use anyhow::Context;
 use std::collections::HashMap;
@@ -43,8 +42,7 @@ pub(crate) fn with_project_compose_lock_in<F, T>(
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    // Defence-in-depth: lock path is built from `project`, so reject traversal
-    // at the boundary even if the caller forgot to validate.
+    // Lock path is built from `project`; reject traversal at the boundary.
     crate::validation::validate_project_name(project)?;
 
     let inner_arc = in_process_lock_for(project);
@@ -207,9 +205,7 @@ mod tests {
             with_project_compose_lock_in(&root, "epsilon", || Ok(())).unwrap();
         }
         let map_len = IN_PROCESS_LOCKS.lock().unwrap().len();
-        // Map grows monotonically with distinct project keys. Other tests
-        // run in parallel may add their own entries, so we only assert that
-        // our key is present, not that the map is size 1.
+        // Parallel tests may add entries, so assert only our key is present.
         let map_contains = IN_PROCESS_LOCKS.lock().unwrap().contains_key("epsilon");
         assert!(map_contains, "epsilon entry should persist for reuse");
         assert!(map_len >= 1);
@@ -239,8 +235,7 @@ mod tests {
     fn panic_releases_file_lock_via_raii() {
         let dir = tempdir();
         let root = dir.path().to_path_buf();
-        // Panic inside the critical section — FileLockGuard::drop must release
-        // the cross-process file lock so the next acquire does not deadlock.
+        // Panic in the critical section; FileLockGuard::drop must release the file lock.
         let root_clone = root.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_project_compose_lock_in(&root_clone, "panic_proj", || -> anyhow::Result<()> {

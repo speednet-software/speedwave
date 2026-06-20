@@ -44,12 +44,7 @@ const EFFECTIVE_MODES: readonly EffectiveMode[] = THEME_MODES.filter(
   (m): m is EffectiveMode => m !== 'auto'
 );
 
-/**
- * Stubs `window.matchMedia` so ThemeService can construct in jsdom even though
- * jsdom does not implement the media query API. We don't rely on the listener
- * for axe assertions — accents and `.dark` are set directly via
- * activateTheme/activateMode.
- */
+/** Stubs `window.matchMedia` so ThemeService can construct in jsdom. */
 function stubMatchMedia(): void {
   if (typeof window.matchMedia === 'function') return;
   Object.defineProperty(window, 'matchMedia', {
@@ -86,11 +81,7 @@ interface ViewUnderTest {
   readonly prepare?: (fixture: ComponentFixture<unknown>) => void;
 }
 
-/**
- * Configurable mock responses for routed views. Anything a route-level
- * component requests during `ngOnInit` must resolve here so jsdom can
- * render the baseline layout that axe-core inspects.
- */
+/** Configurable mock responses for routed views during jsdom render. */
 function buildMockTauri(): MockTauriService {
   const mock = new MockTauriService();
   mock.invokeHandler = async (cmd: string) => {
@@ -149,9 +140,6 @@ function activateTheme(id: ThemeId): void {
 
 /**
  * Renders a component in a detached fixture for axe inspection.
- *
- * Runs the full change-detection loop so dynamic content (e.g. conditional
- * error banners) is reflected in the DOM axe scans.
  * @param view - The view under test.
  * @param mockTauri - The mock TauriService used for invoke/listen calls.
  */
@@ -238,9 +226,7 @@ const VIEWS: readonly ViewUnderTest[] = [
 ];
 
 /**
- * Classifies axe serious violations worth blocking on. Discards advisory
- * rules (e.g. landmark-one-main in a detached fragment) since fragment-only
- * rendering cannot satisfy document-level rules.
+ * Classifies axe serious violations, discarding fragment-only advisory rules.
  * @param results - The full axe-core scan results.
  */
 function seriousViolations(results: AxeResults): AxeResults['violations'] {

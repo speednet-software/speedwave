@@ -49,21 +49,12 @@ export interface AuthStatusResponse {
   oauth_authenticated: boolean;
 }
 
-/**
- * SSOT for project lifecycle state. All project switching, adding,
- * container lifecycle, and reconcile status goes through this service.
- * Components subscribe to state changes instead of listening to Tauri
- * events directly.
- */
+/** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
 @Injectable({ providedIn: 'root' })
 export class ProjectStateService {
   activeProject: string | null = null;
   targetProject: string | null = null;
-  /**
-   * All configured projects from `~/.speedwave/config.json`. Exposed so views
-   * can resolve the directory of the active project (e.g. for the
-   * project-pill tooltip) without re-invoking `list_projects` themselves.
-   */
+  /** All configured projects from `~/.speedwave/config.json`. */
   projects: ProjectEntry[] = [];
   status: ProjectStatus = 'loading';
   error = '';
@@ -71,16 +62,12 @@ export class ProjectStateService {
   restarting = false;
   restartError = '';
 
-  /**
-   * Service just toggled on, forwarded to backend for rollback on build fail.
-   * Tracks the most recent toggle only; rapid A→B enables overwrite to B.
-   */
+  /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
 
   /**
    * Structured error kind set when a CloudStorage TCC failure is detected.
    * `'cloudstorage_tcc_required'` routes the shell to `<app-cloudstorage-modal>`.
-   * Reset to `undefined` at the start of every new project switch attempt.
    */
   errorKind?: 'cloudstorage_tcc_required';
   /** CloudStorage provider display name (e.g. "OneDrive") when errorKind is set. */
@@ -92,10 +79,7 @@ export class ProjectStateService {
   private tauri = inject(TauriService);
   private log = inject(LoggerService);
   private healthStore = inject(HealthStoreService);
-  /**
-   * Set of integration status re-fetchers registered by the integrations component;
-   * called after a failed restart so the toggled-on row reverts to reality.
-   */
+  /** Set of integration status re-fetchers, called after a failed restart. */
   private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
@@ -181,12 +165,7 @@ export class ProjectStateService {
     }
   }
 
-  /**
-   * Re-fetch the configured project list so cached metadata
-   * (e.g. directories used by the project-pill tooltip) stays in sync after
-   * the user adds, renames, or switches projects. Fire-and-forget; failures
-   * leave the previous snapshot in place.
-   */
+  /** Re-fetch configured projects so cached metadata stays in sync after adds/renames/switches. */
   private async refreshProjectList(): Promise<void> {
     try {
       const refreshed = await this.tauri.invoke<ProjectList>('list_projects');

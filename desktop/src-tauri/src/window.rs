@@ -4,28 +4,19 @@
 use super::MAIN_WINDOW_LABEL;
 use tauri::Manager;
 
-/// Returns `true` if a click should be suppressed (debounced).
-///
-/// A click is suppressed when the elapsed time since the previous click
-/// (`now_ms.saturating_sub(prev_ms)`) is less than `threshold_ms`. Uses saturating
-/// subtraction so that a backward clock jump suppresses rather than
-/// double-toggles.
+/// Returns `true` if a click should be suppressed (debounced): elapsed since
+/// the previous click (`now_ms.saturating_sub(prev_ms)`) is `< threshold_ms`.
 pub(crate) fn should_debounce(prev_ms: u64, now_ms: u64, threshold_ms: u64) -> bool {
     now_ms.saturating_sub(prev_ms) < threshold_ms
 }
 
-/// Determines what the `CloseRequested` handler should do.
-///
-/// Returns `true` when the close should be intercepted (prevent close + hide).
-/// Returns `false` when the close should proceed normally (app exits).
+/// Whether `CloseRequested` should be intercepted: `true` prevents close + hides,
+/// `false` lets the close proceed (app exits).
 pub(crate) fn should_prevent_close(window_label: &str, tray_available: bool) -> bool {
     window_label == MAIN_WINDOW_LABEL && tray_available
 }
 
-/// Returns `true` if the `Destroyed` event should trigger cleanup.
-///
-/// Only the main window destruction runs cleanup — dialog or secondary
-/// windows must not prematurely stop services.
+/// Returns `true` if the `Destroyed` event should trigger cleanup (main window only).
 pub(crate) fn should_run_cleanup(window_label: &str) -> bool {
     window_label == MAIN_WINDOW_LABEL
 }
@@ -92,22 +83,19 @@ mod tests {
 
     #[test]
     fn debounce_allows_click_at_exact_threshold() {
-        // At exactly 500ms elapsed, the click should go through
-        // (condition is strict less-than).
+        // Exactly 500ms elapsed goes through (strict less-than).
         assert!(!should_debounce(1000, 1500, 500));
     }
 
     #[test]
     fn debounce_suppresses_when_clock_goes_backward() {
-        // Clock jumped backward: now < prev. saturating_sub returns 0,
-        // which is < threshold → suppressed. This is the safe behavior.
+        // Backward clock (now < prev): saturating_sub is 0 < threshold → suppressed.
         assert!(should_debounce(5000, 3000, 500));
     }
 
     #[test]
     fn debounce_allows_first_click_ever() {
-        // prev=0 (initial AtomicU64 value), now is any reasonable time.
-        // Elapsed time is huge → not debounced.
+        // prev=0 (initial AtomicU64): huge elapsed → not debounced.
         assert!(!should_debounce(0, 1_700_000_000_000, 500));
     }
 
@@ -125,8 +113,7 @@ mod tests {
 
     #[test]
     fn debounce_handles_u64_max_prev() {
-        // prev is u64::MAX, now is small (extreme backward jump).
-        // saturating_sub(u64::MAX) = 0 → suppressed.
+        // prev=u64::MAX, small now: saturating_sub is 0 → suppressed.
         assert!(should_debounce(u64::MAX, 1000, 500));
     }
 

@@ -1,7 +1,6 @@
 //! Plugin host-bridge lifecycle: spawn at startup for each verified plugin
 //! whose manifest declares a `host_bridge` block, and replace/stop on install
-//! and remove. Bridges live for the Desktop process lifetime; per-pair status
-//! is published on the `plugin_bridge_event` Tauri event.
+//! and remove.
 
 use std::sync::Arc;
 

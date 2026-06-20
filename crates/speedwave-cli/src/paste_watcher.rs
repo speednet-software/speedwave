@@ -1,9 +1,4 @@
 //! Host-side clipboard watcher for CLI paste (ADR-065).
-//!
-//! Polls `arboard` every 250 ms; when an image change is detected, encodes
-//! PNG and atomically replaces `<project_dir>/.speedwave/pastes/clip.png`.
-//! Claude Code TUI's `xclip -t image/png -o` (proxied by `osc52-copy.sh`)
-//! reads that file.
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;

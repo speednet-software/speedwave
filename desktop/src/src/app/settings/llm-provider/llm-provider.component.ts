@@ -521,9 +521,7 @@ type DiscoveryState =
               }
               @if (entry.kind === 'open_router' && entry.models && entry.models.length > 0) {
                 <div class="flex items-center gap-2">
-                  <!-- Selection lives on the options: a [value] binding on the
-                       select applies before the async catalog options exist
-                       and the browser silently falls back to the first row. -->
+                  <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
                   <select
                     (change)="onExtraModelSelect(entry, $any($event.target).value)"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
@@ -1096,28 +1094,21 @@ export class LlmProviderComponent implements OnInit {
    */
   async onProviderChange(): Promise<void> {
     if (this.provider === this.lastKnownProvider) {
-      // Guard against redundant ngModelChange fires (HMR reinit, identical
-      // selection etc.) — don't wipe state on no-op.
+      // Guard against redundant ngModelChange fires — no-op.
       return;
     }
-    // Stash the URL we were just on so the user gets it back if they switch
-    // back to this provider during the same session (e.g. they typed :8001
-    // for llama.cpp, switched to Ollama to check something, came back — we
-    // restore :8001 instead of the hardcoded :8080 default).
+    // Cache the URL per provider to restore on switch back in the same session.
     const previousProvider = this.lastKnownProvider;
     if (previousProvider !== 'anthropic' && this.baseUrl) {
       this.baseUrlByProvider[previousProvider] = this.baseUrl;
     }
-    // Snapshot the anthropic model when leaving the card so it survives the
-    // round-trip and is restored below (symmetric with loadedLocalEntry).
+    // Snapshot the anthropic model when leaving the card so it is restored below.
     if (previousProvider === 'anthropic' && this.model) {
       this.loadedAnthropicModel = this.model;
     }
     this.lastKnownProvider = this.provider;
     this.discoveryCounter++;
-    // Clear stale state synchronously so the UI reflects the provider change
-    // immediately — even while the async default-URL fetch is in-flight.
-    // Model is provider-specific; restore the target's persisted one, else clear.
+    // Clear state now; model is provider-specific and restored from snapshot.
     this.model =
       this.provider === 'anthropic'
         ? (this.loadedAnthropicModel ?? '')
@@ -1125,9 +1116,7 @@ export class LlmProviderComponent implements OnInit {
     this.discoveryState = { kind: 'idle' };
     this.providerChange.emit(this.provider);
     this.cdr.markForCheck();
-    // Fetch the backend-authoritative default for the new provider if not yet cached.
-    // This keeps compose.rs as the SSOT and avoids duplicating URL strings here.
-    // Done AFTER the synchronous state reset above so the UI is consistent.
+    // Fetch backend-authoritative default if not cached (compose.rs is SSOT).
     if (this.provider !== 'anthropic' && !this.defaultBaseUrlsByProvider[this.provider]) {
       try {
         const freshDefault = await this.tauri.invoke<string | null>('get_default_base_url', {
@@ -1344,11 +1333,7 @@ export class LlmProviderComponent implements OnInit {
       }
     }
     for (const extra of this.extraProviders) {
-      // The rows are permanent UI; only configured ones are persisted (a
-      // bare compat row would also fail the backend's base-URL validation).
-      // hasKey reflects the post-save truth: an edited-then-cleared field
-      // drops the key, so the entry must record has_api_key:false (otherwise
-      // the rendered config keeps an os.environ ref the entrypoint can't fill).
+      // Only configured rows persist; hasKey drops when the field is cleared.
       const hasKey = extra.keyTouched ? extra.keyInput.trim() !== '' : extra.hasKey;
       const configured =
         extra.kind === 'open_ai_compat'
@@ -1432,22 +1417,14 @@ export class LlmProviderComponent implements OnInit {
     this.saved = false;
     try {
       const active = this.buildActive();
-      // If the user left baseUrl blank for the active local card, fall back to
-      // the provider default so compose can inject ANTHROPIC_BASE_URL. Anthropic
-      // and remote rows ignore the flat baseUrl, so null is correct there.
+      // Fall back to provider default if baseUrl blank; compose injects ANTHROPIC_BASE_URL.
       const effectiveBaseUrl =
         active.provider_id === 'local' ? this.baseUrl || this.defaultBaseUrl || null : null;
       // Input signal — the single project source (drives the restart below).
       const project = this.activeProject();
       // Reuse the cached auth state (loadAuthStatus) — no redundant round-trip.
       const anthropicHasApiKey = this.apiKeyConfigured;
-      // The flat provider/model/base_url fields are the legacy (kill-switch
-      // direct path) mirror and drive the backend's model-required gate. When
-      // a card is active they keep the card's provider verbatim (preserving a
-      // legacy alias like `ollama` the user hasn't migrated). When a REMOTE row
-      // is active they must NOT describe the local card's leftover state — send
-      // the remote id (neither 'local' nor 'anthropic', so the model-required
-      // gate doesn't fire); the v2 providers/active blocks carry routing.
+      // Flat fields mirror v2 providers/active for backend routing; remote row active = remote id.
       const activeIsRemote = this.extraProviders.some((p) => p.id === active.provider_id);
       const flatProvider = activeIsRemote ? active.provider_id : this.provider;
       const update: {
@@ -1473,10 +1450,7 @@ export class LlmProviderComponent implements OnInit {
       if (this.customHeadersTouched) {
         update.custom_headers = nullIfEmpty(this.customHeaders);
       }
-      // Write per-provider keys BEFORE persisting config (ADR-073: values
-      // bypass config.json). A key-write failure throws here, before the
-      // config commit, so the two never end up out of sync. State resets are
-      // deferred until every write + the config save succeed.
+      // Write keys before config so a failure prevents the config commit (ADR-073).
       const touchedExtras = this.extraProviders.filter((e) => e.keyTouched);
       for (const extra of touchedExtras) {
         await this.tauri.invoke('set_llm_provider_key', {
@@ -1486,11 +1460,7 @@ export class LlmProviderComponent implements OnInit {
       }
       await this.tauri.invoke('update_llm_config', { update });
 
-      // Everything persisted — now reset UI state to mirror what was saved.
-      // Mirror exactly what was persisted: if the save dropped the local entry
-      // (e.g. base_url cleared), forget the snapshot too — otherwise the stale
-      // entry would be re-pushed verbatim on the next save and resurrect a
-      // provider the user removed.
+      // Reset to mirror the save; a stale local entry would resurrect on the next save.
       const savedLocal = update.providers.find((p) => p.id === 'local');
       this.loadedLocalEntry = savedLocal ? { ...savedLocal } : null;
       for (const extra of touchedExtras) {
@@ -1499,9 +1469,7 @@ export class LlmProviderComponent implements OnInit {
         extra.keyTouched = false;
       }
       this.saved = true;
-      // Reset touched flags so subsequent saves don't re-send the credentials
-      // unless the user edits the fields again. Update the `has_*` flags
-      // optimistically based on what we just persisted.
+      // Reset touched flags; update the has_* flags from persisted values.
       if (this.apiKeyTouched) {
         this.hasApiKey = !!update.api_key;
         this.apiKey = '';
@@ -1512,15 +1480,10 @@ export class LlmProviderComponent implements OnInit {
         this.customHeaders = '';
         this.customHeadersTouched = false;
       }
-      // Push the freshly-persisted context_tokens into ChatStateService so
-      // the chat footer's `used / max` reflects the new model immediately,
-      // not after the next session start.
+      // Push context tokens so the chat footer updates immediately.
       void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(this.provider);
-      // Restart scope (ADR-073): the active provider/model lives in the
-      // claude env — changing it needs the full project restart. Anything
-      // else (keys, added/removed remote providers) only changes the litellm
-      // config: hot-reload the proxy and keep the claude session running.
+      // Provider/model change needs full restart; other changes = proxy reload (ADR-073).
       const activeKey = `${active.provider_id}|${active.model ?? ''}`;
       if (activeKey === this.loadedActiveKey && project) {
         try {
@@ -1581,38 +1544,27 @@ export class LlmProviderComponent implements OnInit {
       this.model = config.model || '';
       this.baseUrl = config.base_url || '';
       this.defaultBaseUrl = config.default_base_url || '';
-      // Seed the local-model context cache so a Save right after load
-      // (without re-running discovery) preserves the persisted value
-      // instead of nulling it out.
+      // Seed the context cache so a save preserves the persisted value without discovery.
       this.loadedLocalContextTokens =
         this.provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
       this.hasApiKey = !!config.has_api_key;
       this.hasCustomHeaders = !!config.has_custom_headers;
       this.lastKnownProvider = this.provider;
-      // Seed the per-provider cache with the backend-authoritative default for
-      // the persisted provider so `isDefaultBaseUrl` can compare without a
-      // round-trip (backend is SSOT via get_default_base_url / compose.rs).
+      // Seed the cache with the backend-authoritative default for isDefaultBaseUrl.
       if (this.provider !== 'anthropic' && this.defaultBaseUrl) {
         this.defaultBaseUrlsByProvider[this.provider] = this.defaultBaseUrl;
       }
-      // Seed the per-provider URL cache with the persisted URL so switching away
-      // and back doesn't lose it.
+      // Seed the URL cache so switching away and back preserves the user's URL.
       if (this.provider !== 'anthropic' && this.baseUrl) {
         this.baseUrlByProvider[this.provider] = this.baseUrl;
       }
 
-      // v2 provider list (ADR-073): anthropic/local entries map onto the
-      // cards (already seeded from the legacy flat fields above, which
-      // sync_llm_legacy_fields keeps coherent); everything else becomes a
-      // remote row.
+      // v2 provider list: anthropic/local on cards, the rest become remote rows (ADR-073).
       this.loadedLocalEntry = (config.providers ?? []).find((p) => p.id === 'local') ?? null;
       if (this.loadedLocalEntry?.base_url && !this.baseUrlByProvider['local']) {
         this.baseUrlByProvider['local'] = this.loadedLocalEntry.base_url;
       }
-      // Anthropic model snapshot: prefer the v2 entry / active selection, then
-      // fall back to the flat field already seeded into this.model above (the
-      // v1 shape carries the model only there). Never clobber a model the flat
-      // path loaded.
+      // Anthropic model snapshot: prefer v2 entry / active, fall back to the flat field.
       const anthropicEntry = (config.providers ?? []).find((p) => p.id === 'anthropic');
       this.loadedAnthropicModel =
         anthropicEntry?.model ??
@@ -1636,9 +1588,7 @@ export class LlmProviderComponent implements OnInit {
           row.contextTokens = p.context_tokens ?? null;
         }
       }
-      // Resolve the active remote row, tolerating legacy generated ids
-      // (`openrouter-2`, suffixed compat): match by exact id first, then by
-      // the active entry's kind — the fixed rows absorbed that entry above.
+      // Resolve the active row by id first, then by kind for legacy generated ids.
       const activeId = config.active?.provider_id;
       const activeEntry = (config.providers ?? []).find((p) => p.id === activeId);
       const activeRow = activeId ? this.findExtraRow(activeId, activeEntry?.kind) : undefined;
@@ -1665,12 +1615,7 @@ export class LlmProviderComponent implements OnInit {
       }
     }
     this.cdr.markForCheck();
-    // Auto-probe only when the effective URL is a known-safe default. Any
-    // user-supplied URL (even one persisted in config) must NOT be probed
-    // silently — a cloned malicious repo could set base_url to an internal
-    // RFC1918 host, turning Settings open into an SSRF probe. The user must
-    // explicitly click Refresh or blur the Base URL field to trigger a probe
-    // against a non-default URL.
+    // Auto-probe only defaults; user-supplied URLs need an explicit trigger (SSRF mitigation).
     const effectiveUrl = this.baseUrl || this.defaultBaseUrl;
     const isSafeToAutoProbe =
       this.provider !== 'anthropic' &&

@@ -18,9 +18,7 @@ fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, St
     ))
 }
 
-// tauri-plugin-log (KeepSome) names rotated files
-// `speedwave-desktop_YYYY-MM-DD_HH-MM-SS.log`; reading only the bare file
-// shows an empty current segment right after rotation.
+// Reads all `speedwave-desktop*.log` segments (tauri-plugin-log rotates them).
 fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -60,16 +58,12 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
 // Unified `/logs` view — merge of every log source the app produces
 // ---------------------------------------------------------------------------
 //
-// The frontend's `parseLogLine` recognises lines of the form
-// `<source-token> | <rest>`, where `<source-token>` matches `[\w.-]+`. Compose
-// container logs already arrive in that shape (`<container_name> | <ISO> msg`).
-// Host-side log files (tauri-desktop, mcp-os, claude-session) do not, so we
-// reformat them via `prefix_lines` before concatenating with the compose
-// stream into a single string. This is what `get_all_logs` returns.
+// Frontend `parseLogLine` recognises `<source-token> | <rest>` (`<source-token>`
+// matches `[\w.-]+`). Compose lines already match; host files are reformatted
+// via `prefix_lines` before concatenation. `get_all_logs` returns the result.
 
 /// Returns true when the line already carries a `<source-token> | …` prefix
-/// that the frontend parser will recognise. Used to skip re-prefixing compose
-/// container lines (which `nerdctl compose logs` already prefixes for us).
+/// that the frontend parser will recognise.
 fn has_source_prefix(line: &str) -> bool {
     let bytes = line.as_bytes();
     if bytes.is_empty() {
@@ -94,20 +88,11 @@ fn has_source_prefix(line: &str) -> bool {
     i < bytes.len() && bytes[i] == b'|'
 }
 
-/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`, `[WARN]`, …) into
-/// the unbracketed form Angular's `LEVEL_RE` expects after timestamp
-/// extraction.
-///
-/// Production input:
-///   `2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] msg`
-/// Output:
-///   `2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] msg`
-///
-/// Returns the line unchanged when it does not match the expected layout
-/// (e.g. multi-line stack traces or external library lines).
+/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`) into the unbracketed
+/// form Angular's `LEVEL_RE` expects. Returns the line unchanged when it does
+/// not match the expected layout.
 fn rewrite_desktop_bracketed_level(line: &str) -> String {
-    // ISO timestamp ends at the first space (timestamp contains digits, `-`,
-    // `:`, `.`, `+`, optionally `Z` — never spaces).
+    // ISO timestamp ends at the first space (it contains no spaces).
     let Some(space_idx) = line.find(' ') else {
         return line.to_string();
     };
@@ -125,27 +110,17 @@ fn rewrite_desktop_bracketed_level(line: &str) -> String {
     ) {
         return line.to_string();
     }
-    // `line[..space_idx]` = ISO timestamp (without trailing space)
-    // After the closing `]` comes the rest, which usually starts with `[target]`.
-    // The frontend `LEVEL_RE = /^(LEVEL)\s+(.*)$/i` requires a space after the
-    // level word — without it the line falls back to default `info` and we lose
-    // the WARN/ERROR signal in the level chip.
+    // Frontend `LEVEL_RE` requires a space after the level word.
     let before = &line[..space_idx];
     let after = &after_ts[close_idx + 1..];
     format!("{before} {level} {after}")
 }
 
-/// Reformats the raw output of one log source so that every non-empty line
-/// matches the frontend's `<source> | <rest>` parsing contract.
-///
-/// - Empty lines are dropped (they would break `parseLogLine` and add no value).
-/// - Lines that already carry a `<word> | …` prefix (compose container logs)
-///   have the compose container prefix stripped so the dropdown shows
-///   `mcp_hub` not `speedwave_my_project_mcp_hub` — only when `project` is
-///   supplied (i.e. compose source); host-side sources pass through as-is.
-/// - Other lines (host-side log files) get the `<source> | ` prefix.
-/// - Desktop-log lines additionally have their bracketed level rewritten
-///   so the Angular level chip works (`[INFO]` → `INFO`).
+/// Reformats one log source so every non-empty line matches the frontend's
+/// `<source> | <rest>` contract. Empty lines are dropped; already-prefixed
+/// compose lines have their project prefix stripped (only when `project` is
+/// supplied); other lines get the `<source> | ` prefix. Desktop-log lines also
+/// have their bracketed level rewritten (`[INFO]` → `INFO`).
 pub(crate) fn prefix_lines(source: &str, raw: &str, project: Option<&str>) -> String {
     let mut out = String::with_capacity(raw.len() + raw.lines().count() * (source.len() + 4));
     for line in raw.split('\n') {
@@ -188,16 +163,13 @@ pub(crate) struct LogSources {
     pub desktop: String,
     pub mcp_os: String,
     pub claude: String,
-    /// Lima VM serial log (macOS only; empty elsewhere). Parity with the ZIP —
-    /// it's a displayable log, so it must also appear in /logs.
+    /// Lima VM serial log (macOS only; empty elsewhere).
     pub lima: String,
 }
 
-/// Composes the per-source log buffers into a single newline-separated string,
-/// block-by-block in a deterministic source order. Chronological interleaving
-/// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
-/// every line carries one ISO timestamp, so the renderer parses and merges
-/// them by instant; here we just concatenate.
+/// Concatenates the per-source log buffers into a single newline-separated
+/// string in a deterministic source order. Chronological interleaving is the
+/// frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`).
 pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let compose = prefix_lines("compose", &sources.compose, Some(project));
     let desktop = prefix_lines("desktop", &sources.desktop, None);
@@ -205,30 +177,12 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let claude = prefix_lines("claude", &sources.claude, None);
     let lima = prefix_lines("lima", &sources.lima, None);
 
-    // Apply the sanitizer once to the merged buffer (idempotent — sources are
-    // already individually sanitized, this is a defence-in-depth pass).
+    // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
     speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}{lima}"))
 }
 
-/// Reads every host-side log file, fetches the compose stream, and returns a
-/// merged buffer that the frontend's existing `parseLogLine` understands.
-///
-/// Sources merged (in this fixed order, per-source-block):
-///   1. compose   — `nerdctl compose logs --timestamps --tail <N>`
-///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
-///      Swift CLI stderr forwarded by `check_os_permission`)
-///   3. mcp-os    — `~/.speedwave/mcp-os.log`
-///   4. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
-///
-/// Each source uses the full `tail` budget independently (default 200, cap
-/// 10 000). With 5 sources × 10 000 the upper bound is 50 000 lines — trivial
-/// for the renderer, especially since the frontend further filters by source
-/// in the dropdown.
-///
-/// Compose-only output (e.g. diagnostics export) reads `rt.compose_logs`
-/// directly; this is the only log command the webview invokes.
-/// Give up on the (normally sub-second) compose-logs fetch after this long —
-/// a busy container engine must not blank the file-based sources.
+/// Compose-logs fetch timeout; a busy container engine must not blank the
+/// file-based sources.
 const COMPOSE_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Single-flight marker: a compose-logs fetch survives its timeout as a
@@ -298,8 +252,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             None => String::new(),
         };
 
-        // File-source paths resolved from the SSOT registry (platform-gated), so
-        // /logs and the ZIP draw from the same list. Empty when unavailable.
+        // File-source paths resolved from the SSOT registry (platform-gated).
         let data_dir = speedwave_runtime::consts::data_dir();
         let read_source = |key: &str| -> String {
             speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
@@ -503,7 +456,6 @@ mod tests {
     #[test]
     fn has_source_prefix_rejects_token_with_spaces() {
         // Token chars are `[\w.-]`; any space inside the token portion fails.
-        // (`a b | c` — frontend `COMPOSE_RE` would not match either.)
         assert!(!has_source_prefix("a b | c"));
     }
 
@@ -533,9 +485,7 @@ mod tests {
 
     #[test]
     fn rewrite_desktop_level_handles_colon_offset_timestamp() {
-        // `log_ts::log_timestamp()` emits the RFC-3339 colon form `+02:00`;
-        // the timestamp still has no space, so the first-space split lands
-        // exactly at the start of `[LEVEL]`.
+        // RFC-3339 colon-offset `+02:00` has no space, so the split lands at `[LEVEL]`.
         let line = "2026-05-12T14:34:02.814+02:00 [WARN][speedwave_desktop::x] msg";
         let out = rewrite_desktop_bracketed_level(line);
         assert_eq!(
@@ -665,10 +615,7 @@ mod tests {
 
     #[test]
     fn logs_view_covers_all_displayable_registry_sources() {
-        // Parity, checked against the ACTUAL merge output (not a proxy array):
-        // give every source a unique marker, run the real merge, and assert each
-        // displayable+available registry source's marker survives prefixed by its
-        // key. A registry source not wired into LogSources/merge fails here.
+        // A displayable registry source not wired into the merge fails here.
         use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
         let merged = merge_log_sources(
             LogSources {

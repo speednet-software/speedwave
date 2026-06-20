@@ -127,6 +127,12 @@ BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache
 
 Both update paths share this pruning: **Desktop** (`reconcile_bundle_update_inner`) after `ProjectsRestored`, **CLI** (`update_containers` → `maybe_prune_previous_bundle`) after containers are confirmed running. The CLI never writes `bundle-state.json` (single-writer rule, test-pinned); Desktop reconcile and the setup wizard are the only writers of `applied_image_hashes`/`applied_bundle_id`.
 
+### Known upstream: containerd overlayfs snapshotter rename race
+
+A build can intermittently fail with a containerd snapshotter error whose chain contains `apply layer error` / `failed to prepare extraction snapshot` / `failed to rename … file exists`. This is a race in containerd's overlayfs snapshotter atomic-commit path[^containerd-11719][^nerdctl-3420], **not a Speedwave bug** — concurrent layer extraction can collide on the `snapshots/new-<N>` → `snapshots/<N>` rename.
+
+Speedwave detects it via `is_snapshotter_error` (string match over the full error chain) and recovers in the `with_build_recovery` ladder: **`nerdctl system prune --force` → retry once → engine restart** if it still fails. The accompanying `[WARN][speedwave_runtime::build]` line is **expected on a recovered build and requires no operator action** — the retry resolves it. A `warn!` level is intentional: the retry-after-prune is a fallback path, which `warn!` denotes; `info!` would understate it.
+
 ## Dynamic Port Reconciliation (mcp-os)
 
 The mcp-os process runs on the host (not in a container) and binds to a dynamic port at startup. When the Desktop app starts — or when the mcp-os watchdog respawns a crashed process — the new port may differ from the `WORKER_OS_URL` baked into the running compose configuration.
@@ -255,3 +261,7 @@ SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)
 - [ADR-008: No Background Daemon](../adr/ADR-008-no-background-daemon.md)
 - [ADR-017: Claude Code in Container via entrypoint.sh](../adr/ADR-017-claude-code-in-container-via-entrypoint.md)
+
+[^containerd-11719]: containerd issue #11719 — overlayfs snapshotter rename race on concurrent extraction. <https://github.com/containerd/containerd/issues/11719>
+
+[^nerdctl-3420]: nerdctl issue #3420 — `failed to rename … file exists` during parallel image pulls/builds. <https://github.com/containerd/nerdctl/issues/3420>

@@ -134,8 +134,7 @@ export interface MCPServer {
  * @returns MCP server instance
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
-  // Default 127.0.0.1 is macOS-only; Windows supervisor always sets MCP_LISTEN_HOST
-  // to the WSL adapter IP (compose::host_bind_address). See ADR-067 / SSOT row.
+  // Windows supervisor sets MCP_LISTEN_HOST to the WSL adapter IP; see ADR-067.
   const {
     name,
     version,
@@ -190,8 +189,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       const header = req.headers.authorization ?? '';
       const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
 
-      // res.locals is set up by Express on real requests, but absent in some
-      // unit-test mocks — guard with an `??=`.
       const locals: Record<string, unknown> = (res.locals ??= {});
       if (provided && safeTokenCompare(provided, token)) {
         locals.caller = '';
@@ -283,8 +280,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       try {
         await options.healthCheck();
       } catch (error) {
-        // Always log: every prod worker sets auth, so gating on `!auth` meant
-        // health failures were never logged where they matter most.
         console.error(`[${name}] Health check failed:`, error);
         res.status(500).json({ status: 'error' });
         return;
