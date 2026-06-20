@@ -45,6 +45,23 @@ function mockJsonResponse(
 }
 
 /**
+ * Create a mock fetch Response whose body is plain text (for non-2xx paths
+ * that read the body via `.text()`).
+ * @param text - Raw body text to return
+ * @param options - Additional response options (ok, status)
+ */
+function mockTextResponse(text: string, options: { ok?: boolean; status?: number } = {}) {
+  const { ok = true, status = 200 } = options;
+  return {
+    ok,
+    status,
+    json: () => Promise.resolve(undefined),
+    text: () => Promise.resolve(text),
+    headers: { get: () => null },
+  };
+}
+
+/**
  * Mock fetch for the initialize / notifications/initialized / tools/list sequence.
  * @param tools - Tools to return from tools/list
  * @param sessionId - Optional session ID to return from initialize
@@ -745,8 +762,8 @@ describe('tool-discovery', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    it('logs warning when notifications/initialized returns non-ok status', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('logs error with response body when notifications/initialized returns non-ok status', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const mockFetch = vi
         .fn()
@@ -761,7 +778,7 @@ describe('tool-discovery', () => {
             },
           })
         )
-        .mockResolvedValueOnce(mockJsonResponse(null, { ok: false, status: 500 }));
+        .mockResolvedValueOnce(mockTextResponse('method not found', { ok: false, status: 500 }));
       vi.stubGlobal('fetch', mockFetch);
 
       // Should not throw — notification failures are logged, not thrown
@@ -770,16 +787,82 @@ describe('tool-discovery', () => {
       });
 
       expect(sessionId).toBeUndefined();
-      const notifWarns = warnSpy.mock.calls
+      const notifErrors = errorSpy.mock.calls
         .map((c) => c.join(' '))
         .filter((msg) => msg.includes('notifications/initialized returned 500'));
-      expect(notifWarns).toHaveLength(1);
+      expect(notifErrors).toHaveLength(1);
+      expect(notifErrors[0]).toContain('method not found');
 
-      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    it('caps the logged response body at 512 chars', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          mockJsonResponse({
+            jsonrpc: '2.0',
+            id: 'init',
+            result: {
+              protocolVersion: LATEST_PROTOCOL_VERSION,
+              capabilities: {},
+              serverInfo: { name: 'w', version: '1.0.0' },
+            },
+          })
+        )
+        .mockResolvedValueOnce(mockTextResponse('x'.repeat(1000), { ok: false, status: 500 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      await initializeWorker('http://mcp-test:3001', { 'Content-Type': 'application/json' });
+
+      const msg = errorSpy.mock.calls
+        .map((c) => c.join(' '))
+        .find((m) => m.includes('returned 500'));
+      expect(msg).toBeDefined();
+      expect((msg?.match(/x/g) ?? []).length).toBe(512);
+
+      errorSpy.mockRestore();
+    });
+
+    it('logs error without body suffix when reading the response body fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          mockJsonResponse({
+            jsonrpc: '2.0',
+            id: 'init',
+            result: {
+              protocolVersion: LATEST_PROTOCOL_VERSION,
+              capabilities: {},
+              serverInfo: { name: 'w', version: '1.0.0' },
+            },
+          })
+        )
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          text: () => Promise.reject(new Error('stream closed')),
+          headers: { get: () => null },
+        });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await initializeWorker('http://mcp-test:3001', { 'Content-Type': 'application/json' });
+
+      const msg = errorSpy.mock.calls
+        .map((c) => c.join(' '))
+        .find((m) => m.includes('returned 503'));
+      expect(msg).toBeDefined();
+      expect(msg?.endsWith('http://mcp-test:3001')).toBe(true);
+
+      errorSpy.mockRestore();
     });
 
     it('does not log when notifications/initialized returns ok', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const mockFetch = vi
         .fn()
@@ -799,12 +882,12 @@ describe('tool-discovery', () => {
 
       await initializeWorker('http://mcp-test:3001', { 'Content-Type': 'application/json' });
 
-      const notifWarns = warnSpy.mock.calls
+      const notifErrors = errorSpy.mock.calls
         .map((c) => c.join(' '))
         .filter((msg) => msg.includes('notifications/initialized'));
-      expect(notifWarns).toHaveLength(0);
+      expect(notifErrors).toHaveLength(0);
 
-      warnSpy.mockRestore();
+      errorSpy.mockRestore();
     });
   });
 
