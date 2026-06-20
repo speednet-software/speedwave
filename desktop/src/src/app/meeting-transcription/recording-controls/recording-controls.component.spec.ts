@@ -5,11 +5,10 @@ import { TranscriptionService } from '../../services/transcription.service';
 import type { AudioSourceInfo, CapabilitiesAck, StartAck } from '../../models/transcript';
 
 const SOURCES: AudioSourceInfo[] = [
-  { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
+  { source: { kind: 'system_wide' }, label: 'System (everything)' },
   {
     source: { kind: 'microphone', device: null },
     label: 'Microphone (default input)',
-    app_id: null,
   },
 ];
 
@@ -18,13 +17,11 @@ const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
   {
     source: { kind: 'mixed', mic: null },
     label: 'Whole meeting (system audio + your microphone)',
-    app_id: null,
   },
-  { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
+  { source: { kind: 'system_wide' }, label: 'System (everything)' },
   {
     source: { kind: 'microphone', device: null },
     label: 'Microphone (default input)',
-    app_id: null,
   },
 ];
 
@@ -33,17 +30,14 @@ const SOURCES_WITH_MICS: AudioSourceInfo[] = [
   {
     source: { kind: 'mixed', mic: null },
     label: 'Whole meeting (system audio + your microphone)',
-    app_id: null,
   },
   {
     source: { kind: 'microphone', device: 'BuiltInMicrophoneDevice' },
     label: 'Microphone: MacBook Pro Microphone (default)',
-    app_id: null,
   },
   {
     source: { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
     label: 'Microphone: USB MIC',
-    app_id: null,
   },
 ];
 
@@ -118,8 +112,8 @@ describe('RecordingControlsComponent', () => {
     // A host that only exposes mic sources. sourceIndex stays 0; the mixed
     // computed reads sources()[0] safely (it's a microphone, not undefined).
     svc.listAudioSources.mockResolvedValueOnce([
-      { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A', app_id: null },
-      { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B', app_id: null },
+      { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A' },
+      { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B' },
     ]);
     await component.ngOnInit();
     fixture.detectChanges();
@@ -272,7 +266,11 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.hasModel()).toBe(false);
-    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();
+    const note = fixture.nativeElement.querySelector('[data-testid="no-model-note"]');
+    expect(note).not.toBeNull();
+    // Points users to Settings, not a removed model picker (no hardcoded size).
+    expect(note.textContent).toContain('Settings');
+    expect(note.textContent).not.toContain('Models panel');
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(true);
   });
 

@@ -24,7 +24,6 @@ export type AudioSource =
 export interface AudioSourceInfo {
   source: AudioSource;
   label: string;
-  app_id: string | null;
 }
 
 /** A word with its time span (populated only when word_timestamps is set). */

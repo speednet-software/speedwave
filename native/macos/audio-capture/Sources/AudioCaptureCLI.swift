@@ -188,6 +188,11 @@ struct RecordOptions {
     let mic: MicSelector
 }
 
+/// The mic selector for a `mic-only[:uid]` source: the named device, or default.
+func micSelector(forMicOnly uid: String?) -> MicSelector {
+    uid.map { .device($0) } ?? .defaultDevice
+}
+
 /// Parses `--record --source <s> [--mic <m>]` from argv (after the subcommand).
 /// `--mic` is optional and defaults to `none`. Returns `nil` if any flag is
 /// missing or malformed — caller exits with usage.
@@ -458,7 +463,7 @@ func runRecord(_ opts: RecordOptions) {
                 "microphone access denied — grant it in System Settings → Privacy & Security → Microphone")
             exit(2)
         }
-        let selector: MicSelector = uid.map { .device($0) } ?? .defaultDevice
+        let selector = micSelector(forMicOnly: uid)
         WriterQueue.shared.writeHeader(streams: ["mic"])
         do {
             try startMicEngine(session: session, selector: selector, streamIndex: 0)
