@@ -307,7 +307,7 @@ bundle-native-assets:
 	@bash scripts/bundle-native-assets.sh
 
 # Copy the static third-party licenses we keep in-repo (whisper.cpp,
-# onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
+# wasapi, cpal, transcription model weights — ADR-056) into the bundled
 # THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
 # download-* targets fetch there. The static dir is VCS-tracked; the bundled
 # dir is generated.

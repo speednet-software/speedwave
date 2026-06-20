@@ -290,7 +290,8 @@ impl Default for ModelStore {
 
 /// Builds the `reqwest::blocking::Client` used for model downloads: a generous
 /// timeout, and a custom redirect policy that follows redirects **only** to
-/// hosts on the allowlist (an unrecognised redirect host aborts the request).
+/// allowlisted hosts that pass the shared SSRF validator (`url_validation` —
+/// blocks loopback / link-local-metadata / private / reserved targets).
 fn build_client() -> Result<reqwest::blocking::Client, ModelStoreError> {
     reqwest::blocking::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
@@ -298,13 +299,15 @@ fn build_client() -> Result<reqwest::blocking::Client, ModelStoreError> {
             if attempt.previous().len() > 10 {
                 return attempt.error("too many redirects");
             }
-            let allowed = host_on_allowlist(attempt.url());
-            let host = attempt.url().host_str().unwrap_or("(none)").to_string();
-            if allowed {
-                attempt.follow()
-            } else {
-                attempt.error(format!("disallowed redirect host: {host}"))
+            let url = attempt.url();
+            let host = url.host_str().unwrap_or("(none)").to_string();
+            if !host_on_allowlist(url) {
+                return attempt.error(format!("disallowed redirect host: {host}"));
             }
+            if let Err(e) = crate::url_validation::validate_url(url.as_str()) {
+                return attempt.error(format!("unsafe redirect target {host}: {e}"));
+            }
+            attempt.follow()
         }))
         .build()
         .map_err(|e| ModelStoreError::Http(format!("failed to build HTTP client: {e}")))
@@ -636,6 +639,26 @@ mod tests {
                 "should reject {u}"
             );
         }
+    }
+
+    #[test]
+    fn redirect_ssrf_guard_blocks_private_and_reserved_targets() {
+        // The redirect policy follows a target only if it's allowlisted AND
+        // passes the shared SSRF validator. The validator rejects loopback, the
+        // cloud-metadata link-local endpoint, and private IPs.
+        for u in [
+            "http://127.0.0.1/m.bin",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/m.bin",
+            "http://192.168.1.10/m.bin",
+        ] {
+            assert!(
+                crate::url_validation::validate_url(u).is_err(),
+                "SSRF guard must reject {u}"
+            );
+        }
+        // A normal public CDN host passes.
+        assert!(crate::url_validation::validate_url("https://cas-bridge.xethub.hf.co/y").is_ok());
     }
 
     #[test]

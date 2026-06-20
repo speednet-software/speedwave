@@ -87,13 +87,12 @@ describe('TranscriptionService', () => {
       };
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
       const spy = vi.spyOn(mockTauri, 'invoke');
-      const mixed = { kind: 'mixed' as const, system: { kind: 'system_wide' as const }, mic: null };
+      const mixed = { kind: 'mixed' as const, mic: null };
       await svc.startRecording(mixed, 'pl');
       expect(spy).toHaveBeenCalledWith('start_transcription', {
         params: {
           source: mixed,
           language: 'pl',
-          liveModelOverride: null,
         },
       });
     });

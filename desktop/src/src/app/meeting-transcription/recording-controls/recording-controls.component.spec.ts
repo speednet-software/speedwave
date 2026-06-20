@@ -16,7 +16,7 @@ const SOURCES: AudioSourceInfo[] = [
 /** Sources list led by a "Whole meeting" mixed entry (the real backends do this). */
 const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
   {
-    source: { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+    source: { kind: 'mixed', mic: null },
     label: 'Whole meeting (system audio + your microphone)',
     app_id: null,
   },
@@ -31,7 +31,7 @@ const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
 /** Mixed default + two named mics (the shape macOS/Windows now emit). */
 const SOURCES_WITH_MICS: AudioSourceInfo[] = [
   {
-    source: { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+    source: { kind: 'mixed', mic: null },
     label: 'Whole meeting (system audio + your microphone)',
     app_id: null,
   },
@@ -152,10 +152,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(
-      { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
-      'pl'
-    );
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
   });
 
   it('derives named mics from the source list and strips the "Microphone:" prefix', async () => {
@@ -187,7 +184,6 @@ describe('RecordingControlsComponent', () => {
     expect(svc.startRecording).toHaveBeenCalledWith(
       {
         kind: 'mixed',
-        system: { kind: 'system_wide' },
         mic: 'AppleUSBAudioEngine:USB MIC:1',
       },
       'pl'
@@ -210,10 +206,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(
-      { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
-      'pl'
-    );
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
   });
 
   it('shows the acceleration badge and language toggle', async () => {
@@ -291,5 +284,12 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockResolvedValue(modelsWithSmall);
     await component.refreshModelAvailability();
     expect(component.hasModel()).toBe(true);
+  });
+
+  it('refreshModelAvailability fails open (modelsKnown=false) on a listModels error', async () => {
+    await component.ngOnInit();
+    svc.listModels.mockRejectedValueOnce(new Error('boom'));
+    await component.refreshModelAvailability();
+    expect(component.modelsKnown()).toBe(false);
   });
 });

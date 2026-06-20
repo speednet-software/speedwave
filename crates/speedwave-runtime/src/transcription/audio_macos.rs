@@ -82,10 +82,7 @@ impl AudioCapture for MacOsAudioCapture {
         // default), system-only, then one entry per real input device.
         let mut sources = vec![
             AudioSourceInfo {
-                source: AudioSource::Mixed {
-                    system: Box::new(AudioSource::SystemWide),
-                    mic: None,
-                },
+                source: AudioSource::Mixed { mic: None },
                 label: super::audio::DEFAULT_MIXED_SOURCE_LABEL.to_string(),
                 app_id: None,
             },
@@ -113,11 +110,11 @@ impl AudioCapture for MacOsAudioCapture {
                     });
                 }
             }
-            _ => sources.push(AudioSourceInfo {
-                source: AudioSource::Microphone { device: None },
-                label: "Microphone (default input)".to_string(),
-                app_id: None,
-            }),
+            Ok(_) => sources.push(generic_default_mic()),
+            Err(e) => {
+                log::warn!(target: "transcription::capture", "mic enumeration failed, using the default mic: {e}");
+                sources.push(generic_default_mic());
+            }
         }
         Ok(sources)
     }
@@ -352,6 +349,15 @@ impl AudioStream for MixedCliStream {
     }
 }
 
+/// The fallback picker entry when device enumeration yields nothing/errors.
+fn generic_default_mic() -> AudioSourceInfo {
+    AudioSourceInfo {
+        source: AudioSource::Microphone { device: None },
+        label: "Microphone (default input)".to_string(),
+        app_id: None,
+    }
+}
+
 /// Lists input devices via `audio-capture-cli --list-mics` (uid, name, default).
 fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
     let output = super::super::binary::command(CLI_NAME)
@@ -372,7 +378,7 @@ fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
 
 /// Maps an `AudioSource` to the CLI's `--source` / `--mic` args. `SystemWide`
 /// → `all`, `Microphone` → `mic-only[:uid]`, `Mixed` → `all` + the mic uid (the
-/// CLI emits system on stream 0 and mic on stream 1; `CliAudioStream` sums them).
+/// CLI emits system on stream 0 and mic on stream 1; `MixedCliStream` sums them).
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
@@ -383,20 +389,12 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
             };
             Ok((src, "none".to_string()))
         }
-        AudioSource::Mixed { system, mic } => {
-            let source_arg = match system.as_ref() {
-                AudioSource::SystemWide => "all".to_string(),
-                other => {
-                    return Err(CaptureError::Unsupported(format!(
-                        "mixed capture's system source must be System, got {other:?}"
-                    )))
-                }
-            };
+        AudioSource::Mixed { mic } => {
             let mic_arg = match mic {
                 Some(uid) => uid.clone(),
                 None => "default".to_string(),
             };
-            Ok((source_arg, mic_arg))
+            Ok(("all".to_string(), mic_arg))
         }
     }
 }
@@ -426,17 +424,12 @@ mod tests {
 
     #[test]
     fn mixed_system_plus_mic_maps_to_source_and_mic_args() {
-        // SystemWide + default mic → ("all", "default").
-        let (s, m) = source_to_cli_args(&AudioSource::Mixed {
-            system: Box::new(AudioSource::SystemWide),
-            mic: None,
-        })
-        .unwrap();
+        // Mixed + default mic → ("all", "default").
+        let (s, m) = source_to_cli_args(&AudioSource::Mixed { mic: None }).unwrap();
         assert_eq!(s, "all");
         assert_eq!(m, "default");
-        // SystemWide + a named mic → ("all", "<uid>").
+        // Mixed + a named mic → ("all", "<uid>").
         let (s2, m2) = source_to_cli_args(&AudioSource::Mixed {
-            system: Box::new(AudioSource::SystemWide),
             mic: Some("BuiltInMic".to_string()),
         })
         .unwrap();
@@ -465,30 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn mixed_with_a_nonsensical_system_source_is_rejected() {
-        // Inner system can't be a microphone or another Mixed.
-        let mic_as_system = AudioSource::Mixed {
-            system: Box::new(AudioSource::Microphone { device: None }),
-            mic: None,
-        };
-        assert!(matches!(
-            source_to_cli_args(&mic_as_system).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
-        let nested = AudioSource::Mixed {
-            system: Box::new(AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            }),
-            mic: None,
-        };
-        assert!(matches!(
-            source_to_cli_args(&nested).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
-    }
-
-    #[test]
     fn microphone_maps_to_mic_only() {
         let (s, m) = source_to_cli_args(&AudioSource::Microphone { device: None }).unwrap();
         assert_eq!(s, "mic-only");
@@ -508,7 +477,7 @@ mod tests {
         assert_eq!(h.channels, 1);
         assert_eq!(h.format, "f32le");
         assert_eq!(h.streams, &["app".to_string(), "mic".to_string()]);
-        assert!(h.streams.len() > 1, "two streams → CliAudioStream mixes");
+        assert!(h.streams.len() > 1, "two streams → MixedCliStream mixes");
         assert_eq!(h._started_at_ns, 123);
 
         let one = r#"{"sample_rate":16000,"channels":1,"format":"f32le","streams":["mic"],"started_at_ns":0}"#;

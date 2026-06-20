@@ -40,8 +40,6 @@ function micName(label: string): string {
  */
 function accelLabel(backends: Backend[]): string {
   if (backends.includes('metal')) return 'Acceleration: Metal';
-  if (backends.includes('cuda')) return 'Acceleration: CUDA';
-  if (backends.includes('vulkan')) return 'Acceleration: Vulkan';
   return 'Acceleration: CPU only';
 }
 

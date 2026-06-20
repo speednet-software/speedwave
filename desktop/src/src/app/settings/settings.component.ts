@@ -247,11 +247,15 @@ export class SettingsComponent implements OnInit, OnDestroy {
    */
   private scrollToFragment(id: string | null, attempt = 0): void {
     if (!id) return;
-    const el = this.host.nativeElement.querySelector(`#${id}`);
+    // CSS.escape guards against a fragment with CSS-special chars throwing
+    // (guarded — not present in every test environment).
+    const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id;
+    const el = this.host.nativeElement.querySelector(`#${safeId}`);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
+    // Give up after ~1s of retries — the section never mounted (cosmetic).
     if (attempt < 20) {
       setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
     }

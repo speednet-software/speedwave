@@ -98,7 +98,6 @@ pub struct StartAck {
 pub struct StartParams {
     pub source: serde_json::Value,
     pub language: String,
-    pub live_model_override: Option<String>,
 }
 
 #[tauri::command]
@@ -110,11 +109,7 @@ pub async fn start_transcription(
     forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
-    let StartParams {
-        source,
-        language,
-        live_model_override,
-    } = params;
+    let StartParams { source, language } = params;
     // Force-language is enum-validated at the Rust boundary.
     let lang = match language.as_str() {
         "pl" => Language::Pl,
@@ -129,18 +124,17 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: override wins, else recommendation, else any downloaded.
+    // Pick live model: recommendation if downloaded, else any downloaded.
     // Never download implicitly — error with a hint if nothing is present.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
     let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
         .key
         .to_string();
-    let override_key = live_model_override.clone();
     let live_key: String = {
         let m = models_arc.clone();
         let rec = recommended.clone();
-        tokio::task::spawn_blocking(move || pick_live_model(&m, override_key.as_deref(), &rec))
+        tokio::task::spawn_blocking(move || pick_live_model(&m, &rec))
             .await
             .map_err(|e| format!("model pick task panicked: {e}"))??
     };
@@ -335,7 +329,7 @@ pub async fn stop_transcription(
 }
 
 /// Validates a requested `AudioSource` against the host's `CaptureCapabilities`.
-/// A `Mixed` source needs a microphone and a `SystemWide` system side.
+/// A `Mixed` (or bare microphone) source needs a microphone.
 fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
@@ -345,20 +339,7 @@ fn validate_source_against_caps(
     let needs_microphone: bool = match src {
         AudioSource::SystemWide => false,
         AudioSource::Microphone { .. } => true,
-        AudioSource::Mixed { system, mic: _ } => {
-            // The system side of a mix must be System — not a microphone or
-            // another mix. Reject the bad shape here so the error comes from the
-            // boundary, not a deep backend.
-            match system.as_ref() {
-                AudioSource::SystemWide => {}
-                other => {
-                    return Err(format!(
-                        "the system side of a mixed source must be System, not {other:?}"
-                    ));
-                }
-            }
-            true
-        }
+        AudioSource::Mixed { .. } => true,
     };
     if needs_microphone && !caps.supports_microphone {
         return Err(if matches!(src, AudioSource::Mixed { .. }) {
@@ -386,8 +367,7 @@ fn source_label(
         match src {
             AudioSource::SystemWide => "System (everything)".to_string(),
             AudioSource::Microphone { .. } => "Microphone".to_string(),
-            // A Mixed not in the picker: "<system> + microphone".
-            AudioSource::Mixed { system, .. } => format!("{} + microphone", generic(system)),
+            AudioSource::Mixed { .. } => "System (everything) + microphone".to_string(),
         }
     }
     generic(src)
@@ -402,8 +382,13 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
 /// the first downloaded Whisper model in the catalogue (the live model is
 /// guaranteed present at this point). `None` if somehow nothing is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
-    if models.whisper_is_present_by_key("large-v3") {
-        return Some("large-v3".to_string());
+    // The catalogue's FinalQuality model if present, else any downloaded one.
+    if let Some(best) =
+        transcription::model_for_recommendation(transcription::ModelRecommendation::FinalQuality)
+    {
+        if models.whisper_is_present_by_key(best.key) {
+            return Some(best.key.to_string());
+        }
     }
     models
         .whisper_status()
@@ -418,19 +403,7 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
 /// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
 ///    multi-GB file — the UI prompts for that).
 /// 4. If nothing is downloaded: an error with a download hint.
-fn pick_live_model(
-    models: &ModelStore,
-    override_key: Option<&str>,
-    recommended: &str,
-) -> Result<String, String> {
-    if let Some(k) = override_key {
-        if models.whisper_is_present_by_key(k) {
-            return Ok(k.to_string());
-        }
-        return Err(format!(
-            "Whisper model '{k}' isn't downloaded — download it first"
-        ));
-    }
+fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
     }
@@ -524,7 +497,7 @@ async fn forward_events(
     }
 }
 
-// ---- 4) list / get / delete / discard / relabel / markdown ----------------
+// ---- 4) list / get / delete / markdown ------------------------------------
 
 #[tauri::command]
 pub async fn list_transcripts(
@@ -587,17 +560,12 @@ pub struct RecommendedModelAck {
     pub accel_label: String,
 }
 
-/// Short acceleration label from the compiled backends (highest tier wins).
+/// Short acceleration label from the compiled backends (a GPU backend wins).
 fn accel_label() -> String {
     let backends = transcription::compiled_backends();
-    if backends.contains(&Backend::Metal) {
-        "Metal (GPU)".to_string()
-    } else if backends.contains(&Backend::Cuda) {
-        "CUDA (GPU)".to_string()
-    } else if backends.contains(&Backend::Vulkan) {
-        "Vulkan (GPU)".to_string()
-    } else {
-        "CPU".to_string()
+    match backends.iter().find(|b| b.is_gpu()) {
+        Some(gpu) => format!("{} (GPU)", gpu.label()),
+        None => "CPU".to_string(),
     }
 }
 
@@ -790,22 +758,9 @@ mod tests {
     fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // No model on disk: an override errors naming that model; no override
-        // errors naming the recommended one — both with "download" guidance.
-        let e1 = pick_live_model(&store, Some("small"), "large-v3-turbo").unwrap_err();
-        assert!(e1.contains("'small'") && e1.contains("download"));
-        let e2 = pick_live_model(&store, None, "large-v3-turbo").unwrap_err();
-        assert!(e2.contains("download") && e2.contains("large-v3-turbo"));
-    }
-
-    #[test]
-    fn pick_live_model_uses_a_known_catalogue_key_for_the_override_error() {
-        // Sanity: the message references the requested key verbatim even for an
-        // unknown one (whisper_is_present_by_key returns false → error path).
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::with_root(dir.path());
-        let err = pick_live_model(&store, Some("nonexistent-model"), "small").unwrap_err();
-        assert!(err.contains("nonexistent-model"));
+        // No model on disk: errors naming the recommended one, with guidance.
+        let e = pick_live_model(&store, "large-v3-turbo").unwrap_err();
+        assert!(e.contains("download") && e.contains("large-v3-turbo"));
     }
 
     #[test]
@@ -833,15 +788,8 @@ mod tests {
     fn source_label_for_a_mixed_source_falls_back_to_system_plus_microphone() {
         use speedwave_runtime::transcription::{AudioSource, FileAudioCapture};
         let cap = FileAudioCapture::new();
-        // SystemWide + mic → "System (everything) + microphone".
         assert_eq!(
-            source_label(
-                &cap,
-                &AudioSource::Mixed {
-                    system: Box::new(AudioSource::SystemWide),
-                    mic: None,
-                }
-            ),
+            source_label(&cap, &AudioSource::Mixed { mic: None }),
             "System (everything) + microphone"
         );
     }
@@ -854,57 +802,22 @@ mod tests {
             supports_microphone: true,
             note: None,
         };
-        // SystemWide, a bare Microphone, and a SystemWide-backed Mixed are fine.
+        // SystemWide, a bare Microphone, and a Mixed are fine on a full host.
         assert!(validate_source_against_caps(&AudioSource::SystemWide, &full).is_ok());
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
         );
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &full
-        )
-        .is_ok());
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &full).is_ok());
         // A Mixed (or bare mic) is rejected on a host with no microphone.
         let no_mic = CaptureCapabilities {
             supports_system_audio: true,
             supports_microphone: false,
             note: None,
         };
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &no_mic
-        )
-        .is_err());
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &no_mic).is_err());
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
         );
-        // A structurally-invalid Mixed (mic-as-system, or nested Mixed) is
-        // rejected at the boundary regardless of capabilities.
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Microphone { device: None }),
-                mic: None,
-            },
-            &full
-        )
-        .is_err());
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Mixed {
-                    system: Box::new(AudioSource::SystemWide),
-                    mic: None,
-                }),
-                mic: None,
-            },
-            &full
-        )
-        .is_err());
     }
 }

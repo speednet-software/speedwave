@@ -36,12 +36,9 @@ pub enum AudioSource {
         /// Device id (`None` = system default input).
         device: Option<String>,
     },
-    /// Both `system` (the meeting's audio output) and `mic` (your voice)
-    /// captured together — the "meeting transcription" default. The backend
-    /// mixes the two streams into one mono buffer for the transcriber.
+    /// System audio + your microphone, mixed into one mono stream (the meeting
+    /// default). The system side is always the full loopback.
     Mixed {
-        /// What to capture for the "other side" (`SystemWide`).
-        system: Box<AudioSource>,
         /// The microphone device for "your side" (`None` = default input).
         mic: Option<String>,
     },
@@ -99,8 +96,8 @@ pub struct AudioChunk {
 /// Errors a capture backend can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
-    /// The requested source isn't supported on this host (e.g. per-process on
-    /// an old OS, or a missing sound server).
+    /// The requested source isn't supported on this host (e.g. system loopback
+    /// on macOS < 14.2, or a missing sound server).
     #[error("audio source not supported on this host: {0}")]
     Unsupported(String),
     /// The OS denied the recording permission (or, on macOS system audio,
@@ -514,6 +511,18 @@ mod tests {
     }
 
     #[test]
+    fn bytes_to_f32_decodes_le_and_drops_a_trailing_partial_sample() {
+        // 2 full f32s + 3 trailing bytes — chunks_exact drops the partial.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&(-0.5f32).to_le_bytes());
+        raw.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        assert_eq!(bytes_to_f32_samples(&raw), vec![1.0, -0.5]);
+        assert!(bytes_to_f32_samples(&[]).is_empty());
+        assert!(bytes_to_f32_samples(&[1, 2, 3]).is_empty());
+    }
+
+    #[test]
     fn resample_linear_is_identity_when_rates_match() {
         let v = sine(100, 16_000, 100.0);
         assert_eq!(resample_linear(&v, 16_000, 16_000), v);
@@ -529,7 +538,6 @@ mod tests {
                 device: Some("/tmp/x.wav".into()),
             },
             AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
                 mic: Some("default".into()),
             },
         ];
@@ -538,6 +546,13 @@ mod tests {
             let back: AudioSource = serde_json::from_str(&j).unwrap();
             assert_eq!(back, c, "round-trip failed for {c:?} (json: {j})");
         }
+        // Backward compat: an old Mixed with the retired `system` field still
+        // loads (serde ignores the unknown key) into the new shape.
+        let old = r#"{"kind":"mixed","system":{"kind":"system_wide"},"mic":null}"#;
+        assert_eq!(
+            serde_json::from_str::<AudioSource>(old).unwrap(),
+            AudioSource::Mixed { mic: None }
+        );
         // Spot-check the wire shape so a frontend mirroring this type knows it.
         let j = serde_json::to_value(AudioSource::Microphone { device: None }).unwrap();
         assert_eq!(j["kind"], "microphone");

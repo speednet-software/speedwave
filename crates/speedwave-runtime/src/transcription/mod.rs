@@ -26,7 +26,8 @@ pub use audio::{
 };
 pub use mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{
-    whisper_model, ModelRecommendation, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS,
+    model_for_recommendation, whisper_model, ModelRecommendation, ModelRole, Quantization,
+    WhisperModelInfo, WHISPER_MODELS,
 };
 pub use model_store::{
     no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,
@@ -54,7 +55,7 @@ pub fn models_dir() -> PathBuf {
 
 /// Resolves the `AudioCapture` backend for this host: macOS = the bundled
 /// `audio-capture-cli` (CoreAudio process taps); Windows = WASAPI loopback via
-/// cpal; anything else = `FileAudioCapture` (file input only).
+/// the `wasapi` crate (mic via cpal); else = `FileAudioCapture` (file input).
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     #[cfg(target_os = "macos")]
     {

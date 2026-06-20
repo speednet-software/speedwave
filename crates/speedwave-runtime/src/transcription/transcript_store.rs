@@ -268,8 +268,8 @@ impl TranscriptStore {
         F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
     {
         // `activate` loads from disk on a cache miss, so mutators work on
-        // sessions persisted by an earlier run (cache-only `entry` returned
-        // NotFound for them — the "no such transcript session" on discard).
+        // sessions persisted by an earlier run (a cache-only lookup returned
+        // NotFound for them — the "no such transcript session" on any mutator).
         let h = self.activate(id)?;
         let dir = self.session_dir(id);
         let event;

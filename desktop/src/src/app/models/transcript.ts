@@ -5,7 +5,7 @@
 export type Language = 'pl' | 'en';
 
 /** Compiled whisper.cpp acceleration backends (build-time, not host-probe). */
-export type Backend = 'cpu' | 'metal' | 'cuda' | 'vulkan';
+export type Backend = 'cpu' | 'metal';
 
 /** What the host's capture backend can do. */
 export interface CaptureCapabilities {
@@ -18,7 +18,7 @@ export interface CaptureCapabilities {
 export type AudioSource =
   | { kind: 'system_wide' }
   | { kind: 'microphone'; device: string | null }
-  | { kind: 'mixed'; system: AudioSource; mic: string | null };
+  | { kind: 'mixed'; mic: string | null };
 
 /** A capturable source the user can pick. */
 export interface AudioSourceInfo {

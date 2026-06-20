@@ -255,9 +255,8 @@ pub struct FinalizeConfig {
     pub id: Uuid,
     /// The session store.
     pub store: Arc<TranscriptStore>,
-    /// Recorded audio (`<session_dir>/audio.wav`). Must exist — if the user
-    /// discarded the audio, the caller shouldn't reach here (and `run_finalize`
-    /// returns `Failed` if it's missing).
+    /// Recorded audio (`<session_dir>/audio.wav`). `run_finalize` returns
+    /// `Failed` if it's missing.
     pub audio_path: std::path::PathBuf,
     /// Higher-quality transcriber (e.g. `large-v3`).
     pub transcriber: Box<dyn Transcriber>,

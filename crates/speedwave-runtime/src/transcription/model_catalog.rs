@@ -42,10 +42,8 @@ pub enum ModelRole {
     Finalize,
 }
 
-/// UI recommendation badge for a model in the download list. A given role is
-/// recommended for at most one model: `Live` = the default low-latency live
-/// model; `FinalQuality` = the highest-quality model for the offline pass
-/// (`large-v3`). Surfaced to the frontend via `ModelStatusEntry`.
+/// SSOT for "which model to pick" per pass (one model per value). Read by
+/// `accel::best_model_for_backends` + `pick_offline_model`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRecommendation {
@@ -232,6 +230,13 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
 /// Looks up a Whisper model by its catalogue [`key`](WhisperModelInfo::key).
 pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
     WHISPER_MODELS.iter().find(|m| m.key == key)
+}
+
+/// The model the catalogue marks with `rec` (the selection SSOT).
+pub fn model_for_recommendation(rec: ModelRecommendation) -> Option<&'static WhisperModelInfo> {
+    WHISPER_MODELS
+        .iter()
+        .find(|m| m.recommendation == Some(rec))
 }
 
 #[cfg(test)]
