@@ -4,6 +4,7 @@
 //! `STT_E2E_EXPECT` (markdown substring assertion, requires STT_E2E_WAV).
 
 #![cfg(feature = "audio-transcription")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,8 +45,8 @@ fn synth_wav(dir: &std::path::Path, secs: f32) -> PathBuf {
 
 #[test]
 fn full_pipeline_capture_transcribe_finalize_markdown() {
+    // Opt-in: skip silently unless RUN_STT_E2E=1 (see the module doc).
     if env("RUN_STT_E2E").is_none() {
-        eprintln!("skipping: set RUN_STT_E2E=1 to run the STT pipeline E2E test");
         return;
     }
     let model_key = env("STT_E2E_MODEL").unwrap_or_else(|| "small".to_string());

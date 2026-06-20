@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
         let year: i32 = s[..4].parse().unwrap();
-        assert!(year >= 2020 && year < 2100, "year {year} not plausible");
+        assert!((2020..2100).contains(&year), "year {year} not plausible");
     }
 
     #[test]
