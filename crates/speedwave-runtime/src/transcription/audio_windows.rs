@@ -64,7 +64,6 @@ impl AudioCapture for WasapiAudioCapture {
             sources.push(AudioSourceInfo {
                 source: AudioSource::Mixed { mic: None },
                 label: DEFAULT_MIXED_SOURCE_LABEL.to_string(),
-                app_id: None,
             });
         }
         // System loopback — the default output device's loopback.
@@ -75,7 +74,6 @@ impl AudioCapture for WasapiAudioCapture {
             sources.push(AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label,
-                app_id: None,
             });
         } else {
             // No output device — still offer the abstract SystemWide so the UI
@@ -83,7 +81,6 @@ impl AudioCapture for WasapiAudioCapture {
             sources.push(AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label: "System (everything)".to_string(),
-                app_id: None,
             });
         }
         // Microphones — every input device cpal sees.
@@ -95,7 +92,6 @@ impl AudioCapture for WasapiAudioCapture {
                         device: Some(name.clone()),
                     },
                     label: name,
-                    app_id: None,
                 });
             }
         }

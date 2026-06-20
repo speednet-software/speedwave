@@ -245,7 +245,6 @@ mod tests {
         AudioSourceInfo {
             source: AudioSource::SystemWide,
             label: "System (everything)".to_string(),
-            app_id: None,
         }
     }
     fn seg(start_s: f32, end_s: f32, text: &str) -> Segment {

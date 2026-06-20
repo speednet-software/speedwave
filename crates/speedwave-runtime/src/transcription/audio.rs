@@ -52,8 +52,6 @@ pub struct AudioSourceInfo {
     pub source: AudioSource,
     /// Human-readable label (e.g. `"System (everything)"`, `"Microphone: …"`).
     pub label: String,
-    /// Reserved for a best-effort app identifier; currently always `None`.
-    pub app_id: Option<String>,
 }
 
 /// What a capture backend on this host can do — surfaced to the UI.
@@ -210,7 +208,6 @@ impl AudioCapture for FileAudioCapture {
                     device: Some(p.to_string_lossy().into_owned()),
                 },
                 label: format!("File: {}", p.display()),
-                app_id: None,
             })
             .collect())
     }

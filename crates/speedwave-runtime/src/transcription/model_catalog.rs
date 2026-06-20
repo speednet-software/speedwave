@@ -42,17 +42,6 @@ pub enum ModelRole {
     Finalize,
 }
 
-/// SSOT for "which model to pick" per pass (one model per value). Read by
-/// `accel::best_model_for_backends` + `pick_offline_model`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelRecommendation {
-    /// Recommended live (low-latency) model.
-    Live,
-    /// Recommended highest-quality model for the offline finalize pass.
-    FinalQuality,
-}
-
 /// Whether a model is a full-precision GGML model or a quantised variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,8 +77,6 @@ pub struct WhisperModelInfo {
     /// `true` for the models v1 considers "live-capable" on the relevant
     /// backend (`small` on CPU, `large-v3-turbo` on GPU/Metal).
     pub live_capable: bool,
-    /// UI recommendation badge, if any (at most one model per recommendation).
-    pub recommendation: Option<ModelRecommendation>,
     /// SPDX-ish licence string for the model weights.
     pub license: &'static str,
 }
@@ -114,7 +101,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::CpuLive,
         quantization: Quantization::Full,
         live_capable: true,
-        recommendation: Some(ModelRecommendation::Live),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -126,7 +112,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::CpuLive,
         quantization: Quantization::Q5_1,
         live_capable: true,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -138,7 +123,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Mid,
         quantization: Quantization::Full,
         live_capable: false,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -150,7 +134,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Mid,
         quantization: Quantization::Q5_0,
         live_capable: false,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -162,7 +145,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::GpuLive,
         quantization: Quantization::Full,
         live_capable: true,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -174,7 +156,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::GpuLive,
         quantization: Quantization::Q5_0,
         live_capable: true,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -186,7 +167,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Finalize,
         quantization: Quantization::Full,
         live_capable: false,
-        recommendation: Some(ModelRecommendation::FinalQuality),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -198,7 +178,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Finalize,
         quantization: Quantization::Q5_0,
         live_capable: false,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -210,7 +189,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::SmallestUsable,
         quantization: Quantization::Full,
         live_capable: true,
-        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -222,7 +200,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::DevTest,
         quantization: Quantization::Full,
         live_capable: true,
-        recommendation: None,
         license: "MIT",
     },
 ];
@@ -230,13 +207,6 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
 /// Looks up a Whisper model by its catalogue [`key`](WhisperModelInfo::key).
 pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
     WHISPER_MODELS.iter().find(|m| m.key == key)
-}
-
-/// The model the catalogue marks with `rec` (the selection SSOT).
-pub fn model_for_recommendation(rec: ModelRecommendation) -> Option<&'static WhisperModelInfo> {
-    WHISPER_MODELS
-        .iter()
-        .find(|m| m.recommendation == Some(rec))
 }
 
 #[cfg(test)]
@@ -325,35 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn recommendations_have_exactly_one_final_quality_and_at_least_one_live() {
-        // PR-4: the download list badges one model "Recommended for final
-        // quality" (large-v3) and at least one "Recommended for live".
-        let final_q: Vec<&str> = WHISPER_MODELS
-            .iter()
-            .filter(|m| m.recommendation == Some(ModelRecommendation::FinalQuality))
-            .map(|m| m.key)
-            .collect();
-        assert_eq!(
-            final_q,
-            vec!["large-v3"],
-            "exactly one model must be recommended for final quality"
-        );
-        let live: Vec<&str> = WHISPER_MODELS
-            .iter()
-            .filter(|m| m.recommendation == Some(ModelRecommendation::Live))
-            .map(|m| m.key)
-            .collect();
-        assert!(!live.is_empty(), "need at least one live-recommended model");
-        // A live-recommended model must actually be live-capable.
-        for key in &live {
-            assert!(
-                whisper_model(key).is_some_and(|m| m.live_capable),
-                "live-recommended {key} must be live_capable"
-            );
-        }
-    }
-
-    #[test]
     fn lookups_work() {
         assert_eq!(
             whisper_model("medium").map(|m| m.file),
@@ -378,13 +319,6 @@ mod tests {
         for q in [Quantization::Full, Quantization::Q5_0, Quantization::Q5_1] {
             let j = serde_json::to_string(&q).unwrap();
             assert_eq!(serde_json::from_str::<Quantization>(&j).unwrap(), q);
-        }
-        for rec in [ModelRecommendation::Live, ModelRecommendation::FinalQuality] {
-            let j = serde_json::to_string(&rec).unwrap();
-            assert_eq!(
-                serde_json::from_str::<ModelRecommendation>(&j).unwrap(),
-                rec
-            );
         }
     }
 

@@ -467,7 +467,6 @@ mod tests {
             AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label: "System".to_string(),
-                app_id: None,
             },
             audio_path.to_path_buf(),
         );

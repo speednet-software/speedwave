@@ -76,7 +76,6 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
         AudioSourceInfo {
             source: AudioSource::SystemWide,
             label: "E2E".to_string(),
-            app_id: None,
         },
         audio_wav.clone(),
     );

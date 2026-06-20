@@ -50,36 +50,9 @@ pub fn has_gpu_backend() -> bool {
     compiled_backends().iter().any(|b| b.is_gpu())
 }
 
-/// The live-path Whisper model for `backends`: `large-v3-turbo` if a GPU
-/// backend is present, else `small`.
-pub fn recommended_live_model(backends: &[Backend]) -> &'static WhisperModelInfo {
-    let want = if backends.iter().any(|b| b.is_gpu()) {
-        ModelRole::GpuLive
-    } else {
-        ModelRole::CpuLive
-    };
-    WHISPER_MODELS
-        .iter()
-        .find(|m| m.role == want && m.live_capable && matches!(m.quantization, Quantization::Full))
-        .or_else(|| {
-            WHISPER_MODELS
-                .iter()
-                .find(|m| m.role == want && m.live_capable)
-        })
-        .or_else(|| WHISPER_MODELS.iter().find(|m| m.live_capable))
-        .unwrap_or(&WHISPER_MODELS[0])
-}
-
-/// The live model for this build's compiled backends. Test-only — production
-/// passes an explicit backend set to `recommended_live_model`.
-#[cfg(test)]
-pub fn recommended_live_model_for_this_build() -> &'static WhisperModelInfo {
-    recommended_live_model(&compiled_backends())
-}
-
 /// The single best model to download for `backends`: `large-v3` on GPU, else
-/// `large-v3-turbo` (its `GpuLive` role is the best live-capable model; on CPU
-/// it serves both passes — turbo on a weak CPU may lag live, accepted). See ADR-056.
+/// `large-v3-turbo`. One model serves both the live and offline passes; on a
+/// weak CPU turbo may lag live, accepted (ADR-056).
 pub fn best_model_for_backends(backends: &[Backend]) -> &'static WhisperModelInfo {
     let want = if backends.iter().any(|b| b.is_gpu()) {
         ModelRole::Finalize
@@ -118,33 +91,6 @@ mod tests {
         assert_eq!(
             has_gpu_backend(),
             compiled_backends().iter().any(|b| b.is_gpu())
-        );
-    }
-
-    #[test]
-    fn recommended_live_model_gpu_vs_cpu() {
-        assert_eq!(
-            recommended_live_model(&[Backend::Cpu, Backend::Metal]).key,
-            "large-v3-turbo"
-        );
-        assert_eq!(recommended_live_model(&[Backend::Cpu]).key, "small");
-        assert_eq!(
-            recommended_live_model(&[Backend::Metal]).role,
-            ModelRole::GpuLive
-        );
-    }
-
-    #[test]
-    fn recommended_live_model_for_this_build_is_consistent() {
-        let m = recommended_live_model_for_this_build();
-        assert!(m.live_capable);
-        assert_eq!(
-            m.role,
-            if has_gpu_backend() {
-                ModelRole::GpuLive
-            } else {
-                ModelRole::CpuLive
-            }
         );
     }
 
