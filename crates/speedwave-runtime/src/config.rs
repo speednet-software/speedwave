@@ -1113,6 +1113,7 @@ mod tests {
             .iter()
             .any(|f| f == defaults::MCP_CONFIG_PATH));
         assert!(resolved.flags.iter().any(|f| f == "--strict-mcp-config"));
+        assert!(resolved.flags.iter().any(|f| f == "--ide"));
     }
 
     #[test]

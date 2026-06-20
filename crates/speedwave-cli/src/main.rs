@@ -1506,6 +1506,7 @@ mod tests {
         assert!(exec_cmd.contains(&"--mcp-config"));
         assert!(exec_cmd.contains(&defaults::MCP_CONFIG_PATH));
         assert!(exec_cmd.contains(&"--strict-mcp-config"));
+        assert!(exec_cmd.contains(&"--ide"));
     }
 
     /// Builds a project entry with the given name; dir is irrelevant now that

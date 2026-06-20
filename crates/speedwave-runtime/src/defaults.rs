@@ -146,6 +146,10 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     "--strict-mcp-config",
     "--thinking-display",
     "summarized",
+    // Auto-connect to the IDE bridge via the lock at ~/.claude/ide/ — the
+    // lock-file path, complementing CLAUDE_CODE_AUTO_CONNECT_IDE (which only
+    // forces the integrated-terminal path). Skipped silently when absent.
+    "--ide",
 ];
 
 /// Base environment variables injected into every Claude container.
@@ -280,6 +284,13 @@ mod tests {
     #[test]
     fn default_flags_include_permission_bypass() {
         assert!(DEFAULT_FLAGS.contains(&"--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn default_flags_include_ide_auto_connect() {
+        // Lock-file auto-connect path; safe default since Claude Code skips it
+        // silently when no ~/.claude/ide/ lock is present (CLI-only).
+        assert!(DEFAULT_FLAGS.contains(&"--ide"));
     }
 
     #[test]
