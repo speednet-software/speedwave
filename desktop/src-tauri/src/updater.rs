@@ -8,10 +8,7 @@ use tauri_plugin_updater::UpdaterExt;
 /// Mutex to serialize load-modify-save cycles on update-settings.json.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
-/// Authoritative update endpoint. Replaces `plugins.updater.endpoints` in tauri.conf.json at runtime.
-/// Keep both in sync for documentation purposes.
-///
-/// Stable update endpoint — GitHub Releases latest (non-draft, non-prerelease).
+/// Stable update endpoint — GitHub Releases latest. Mirrors `plugins.updater.endpoints` in tauri.conf.json.
 const STABLE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
 
@@ -102,8 +99,7 @@ fn save_update_settings_inner(settings: &UpdateSettings) -> Result<(), String> {
     let mut clamped = settings.clone();
     clamped.normalize();
     let json = serde_json::to_string_pretty(&clamped).map_err(|e| e.to_string())?;
-    // Atomic write: write to a temporary file in the same directory, then rename.
-    // This prevents partial/corrupt reads if the process is interrupted mid-write.
+    // Atomic write: temp file in the same directory, then rename.
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())
@@ -125,12 +121,7 @@ fn detect_critical(body: &Option<String>) -> bool {
     })
 }
 
-/// Builds a Tauri Updater configured for the stable update channel.
-///
-/// Checks GitHub Releases `/releases/latest/download/latest.json`.
-///
-/// The `version_comparator` uses semver to only allow upgrades (remote > current),
-/// preventing downgrade attacks where a compromised endpoint serves an older version.
+/// Builds a stable-channel Tauri Updater. `version_comparator` allows upgrades only (remote > current).
 fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let parsed_url: url::Url = STABLE_ENDPOINT
         .parse()
@@ -140,8 +131,6 @@ fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, Strin
         .map_err(|e| e.to_string())?
         .version_comparator(|current, remote| {
             // Only update when remote version is strictly newer (no downgrades).
-            // Both `current` and `remote.version` are already parsed semver::Version
-            // (tauri-plugin-updater handles parsing), so direct comparison is safe.
             remote.version > current
         })
         .build()
@@ -186,7 +175,6 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     let update = update.ok_or("No update available")?;
 
     // Verify the version matches what the user approved (TOCTOU mitigation).
-    // If the server returns a different version between check and install, abort.
     let installing_version = update.version.clone();
     if installing_version != expected_version {
         return Err(format!(
@@ -211,9 +199,7 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
         .await
         .map_err(|e| e.to_string())?;
 
-    // Do not restart immediately from the auto-check flow — containers may be running.
-    // Emit an event so the frontend can handle it. Note: the Settings page
-    // "Install & Restart" intentionally uses force restart as an explicit user action.
+    // Do not restart from the auto-check flow (containers may be running); emit an event for the frontend.
     use tauri::Emitter;
     if let Err(e) = app.emit(
         "update_installed",
@@ -522,9 +508,7 @@ pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHand
                 }
             }
 
-            // Sleep in 60-second increments so that settings changes
-            // (e.g. disabling auto-check or adjusting the interval) take
-            // effect within one minute rather than after the full interval.
+            // Sleep in 60-second increments so settings changes take effect within a minute.
             let interval_secs = (settings.check_interval_hours as u64) * 3600;
             let mut elapsed: u64 = 0;
             while elapsed < interval_secs {

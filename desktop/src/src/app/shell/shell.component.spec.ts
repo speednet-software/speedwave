@@ -15,8 +15,7 @@ describe('ShellComponent', () => {
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
-  // Stub the root BetaService so specs control beta state directly; default
-  // "on" so the meeting-transcription nav entry behaves as before.
+  // Beta on by default so the meeting-transcription nav entry is present.
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -241,9 +240,7 @@ describe('ShellComponent', () => {
   });
 
   it('keeps the Chat nav link visible when status is auth_required', async () => {
-    // Mockup-aligned behaviour: the chat icon is always present in the rail.
-    // When auth is missing the chat view itself surfaces an inline
-    // "auth required" block with a link to Settings instead of disappearing.
+    // Chat icon persists in nav even when auth is required; auth surfaces inline.
     await component.ngOnInit();
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
@@ -315,9 +312,7 @@ describe('ShellComponent', () => {
   });
 
   describe('restart overlay', () => {
-    // Modal contents render through CDK Dialog (a portal attached to
-    // document.body), not inside the host fixture, so we query the global
-    // document for any element underneath the overlay.
+    // CDK Dialog renders into document.body, outside the host fixture.
     function q(sel: string): HTMLElement | null {
       return document.querySelector(sel) as HTMLElement | null;
     }
@@ -343,8 +338,7 @@ describe('ShellComponent', () => {
     });
 
     it('shows overlay when needsRestart is true and status is auth_required', () => {
-      // Toggling an integration is valid before Anthropic login; the restart
-      // prompt must still surface in auth_required, not only in ready.
+      // Restart prompt must surface in auth_required, not only in ready.
       projectState.status = 'auth_required';
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
@@ -426,8 +420,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      // The spinner branch lives inside the host template (not the modal),
-      // so it stays in the fixture DOM.
+      // Spinner branch lives in the host template, so it stays in the fixture DOM.
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');

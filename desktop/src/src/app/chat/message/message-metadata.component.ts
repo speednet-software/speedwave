@@ -50,11 +50,7 @@ export class MessageMetadataComponent {
     const raw = this.entry().meta?.model;
     if (!raw) return '';
     const stripped = raw.replace(/^claude-/, '');
-    // Collapse repeated `[1m]` suffixes. They appear when Claude Code
-    // resolves the `opus`/`sonnet` alias against `ANTHROPIC_DEFAULT_*_MODEL`
-    // (which already carries `[1m]`) and re-appends the suffix on top —
-    // surfaces as `opus-4-7[1m][1m]` in the chat footer. The functional
-    // 1M-context behaviour is unaffected; this is purely a display fix.
+    // Collapse repeated `[1m]` suffixes.
     const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
     return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
   });

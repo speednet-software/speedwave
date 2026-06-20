@@ -26,12 +26,7 @@ services:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
-      # Connect to the Speedwave IDE Bridge on start so the user does not have to
-      # run /ide and pick "Speedwave" by hand. The bridge lock file is always
-      # mounted at ~/.claude/ide; this var forces the attempt even though the
-      # container TTY is not a recognised IDE integrated terminal (the documented
-      # "auto-detection fails" case). Value is the string `true` (not 1) per the
-      # Claude Code env-vars reference.
+      # Auto-connect IDE bridge; value is literal `true` per Claude Code env-vars.
       - CLAUDE_CODE_AUTO_CONNECT_IDE=true
       - ANTHROPIC_LOG=debug
     working_dir: /workspace
@@ -43,24 +38,13 @@ services:
           cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
-  # LiteLLM proxy (ADR-073): Claude Code's single LLM endpoint. Routes to the
-  # configured providers; subscription OAuth passes through /anthropic
-  # untouched. Worker-class token holder: per-provider API keys mount at
-  # /tokens:ro, never enter the claude container. No host port — reachable
-  # only on the per-project network. extra_hosts: local LLM backends on the
-  # host (Ollama/LM Studio/llama.cpp) are reached via host.docker.internal
-  # (ADR-062).
+  # LiteLLM proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
   litellm:
     image: ${IMAGE_LITELLM}
     pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_litellm
     environment:
-      # Force /v1/chat/completions for OpenAI-compatible backends. The
-      # default Responses-API bridge bypasses llama-server's prompt cache
-      # (a ~20k-token Claude Code prompt reprocesses from scratch — ~50 s
-      # per turn on a Mac-class host) and ignores --chat-template-kwargs
-      # (re-enabling Qwen's silent thinking). Chat completions is the path
-      # validated in the ADR-073 spike.
+      # Use OpenAI-compatible /v1/chat/completions for local LLM backends (ADR-073).
       - LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
       # Not read by litellm — forces container recreation on config-up
       # when the rendered config or a provider key changed.
@@ -160,10 +144,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_SHAREPOINT_TMPFS}
     volumes:
-      # :ro per ADR-060 — OAuth token refresh moved to the host-side `oauth`
-      # worker. The SharePoint container only reads access_token / site_id /
-      # base_path; refresh writes happen on the host (oauth worker) which
-      # updates /tokens/access_token visible through this read-only mount.
+      # :ro per ADR-060 (OAuth refresh on host-side oauth worker); token writes flow through here.
       - ${TOKENS_DIR}/sharepoint:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
@@ -274,8 +255,7 @@ services:
           cpus: '${MCP_ATLASSIAN_CPUS}'
           memory: ${MCP_ATLASSIAN_MEM}
 
-  # Office documents worker — a pure file processor: no service credentials, no /tokens mount,
-  # and NO network egress (attached only to the internal ${NETWORK_NAME}_office network — see ADR-055).
+  # Office worker — pure file processor: no /tokens, no egress (internal ${NETWORK_NAME}_office, ADR-055).
   # Mounts the project workspace read-write; outputs land under /workspace/.speedwave/office/.
   mcp-office:
     image: ${IMAGE_MCP_OFFICE}
@@ -323,16 +303,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Host gateway alias so Claude and plugins can navigate Playwright to
-    # local dev servers (e.g. `http://host.docker.internal:4200` for Angular).
-    # See ADR-062. The IP routing to the VM gateway already exists for every
-    # container in the project network; this extra_hosts entry only adds the
-    # canonical DNS name so callers don't need to know per-platform gateway IPs.
+    # Host gateway alias for dev servers (e.g. Angular on localhost:4200); see ADR-062.
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     # Chromium uses /tmp for page caches and screenshot compositing.
-    # tmpfs lives in RAM — keep it lean. Heavy screenshots return inline
-    # as base64, not via /tmp.
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_PLAYWRIGHT_TMPFS}
     # Chromium IPC shared-memory requirement; the 64 MiB default causes ENOMEM
@@ -342,9 +316,7 @@ services:
     # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
     environment:
       - PORT=${PORT_WORKER}
-      # MCP-level request/response logging (uses the `debug` npm package;
-      # output goes to stderr, visible in Desktop UI → System Health logs).
-      # Covers tools/call, tool responses, and errors. Set to `pw:*` for full verbosity.
+      # MCP request/response logging (debug npm package); set to `pw:*` for full verbosity.
       - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}

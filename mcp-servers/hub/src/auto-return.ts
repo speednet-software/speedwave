@@ -12,17 +12,7 @@ export interface AutoReturnResult {
 }
 
 /**
- * Dodaje 'return' do ostatniego wyrażenia w kodzie, jeśli nie ma explicit return.
- * Używa AST parsera dla 100% poprawności.
- *
- * Parser configuration:
- * - sourceType: 'script' - allows parsing without ES module restrictions
- * - allowAwaitOutsideFunction: true - allows top-level await
- * - allowReturnOutsideFunction: true - allows top-level return
- *
- * Note: ES module syntax (import/export statements) will cause parse errors.
- * This is intentional - the code is executed inside an AsyncFunction wrapper,
- * where static ES module syntax is not supported anyway.
+ * Adds implicit 'return' to the last expression if no explicit return exists.
  * @param code - JavaScript code to process
  * @returns Result with code and optional parse error
  */

@@ -1,9 +1,4 @@
 //! UI preferences commands — currently the beta-features toggle (ADR-058).
-//!
-//! `apply_beta_toggle_inner` is the shared write path used by the tray menu's
-//! `toggle_beta` arm; it locks the user-config, persists the new value, updates
-//! `TrayMenuState`, rebuilds the tray menu, and emits `beta-changed` so the
-//! frontend can react. `get_beta_enabled` exposes the persisted flag to the UI.
 
 use speedwave_runtime::config;
 use tauri::{AppHandle, Emitter, Manager};

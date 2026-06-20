@@ -31,9 +31,7 @@ fn run(app: AppHandle) -> anyhow::Result<()> {
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(tx)?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
 
-    // Dedup key: the last content we pushed to the clipboard. A single write
-    // to `.clipboard-bridge` fires both Create and Modify events on most
-    // platforms; equal content means we already handled it.
+    // Dedup key: the last content pushed to the clipboard.
     let mut last_content = String::new();
     log::info!("clipboard bridge started: watching {}", root.display());
 
@@ -41,8 +39,7 @@ fn run(app: AppHandle) -> anyhow::Result<()> {
         let event = match res {
             Ok(e) => e,
             Err(e) => {
-                // inotify exhaustion (MaxFilesWatch), permission loss, etc. —
-                // events are now being dropped; surface it.
+                // Watcher error (inotify exhaustion, permission loss); events dropped.
                 log::warn!("clipboard bridge: watcher error: {e}");
                 continue;
             }
@@ -59,17 +56,13 @@ fn run(app: AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reads up to `MAX_PAYLOAD_BYTES + 1` bytes from `path` in a single open —
-/// this collapses the check-then-act window a separate `metadata()` + `read()`
-/// would leave (a container could swap a small file for a huge one in between).
-/// `Ok(None)` means "nothing actionable" (empty, too large, or unreadable —
-/// unreadable is logged at warn unless it's the benign "file already gone").
+/// Reads up to `MAX_PAYLOAD_BYTES + 1` bytes in one open to detect oversized
+/// payloads atomically. `None` means empty, too large, or unreadable.
 fn read_capped(path: &Path) -> Option<String> {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            // NotFound is expected — the file can be deleted between the notify
-            // event and this open. Anything else is worth a log line.
+            // NotFound is expected (file can vanish between notify event and open).
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("clipboard bridge: open failed at {}: {e}", path.display());
             }
@@ -198,9 +191,7 @@ mod tests {
 
     #[test]
     fn dedup_skips_identical_content() {
-        // We can't easily call handle_bridge_write without an AppHandle, but
-        // the dedup decision is observable through the content comparison:
-        // simulate by checking the equality the function uses.
+        // Dedup decision is the String equality the function uses.
         let mut last = String::from("payload-1");
         let new = String::from("payload-1");
         let is_dup = new == last;
@@ -220,9 +211,7 @@ mod tests {
 
     #[test]
     fn bridge_filename_matches_shell_wrapper_literal() {
-        // SSOT cross-check: containers/osc52-copy.sh writes "~/.clipboard-bridge".
-        // If this constant changes, that script must change too (and the BATS
-        // test in _tests/entrypoint/osc52-copy.bats greps for this exact value).
+        // SSOT: containers/osc52-copy.sh and _tests/entrypoint/osc52-copy.bats depend on this value.
         assert_eq!(BRIDGE_FILENAME, ".clipboard-bridge");
     }
 }

@@ -11,17 +11,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { swatchFor } from './project-swatch';
 
-/**
- * Project switcher trigger — the small monogram + name pill rendered in the
- * right slot of every view header (chat, settings, logs, plugins, etc.).
- *
- * Single source of truth for the pill so all views look and behave identically.
- * Reads the active project from {@link ProjectStateService} and toggles the
- * dropdown via {@link UiStateService.toggleProjectSwitcher}.
- *
- * Mockup reference: header right-cluster across all views (lines 488-506,
- * 1481-1492, 1636-1660).
- */
+/** Header pill showing the active project; opens the project switcher on click. */
 @Component({
   selector: 'app-project-pill',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -49,7 +39,7 @@ export class ProjectPillComponent implements OnInit, OnDestroy {
   readonly ui = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
 
-  /** Active project name — kept in a signal so OnPush re-renders on change. */
+  /** Active project name. */
   protected readonly projectName = signal<string>('');
 
   /** Position of the active project in the list — drives the swatch. -1 when no project. */
@@ -67,7 +57,7 @@ export class ProjectPillComponent implements OnInit, OnDestroy {
 
   private unsubscribe: (() => void) | null = null;
 
-  /** Subscribes to project state changes so the pill label stays current. */
+  /** Subscribes to project state changes. */
   ngOnInit(): void {
     this.refresh();
     this.unsubscribe = this.projectState.onChange(() => this.refresh());

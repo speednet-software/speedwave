@@ -1,10 +1,5 @@
 /**
- * State-tree types mirroring `crates/speedwave-runtime/src/stream/state_tree.rs`.
- *
- * The Rust side serialises these via serde with `rename_all = "snake_case"`
- * for tagged enums and default field names otherwise. The tree is rebuilt
- * locally by `ChatStateService.rebuildStateTree()` after every mutation.
- * @see docs/adr/ADR-042-json-patch-stream-protocol.md
+ * State-tree types mirroring `crates/speedwave-runtime/src/stream/state_tree.rs` (ADR-042).
  */
 
 /** Conversation role. */
@@ -62,11 +57,7 @@ export interface EntryMetaState {
 import type { AskUserQuestionItem } from './chat';
 
 /**
- * One question inside an `ask_user` block — mirrors
- * `speedwave_runtime::stream::AskUserQuestionItem`. Same shape as
- * {@link AskUserQuestionItem}; this alias exposes a `Readonly` view for
- * persistence-layer consumers, but the underlying type lives in
- * `models/chat.ts` (single source of truth).
+ * One question inside an `ask_user` block; mirrors Rust `AskUserQuestionItem` (SSOT in `models/chat.ts`).
  */
 export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
 

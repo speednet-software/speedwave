@@ -298,11 +298,7 @@ function buildMockToolMetadata(
 }
 
 /**
- * Populate registry with mock tool data inline.
- * Replaces the old populateRegistryFromPolicies() that depended on TOOL_POLICIES.
- * Must be called after _resetRegistryForTesting().
- *
- * Also sets SERVICE_NAMES so tests that iterate SERVICE_NAMES see all 5 built-in services.
+ * Populate registry with mock tool data and set SERVICE_NAMES. Call after _resetRegistryForTesting().
  */
 export function populateRegistryWithMockTools(): void {
   const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
@@ -321,7 +317,6 @@ export function populateRegistryWithMockTools(): void {
 
 /**
  * Create a full mock AllBridges object with all service methods as vi.fn().
- * Eliminates ~425 lines of duplicated mock definitions across test files.
  */
 export function createMockBridges(): AllBridges {
   return {

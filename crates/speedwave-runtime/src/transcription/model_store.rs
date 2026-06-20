@@ -1,26 +1,7 @@
-//! On-demand download + verification + caching of the Whisper and diarization
-//! models (ADR-056).
-//!
-//! Models live under `<data_dir>/models/whisper/` and `<data_dir>/models/diarization/`
-//! (perms `0o700`, files `0o600` — they aren't secrets, but neither are they
-//! world-readable). `ensure_model()` downloads a model if absent, **streaming
-//! it to a `.part` temp file in the same directory while computing SHA256 on
-//! the fly**, then verifies against the catalogue hash and atomically renames
-//! into place; on hash mismatch or any error the temp is removed and nothing
-//! partial is left behind. The HTTP client uses a **custom redirect policy
-//! that only follows redirects to hosts in `consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`**
-//! (Hugging Face `302`s to its Xet CDN, GitHub release assets to theirs — both
-//! with signed URLs — so `Policy::none()` would break the download; an
-//! unrecognised redirect host produces a `Mismatch`-class error rather than
-//! being followed). There is a per-model size cap from the catalogue plus the
-//! `MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES` overall dome.
-//!
-//! (The downloader is a blocking API — a multi-GiB download is a long blocking
-//! operation the Tauri layer wraps in `spawn_blocking`. It re-implements a
-//! small bounded-streaming reader here rather than reusing the Desktop's
-//! `http_util` — `speedwave-runtime` is pure Rust with no Tauri coupling — but
-//! follows the same principles: request timeout, restricted redirects, no
-//! buffer-the-whole-body-in-memory.)
+//! On-demand download + verification + caching of Whisper and diarization
+//! models under `<data_dir>/models/` (ADR-056). `ensure_model()` streams to a
+//! `.part` temp, verifies SHA256, atomically renames; redirects only follow
+//! `consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`. Blocking API.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -50,8 +31,7 @@ pub enum ModelStoreError {
     #[error("no such model in the catalogue: {0}")]
     UnknownModel(String),
     /// The download's redirect chain led to a host not on the allowlist
-    /// (`consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`) — most likely a
-    /// CDN hostname changed, which means the model catalogue needs updating.
+    /// (`consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`).
     #[error("model download redirected to a host not on the allowlist ({0}) — the model URL may have changed; report this")]
     DisallowedRedirect(String),
     /// `Content-Length` (or the bytes actually streamed) exceeded the per-model
@@ -170,10 +150,9 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// Local path a diarization download artifact / unpacked file lives at.
-    /// For an embedding model that is the `.onnx` file itself; for a
-    /// segmentation model the archive is unpacked into `<root>/diarization/<key>/`
-    /// and `model.onnx` inside it is the result.
+    /// Local path a diarization artifact lives at: the `.onnx` itself for an
+    /// embedding model, the unpack dir `<root>/diarization/<key>/` for a
+    /// segmentation model.
     fn diarization_artifact_path(&self, info: &DiarizationModelInfo) -> PathBuf {
         match info.kind {
             DiarizationModelKind::Embedding => {
@@ -190,8 +169,7 @@ impl ModelStore {
 
     /// The path the segmentation `model.onnx` ends up at after unpacking.
     fn segmentation_onnx_path(&self, info: &DiarizationModelInfo) -> PathBuf {
-        // k2-fsa's archive extracts to a top-level dir
-        // `sherpa-onnx-pyannote-segmentation-3-0/` containing `model.onnx`.
+        // k2-fsa's archive extracts to a top-level dir containing `model.onnx`.
         self.diarization_artifact_path(info)
             .join("sherpa-onnx-pyannote-segmentation-3-0")
             .join("model.onnx")
@@ -199,15 +177,12 @@ impl ModelStore {
 
     /// `true` if a Whisper model with this catalogue key is present and its
     /// on-disk size matches the catalogue's `approx_bytes` within a small
-    /// tolerance (a cheap "is this a complete file" sanity check — the SHA256
-    /// was already verified on download, and we don't re-hash on every status
-    /// query).
+    /// tolerance.
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
             Ok(m) => {
                 let on_disk = m.len();
-                // approx_bytes is from the HF API — exact for these files, but
-                // allow a tiny slack in case of a metadata vs content mismatch.
+                // Allow a tiny slack for metadata vs content mismatch.
                 let diff = on_disk.abs_diff(info.approx_bytes);
                 diff <= 64 || on_disk == info.approx_bytes
             }
@@ -254,9 +229,7 @@ impl ModelStore {
         }
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
-        // Per-model cap = catalogue approx_bytes + 5% headroom (the file is a
-        // fixed size; this just keeps a wildly-wrong Content-Length from
-        // writing gigabytes).
+        // Per-model cap = catalogue approx_bytes + 5% headroom.
         let per_model_cap = info.approx_bytes + info.approx_bytes / 20 + 1024;
         // Total-storage check.
         let current_total = self.total_bytes_used();
@@ -281,9 +254,7 @@ impl ModelStore {
 
     /// Downloads `url` to `dest`, verifies SHA256 against `expected_sha256`,
     /// enforces `cap`, restricts perms, and on a hash mismatch removes the
-    /// (already-renamed-away) temp and errors. The shared body of `ensure_model`
-    /// and `ensure_diarization_models`' embedding branch — and the seam tests
-    /// use to drive a `mockito` URL through the full verify path.
+    /// (already-renamed-away) temp and errors.
     fn download_to(
         &self,
         url: &str,
@@ -295,8 +266,7 @@ impl ModelStore {
     ) -> Result<(), ModelStoreError> {
         let got_hash = download_verified(url, dest, model_key, cap, progress)?;
         if got_hash != expected_sha256 {
-            // download_verified renamed the temp into `dest` on success; on a
-            // hash mismatch that means there is now a bad file at `dest` — remove it.
+            // Remove the bad file `download_verified` renamed into `dest`.
             let _ = std::fs::remove_file(dest);
             return Err(ModelStoreError::HashMismatch {
                 model: model_key.to_string(),
@@ -525,9 +495,8 @@ fn download_verified(
     Ok(hash)
 }
 
-/// Like `download_verified` but writes to `dest_tmp` exactly (no rename) — used
-/// for the segmentation archive, which is unpacked then deleted, so the caller
-/// manages the temp file's lifecycle.
+/// Like `download_verified` but writes to `dest_tmp` exactly (no rename); the
+/// caller manages the temp file's lifecycle.
 fn download_to_file_verified(
     url: &str,
     dest_tmp: &Path,
@@ -629,8 +598,7 @@ fn stream_to_path(
 /// error's `source()` chain — we walk that chain to recover the host.
 fn classify_reqwest_err(e: &reqwest::Error) -> ModelStoreError {
     if e.is_redirect() {
-        // Try to pull the host out of our "disallowed redirect host: <host>"
-        // message somewhere in the source chain; fall back to the URL.
+        // Pull the host from the "disallowed redirect host: <host>" message, else the URL.
         let mut src: Option<&dyn std::error::Error> = Some(e);
         while let Some(cur) = src {
             let m = cur.to_string();
@@ -886,8 +854,7 @@ mod tests {
             .create();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("m.bin");
-        // mockito serves on 127.0.0.1 with a random port — definitely not on the
-        // allowlist — so the redirect must be refused.
+        // mockito's random port is not on the allowlist, so the redirect is refused.
         let err = stream_to_path(&redir_url, &out, "redir", 10_000, &mut no_progress).unwrap_err();
         assert!(
             matches!(
@@ -999,19 +966,7 @@ mod tests {
 
     #[test]
     fn ensure_model_storage_cap_arithmetic_blocks_overflow() {
-        // We can't put 12 GiB on disk in a unit test, so verify the *check*:
-        // pre-fill the model dir so `total_bytes_used()` is reported as huge by
-        // a wrapper, then... actually, the cleanest direct check is that the
-        // dome is enforced on `total + approx`. We assert via a tiny store
-        // whose root we point at a dir we then claim is "full" — but
-        // total_bytes_used walks the real fs. So instead: assert the
-        // arithmetic relationship the code uses, against the real constant and
-        // the real catalogue, so a future change that, say, drops the check
-        // would be caught by ensure_model_rejects_unknown_key + the mockito
-        // download tests, and the *sizing* of the dome is covered by the
-        // catalogue test. Here we just confirm the dome is bigger than any
-        // single model (so `ensure_model` for an empty store always proceeds
-        // past the cap check), which is the property the check relies on:
+        // The dome must exceed any single model, else ensure_model could never download it.
         let biggest = crate::transcription::model_catalog::WHISPER_MODELS
             .iter()
             .map(|m| m.approx_bytes)
@@ -1021,10 +976,6 @@ mod tests {
             biggest < consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "the dome must exceed the largest model, else ensure_model could never download it"
         );
-        // And: a store with files summing over the dome would block a new
-        // download. We can't write that much, but `total_bytes_used` is just
-        // `dir_size`, which we exercise elsewhere — the cap check in
-        // ensure_model is `current + approx > MAX`, plain arithmetic.
     }
 
     #[test]
@@ -1033,11 +984,8 @@ mod tests {
         let store = ModelStore::with_root(dir.path());
         let info = whisper_model("tiny").unwrap();
         std::fs::create_dir_all(store.whisper_dir()).unwrap();
-        // Write a file of exactly approx_bytes so whisper_is_present() == true.
         let path = store.whisper_path(info);
-        // approx_bytes for tiny is ~78 MiB — too big to actually write in a unit
-        // test. So instead: temporarily we can't make whisper_is_present true
-        // without that size. Verify the *negative* side (not present) + delete-noop:
+        // approx_bytes (~78 MiB) is too big to write here; verify the not-present side.
         assert!(
             !store
                 .whisper_status()
@@ -1072,13 +1020,7 @@ mod tests {
         assert!(store.diarization_dir().starts_with(dir.path()));
     }
 
-    // Note: a "rejects `../` path traversal" test would need a tar archive
-    // *containing* a `..` entry, but the `tar` crate's `Builder` refuses to
-    // write one (it has its own traversal guard) — so such a fixture can't be
-    // produced through the public API. `unpack_tar_bz2`'s own `..`/absolute
-    // check is kept as defence-in-depth (the model catalogue could one day
-    // point at a non-k2-fsa archive); the happy-path test below exercises the
-    // function, and a manual review confirms the guard is hit before any write.
+    // No `..`-traversal test: `tar::Builder` refuses to write a `..` entry.
 
     #[test]
     fn unpack_tar_bz2_extracts_a_normal_archive() {

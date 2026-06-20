@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Pre-fetches the sherpa-onnx Windows static-lib prebuilt in its MD-Release
-# (dynamic CRT) variant so cargo's sherpa-onnx-sys build skips its hard-coded
-# MT-Release download. Used by both CI (download-sherpa-onnx composite action)
-# and Windows E2E (e2e-vm.sh). Prints the absolute path of the lib/ directory
-# on stdout — caller must export that as SHERPA_ONNX_LIB_DIR.
-#
-# See ADR-061 for the architecture rationale.
+# Pre-fetches the sherpa-onnx Windows static-lib MD-Release prebuilt (ADR-061).
+# Prints the lib/ absolute path on stdout; caller exports it as SHERPA_ONNX_LIB_DIR.
 
 set -euo pipefail
 
@@ -41,9 +36,7 @@ echo "Fetching ${CHECKSUM_URL}" >&2
 CHECKSUM_PATH="${OUT_ROOT}/checksum.txt"
 curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH"
 
-# checksum.txt format today: <filename>\t<sha256>  (tab-separated, filename first).
-# Defensive: also accept the standard `sha256sum` ordering <sha256>  <filename>
-# in case k2-fsa flips the format on a future release.
+# checksum.txt is <filename>\t<sha256>; awk also accepts <sha256>\t<filename>.
 EXPECTED="$(awk -v f="$ARCHIVE" '$1 == f { print $2 } $2 == f { print $1 }' "$CHECKSUM_PATH")"
 if [ -z "$EXPECTED" ]; then
   echo "::error::no SHA256 for ${ARCHIVE} in checksum.txt" >&2
@@ -64,11 +57,8 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 echo "SHA256 verified (${ACTUAL})" >&2
 
-# Extract under OUT_ROOT — tarball top-level is ${EXTRACTED_TOP}/.
-# `cd $OUT_ROOT` + relative archive name keeps the drive-letter colon out of
-# tar's argv: MSYS2 tar (Git Bash on windows-latest) parses a `:` in a native
-# path like `D:\a\...` as `user@host:path` SSH form. The drive letter is fine
-# in the working directory, just not in the archive argument.
+# cd $OUT_ROOT + relative archive name keeps the drive-letter colon out of
+# tar's argv (MSYS2 tar reads a `:` in a native path as SSH user@host:path).
 rm -rf "${OUT_ROOT:?}/${EXTRACTED_TOP}"
 (cd "$OUT_ROOT" && tar -xjf "$ARCHIVE")
 

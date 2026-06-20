@@ -1,12 +1,6 @@
 //! Collapses + summarises multi-line `ANTHROPIC_LOG=debug` blocks emitted by
 //! Claude Code into single, human-readable log entries.
 //!
-//! Claude Code's HTTP debug logging is a known Anthropic bug — `console.log`
-//! sends `util.inspect()` pretty-printed JS objects to stdout instead of
-//! stderr (anthropics/claude-agent-sdk-typescript#157, anthropics/claude-code
-//! #4859). Each HTTP transaction spans 60–80 physical lines that would
-//! otherwise spam the System Health UI with one event per line.
-//!
 //! Three stages:
 //!   1. [`Collator`] groups continuation lines into one logical block (any
 //!      line ending in `{` opens a block, the matching outer `}` closes it).
@@ -121,8 +115,7 @@ impl Collator {
         self.depth += delta;
         if self.depth > 0 {
             if self.buffer.len() >= MAX_BUFFERED_LINES {
-                // Malformed input — release buffered content verbatim and reset
-                // so the collator does not grow unbounded.
+                // Malformed input — release buffered content verbatim and reset.
                 let joined = self.drain_buffer().unwrap_or_default();
                 self.depth = 0;
                 return vec![joined];
@@ -155,9 +148,6 @@ impl Collator {
     }
 
     /// Emit a merged summary line for every pending response and clear them.
-    /// Exposed so the stdout reader can call this on Claude Code stream
-    /// markers (`RESULT:`, `SYSTEM:`, `SESSION:`, `RATE_LIMIT:`) that signal
-    /// in-flight HTTP transactions are done.
     pub fn flush_all_pending_responses(&mut self) -> Vec<String> {
         let order: Vec<String> = self.pending_order.drain(..).collect();
         order
@@ -178,8 +168,7 @@ impl Collator {
             return out;
         }
 
-        // Same-id sending request flushes any previously-pending response
-        // for that id (defensive — the SDK could in theory reuse an id).
+        // Same-id sending request flushes any previously-pending response for that id.
         if let Some(id) = extract_log_id(&line) {
             if line.contains("sending request") {
                 if let Some(merged) = self.flush_pending_response(&id) {
@@ -257,9 +246,7 @@ fn brace_delta(line: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn re(pat: &str) -> Regex {
-    // `.expect()` is forbidden in prod by clippy::expect_used (CLAUDE.md rule);
-    // the panic body is the same — these patterns are static, panics surface
-    // any malformed regex on first use in tests.
+    // Static patterns; panic on a malformed regex (`.expect()` is clippy-forbidden in prod).
     Regex::new(pat).unwrap_or_else(|e| panic!("static regex must compile: {e}"))
 }
 
@@ -307,9 +294,7 @@ fn parse_response_fragment(line: &str) -> Option<ResponseFields> {
     let log_id = if is_response_start {
         extract_log_id(line)?
     } else {
-        // The headers block has no `[log_id]` of its own — Claude SDK emits
-        // it immediately after `[log_xxx] post … succeeded`. We can't merge
-        // it without an id. Skip and let format_block render it standalone.
+        // Headers block has no `[log_id]`; skip and let format_block render it standalone.
         return None;
     };
 
@@ -346,8 +331,7 @@ pub fn format_block(block: &str) -> String {
     if block.starts_with("response ") && block.contains("Headers {") {
         return format_response_full(block);
     }
-    // Response start / parsed blocks: emitted before merging — render anyway
-    // for the case where the merge never happens (unknown id, EOF, etc.).
+    // Response start / parsed blocks: render standalone when the merge never happens.
     if block.contains("response start") || block.contains("response parsed") {
         return format_response_start(block, log_id.as_deref());
     }
@@ -727,8 +711,7 @@ mod tests {
     #[test]
     fn buffer_overflow_releases_content_and_resets() {
         let mut c = Collator::new();
-        // Open a block, then exceed MAX_BUFFERED_LINES with content that never
-        // closes — collator must release the buffer and not grow unbounded.
+        // Open a block, then exceed MAX_BUFFERED_LINES with never-closing content.
         c.push("[log_abc] sending request {".into());
         let mut emitted = None;
         for i in 0..MAX_BUFFERED_LINES + 5 {
@@ -748,8 +731,7 @@ mod tests {
     #[test]
     fn pending_response_overflow_evicts_oldest() {
         let mut c = Collator::new();
-        // Insert MAX_PENDING_RESPONSES + 1 distinct response fragments — the
-        // oldest must be evicted to keep memory bounded.
+        // Insert more than MAX_PENDING_RESPONSES distinct fragments; oldest evicted.
         for i in 0..MAX_PENDING_RESPONSES + 5 {
             c.push(format!("[log_{i:06x}] response start {{"));
             c.push(format!(r#"  url: "http://x/{i}","#));
@@ -774,8 +756,7 @@ mod tests {
         }
         let flushed = c.flush_all_pending_responses();
         assert_eq!(flushed.len(), 3);
-        // Insertion order preserved (not alphabetic — would be coincident here,
-        // but the order field guarantees insertion-order on any input).
+        // Insertion order preserved.
         assert!(flushed[0].contains("[log_aaa111]"));
         assert!(flushed[1].contains("[log_bbb222]"));
         assert!(flushed[2].contains("[log_ccc333]"));

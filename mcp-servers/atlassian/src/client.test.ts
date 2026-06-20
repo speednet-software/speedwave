@@ -1,17 +1,13 @@
 /**
- * Tests for AtlassianClient — auth header, per-request retry policy, error
- * formatting (secret-safe), connectivity, and `initializeAtlassianClient`.
- *
- * `axios` is mocked: `axios.create()` returns a fake instance whose `request`
- * is a `vi.fn()` we script per test. `axios.isAxiosError` is preserved.
+ * Tests for AtlassianClient — auth header, retry policy, error formatting,
+ * connectivity, and `initializeAtlassianClient`. `axios` is mocked.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AxiosRequestConfig } from 'axios';
 
 // ── axios mock ─────────────────────────────────────────────────────────────
-// `vi.mock` factories are hoisted above module-level `const`s, so the mock
-// functions must come from `vi.hoisted()` to be referenceable inside them.
+// `vi.mock` factories are hoisted; mocks come from `vi.hoisted()`.
 const { requestMock, createMock, readCredentialsMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
   createMock: vi.fn(),
@@ -85,8 +81,7 @@ beforeEach(() => {
   readCredentialsMock.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
-  // Make jitter deterministic-ish: backoff() uses Math.random — pin to 0 so
-  // retries don't actually sleep long. We still advance timers manually.
+  // Pin Math.random to 0 to make backoff jitter deterministic.
   vi.spyOn(Math, 'random').mockReturnValue(0);
 });
 
@@ -398,8 +393,7 @@ describe('formatError', () => {
   });
 
   it('a short ATATT-prefixed string (under 20 chars after the prefix) is not redacted', () => {
-    // The scrub() regex requires {20,} to match log_sanitizer.rs — short
-    // strings are not real Atlassian tokens and pass through unchanged.
+    // scrub() regex requires {20,} chars; short strings pass through.
     expect(AtlassianClient.formatError('value: ATATTshort')).toMatch(/ATATTshort/);
   });
 
@@ -416,9 +410,6 @@ describe('initializeAtlassianClient', () => {
   });
 
   it('returns client + schedules background test when testConnection fails', async () => {
-    // Init no longer blocks on testConnection — it kicks the check into the
-    // background. The client is returned immediately; healthCheck reads the
-    // tracker to surface the failure.
     readCredentialsMock.mockResolvedValueOnce(CONFIG);
     requestMock.mockRejectedValueOnce(httpError(401));
     const client = await initializeAtlassianClient();

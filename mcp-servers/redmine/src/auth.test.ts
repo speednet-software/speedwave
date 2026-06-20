@@ -1,8 +1,5 @@
 /**
- * Redmine worker auth wiring tests (SEC-035)
- *
- * Verifies that mcp-redmine reads MCP_REDMINE_AUTH_TOKEN and passes it to createMCPServer.
- * Middleware correctness is covered by shared/src/server.test.ts — here we test wiring only.
+ * Redmine worker auth wiring tests (SEC-035): MCP_REDMINE_AUTH_TOKEN passed to createMCPServer.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

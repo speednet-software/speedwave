@@ -86,39 +86,15 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  /**
-   * Context window for the active model. `null` until populated from a
-   * stream value, SSOT lookup, persisted config, or the Anthropic default
-   * fallback. ADR-041 forbids guessing a value for local providers, so
-   * `null` propagates to the UI and the footer hides the `used / max` ratio
-   * rather than showing 200K.
-   */
+  /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
-  /**
-   * Active LLM provider id from `get_llm_config().provider`. Drives the
-   * "is local?" check in `resolveContextWindow` — Anthropic gets the
-   * DEFAULT_CONTEXT_TOKENS bottom fallback; local providers do not.
-   */
+  /** Active LLM provider id from `get_llm_config().provider`. */
   private _currentProvider: string | null = null;
 
-  /**
-   * Last-known persisted context window from `claude.llm.context_tokens`
-   * (`get_llm_config`). Refreshed on init / project change / explicit
-   * `refreshLlmConfigCache()` calls (Settings invokes that after save).
-   * Populated from the real provider API for local providers
-   * (Ollama / LM Studio / llama.cpp) and from the SSOT for Anthropic, so
-   * the chat footer can show an accurate `used / max` ratio before any
-   * stream-level value lands.
-   */
+  /** Last-known persisted context window from `claude.llm.context_tokens`. */
   private _persistedContextTokens: number | null = null;
 
-  /**
-   * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
-   * starts) and `stopConversation` (turn cancelled). Used across awaits by
-   * `submitAnswer` to detect whether the turn it was answering has since
-   * been superseded, so late backend errors from the dying turn can be
-   * suppressed.
-   */
+  /** Monotonically increasing turn id; bumped on `sendMessage` and `stopConversation`. */
   private _turnId = 0;
   /** Test-only read access. */
   get turnId(): number {
@@ -136,22 +112,12 @@ export class ChatStateService {
   private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
-  /**
-   * ADR-042 — full state-tree signal. Rebuilt from the legacy
-   * `_messages`/`_currentBlocks` fields by `rebuildStateTree()` after
-   * every mutation — the single pipeline feeding the signal projections.
-   */
+  /** ADR-042 — full state-tree signal, rebuilt after every mutation. */
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   /** Public read-only signal exposed to components. */
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
 
-  /**
-   * ADR-042 — Project the state-tree's committed entries onto the legacy
-   * `ChatMessage[]` shape so components can read state-tree as their
-   * source of truth without changing their templates. The trailing
-   * "live streaming" entry (no committed UUID, no meta) is excluded —
-   * `currentBlocksFromState` exposes it separately for the streaming view.
-   */
+  /** ADR-042 — committed state-tree entries projected onto `ChatMessage[]`. */
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
     stateEntriesToChatMessages(this._state().entries)
   );
@@ -159,25 +125,14 @@ export class ChatStateService {
   /** ADR-042 — projection of `state().is_streaming` onto a signal. */
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
 
-  /**
-   * Signal mirror of {@link canRetryLastAssistant}. Backed by the same
-   * `_state` projection that drives `messagesFromState`, so OnPush
-   * components binding `[disabled]="!retryEnabled()"` re-evaluate without
-   * a manual `markForCheck` whenever the retry anchor flips.
-   */
+  /** Signal mirror of {@link canRetryLastAssistant}. */
   readonly retryEnabled: Signal<boolean> = computed(() => {
     const tree = this._state();
     if (tree.is_streaming || !tree.session_id) return false;
     return findRetryAnchorIn(tree.entries, 'committed') !== null;
   });
 
-  /**
-   * ADR-042 — projection of the live (uncommitted) trailing entry's blocks.
-   * "Live" means: the trailing entry is an assistant turn that has no
-   * meta yet (Result hasn't fired) AND no committed UUID. Once Result
-   * settles meta or commits the UUID the entry is no longer live and
-   * its blocks belong on `messagesFromState` instead.
-   */
+  /** ADR-042 — projection of the live (uncommitted) trailing entry's blocks. */
   readonly currentBlocksFromState: Signal<readonly MessageBlock[]> = computed(() => {
     const entries = this._state().entries;
     const last = entries[entries.length - 1];
@@ -210,22 +165,12 @@ export class ChatStateService {
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
   }
 
-  /**
-   * Rebuilds the state-tree signal from the post-mutation legacy fields so
-   * the `state()` projections (`messagesFromState`, `currentBlocksFromState`,
-   * `isStreamingFromState`, `pendingQueueFromState`) stay in lockstep with
-   * the legacy mutation methods (ADR-042/043). Components read the signal
-   * projections; OnPush picks up the change automatically.
-   */
+  /** Rebuilds the state-tree signal from legacy fields after a mutation. */
   private notifyChange(): void {
     this.rebuildStateTree();
   }
 
-  /**
-   * Project the legacy fields onto a fresh `ConversationStateTree` and
-   * write it to `_state`. Called from `notifyChange()` so the signal
-   * always reflects the latest mutation.
-   */
+  /** Project legacy fields onto a fresh `ConversationStateTree` and write `_state`. */
   private rebuildStateTree(): void {
     this._state.set(
       buildStateTreeFromLegacy({
@@ -455,14 +400,10 @@ export class ChatStateService {
   }
 
   /**
-   * Records one slot's answer for a multi-question AskUserQuestion block
-   * Optimistically advances the block's `current_index` to the
-   * next unanswered slot, then forwards to the host. On error, reverts the
-   * slot and appends an error block.
+   * Records one slot's answer for a multi-question AskUserQuestion block.
    * @param toolUseId   tool_use_id of the AskUserQuestion control_request.
    * @param questionIdx slot index being answered (0-based).
-   * @param value       chosen value (single string; multi-select labels are
-   *                    pre-joined with `", "` by the renderer).
+   * @param value       chosen value (multi-select labels pre-joined with `", "`).
    */
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
@@ -533,16 +474,10 @@ export class ChatStateService {
     // 1. Invalidate any in-flight / buffered stream events from the dying turn.
     this._turnId += 1;
 
-    // 2. Synchronous UI reset — must precede any await so re-entrant calls see
-    //    isStreaming=false and early-return (prevents double invoke of stop_chat).
+    // 2. Synchronous UI reset, before any await, so re-entrant calls early-return.
     this.isStreaming = false;
 
-    // 3. Preserve the partial assistant reply but drop ask_user blocks and
-    //    finalize running tool_use blocks. The interrupt aborts the in-flight
-    //    turn; Claude will not answer any rendered question (the matching
-    //    tool_use_id is abandoned), so ask_user is unanswerable. Running tools
-    //    would otherwise render a permanent "running" spinner inside a closed
-    //    message — flip them to status: 'error' with an "Interrupted" marker.
+    // 3. Keep the partial reply; drop ask_user blocks; mark running tools errored.
     const keptBlocks = this._currentBlocks
       .filter((b) => b.type !== 'ask_user')
       .map((b) => {
@@ -672,10 +607,7 @@ export class ChatStateService {
 
       case 'Result': {
         if (chunk.data.result_text) {
-          // Only append result_text when no streamed text blocks exist yet.
-          // Claude Code always copies the full response into `result`, so for
-          // normal turns the text was already streamed via Text deltas.  Slash
-          // commands (e.g. /cost) produce *only* a result — no text deltas.
+          // Append result_text only when no streamed text blocks exist (e.g. slash commands).
           const hasStreamedText = this._currentBlocks.some((b) => b.type === 'text');
           if (!hasStreamedText) {
             this._currentBlocks = [
@@ -722,10 +654,7 @@ export class ChatStateService {
       }
 
       case 'UserMessageCommit': {
-        // ADR-046: the parser has seen `user.message.id` for the most recent
-        // user prompt. Commit it onto the last user entry that still lacks a
-        // UUID — walking from the end handles out-of-order arrivals where the
-        // commit chunk lands after several intermediate events.
+        // ADR-046: commit the parsed UUID onto the last user entry missing one.
         const uuid = chunk.data.uuid;
         const idx = findLastUserIndexMissingUuid(this._messages);
         if (idx >= 0) {
@@ -758,10 +687,7 @@ export class ChatStateService {
         break;
 
       case 'QueueDrained': {
-        // ADR-045: backend sent the queued payload to stdin as the next
-        // turn. Mirror that into local state so the composer's "queued: …"
-        // line clears, and synthesise the user entry so the streamed
-        // response below has its retry anchor in place.
+        // ADR-045: backend sent the queued payload to stdin; mirror to local state.
         this._pendingQueue = null;
         this._messages = [
           ...this._messages,
@@ -810,10 +736,7 @@ export class ChatStateService {
   }
 
   /**
-   * Seeds the session id immediately after a resume so retry / queue can run
-   * without waiting for the first `Result` event. Stamps a minimal stats
-   * object — token counters / cost stay zero until the next live turn fills
-   * them in.
+   * Seeds the session id after a resume so retry / queue can run before the first `Result`.
    * @param sessionId - Resumed JSONL session uuid.
    */
   seedResumedSession(sessionId: string): void {
@@ -833,15 +756,9 @@ export class ChatStateService {
   }
 
   /**
-   * Queue a message to be sent as the next turn (ADR-045). Replace
-   * semantics — calling this while a slot is already occupied displaces the
-   * previous queued message and returns its preview text. Returns `null`
-   * when the slot was empty before this call.
-   *
-   * The composer calls this when the user hits send while
-   * `isStreaming === true`. Backend drains the slot when the running turn
-   * emits its `Result` event.
+   * Queue a message as the next turn (ADR-045); replace semantics.
    * @param text - The message to queue.
+   * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
     const sessionId = this._sessionStats?.session_id;
@@ -860,16 +777,11 @@ export class ChatStateService {
     }
   }
 
-  /**
-   * Cancel the queued message for the active session. No-op when no slot
-   * is occupied or no session is active. Composer wires this to the X
-   * button on the "queued: …" preview line.
-   */
+  /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
     const sessionId = this._sessionStats?.session_id;
     if (!sessionId) {
-      // No session yet — but local slot may still be set if we got ahead
-      // of the first Result. Clear locally either way.
+      // No session yet — clear the local slot anyway.
       this._pendingQueue = null;
       this.notifyChange();
       return;
@@ -884,16 +796,9 @@ export class ChatStateService {
   }
 
   /**
-   * Copies the textual content of the message at `index` to the system
-   * clipboard via Angular CDK's `Clipboard` service. Returns `true` on
-   * success, `false` on failure (out-of-range index, empty content, write
-   * rejection). Block kinds that carry no user-facing prose — `tool_use`,
-   * `thinking`, `ask_user` — are elided; `text` and `error` blocks are
-   * joined with a blank line.
-   *
-   * The component layer owns the "copied" indicator timing so this method can
-   * stay pure and testable.
+   * Copies the message at `index` to the clipboard; elides tool/thinking/ask_user blocks.
    * @param index - Index into `messages` of the entry to copy.
+   * @returns `true` on success, `false` on out-of-range / empty / write failure.
    */
   copyMessage(index: number): boolean {
     const msg = this._messages[index];
@@ -907,26 +812,12 @@ export class ChatStateService {
     return ok;
   }
 
-  /**
-   * Returns whether the last assistant turn can be retried (ADR-046).
-   * Requires:
-   *   - not streaming (would race with the live turn),
-   *   - a session id from the most recent Result chunk,
-   *   - a user entry preceding the last assistant entry whose UUID is committed.
-   *
-   * The component layer reads this on every change-detection cycle to gate
-   * the retry button — it must be cheap and side-effect free.
-   */
+  /** Returns whether the last assistant turn can be retried (ADR-046). */
   canRetryLastAssistant(): boolean {
     return this.findRetryAnchor() !== null;
   }
 
-  /**
-   * Walks the message list from the end to find the retry anchor: the user
-   * entry immediately preceding the last committed assistant entry. Returns
-   * `null` when no such pair exists, when streaming, or when the session id
-   * is missing.
-   */
+  /** Finds the retry anchor: user entry before the last committed assistant entry. */
   private findRetryAnchor(): {
     sessionId: string;
     userUuid: string;
@@ -940,16 +831,7 @@ export class ChatStateService {
     return anchor === null ? null : { sessionId, ...anchor };
   }
 
-  /**
-   * Retries the last assistant turn via the backend `retry_last_turn` Tauri
-   * command (ADR-046). Trims the last assistant entry from local state,
-   * stamps `edited_at` on the anchor user entry, flips `isStreaming` so the
-   * input bar disables and the next stream chunks are accepted, and asks the
-   * backend to relaunch Claude Code with `--resume-session-at`.
-   *
-   * On backend failure the optimistic state changes are reverted and an error
-   * block is appended so the user sees what went wrong.
-   */
+  /** Retries the last assistant turn via the backend `retry_last_turn` command (ADR-046). */
   async retryLastAssistant(): Promise<void> {
     const anchor = this.findRetryAnchor();
     if (!anchor) return;
@@ -1012,11 +894,7 @@ export class ChatStateService {
   }
 
   /**
-   * Fallback chain for the chat footer's context-window value.
-   * Order: live stream value → Anthropic SSOT lookup → persisted
-   * `claude.llm.context_tokens` → previous `_contextWindowSize` → for
-   * Anthropic only: {@link DEFAULT_CONTEXT_TOKENS}. Local providers
-   * propagate `null` instead — ADR-041 "never guess".
+   * Context-window fallback: live → SSOT → persisted → previous → Anthropic default; local stays `null`.
    * @param liveValue - Authoritative value carried by the stream (highest priority).
    * @param model - Resolved model id used for the SSOT lookup.
    */
@@ -1032,28 +910,19 @@ export class ChatStateService {
     return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
   }
 
-  /**
-   * Re-reads `get_llm_config().context_tokens` from the backend and updates
-   * the cache used by the chat fallback chain. Public so Settings can call
-   * it after `update_llm_config` settles — without that, the chat footer
-   * would keep showing the previous model's window until the next session.
-   */
+  /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
   async refreshLlmConfigCache(): Promise<void> {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
-      // If we have no live stream value yet, surface the persisted one
-      // through `_contextWindowSize` so the next `notifyChange` rebuilds
-      // session stats with the right `used / max`.
+      // With no live stream value, surface the persisted one.
       if (this._persistedContextTokens && !this._sessionStats?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
       this.notifyChange();
     } catch (err) {
-      // Browser dev mode or backend unavailable — log so backend renames /
-      // serialisation regressions surface during development without
-      // disrupting the UI.
+      // Browser dev mode or backend unavailable.
       this.log.debug(`[chat-state] refreshLlmConfigCache failed: ${String(err)}`);
     }
   }
@@ -1069,12 +938,7 @@ export class ChatStateService {
           this.handleStreamChunk(chunk);
           return;
         }
-        // Content-bearing chunks belong to a specific turn. If isStreaming is
-        // false (stopConversation already ran, or the turn already finished),
-        // drop the chunk so it cannot write into _messages or flip isStreaming
-        // back on. That single check is sufficient in single-threaded JS:
-        // stopConversation sets isStreaming = false synchronously before any
-        // await, so every subsequent event-loop tick observes the reset.
+        // Drop content-bearing chunks when not streaming.
         if (!this.isStreaming) return;
         this.handleStreamChunk(chunk);
       });
@@ -1099,13 +963,7 @@ function appendOrCreateTextBlock(blocks: MessageBlock[], content: string): Messa
 }
 
 function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): MessageBlock[] {
-  // Anthropic returns redacted thinking blocks by default for Opus 4.7
-  // (and others when summaries are not requested) — the model still does
-  // the reasoning, but the streamed `thinking` text is empty and only the
-  // signature (encrypted thinking, used for multi-turn continuity) is sent.
-  // Skip empty deltas so we don't render an empty collapsible. If the API
-  // ever sends a non-empty delta later in the same turn, we still attach
-  // it to a fresh thinking block.
+  // Anthropic returns redacted thinking blocks by default; skip empty deltas.
   if (!content) return blocks;
   const last = blocks[blocks.length - 1];
   if (last && last.type === 'thinking') {
@@ -1125,11 +983,7 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
 }
 
 /**
- * Builds per-turn metadata for the assistant entry just finalized by a
- * `Result` chunk. Prefers the backend's authoritative `turn_cost`; falls
- * back to `calculateCost()` against the per-model pricing table when the
- * backend didn't provide it. Returns `undefined` when the chunk carries
- * no usage or model information.
+ * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
  * @param data - Relevant fields copied from the `Result` chunk payload.
  * @param data.turn_usage - Per-turn token usage (required for fallback cost).
  * @param data.turn_cost - Authoritative per-turn cost from the backend.
@@ -1137,14 +991,7 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
  * @param resolvedModel - Model id already resolved by the reducer.
  */
 /**
- * Locates the retry anchor — the (assistant, user) pair at the tail of
- * `entries` whose user entry can be replayed via `retry_last_turn`
- * (ADR-046). Returns the matched indices and the user uuid, or `null`.
- *
- * `committedTag` is parametrised because the legacy ChatMessage shape
- * uses 'Committed' while the state-tree shape uses 'committed'. An
- * `undefined` `uuid_status` is treated as committed for backward
- * compatibility with pre-ADR-046 transcript entries.
+ * Locates the retry anchor: the (assistant, user) pair replayable via `retry_last_turn` (ADR-046).
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
  */
@@ -1225,10 +1072,7 @@ function completeToolBlock(
 }
 
 /**
- * Returns the index of the most recent user entry that has not yet had a UUID
- * committed onto it (ADR-046). Returns -1 when no such entry exists. Walking
- * from the end is correct because `UserMessageCommit` chunks always belong to
- * the latest pending user prompt — earlier prompts already carry their UUIDs.
+ * Index of the most recent user entry missing a UUID, or -1 if none (ADR-046).
  * @param msgs - Snapshot of `_messages` at the time the commit chunk arrives.
  */
 function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
@@ -1250,11 +1094,7 @@ export interface LegacyStateSnapshot {
 }
 
 /**
- * Project legacy ChatStateService fields onto a `ConversationStateTree`.
- *
- * This projection is the single pipeline feeding the `state()` signal
- * (ADR-042 status note): it rebuilds the tree from the legacy fields
- * after every mutation so the projections never drift.
+ * Project legacy ChatStateService fields onto a `ConversationStateTree` (ADR-042).
  * @param src - Snapshot of legacy backing fields.
  */
 export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): ConversationStateTree {
@@ -1390,10 +1230,7 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
       default: {
-        // A new Rust MessageBlock variant landed without a TS arm here
-        // (ADR-042 SSOT-alignment drift). Surface a placeholder instead of
-        // silently dropping it, and forward to the log pipeline so the gap
-        // is visible in a diagnostics ZIP.
+        // Unknown Rust MessageBlock variant with no TS arm (ADR-042 drift).
         const unknownKind = (b as { kind: string }).kind;
         pluginLogWarn(
           `[chat-state] stateBlocksToMessageBlocks: dropping unknown block kind "${unknownKind}"`
@@ -1466,11 +1303,7 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
 }
 
 /**
- * Flattens a message's blocks into a copy-friendly plain-text string. Tool
- * inputs and outputs are intentionally elided — the user wants the assistant's
- * prose, not the JSON of every Bash command. Thinking blocks, ask_user, and
- * tool_use are dropped; text and error contents are concatenated with a blank
- * line between blocks for readability.
+ * Flatten blocks into plain text; elides tool inputs/outputs, thinking, and ask_user.
  * @param blocks - The message blocks to flatten.
  */
 export function blocksToPlainText(blocks: readonly MessageBlock[]): string {

@@ -185,9 +185,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Renders the transcript as markdown and sends it to Claude via the existing
-   * chat path. The UI should show a confirm dialog before calling this — the
-   * markdown leaves the machine.
+   * Renders the transcript as markdown and sends it to Claude via the chat path.
    * @param sessionId - the session to send.
    */
   async sendToChat(sessionId: string): Promise<void> {
@@ -293,7 +291,6 @@ export class TranscriptionService {
         break;
       case 'final_segments_ready':
         // The offline pass produced a higher-quality transcript; swap it in.
-        // Speaker IDs were already remapped server-side to keep user relabels.
         next.final_segments = ev.segments;
         next.speaker_names = pairsToRecord(ev.speaker_names);
         break;

@@ -1,13 +1,12 @@
-//! Static assertion that each LOCKED method on `LockedRuntime` acquires the
-//! per-project compose lock exactly once, and that passthrough methods do
-//! not. Runs in its own process (Cargo integration test), so the global
-//! `LOCK_ACQUISITIONS` counter starts at zero and is not polluted by other
-//! tests.
+//! Each LOCKED method on `LockedRuntime` acquires the per-project compose lock
+//! exactly once; passthrough methods do not. Own process, so `LOCK_ACQUISITIONS`
+//! starts at zero.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
-// Internal hook from the crate's `runtime::locked` module — only the in-crate
-// counter knows about acquisitions.
+// Internal hook from the crate's `runtime::locked` module.
 extern crate speedwave_runtime as _runtime;
 
 fn count() -> usize {

@@ -1,16 +1,6 @@
 //! Drift detector: test code must never resolve the production data dir via
-//! `consts::data_dir()`. Tests pass an explicit tempdir to the `_in` variants
-//! (or set `SPEEDWAVE_DATA_DIR` to a tempdir in a dedicated integration binary).
-//! Bypass an individual line with `// SSOT-allow: <reason>`.
-//!
-//! KNOWN LIMITATION (cannot be fixed statically): this scanner only catches a
-//! *literal* `consts::data_dir()` token inside test code. It cannot catch
-//! TRANSITIVE resolution — a test that calls a no-arg production fn (e.g.
-//! `compose::init_secrets_dir(project)`) which internally resolves
-//! `consts::data_dir()`. The runtime guard `prod_data_dir_untouched.rs` is the
-//! backstop for those cases: it env-isolates the data dir and asserts the real
-//! `~/.speedwave` is untouched after a representative smoke, catching transitive
-//! leaks this static scan is blind to.
+//! `consts::data_dir()`. Catches only literal tokens; transitive resolution is
+//! backstopped by `prod_data_dir_untouched.rs`. Bypass with `// SSOT-allow:`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -45,10 +35,8 @@ fn manifest_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The bare-`data_dir()` resolutions forbidden inside test regions. Each is the
-/// production OnceLock-backed singleton that maps to the real `~/.speedwave`.
-/// Ordered longest-first so a qualified form (`crate::consts::…`) is reported
-/// once, not also as the `consts::…` substring it contains.
+/// The bare-`data_dir()` resolutions forbidden inside test regions, ordered
+/// longest-first so a qualified form is reported once, not as a substring.
 const PATTERNS: &[&str] = &[
     "speedwave_runtime::consts::data_dir()",
     "crate::consts::data_dir()",
@@ -57,8 +45,6 @@ const PATTERNS: &[&str] = &[
 
 /// True when `#[cfg(test)]` / `#[cfg(any(test...` guards a test *module*
 /// (the next item is `mod`), not a test-only production helper (`fn`/`pub fn`).
-/// A `data_dir()` call in a `#[cfg(test)]`-gated *helper* runs in
-/// production-shaped code and is legitimate; one inside `mod tests` is not.
 fn cfg_test_guards_a_module(lines: &[&str], cfg_idx: usize) -> bool {
     for l in lines.iter().skip(cfg_idx + 1) {
         let l = l.trim_start();
@@ -73,8 +59,7 @@ fn cfg_test_guards_a_module(lines: &[&str], cfg_idx: usize) -> bool {
 }
 
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
-    // Walk backwards for the nearest enclosing test marker: `mod tests {`,
-    // `#[test]`, or a `#[cfg(test)]` that guards a `mod` (not a helper fn).
+    // Walk backwards for the nearest enclosing test marker.
     for i in (0..idx).rev() {
         let l = lines[i].trim_start();
         if l.starts_with("mod tests") || l.starts_with("#[test]") {
@@ -93,12 +78,8 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
     false
 }
 
-/// A file living under a `tests/` directory is a cargo *integration-test
-/// binary*: the WHOLE file is test code (there is no production codepath in an
-/// integration binary). A bare `data_dir()` in a free helper fn there — not
-/// only under `#[test]`/`mod tests` — still runs in the test process and can
-/// touch the real `~/.speedwave`. So for these files we treat any line as a
-/// test region and rely solely on the comment / `// SSOT-allow:` filters.
+/// A file under a `tests/` directory is a cargo integration-test binary: the
+/// whole file is test code, so every line is treated as a test region.
 fn is_integration_test_file(rel_str: &str) -> bool {
     rel_str.contains("/tests/")
 }
@@ -108,11 +89,8 @@ fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
 }
 
 /// Integration-test binaries that legitimately set `SPEEDWAVE_DATA_DIR` to a
-/// tempdir and then resolve the OnceLock once, to exercise the env-var wiring
-/// itself. These are the only sanctioned bare-`data_dir()` call sites in tests.
-///
-/// This drift detector's own source is self-excluded: it carries the literal
-/// `consts::data_dir()` token in `PATTERNS` as *data*, not as a call.
+/// tempdir to exercise env-var wiring, plus this detector's own self-exclusion
+/// (it carries `consts::data_dir()` in `PATTERNS` as data, not a call).
 const ALLOWLISTED_FILES: &[&str] = &[
     "crates/speedwave-runtime/tests/apply_transaction_behaviour.rs",
     "crates/speedwave-runtime/tests/data_dir_integration.rs",
@@ -124,8 +102,7 @@ fn no_raw_data_dir_in_test_regions() {
     let root = manifest_root();
     let crates_root = root.join("crates");
     let desktop_src = root.join("desktop").join("src-tauri").join("src");
-    // Integration-test binaries for the Desktop crate: whole-file test code,
-    // same as the runtime crate's own `tests/` binaries.
+    // Integration-test binaries for the Desktop crate: whole-file test code.
     let desktop_tests = root.join("desktop").join("src-tauri").join("tests");
 
     let mut files = Vec::new();
@@ -155,12 +132,8 @@ fn no_raw_data_dir_in_test_regions() {
             if has_allow_marker(line, prev) {
                 continue;
             }
-            // Longest-first; report each line once (a qualified form contains
-            // the shorter `consts::data_dir()` substring).
             if let Some(pat) = PATTERNS.iter().find(|p| line.contains(**p)) {
-                // In an integration-test binary the whole file is test code; in
-                // a `src/` file only genuine test regions (`#[test]`/`mod tests`)
-                // are forbidden — a `#[cfg(test)]` helper is production-shaped.
+                // Whole-file test binaries; in `src/` only genuine test regions.
                 if whole_file_is_test || is_in_test_module(&lines, idx) {
                     violations.push(format!(
                         "{}:{}: matches {pat:?}\n  > {}",

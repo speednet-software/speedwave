@@ -1,9 +1,5 @@
 /**
- * Settings E2E tests.
- *
- * Verifies the settings page loads correctly with project data from setup.
- * The `before()` hook navigates to settings and fails if the page does not
- * load — no silent early returns. All assertions use `data-testid` only.
+ * Settings E2E tests: verify the settings page loads with project data from setup.
  */
 
 import { activeProjectSlug } from '../helpers/projects';
@@ -20,10 +16,7 @@ describe('Settings', function () {
     });
     await nav.click();
 
-    // Settings ready signal — the legacy "active project" info card was
-    // replaced by an info-glyph tooltip on the shared project-pill, so we
-    // wait for the page heading instead. Active-project verification still
-    // happens through `activeProjectSlug()` (backend ground truth).
+    // Settings ready signal: wait for the page heading.
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({ timeout: 10_000 });
   });
@@ -65,9 +58,7 @@ describe('Settings', function () {
 
   it('should not duplicate the export-diagnostics control (moved to /logs)', async function () {
     this.timeout(15_000);
-    // Diagnostics export was relocated to System health (/logs). The settings
-    // page must no longer render its own copy — assert absence so a future
-    // accidental re-introduction trips the suite immediately.
+    // Diagnostics export relocated to /logs; assert absence here.
     const exportBtn = await $('[data-testid="settings-export-diagnostics"]');
     expect(await exportBtn.isExisting()).toBe(false);
   });

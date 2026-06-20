@@ -17,15 +17,7 @@ export interface NavRailEntry {
   shortcut?: string;
 }
 
-/**
- * Vertical icon rail that lives on the left edge of the shell.
- *
- * Replaces the legacy top-bar segmented switcher. Each entry renders as a
- * 36×36 button with an inline SVG icon and a tooltip on hover; the active
- * entry gets a 2px accent bar drawn via `.rail-btn.active::before`.
- *
- * Active state is derived from the current router URL by the parent shell.
- */
+/** Vertical icon rail with 36×36 icon buttons; active entry gets a 2px accent bar. */
 @Component({
   selector: 'app-nav-rail',
   imports: [RouterLink, IconComponent, LogoComponent],

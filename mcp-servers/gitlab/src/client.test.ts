@@ -2461,9 +2461,6 @@ describe('initializeGitLabClient', () => {
   });
 
   it('returns client + schedules background test when testConnection fails', async () => {
-    // Init no longer blocks on testConnection — it kicks the check into the
-    // background. The client is returned immediately; healthCheck reads the
-    // tracker to surface the failure.
     mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
@@ -3669,8 +3666,7 @@ describe('initializeGitLabClient — additional branches', () => {
 
     await initializeGitLabClient();
 
-    // When host_url file has empty content, should use default gitlab.com
-    // (because trimmed is empty string, falls through to default)
+    // Empty host_url content falls through to default gitlab.com
     expect(mockGitlabConstructor).toHaveBeenCalledWith({
       token: 'test-token',
       host: 'https://gitlab.com',

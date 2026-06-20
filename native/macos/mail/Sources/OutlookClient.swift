@@ -5,9 +5,8 @@ import SharedCLI
 enum OutlookClient {
     static let name = "Microsoft Outlook"
 
-    /// Whether the Outlook process is running. Throws `.automationPermission` /
-    /// `.timeout` so callers don't misattribute an Apple Events denial as
-    /// "Outlook not installed"; a genuine script failure maps to `false`.
+    /// Whether the Outlook process is running. Rethrows `.automationPermission`/`.timeout`;
+    /// a genuine script failure maps to `false`.
     static func isAvailable() throws -> Bool {
         let script = """
         tell application "System Events"
@@ -54,8 +53,7 @@ enum OutlookClient {
             folderClause = "inbox"
         }
 
-        // Iterate with counter to avoid "Invalid index" error (-1719)
-        // when requesting a range beyond the actual message count.
+        // Counter loop avoids "Invalid index" error (-1719) past message count.
         let script = """
         tell application "Microsoft Outlook"
             set output to ""

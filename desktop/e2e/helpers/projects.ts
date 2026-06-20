@@ -1,9 +1,5 @@
 /**
  * Helpers for project state introspection inside the running webview.
- *
- * Tests prefer asking the Tauri backend for ground truth (`list_projects`,
- * `is_setup_complete`) over scraping rendered text — the slug is stable, the
- * UX copy is not.
  */
 
 /** Returns the slug of the active project from `__TAURI_INTERNALS__`. */

@@ -377,10 +377,8 @@ pub struct IdeBridge {
     // (in `new_with_paths`). Tests read these directly via field access.
     _tcp_port: u16,
     lock_file_path: PathBuf,
-    /// `_`-prefix because the field is only read inside `#[cfg(test)]
-    /// fn write_lock_file` — no production read site exists, but tests
-    /// need it via field access. Mirrors the `_path`/`_query`/… pattern
-    /// in `bridges::host_bridge::ConnectionContext`.
+    /// `_`-prefix: only read inside `#[cfg(test)] fn write_lock_file`.
+    /// Mirrors the `_path`/`_query` pattern in `host_bridge::ConnectionContext`.
     _auth: Arc<Mutex<AuthState>>,
 
     upstream: Arc<Mutex<Option<UpstreamIde>>>,
@@ -410,9 +408,7 @@ impl IdeBridge {
         let inner = HostBridge::new(config)?;
         let tcp_port = inner.port();
         let lock_file_path = inner.lock_file_path().to_path_buf();
-        // Use the same UUID as the inner bridge so both layers validate
-        // the same token. (HostBridge mints it; we re-wrap it for callers
-        // that still expect the legacy AuthState handle.)
+        // Re-wrap HostBridge's token as the legacy AuthState handle.
         let auth = Arc::new(Mutex::new(AuthState::new(inner.auth_token())));
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Ok(Self {
@@ -756,11 +752,8 @@ async fn handle_with_stubs<S>(
 // ---------------------------------------------------------------------------
 // Legacy test-only helpers
 // ---------------------------------------------------------------------------
-//
-// The pre-HostBridge implementation exposed `run_websocket_on_tcp` and a
-// standalone lock-file writer. Several integration tests still hit them
-// directly; we keep them gated behind `#[cfg(test)]` so production code
-// only ever goes through HostBridge.
+// Pre-HostBridge `run_websocket_on_tcp` + lock-file writer, kept behind
+// `#[cfg(test)]` for legacy integration tests.
 
 #[cfg(test)]
 fn find_available_port() -> anyhow::Result<u16> {
@@ -1249,9 +1242,7 @@ mod tests {
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
         assert!(bridge._tcp_port > 0, "TCP port should be assigned");
-        // Path under the bridge subdir; the data dir prefix is determined
-        // by SPEEDWAVE_DATA_DIR (may be overridden by other tests in this
-        // binary), so we assert on the bridge-specific suffix only.
+        // Assert the bridge-specific suffix only; the data-dir prefix varies per test.
         assert!(
             bridge
                 .lock_file_path

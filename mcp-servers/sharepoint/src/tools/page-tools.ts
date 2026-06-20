@@ -211,8 +211,7 @@ const addWebPartTool: Tool = {
     type: 'object',
     properties: {
       pageId: { type: 'string' },
-      // Capped to prevent OOM from a malicious/buggy caller passing a huge index.
-      // SharePoint pages have a handful of sections in practice; 20/10 is generous.
+      // Capped to bound index values from an untrusted caller.
       sectionIndex: { type: 'number', minimum: 0, maximum: 20 },
       columnIndex: { type: 'number', minimum: 0, maximum: 10 },
       innerHtml: {
@@ -221,8 +220,7 @@ const addWebPartTool: Tool = {
       },
       webPartType: {
         type: 'string',
-        // Derived from the SSOT (`STANDARD_WEBPART_TYPES`) so the schema enum
-        // and the runtime lookup can never drift.
+        // Derived from the SSOT `STANDARD_WEBPART_TYPES`.
         enum: Object.keys(STANDARD_WEBPART_TYPES),
         description:
           'Standard web part type. Mutually exclusive with `innerHtml` (which targets text web parts).',
@@ -516,10 +514,7 @@ interface UpdatePageParams {
 }
 
 /**
- * Handler for `updatePage` — PATCH a sitePage. Supports updating any subset of
- * metadata fields (title, description, thumbnailWebUrl, showComments,
- * showRecommendedPages, titleArea) plus canvasLayout. Graph requires the FULL
- * canvasLayout when present; other fields can be set independently.
+ * Handler for `updatePage` — PATCH a sitePage (any subset of metadata fields plus canvasLayout).
  * @param client - the SharePoint client
  * @param params - input parameters; pageId is required, every other field is optional
  */
@@ -563,14 +558,6 @@ async function handleUpdatePage(
 
 /**
  * Handler for `addWebPart` — POST a text or standard web part to a column.
- *
- * Index-to-id resolution: SharePoint addresses sections/columns by GUID, not
- * by index. We GET the layout, walk by index, then POST to the dedicated
- * `.../horizontalSections/{section-id}/columns/{column-id}/webparts` endpoint.
- *
- * Mode selection: `innerHtml` triggers the text web part path; `webPartType`
- * triggers the standard web part path (one of the 14 documented types). The
- * two are mutually exclusive.
  * @param client - the SharePoint client
  * @param params - input parameters
  * @param params.pageId - target page id
@@ -593,8 +580,7 @@ async function handleAddWebPart(
 ): Promise<ToolResult> {
   const idErr = validateGraphId(params.pageId, 'pageId');
   if (idErr) return idErr;
-  // Defense in depth — schema enforces the same range but `withValidation`
-  // does not run JSON Schema validation, so cap here too.
+  // Defense in depth — cap here since `withValidation` skips JSON Schema validation.
   const MAX_SECTION = 20;
   const MAX_COLUMN = 10;
   if (
@@ -678,8 +664,7 @@ async function handleAddWebPart(
         },
       };
     }
-    // The Graph ids are URL path segments — defend against injection at the
-    // boundary, even though Graph generated them.
+    // Graph ids become URL path segments — validate against injection.
     const sectErr = validateGraphId(section.id, 'section.id');
     if (sectErr) return sectErr;
     const colErr = validateGraphId(column.id, 'column.id');
@@ -708,9 +693,6 @@ async function handleAddWebPart(
 
 /**
  * Handler for `updateWebPart` — PATCH a text web part directly by id.
- *
- * Graph supports per-web-part PATCH at `.../webparts/{webPartId}`; we don't
- * need to fetch + re-PATCH the whole layout.
  * @param client - the SharePoint client
  * @param params - input parameters
  * @param params.pageId - target page id
@@ -741,8 +723,6 @@ async function handleUpdateWebPart(
 
 /**
  * Handler for `removeWebPart` — DELETE a web part directly by id.
- *
- * Graph supports per-web-part DELETE at `.../webparts/{webPartId}`.
  * @param client - the SharePoint client
  * @param params - input parameters
  * @param params.pageId - target page id
@@ -785,10 +765,7 @@ async function handlePublishPage(
 }
 
 /**
- * Handler for `generateTableOfContents` — fetches the page, walks every text
- * web part on it (in section/column/index order), extracts headings, renders
- * a nested `<ul>` of anchor links, and posts the result as a new text web
- * part to the addressed section/column.
+ * Handler for `generateTableOfContents` — scans text web parts for headings, injects ids for anchor resolution, renders a nested ToC as HTML.
  * @param client - the SharePoint client
  * @param params - input parameters
  * @param params.pageId - target page id
@@ -855,9 +832,7 @@ async function handleGenerateTableOfContents(
     const colErr = validateGraphId(column.id, 'column.id');
     if (colErr) return colErr;
 
-    // Walk every text web part, extract its headings, and PATCH the body with
-    // `id="…"` injected on each heading so ToC anchors actually resolve. The
-    // PATCH is a no-op for web parts whose headings are already anchored.
+    // Extract headings from text web parts and inject anchor ids where missing.
     const allHeadings = [] as ReturnType<typeof extractHeadings>;
     let anchorsInjected = 0;
     for (const s of sections) {
@@ -902,9 +877,7 @@ async function handleGenerateTableOfContents(
 }
 
 /**
- * Handler for `addImageWebPart` — adds an image web part backed by a real
- * driveItem (Site Assets / Documents). Looks up the file's `sharepointIds`
- * and `image` facet so the payload survives SharePoint UI Save & Close.
+ * Handler for `addImageWebPart` — adds an image web part backed by a real driveItem from Site Assets or Documents.
  * @param client - the SharePoint client
  * @param params - input parameters
  * @param params.pageId - target page id

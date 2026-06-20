@@ -37,9 +37,6 @@ describe('addAutoReturn (AST-based)', () => {
   });
 
   it('parses top-level return without error (sourceType: script)', () => {
-    // This test verifies the fix for 'return' outside of function error
-    // With sourceType: 'module', this would fail parsing
-    // With sourceType: 'script', this parses correctly
     const result = addAutoReturn('return 42');
     expect(result.code).toBe('return 42');
     expect(result.parseError).toBeUndefined();
@@ -157,8 +154,6 @@ describe('addAutoReturn (AST-based)', () => {
 
   // AST body length === 0: a comment-only string parses to an empty body
   it('returns original code unchanged when AST body is empty (comment only)', () => {
-    // Acorn parses a comment-only string to ast.body === [] — no statements.
-    // addAutoReturn should detect this and return { code } unchanged.
     const input = '/* just a comment */';
     const result = addAutoReturn(input);
     expect(result.code).toBe(input);

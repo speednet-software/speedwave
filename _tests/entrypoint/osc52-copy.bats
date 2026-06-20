@@ -1,7 +1,6 @@
 #!/usr/bin/env bats
 # Tests for containers/osc52-copy.sh — host-side, no container required.
-# Wrapper has two output channels: ~/.clipboard-bridge file (always written)
-# and OSC 52 sequence on /dev/tty (TTY-only, skipped under bats).
+# Channels: ~/.clipboard-bridge file (always) + OSC 52 on /dev/tty (TTY-only, skipped under bats).
 
 OSC52="$BATS_TEST_DIRNAME/../../containers/osc52-copy.sh"
 CONTAINERFILE="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
@@ -135,9 +134,7 @@ teardown() {
 }
 
 @test "command mentioning BOTH Set-Clipboard and Get-Clipboard takes the write path" {
-    # case patterns are tested per-arg in order: Set-Clipboard precedes the
-    # Get-Clipboard arm, so a single -Command token containing both resolves
-    # deterministically to a write (a copy command that also names the reader).
+    # Set-Clipboard arm precedes Get-Clipboard, so a token naming both resolves to write.
     local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd()); Get-Clipboard'
     run bash -c "printf 'both' | HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command \"\$0\"" "$ps"
     [ "$status" -eq 0 ]
@@ -145,9 +142,8 @@ teardown() {
 }
 
 @test "invoking via the powershell.exe symlink name routes Set-Clipboard to write" {
-    # Claude Code reaches the shim by name (powershell.exe), not by calling
-    # osc52-copy.sh directly — exercise that resolution path, not just the
-    # script. A symlink mirrors the image-time `ln -s` in Containerfile.claude.
+    # Claude Code reaches the shim by name (powershell.exe), not osc52-copy.sh.
+    # Symlink mirrors the image-time `ln -s` in Containerfile.claude.
     local bindir="$TMP_HOME/bin"
     mkdir -p "$bindir"
     ln -s "$OSC52" "$bindir/powershell.exe"
@@ -186,9 +182,7 @@ teardown() {
 # ── SSOT cross-check with the host watcher ──────────────────────────────────
 
 @test "bridge filename matches BRIDGE_FILENAME in clipboard_bridge.rs" {
-    # The shell wrapper writes ~/.clipboard-bridge; the Rust watcher looks for
-    # the same name. If one side is renamed without the other, the bridge
-    # silently stops working — this test catches that.
+    # SSOT: shell wrapper and Rust watcher must use the same ~/.clipboard-bridge name.
     local rs="$BATS_TEST_DIRNAME/../../desktop/src-tauri/src/clipboard_bridge.rs"
     grep -q 'BRIDGE_FILENAME: &str = ".clipboard-bridge"' "$rs"
     grep -q '\.clipboard-bridge' "$OSC52"
@@ -197,9 +191,8 @@ teardown() {
 # ── Error reporting ─────────────────────────────────────────────────────────
 
 @test "reports a stderr error when the bridge file cannot be written" {
-    # HOME points at a path whose parent is not a directory → cannot create
-    # ~/.clipboard-bridge. The wrapper must still exit 0 (so Claude's "press c"
-    # detection keeps working) but print a diagnostic to stderr.
+    # HOME at a non-directory → cannot create ~/.clipboard-bridge.
+    # Wrapper must still exit 0 and print a diagnostic to stderr.
     local notadir="$TMP_HOME/regular-file"
     printf 'x' > "$notadir"
     run bash -c "printf 'hello' | HOME='$notadir' bash '$OSC52'"

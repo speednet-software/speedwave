@@ -1,8 +1,6 @@
 #!/usr/bin/env bats
 # Tests for the `guard-not-prod-data-dir` Makefile target (ADR-031 §4).
-# It must hard-refuse a production data dir (basename `.speedwave`) so a
-# dev/test action can never touch ~/.speedwave, even if the user exported
-# SPEEDWAVE_DATA_DIR to point there.
+# Must hard-refuse a production data dir (basename `.speedwave`).
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 
@@ -39,10 +37,7 @@ run_guard() {
 }
 
 @test "guard allows an empty SPEEDWAVE_DATA_DIR" {
-    # An empty value does not match the `*/.speedwave` production pattern, so the
-    # guard passes it. (Make's `?=` does NOT substitute the default for an
-    # explicitly-empty value; the empty-as-unset → ~/.speedwave fallback is
-    # enforced in Rust by `data_dir_from`, not here.)
+    # Empty value does not match the `*/.speedwave` production pattern.
     run run_guard ""
     [ "$status" -eq 0 ]
 }

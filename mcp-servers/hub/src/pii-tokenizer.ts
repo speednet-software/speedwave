@@ -1,6 +1,5 @@
 /**
- * Replaces PII (email, phone, PESEL, NIP, IBAN, card, API key, sensitive fields) with tokens
- * before data reaches the model, and resolves tokens back to real values for MCP-to-MCP calls.
+ * Tokenizes PII before data reaches the model and resolves tokens back for MCP-to-MCP calls.
  * @module pii-tokenizer
  */
 
@@ -25,8 +24,7 @@ export interface PIIContext {
 }
 
 /**
- * PII detection patterns (for value-based detection)
- * Note: EMAIL pattern has length limits to prevent ReDoS attacks
+ * PII detection patterns (value-based). EMAIL has length limits to prevent ReDoS.
  */
 const PII_PATTERNS: Partial<Record<PIIType, RegExp>> = {
   [PIIType.EMAIL]: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,10}/g,
@@ -41,11 +39,7 @@ const PII_PATTERNS: Partial<Record<PIIType, RegExp>> = {
 };
 
 /**
- * Sensitive field key names (case-insensitive, partial match)
- * Used for key-based detection in objects
- *
- * Note: Partial matching (includes) catches variants like:
- * session_token, jwt_token, encryption_key, etc.
+ * Sensitive field key names (case-insensitive, partial match via includes).
  */
 const SENSITIVE_KEYS = [
   // Authentication & Authorization
@@ -205,10 +199,7 @@ function generateToken(type: PIIType): string {
 }
 
 /**
- * `author`/`authors` as a complete word segment is prose metadata (message
- * author, document author), not authentication — without this carve-out the
- * partial `auth` match redacts every sender name. `authorization` stays
- * caught: its `author` is followed by a letter, so the regex does not match.
+ * Matches `author`/`authors` as a complete word segment (excludes `authorization`).
  */
 const AUTHOR_SEGMENT = /(^|[^a-z])authors?(?=[^a-z]|$)/g;
 
@@ -267,11 +258,7 @@ function tokenizeSensitiveValue(value: string, context: PIIContext): string {
 }
 
 /**
- * Tokenize PII in data
- * Recursively processes objects and arrays
- * Detects PII by:
- * 1. Value patterns (email, phone, PESEL, etc.)
- * 2. Key names (password, token, secret, etc.)
+ * Recursively tokenize PII in data by value patterns and key names.
  * @param data - Data to tokenize
  * @param context - PII context for this execution
  * @returns Tokenized data
@@ -308,8 +295,7 @@ export function tokenizePII(data: unknown, context: PIIContext): unknown {
 }
 
 /**
- * Tokenize PII in a string
- * Uses O(1) lookup via valueToToken cache and replaceAll for multiple occurrences
+ * Tokenize PII in a string.
  * @param text - String to tokenize
  * @param context - PII context for this execution
  * @returns Tokenized string
@@ -412,9 +398,7 @@ export function detokenizePII(data: unknown, context: PIIContext): unknown {
 }
 
 /**
- * Detokenize PII in a string
- * Uses reverse-order replacement to handle cases where token values
- * might contain token-like patterns
+ * Detokenize PII in a string using reverse-order replacement.
  * @param text - String containing tokens
  * @param context - PII context with token mappings
  * @returns Detokenized string

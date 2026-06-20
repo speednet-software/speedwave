@@ -126,9 +126,7 @@ describe('audit-log rotation', () => {
   it.runIf(process.platform !== 'win32')(
     'rotateIfNeeded swallows rename errors (best-effort, covers audit-log.ts:55)',
     async () => {
-      // Make rotation fail: `${logPath}.1` is a non-empty directory →
-      // `rename` cannot replace it. The function must log the error and
-      // continue, not throw, so the calling append still gets a chance.
+      // Make rotation fail: `${logPath}.1` is a non-empty directory.
       const { mkdir } = await import('node:fs/promises');
       await writeFile(logPath, 'a'.repeat(20));
       await mkdir(`${logPath}.1`);

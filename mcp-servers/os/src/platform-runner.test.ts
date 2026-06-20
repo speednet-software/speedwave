@@ -128,8 +128,7 @@ describe('platform-runner', () => {
       });
     });
 
-    // Exercises resolveDarwinPaths() directly so that the `process.platform === 'darwin'`
-    // branch is covered on any host the tests happen to run on.
+    // Exercises resolveDarwinPaths() directly on any host platform.
     describe('macOS paths (resolveDarwinPaths)', () => {
       const originalPlatform = process.platform;
 

@@ -1,8 +1,5 @@
 /**
  * Create/edit Word, Excel, PowerPoint files from the normative `spec`/`ops` DSL.
- * All building runs in the bundled Python venv via `scripts/{docx,xlsx,pptx}_build.py`
- * (python-docx / openpyxl / python-pptx). This module validates the DSL shapes in
- * TypeScript before handing them to the scripts.
  * @module mcp-office/engine/office-build
  */
 

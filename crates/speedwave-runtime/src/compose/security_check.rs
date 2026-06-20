@@ -74,10 +74,6 @@ pub(crate) fn extract_volume_for_target(
 pub struct SecurityCheck;
 
 /// Compile-time enumeration of every security rule enforced by [`SecurityCheck`].
-///
-/// Using an enum instead of `&'static str` guarantees that rule identifiers are
-/// unique and typo-free — a misspelled variant is a compile error, whereas a
-/// misspelled string literal would silently pass.
 #[derive(
     Debug,
     Clone,
@@ -263,11 +259,6 @@ pub enum SecurityRule {
 
 impl SecurityRule {
     /// Returns `true` for SharePoint-specific rules.
-    ///
-    /// Note: there is no `SharepointTokenMountMode` after ADR-060/PR3.
-    /// SharePoint mounts `/tokens:ro` like every other built-in worker; a `:rw`
-    /// regression is caught by `PluginTokenMountMode` (re-used for built-ins)
-    /// via the shared `validate_service_volume_mounts` machinery.
     pub fn is_sharepoint(self) -> bool {
         matches!(
             self,
@@ -367,10 +358,6 @@ impl SecurityCheck {
     }
 
     /// Testable version that accepts an explicit data_dir for host filesystem checks.
-    ///
-    /// Separated from `run()` so tests can pass a temp directory for
-    /// `check_file_security()` without depending on `consts::data_dir()`.
-    /// On non-Unix platforms, `check_file_security()` is a no-op.
     pub(crate) fn run_with_data_dir(
         compose_yml: &str,
         project: &str,
@@ -735,11 +722,9 @@ impl SecurityCheck {
         violations
     }
 
-    /// claude container must not have external LLM API keys
-    /// (OPENAI_*, AZURE_OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_*, COHERE_*,
-    /// MISTRAL_*, TOGETHER_*, GROQ_* — these prefixes are forbidden because external
-    /// LLM API keys must never enter the claude container. Only the dummy
-    /// ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted for local model providers.)
+    /// claude container must not have external LLM API keys (OPENAI_*, AZURE_OPENAI_*,
+    /// GEMINI_*, DEEPSEEK_*, OPENROUTER_*, COHERE_*, MISTRAL_*, TOGETHER_*, GROQ_*).
+    /// Only the dummy ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted.
     fn check_no_external_llm_keys_claude(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -1143,27 +1128,9 @@ impl SecurityCheck {
         violations
     }
 
-    /// Validates file permissions and ownership on sensitive host paths.
-    ///
-    /// Unlike other `check_*` methods which validate in-memory compose YAML,
-    /// this method performs filesystem I/O — it reads metadata from host paths
-    /// under `data_dir`. This is intentional: host file permissions are a
-    /// security property that cannot be derived from the compose template.
-    ///
-    /// Rules:
-    /// - Files containing secrets must be 0o600 (owner rw only).
-    /// - Directories containing secrets must be 0o700 (owner rwx only).
-    /// - All sensitive files/dirs must be owned by the current user (UID match).
-    /// - Missing paths are silently skipped — they may not exist yet.
-    /// - Symlinks are skipped (not followed) to prevent traversal attacks.
-    ///
-    /// Known limitations: validates mode bits and UID only, not ACLs or xattrs.
-    /// TOCTOU: permissions are checked before container start; a concurrent
-    /// change between check and start is theoretically possible but acceptable.
-    ///
-    /// Performance: scans 1-2 directory levels (not recursive). Bounded by
-    /// the number of configured services per project — typically under 10 files.
-    /// Negligible compared to compose_up latency.
+    /// Validates file permissions and ownership on sensitive host paths under `data_dir`.
+    /// Secret files must be 0o600, secret dirs 0o700, all owned by the current UID.
+    /// Missing paths and symlinks are skipped.
     #[cfg(unix)]
     pub(crate) fn check_file_security(
         data_dir: &std::path::Path,
@@ -1287,8 +1254,6 @@ impl SecurityCheck {
 }
 
 /// Per-rule names and remediation strings for volume validation.
-/// Each constant preserves the exact rule names and messages used by plugin
-/// and SharePoint security checks so that existing tests and monitoring remain stable.
 struct VolumeCheckRules {
     volume_long_form: SecurityRule,
     volume_long_form_msg: &'static str,
@@ -1401,10 +1366,8 @@ struct VolumeCheckParams<'a> {
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
-    /// Additional read-only mount targets that are permitted on this service.
-    /// Used by OAuth-consuming workers (ADR-060) to permit their per-service bearer
-    /// mount at `/secrets/oauth-auth-token-<service>:ro`. Each entry is matched as
-    /// an exact `target` path; the mount must be `:ro` to pass.
+    /// Additional read-only mount targets permitted on this service (ADR-060 OAuth
+    /// bearer). Each entry is matched as an exact `target`; the mount must be `:ro`.
     extra_allowed_ro_targets: &'a [String],
     rules: VolumeCheckRules,
 }

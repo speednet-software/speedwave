@@ -25,12 +25,7 @@ export type TooltipPlacement = 'top' | 'right' | 'bottom' | 'left';
 /** Pixels offset between the host edge and the tooltip body. */
 const OFFSET_PX = 8;
 
-/**
- * Internal panel component rendered inside the CDK overlay. Carries the
- * `.app-tooltip` class so the global stylesheet (in `styles.css`) controls
- * its appearance, and adds a `data-state` attribute that drives the fade-in
- * opacity transition.
- */
+/** Internal CDK-overlay panel; `.app-tooltip` class + `data-state` fade attr. */
 @Component({
   selector: 'app-tooltip-panel',
   standalone: true,
@@ -127,27 +122,7 @@ const POSITIONS: Record<TooltipPlacement, ConnectedPosition[]> = {
   ],
 };
 
-/**
- * Custom tooltip directive — single source of truth for hover/focus tooltips
- * across the app. Replaces the native `title=""` attribute so every tooltip
- * is styled identically and matches the terminal-minimal mockup
- * (`design-proposals/06-terminal-minimal.html`, `.tooltip` class).
- *
- * Behaviour:
- * - The tooltip element is rendered through the **CDK Overlay** so it always
- *   floats above any ancestor regardless of `overflow` clipping or stacking
- *   contexts (drawers, dropdowns, modals).
- * - Position is managed by `FlexibleConnectedPositionStrategy` connected to
- *   the host element, with one fallback side if the requested placement
- *   would push the panel off-screen.
- * - Strips the native `title=""` so the browser tooltip never double-appears.
- *
- * Usage:
- * ```html
- * <button appTooltip="Conversations" tooltipKbd="⌘B" placement="bottom">…</button>
- * <button [appTooltip]="dynamicLabel()" placement="left">…</button>
- * ```
- */
+/** Custom tooltip directive — SSOT for hover/focus tooltips; renders via CDK Overlay, strips native `title`. */
 @Directive({
   selector: '[appTooltip]',
   standalone: true,
@@ -173,15 +148,13 @@ export class TooltipDirective implements OnDestroy {
 
   /** Wires the effects that strip the native `title` and sync panel inputs. */
   constructor() {
-    // Strip the native `title` so the browser tooltip never stacks on top
-    // of ours. Effect re-runs when `label()` changes (dynamic tooltips).
+    // Strip native `title`; effect re-runs on label change.
     effect(() => {
       this.label();
       this.host.nativeElement.removeAttribute('title');
     });
 
-    // Keep the live panel inputs (label/kbd/placement) in sync with the
-    // directive inputs while the tooltip is visible.
+    // Sync live panel inputs (label/kbd/placement) while visible.
     effect(() => {
       const ref = this.panelRef;
       if (!ref) return;
@@ -223,13 +196,7 @@ export class TooltipDirective implements OnDestroy {
     this.hide();
   }
 
-  /**
-   * Click on the host should also dismiss the tooltip — the user has
-   * committed to the action, and a click usually triggers a layout change
-   * (drawer open, navigation, modal open) that can hide the host element
-   * without firing `mouseleave`. Without this, the tooltip lingers as a
-   * stale floating chip over the new view.
-   */
+  /** Click dismisses the tooltip; prevents a stale chip when host layout changes. */
   @HostListener('click') onClick(): void {
     this.hide();
   }
@@ -256,8 +223,7 @@ export class TooltipDirective implements OnDestroy {
       this.overlayRef = this.overlay.create({
         positionStrategy,
         scrollStrategy: this.scrollStrategies.close(),
-        // The panel itself is not interactive; pointer-events: none in CSS
-        // keeps the host hover state stable.
+        // Non-interactive panel; CSS pointer-events:none keeps host hover stable.
         hasBackdrop: false,
         disposeOnNavigation: true,
       });
@@ -272,8 +238,7 @@ export class TooltipDirective implements OnDestroy {
 
     this.panelRef = componentRef;
 
-    // Force a reflow then flip `data-state` to trigger the opacity transition
-    // defined in `styles.css`.
+    // Force reflow, then flip data-state to trigger the opacity transition.
     const overlayEl = this.overlayRef.overlayElement;
     void overlayEl.offsetWidth;
     componentRef.setInput('visible', true);

@@ -1,12 +1,6 @@
 /**
- * SharePoint Handler Integration Tests
- *
- * Tests the full handler pipeline: createToolDefinitions routing,
- * withClient guard (null client), withValidation wrapper,
- * authentication error handling, and path traversal rejection.
- *
- * Complements the per-tool unit tests in tools/*.test.ts by testing
- * the wiring and integration at the handler level.
+ * SharePoint handler integration tests: routing, null-client guard,
+ * withValidation wrapper, auth errors, path traversal rejection.
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
@@ -656,9 +650,7 @@ describe('SharePoint handler integration', () => {
       const tools = createToolDefinitions(client as unknown as SharePointClient);
       const listTool = tools.find((t) => t.tool.name === 'listFileIds')!;
 
-      // Simulate an unexpected crash inside the handler by throwing in listFiles
-      // and then making the handler itself throw (instead of returning ToolResult)
-      // This tests the outer catch in withValidation
+      // Synchronous throw exercises withValidation's outer catch.
       client.listFiles.mockImplementation(() => {
         throw new Error('Unexpected synchronous error');
       });

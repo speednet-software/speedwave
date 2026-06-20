@@ -1,7 +1,5 @@
 /**
- * Tests for the tool definitions and handler dispatch. Engine functions are mocked so the
- * handlers' parameter coercion, the `guard` error wrapper, and the tool metadata are exercised
- * without touching subprocesses.
+ * Tests for the tool definitions and handler dispatch.
  * @module mcp-office/tools/index.test
  */
 
@@ -18,7 +16,7 @@ function fr(format: string) {
   };
 }
 
-// Mock every engine module the tools call. Hoisted so the `vi.mock` factories can reference these.
+// Mock every engine module the tools call.
 const eng = vi.hoisted(() => {
   const make = (impl: () => unknown) => vi.fn(async () => impl());
   const file = (format: string) => () => ({

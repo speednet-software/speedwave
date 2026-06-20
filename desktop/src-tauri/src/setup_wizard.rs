@@ -19,21 +19,8 @@ pub struct SetupState {
 }
 
 impl SetupState {
-    /// Derives the current wizard step from the boolean flags.
-    ///
-    /// Returns the number of completed sequential steps (0 = nothing done).
-    /// The wizard steps execute in this order:
-    ///   1. runtime_ready  (Check Runtime)
-    ///   2. vm_ready       (Initialize VM)
-    ///   3. images_built   (Build Images)
-    ///   4. project_created (Create Project)
-    ///   5. containers_started (Start Containers)
-    ///   6. cli_linked     (Finalize / CLI symlink)
-    ///
-    /// Previously this was a stored field (`current_step: u8`) that could
-    /// diverge from the boolean flags. Now it is derived, so it is always
-    /// consistent. Old serialized JSON that includes `"current_step"` is
-    /// silently ignored on deserialization (serde default behavior).
+    /// Derives the wizard step from the boolean flags: count of completed
+    /// sequential steps (0 = nothing done, 6 = all done).
     #[cfg(test)]
     pub fn current_step(&self) -> u8 {
         if !self.runtime_ready {
@@ -68,8 +55,7 @@ impl SetupState {
         match Self::load_from(&path) {
             Ok(state) => state,
             Err(e) => {
-                // Missing file is the normal first-run case; anything else
-                // (corrupt JSON, unreadable) silently restarts onboarding, so warn.
+                // Missing file is the normal first-run case; warn on anything else.
                 if !Self::is_missing_state_file(&e) {
                     log::warn!(
                         "SetupState::load: {} unreadable/corrupt, restarting onboarding from scratch: {e}",
@@ -111,10 +97,8 @@ impl SetupState {
         Ok(())
     }
 
-    /// Pure-logic check: returns `true` when all required setup steps have been completed.
-    ///
-    /// `cli_linked` is intentionally excluded — CLI symlink creation is optional
-    /// (the Desktop app works without it) and may fail on restricted systems.
+    /// `true` when all required setup steps completed. `cli_linked` is
+    /// excluded — CLI symlink creation is optional.
     pub fn is_complete(&self) -> bool {
         self.runtime_ready
             && self.vm_ready
@@ -136,16 +120,11 @@ pub enum RuntimeStatus {
 
 pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     let rt = runtime::detect_runtime();
-    // ensure_ready() verifies the full stack: binary exists, correct version,
-    // AND containerd is running. is_available() only checks the binary, which
-    // causes the wizard to skip init_vm even when containerd is not started.
+    // ensure_ready() verifies the full stack (binary + version + containerd running).
     if rt.ensure_ready().is_ok() {
         let mut state = SetupState::load();
         state.runtime_ready = true;
-        // When the runtime is already Ready, the VM is also ready — ensure_ready()
-        // verifies the full stack (binary + containerd running). Without this,
-        // the wizard skips init_vm (which normally sets vm_ready) and
-        // is_complete() returns false because vm_ready stays false.
+        // A Ready runtime implies the VM is ready (the wizard skips init_vm).
         state.vm_ready = true;
         state.save()?;
         Ok(RuntimeStatus::Ready)
@@ -158,26 +137,16 @@ pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
 // Step 3: Initialize VM (macOS only — Lima)
 // ---------------------------------------------------------------------------
 
-// VM provisioning primitives (Lima YAML builder, WSL2 import, nerdctl-full
-// install, .wslconfig / wsl.conf mergers) live in the runtime SSOT
-// `speedwave_runtime::provision`. `init_vm()` below dispatches into it.
+// VM provisioning primitives live in the runtime SSOT `speedwave_runtime::provision`.
 
 /// Returns a `Command` for `limactl` with bundled-binary resolution and
-/// isolated `LIMA_HOME`. Delegates to [`speedwave_runtime::binary::command`]
-/// which resolves the binary path and ensures LIMA_HOME is set.
-///
-/// Retained here (not in `provision`) because `factory_reset` — wizard-state
-/// orchestration — is the only remaining direct `limactl` caller in this crate.
+/// isolated `LIMA_HOME`, via [`speedwave_runtime::binary::command`].
 #[cfg(target_os = "macos")]
 fn limactl_command() -> std::process::Command {
     speedwave_runtime::binary::command("limactl")
 }
 
-/// Decode output from `wsl.exe` which may be UTF-16LE (with or without BOM) or UTF-8.
-///
-/// Windows `wsl.exe --list` often outputs UTF-16LE text. Using `String::from_utf8_lossy()`
-/// on such output corrupts the data (inserts replacement characters and null bytes), causing
-/// string comparisons like distro name matching to silently fail.
+/// Decodes `wsl.exe` output which may be UTF-16LE (with or without BOM) or UTF-8.
 #[cfg(test)]
 use runtime::decode_wsl_output;
 
@@ -204,11 +173,6 @@ pub fn init_vm() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-// VM provisioning primitives (Lima create/start, WSL2 import, nerdctl-full
-// install, .wslconfig / wsl.conf mergers) moved to the runtime SSOT
-// `speedwave_runtime::provision`. The wizard re-exports the items its public
-// API + `main.rs` reference; `init_vm()` above dispatches into the module.
 
 /// Ensures `%USERPROFILE%\.wslconfig` declares VPN-compatible `[wsl2]` keys.
 /// Re-exported from the runtime SSOT — called at startup from `main.rs`.
@@ -248,13 +212,9 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 // Setup completeness check
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when all required setup steps have been completed AND the
-/// VM / WSL distro still physically exists. `cli_linked` is excluded — CLI
-/// symlink creation is optional. The runtime check catches external removal
-/// (factory reset, manual unregister, data_dir rename) that leaves stale state.
-///
-/// **Cost:** `is_installed()` spawns `limactl list` (macOS) or `wsl.exe --list`
-/// (Windows) per call. Safe for navigation/route guards; do not poll.
+/// `true` when all required setup steps completed AND the VM / WSL distro
+/// still exists (`cli_linked` excluded). Spawns `limactl list` / `wsl.exe
+/// --list` per call — safe for route guards, do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {
@@ -270,10 +230,7 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    // Build the active project's enabled set (+ claude/mcp-hub always). On a
-    // fresh setup there is no active project, so only claude/mcp-hub are
-    // built — workers come on demand when an integration is first enabled
-    // (ADR-057).
+    // Build the active project's enabled set (+ claude/mcp-hub always).
     let active_integrations = {
         let user_config = match config::load_user_config() {
             Ok(c) => c,
@@ -305,15 +262,11 @@ pub fn build_images() -> anyhow::Result<()> {
         Err(e) => return Err(e),
     }
 
-    // Sync claude-resources to data_dir so they are available for
-    // compose volume mounts and container entrypoints.
+    // Sync claude-resources to data_dir for compose volume mounts.
     let build_root = build::resolve_build_root()?;
     bundle::sync_claude_resources(&build_root)?;
 
-    // Record that the current bundle's images are now built so that
-    // reconcile_bundle_update (on next startup) sees bundle_changed=false
-    // and skips the unnecessary rebuild. The per-image map must be persisted
-    // too, else the first reconcile would re-prune/rebuild (ADR-072).
+    // Persist the built bundle id + per-image map so next reconcile skips the rebuild (ADR-072).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
@@ -341,18 +294,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     rt.ensure_ready()?;
     log::info!("runtime ready, rendering compose");
 
-    // Re-render compose.yml before every start. Dynamic config (mcp-os token,
-    // auth keys, addons) may have changed since create_project() first rendered it.
-    // Without this, WORKER_OS_URL is missing if mcp-os started after project creation.
+    // Re-render compose.yml before every start: dynamic config may have changed.
     let user_config = config::load_user_config()?;
     let project_dir = &user_config.require_project(project)?.dir;
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
-    // Bridge info is sourced from the globally-shared plugin-bridges map
-    // via crate::reconcile::current_bridges_info(). When no host-bridged
-    // plugins are running yet (e.g. during early setup), the registration
-    // list is empty and the corresponding env vars stay absent in compose.yml.
     let yaml = compose::render_compose(
         project,
         project_dir,
@@ -381,29 +328,19 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         compose::save_compose(project, &yaml)?;
         log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        // Idempotent up, not force-recreate: config-hash convergence plus
-        // content-addressed image tags (ADR-072) recreate exactly what
-        // changed; an unchanged running project starts in seconds.
+        // Idempotent up, not force-recreate (ADR-072).
         rt.compose_up(project)?;
         Ok(())
     })?;
     log::info!("containers started, verifying health");
 
-    // Windows: `compose up` auto-creates the `/home/speedwave/.claude` bind
-    // mount-point (for the read-only ide-bridge mount) as ROOT, even after we
-    // chowned claude-home — so the uid-1000 entrypoint's `mkdir .claude/skills`
-    // hits EACCES and the container exits(1). Chown the tree AFTER compose
-    // created the mount-points, then ensure_exec_healthy's recovery recreate
-    // re-runs the entrypoint against the now-1000-owned tree. Verified on the
-    // live distro. Fail-open. (ADR-052 mount ownership.)
+    // Windows: chown claude-home AFTER compose created the bind mount-points (ADR-052). Fail-open.
     #[cfg(target_os = "windows")]
     if let Err(e) = ensure_claude_home_owner(project) {
         log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
     }
 
-    // Verify containers are actually functional before marking as started.
-    // Only probes the claude container — MCP workers are health-checked
-    // separately via get_health.
+    // Verify functional before marking started: probes the claude container only.
     let claude_container = format!(
         "{}_{}_claude",
         speedwave_runtime::consts::compose_prefix(),
@@ -422,10 +359,8 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 // Check Claude auth status inside the container
 // ---------------------------------------------------------------------------
 
-/// Pure lookup for the project's LLM provider name from the user config.
-/// Returns `None` when the project is missing or `claude.llm.provider` is
-/// unset. Separated out so the local-provider branch in `check_claude_auth`
-/// can be covered without mocking the container runtime.
+/// Looks up the project's LLM provider name. `None` when the project is
+/// missing or `claude.llm.provider` is unset.
 pub(crate) fn lookup_project_provider<'a>(
     user_config: &'a speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -437,13 +372,8 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
-/// True when the project's sessions authenticate to Anthropic (the only
-/// case where the in-container `claude auth status` check is meaningful).
-///
-/// v2 configs (ADR-073) decide by the active provider kind: only
-/// `AnthropicOauth` needs the OAuth check (`AnthropicApiKey` injects a key
-/// — no interactive login). Legacy configs fall back to the v1 rule:
-/// anything non-local is Anthropic.
+/// True when the project's sessions need the in-container Anthropic OAuth
+/// check: v2 (ADR-073) only for `AnthropicOauth`; legacy for anything non-local.
 pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -494,10 +424,8 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 // Lima VM config migration — upgrade memory from older installs
 // ---------------------------------------------------------------------------
 
-/// Migrates the Lima VM config on existing installs when it drifts from the
-/// SSOT (memory, cpus, or the VPN netplan drop-in). Re-exported from the
-/// runtime SSOT [`speedwave_runtime::provision`] — called at startup from
-/// `main.rs` before `reconcile_bundle_update`.
+/// Migrates the Lima VM config when it drifts from the SSOT (memory, cpus, or
+/// the VPN netplan drop-in). Re-exported from [`speedwave_runtime::provision`].
 #[cfg(target_os = "macos")]
 pub use speedwave_runtime::provision::ensure_lima_vm_config;
 
@@ -508,18 +436,10 @@ pub use speedwave_runtime::provision::ensure_lima_vm_config;
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
-    // 1. Stop containers for the wizard's project (if any) — with timeout.
-    //    Only stops the single project from setup_state.json, not all projects
-    //    from config.json. This is intentional: the VM force-delete (step 2)
-    //    destroys all containers regardless, and config.json may already be
-    //    corrupt or missing at this point. Best-effort graceful stop here.
-    //    Even is_available() could theoretically hang, so run the entire
-    //    "check + compose_down" block with a timeout.
+    // 1. Stop only the wizard's project (VM force-delete destroys all containers anyway), with timeout.
     if let Some(ref project) = state.project_created {
         log::info!("stopping containers for project={project}");
         let project_clone = project.clone();
-        // Uses thread+channel (not run_with_timeout) because compose_down goes
-        // through the ContainerRuntime trait, which returns Result — not a Command.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = runtime::detect_runtime();
@@ -564,12 +484,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 2b. Reset VM/distro across platforms.
-    //     Windows: WslRuntime::reset_vm runs `wsl --terminate` + `--unregister`,
-    //     each bounded by CommandRunner::run_with_timeout (10s + 25s).
-    //     macOS: trait default no-op (Lima VM already destroyed above).
-    //     Run BEFORE wipe_data_dir so the WSL VHDX path is still where WSL
-    //     expects it (~/.speedwave/wsl/Speedwave/ext4.vhdx).
+    // 2b. Reset VM/distro before wipe_data_dir (WSL VHDX still lives under the data dir).
     {
         let rt = runtime::detect_runtime();
         if let Err(e) = rt.reset_vm() {
@@ -609,12 +524,8 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
 // Step 7: Copy CLI binary to user PATH
 // ---------------------------------------------------------------------------
 
-/// Resolves the CLI binary bundled in Tauri resources.
-///
-/// Layout at runtime:
-/// - macOS:   `.app/Contents/Resources/cli/speedwave`
-/// - Windows: `<exe_dir>/resources/cli/speedwave.exe`
-/// - Dev mode fallback: `<exe_dir>/speedwave` (existing behaviour)
+/// Resolves the CLI binary bundled in Tauri resources, with a dev fallback
+/// next to the exe.
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
@@ -728,11 +639,8 @@ enum UserShell {
     Unknown,
 }
 
-/// Detects the user's default shell from the `$SHELL` environment variable.
-///
-/// Falls back to [`UserShell::Zsh`] on macOS when `$SHELL` is unset (common when
-/// the Desktop app is launched from Dock/Finder, where launchd may not propagate
-/// `$SHELL`). macOS has defaulted to zsh since Catalina (10.15).
+/// Detects the user's default shell from `$SHELL`. Falls back to
+/// [`UserShell::Zsh`] on macOS when `$SHELL` is unset.
 #[cfg(unix)]
 fn detect_shell() -> UserShell {
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -740,9 +648,6 @@ fn detect_shell() -> UserShell {
 }
 
 /// Parses a `$SHELL` value into a [`UserShell`].
-///
-/// Separated from [`detect_shell`] so unit tests can exercise the parsing logic
-/// directly without depending on (or mutating) the `$SHELL` environment variable.
 #[cfg(unix)]
 fn parse_shell_env(shell: &str) -> UserShell {
     if shell.ends_with("/bash") {
@@ -751,7 +656,6 @@ fn parse_shell_env(shell: &str) -> UserShell {
         UserShell::Zsh
     } else if shell.is_empty() {
         // $SHELL may be unset when launched from macOS Dock/Finder (launchd).
-        // macOS default shell is zsh since Catalina (10.15).
         #[cfg(target_os = "macos")]
         return UserShell::Zsh;
         #[cfg(target_os = "windows")]
@@ -761,14 +665,9 @@ fn parse_shell_env(shell: &str) -> UserShell {
     }
 }
 
-/// Returns the shell config file path(s) to modify for the given shell.
-///
-/// Selection rules per shell initialization order:
-/// - **bash on macOS**: login shell reads first of `.bash_profile` > `.bash_login` >
-///   `.profile` (then stops). macOS terminals always open login shells, so only the
-///   login file is needed. Creates `.bash_profile` if none of the three exist.
-/// - **zsh**: `.zshrc` is sourced for both login and interactive shells on all platforms.
-/// - **Unknown**: `.profile` — POSIX portable fallback.
+/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of
+/// `.bash_profile`/`.bash_login`/`.profile` (creates `.bash_profile` if none);
+/// unknown → `.profile`.
 #[cfg(unix)]
 fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
     match shell {
@@ -789,12 +688,8 @@ fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::pa
     }
 }
 
-/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the correct
-/// shell config file(s) for the user's detected shell and platform.
-///
-/// Detects the user's shell via `$SHELL` and writes to the appropriate config file
-/// (e.g., `.bash_profile` for bash on macOS, `.zshrc` for zsh). Creates the target
-/// file if it doesn't exist. Skips files that already contain `.local/bin`.
+/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the
+/// detected shell's config file. Idempotent: skips files already containing it.
 #[cfg(unix)]
 fn ensure_local_bin_on_path(home: &std::path::Path) -> anyhow::Result<()> {
     ensure_local_bin_on_path_for_shell(home, detect_shell())
@@ -836,14 +731,8 @@ fn ensure_local_bin_on_path_for_shell(
     Ok(())
 }
 
-/// Returns the platform-specific path where the CLI binary is installed.
-///
-/// - Unix: `~/.local/bin/speedwave`
-/// - Windows: `~/.speedwave/bin/speedwave.exe`
-///
-/// Returns the install path of the CLI binary for an explicit `data_dir`.
-/// Only the Windows branch consults `data_dir`; on Unix the path derives from
-/// the home dir. Used only in tests to verify the path matches `link_cli_from`.
+/// CLI install path (Unix: `~/.local/bin/speedwave`, Windows:
+/// `<data_dir>/bin/speedwave.exe`).
 #[cfg(test)]
 fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
@@ -858,17 +747,10 @@ fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf
     Some(path)
 }
 
-/// Copies the CLI binary into the user's PATH and updates shell configuration.
-///
-/// Called both unconditionally on app startup (to keep the CLI in sync after updates)
-/// and during the setup wizard finalize step. Both calls are idempotent.
-///
-/// Uses [`link_cli_from`] internally for the filesystem operations, then updates
-/// the persisted [`SetupState`] to mark `cli_linked = true`.
+/// Copies the CLI binary into PATH, updates shell config, and marks
+/// `cli_linked` in [`SetupState`]. Idempotent.
 pub fn link_cli() -> anyhow::Result<()> {
-    // Guard: skip if data directory does not exist — factory reset wiped it
-    // or this is a fresh install. The wizard will link the CLI after creating
-    // the data directory. Defense in depth: main.rs also guards the call site.
+    // Guard: skip if the data directory does not exist.
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
@@ -886,9 +768,6 @@ pub fn link_cli() -> anyhow::Result<()> {
     link_cli_from(&cli_source, &home)?;
 
     // Write resources-dir marker so the external CLI can find build context.
-    // On startup this write is gated behind setup_started (to avoid
-    // recreating ~/.speedwave/ after factory reset). Here in link_cli() the
-    // data dir is guaranteed to exist, so write the marker unconditionally.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
             log::warn!("link_cli: could not write resources-dir marker: {e}");
@@ -952,11 +831,9 @@ pub(crate) fn system_powershell_path() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
-/// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
-/// the binaries we are about to overwrite. Runs at every Tauri Desktop
-/// startup, complementing the install-time sweep in NSIS + WiX. Fails open
-/// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
-/// SSOT for the kill predicate is `windows/sweep.ps1`.
+/// Kills stale Speedwave / Node / CLI processes holding binaries about to be
+/// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
+/// predicate is `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
 fn run_pre_link_sweep() {
     let Some(sweep) = resolve_sweep_script() else {
@@ -970,10 +847,7 @@ fn run_pre_link_sweep() {
     let data_dir = consts::data_dir();
     let powershell = system_powershell_path();
 
-    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
-    // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
-    // target its own workers or self. system_command applies CREATE_NO_WINDOW
-    // so PowerShell does not flash a console over the Desktop UI.
+    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe (full mode is install-time only).
     let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
@@ -1004,10 +878,7 @@ fn run_pre_link_sweep() {
     }
 }
 
-/// Inner implementation that copies the CLI binary and configures PATH using explicit paths.
-///
-/// Separated from [`link_cli`] for unit testing without depending on `current_exe()` or
-/// the real home directory.
+/// Copies the CLI binary and configures PATH using explicit paths.
 fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -1036,10 +907,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             );
         }
 
-        // Defense-in-depth: kill any stale CLI / worker process holding
-        // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
-        // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
-        // and post-install processes spawned by containers (ADR-048).
+        // Kill any stale process holding ~/.speedwave/bin/speedwave.exe before overwrite (ADR-048).
         run_pre_link_sweep();
 
         copy_cli_binary(cli_source, &cli_dir)?;

@@ -200,8 +200,7 @@ mod tests {
 
     #[test]
     fn max_expires_in_matches_oauth_tools_ts() {
-        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
-        // the TS clamp must equal the Rust one so mint and refresh agree.
+        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union).
         let src = include_str!("../../../mcp-servers/oauth/src/tools.ts");
         let re = regex::Regex::new(r"const\s+MAX_EXPIRES_IN_SECONDS\s*=\s*([^;]+);").unwrap();
         let expr = re

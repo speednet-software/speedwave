@@ -19,7 +19,6 @@ import { SharePointClient } from '../client.js';
 
 /**
  * Normalize upload parameters to accept both snake_case and camelCase
- * Hub executor sends snake_case, but our handlers expect camelCase
  * @param params - Tool parameters
  */
 function normalizeUploadParams(params: Record<string, unknown>): {

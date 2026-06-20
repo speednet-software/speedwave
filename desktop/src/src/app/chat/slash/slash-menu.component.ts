@@ -184,11 +184,7 @@ export class SlashMenuComponent {
   /** Index of the highlighted entry inside `filtered()`. Reset whenever the query changes. */
   protected readonly activeIndex = signal(0);
 
-  /**
-   * Sets up an effect that resets the highlighted index whenever the query
-   * changes — ensures the first match is always pre-selected so Enter/Tab
-   * pick the most relevant entry.
-   */
+  /** Resets the highlighted index whenever the query changes. */
   constructor() {
     effect(() => {
       this.query();
@@ -196,15 +192,7 @@ export class SlashMenuComponent {
     });
   }
 
-  /**
-   * Commands filtered by the current query, with startsWith ranked above
-   * substring matches.
-   *
-   * Subagents (`kind === 'Agent'`) are dropped here: Claude Code does not
-   * expose them as slash commands — they can only be invoked from inside an
-   * Agent tool call. Surfacing them in the slash menu lets the user pick a
-   * "/Plan" entry that the model then rejects with `Unknown skill: Plan`.
-   */
+  /** Commands filtered by query (startsWith ranked above substring); agents excluded. */
   readonly filtered = computed<readonly SlashCommand[]>(() => {
     const q = this.query().trim().toLowerCase();
     const all = this.service.commands().filter((c) => c.kind !== 'Agent');
@@ -226,12 +214,7 @@ export class SlashMenuComponent {
     return [...starts, ...contains];
   });
 
-  /**
-   * Buckets the filtered list into the mockup's three groups: skills, slash
-   * commands, and plugin commands. The flat-index is preserved on every
-   * entry so keyboard navigation (which addresses items by their position in
-   * `filtered()`) and group rendering stay in sync.
-   */
+  /** Buckets the filtered list into skills, commands, and plugin groups; preserves flat index. */
   readonly groups = computed<readonly SlashGroup[]>(() => {
     const list = this.filtered();
     const skills: GroupEntry[] = [];

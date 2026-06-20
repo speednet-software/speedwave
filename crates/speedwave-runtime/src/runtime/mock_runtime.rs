@@ -1,6 +1,7 @@
 //! Mock-runtime builder for `LockedRuntime`. Single entry point for tests —
 //! `ContainerRuntime` is `pub(crate)`, so this is the only legal way for
 //! downstream crates to build a mock. Gated behind feature `test-support`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
@@ -8,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Recorded `remove_images` call args: `(tags, force)`.
+type RemoveImagesCall = (Vec<String>, bool);
 
 /// Shared introspection handles cloned into the mock before wrapping.
 #[derive(Clone, Default)]
@@ -35,7 +39,7 @@ pub struct MockHandles {
     /// Recorded `vm_exec` calls.
     pub vm_exec_calls: Arc<Mutex<Vec<VmExecCall>>>,
     /// Recorded `remove_images` calls (tags, force).
-    pub remove_images_calls: Arc<Mutex<Vec<(Vec<String>, bool)>>>,
+    pub remove_images_calls: Arc<Mutex<Vec<RemoveImagesCall>>>,
     /// Recorded prune calls by kind.
     pub prune_calls: Arc<Mutex<Vec<&'static str>>>,
     /// Count of `restart_container_engine` calls.
@@ -172,10 +176,8 @@ enum BuildResult {
     AllErr(String),
 }
 
-/// Per-tag attempt counter shared between the builder and the running mock so
-/// retry-classifier tests can fail a specific `(tag, attempt)` pair and pass on
-/// the next attempt. Keyed by build image tag, value is the running 1-based
-/// attempt count.
+/// Per-tag build attempt counter. Keyed by image tag, value is the running
+/// 1-based attempt count.
 type AttemptCounter = Arc<Mutex<HashMap<String, u32>>>;
 
 impl Default for MockRuntimeBuilder {
@@ -332,15 +334,9 @@ impl MockRuntimeBuilder {
         self.exec_piped_error = Some(msg.to_string());
         self
     }
-    /// Push a scripted failing result for `container_exec_piped`. Each call to
-    /// `container_exec_piped` pops one entry (FIFO); the returned `Command`
-    /// writes `stderr_msg` to stderr and exits non-zero. When the queue is
-    /// empty, `container_exec_piped` falls back to its default success
-    /// behaviour (`container_exec_program`, defaults to `"true"`).
-    ///
-    /// Use this to drive `probe_container_exec` through specific failure
-    /// modes (stale mount, missing container, stopped container) followed by
-    /// a default-success recovery probe.
+    /// Push a scripted failing result for `container_exec_piped` (FIFO). The
+    /// returned `Command` writes `stderr_msg` to stderr and exits non-zero;
+    /// when the queue is empty it falls back to default success.
     pub fn push_exec_piped_failure(self, stderr_msg: &str) -> Self {
         self.exec_piped_failure_queue
             .lock()
@@ -499,9 +495,7 @@ impl ContainerRuntime for MockRuntime {
         if let Some(err) = &self.exec_piped_error {
             anyhow::bail!("{err}");
         }
-        // FIFO failure queue: returns a Command that writes `stderr_msg`
-        // to stderr and exits non-zero. Used by `ensure_exec_healthy`
-        // tests to script probe-failure -> recreate -> probe-success flows.
+        // FIFO failure queue: returns a Command that writes stderr and exits non-zero.
         let next_failure = {
             let mut q = self.exec_piped_failure_queue.lock().unwrap();
             if q.is_empty() {
@@ -632,8 +626,7 @@ impl ContainerRuntime for MockRuntime {
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
-        // Exact-match override wins; then substring-based "missing" rule;
-        // then the default.
+        // Exact-match override wins; then substring "missing" rule; then default.
         if let Some(v) = self.image_exists.lock().unwrap().get(tag).copied() {
             return Ok(v);
         }

@@ -54,9 +54,6 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
 
   /**
    * Enforce the project allowlist for a sprint whose board ID may be absent.
-   * The Agile API can omit `originBoardId` (e.g. for some closed/cross-board
-   * sprints); when that happens and an allowlist is configured we cannot prove
-   * the sprint is in scope, so we fail closed rather than leak it.
    * @param sprintId - The sprint ID (for the error message only).
    * @param boardId - The sprint's `originBoardId`, or `undefined` if absent.
    */
@@ -125,8 +122,7 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
         sprintId,
         typeof sprint.originBoardId === 'number' ? sprint.originBoardId : undefined
       );
-      // The board check covers the sprint's project; each issue can still belong
-      // to a different project, so validate every key against the allowlist too.
+      // Each issue may belong to a different project than the sprint's board.
       const issues = issueKeysOrIds.slice(0, 50);
       for (const ref of issues) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
       await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, { issues });

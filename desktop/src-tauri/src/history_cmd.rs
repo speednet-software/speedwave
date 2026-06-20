@@ -1,8 +1,5 @@
-// Chat-history Tauri commands.
-//
-// Read-only views over a project's persisted conversations plus its CLAUDE.md
-// project memory. Each command validates the project, then delegates to the
-// `history` module (which owns transcript parsing / on-disk layout).
+//! Chat-history Tauri commands: read-only views of persisted conversations and CLAUDE.md.
+//! Validates the project, then delegates to the `history` module.
 
 use crate::history;
 use crate::types::check_project;

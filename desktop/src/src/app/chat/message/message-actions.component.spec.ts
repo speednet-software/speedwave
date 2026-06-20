@@ -9,11 +9,7 @@ class FakeChatState {
   copyMessage = vi.fn().mockReturnValue(true);
   retryLastAssistant = vi.fn().mockResolvedValue(undefined);
   canRetryLastAssistant = vi.fn().mockReturnValue(true);
-  /**
-   * Mirrors the real `ChatStateService.retryEnabled` signal — the component's
-   * template binds `[disabled]="!chat.retryEnabled()"` so we expose a writable
-   * signal here whose `set(...)` lets each test toggle the disabled state.
-   */
+  /** Writable mirror of `ChatStateService.retryEnabled` so tests can toggle it. */
   private readonly retrySig = signal(true);
   retryEnabled = this.retrySig.asReadonly();
   setRetryEnabled(v: boolean): void {
@@ -159,10 +155,6 @@ describe('MessageActionsComponent', () => {
   });
 
   it('briefly disables copy button while copyMessage runs and re-enables after', () => {
-    // CDK Clipboard.copy is synchronous, so the disabled flag is observed
-    // via the busy guard: while the handler is running the button is disabled,
-    // and after it returns the button is re-enabled (and the "✓ copied"
-    // indicator appears separately for 1.5s).
     let observedDisabledDuringCopy = false;
     chat.copyMessage = vi.fn().mockImplementation(() => {
       observedDisabledDuringCopy = component.copyBusy;

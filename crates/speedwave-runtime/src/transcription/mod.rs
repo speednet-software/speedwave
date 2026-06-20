@@ -82,9 +82,7 @@ mod tests {
 
     #[test]
     fn dirs_are_under_the_data_dir() {
-        // Structural invariant only — both dirs share one data-dir parent and
-        // end with their subdir. Asserted without naming the production
-        // `data_dir()` singleton, so it holds under any isolated tempdir.
+        // Both dirs share one data-dir parent and end with their subdir.
         let transcripts = transcripts_dir();
         let models = models_dir();
         assert!(transcripts.ends_with(crate::consts::TRANSCRIPTS_SUBDIR));
@@ -105,11 +103,6 @@ mod tests {
     #[test]
     fn detect_audio_capture_picks_the_host_backend() {
         let caps = detect_audio_capture().capabilities();
-        // macOS always has a real backend (the audio-capture-cli enforces
-        // 14.4 itself, so we assume taps are available). Windows depends on a
-        // present output device — true on a dev box, possibly false on a bare
-        // CI runner — so we don't assert its flags beyond per-process being
-        // off in v1. Other OSes fall back to FileAudioCapture.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
             assert!(caps.supports_per_process);

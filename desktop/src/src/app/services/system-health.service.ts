@@ -8,18 +8,7 @@ import type { HealthReport } from '../models/health';
 /** How often the polling loop refreshes the health snapshot. */
 export const HEALTH_REFRESH_INTERVAL_MS = 5000;
 
-/**
- * Polls `get_health` and exposes the latest `HealthReport` as a signal so
- * any component can subscribe without managing the polling timer or
- * project-settled subscription itself.
- *
- * Lifetime is `'root'` — there is exactly one polling loop per app instance.
- * The loop starts on first `ensurePolling()` call and stops on `OnDestroy`.
- *
- * Extracted from `LogsViewComponent` so the SRP load on that component is
- * reduced and the same data is reusable from other views (system tray,
- * setup wizard) without duplicating polling logic.
- */
+/** Polls `get_health` and exposes the latest `HealthReport` as a signal. */
 @Injectable({ providedIn: 'root' })
 export class SystemHealthService implements OnDestroy {
   private readonly tauri = inject(TauriService);
@@ -35,12 +24,7 @@ export class SystemHealthService implements OnDestroy {
   private lastSerialised = '';
   private started = false;
 
-  /**
-   * Starts the polling loop on first call and returns the initial fetch
-   * promise so callers can `await` the first snapshot. Subsequent calls
-   * still return a promise that resolves immediately; they don't multiply
-   * the fetch rate or restart the timer.
-   */
+  /** Starts the polling loop on first call; returns the initial fetch promise. */
   ensurePolling(): Promise<void> {
     if (this.started) return Promise.resolve();
     this.started = true;
@@ -61,16 +45,13 @@ export class SystemHealthService implements OnDestroy {
       if (!report || typeof report !== 'object' || !('vm' in report) || !('ide_bridge' in report)) {
         return;
       }
-      // Skip the signal write when the snapshot is byte-identical to the
-      // previous one — OnPush descendants stay quiet between real changes.
+      // Skip the signal write when the snapshot is byte-identical to the previous one.
       const serialised = JSON.stringify(report);
       if (serialised === this.lastSerialised) return;
       this.lastSerialised = serialised;
       this.health.set(report);
     } catch (err) {
-      // Health is non-critical; keep the previous snapshot. Log at debug so the
-      // failure is visible in a diagnostics ZIP without spamming during the
-      // expected container-startup window (only when actually inside Tauri).
+      // Health is non-critical; keep the previous snapshot and log at debug level.
       if (this.tauri.isRunningInTauri()) {
         this.log.debug(`[SystemHealth] get_health failed: ${String(err)}`);
       }

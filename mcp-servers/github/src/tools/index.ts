@@ -1,17 +1,5 @@
 /**
- * GitHub Tools Aggregator
- *
- * Exports all 45 tools (camelCase names) organized by domain:
- * - Repos: 3 tools (listRepos, getRepo, searchCode)
- * - Pull Requests: 7 tools (listPullRequests, getPullRequest, createPullRequest, mergePullRequest, updatePullRequest, getPrDiff, getPrFiles)
- * - PR Review: 6 tools (listPrCommits, listPrReviews, createPrReview, listPrComments, createPrComment, createPrReviewComment)
- * - Branches: 5 tools (listBranches, getBranch, createBranch, deleteBranch, compareBranches)
- * - Commits: 4 tools (listCommits, listBranchCommits, searchCommits, getCommitDiff)
- * - Repository content: 3 tools (getTree, getFileContents, createOrUpdateFile)
- * - Actions: 7 tools (listWorkflowRuns, getWorkflowRun, getRunLogs, rerunWorkflow, triggerWorkflow, listWorkflowRunArtifacts, downloadArtifact)
- * - Issues: 5 tools (listIssues, getIssue, createIssue, updateIssue, closeIssue)
- * - Labels: 2 tools (listLabels, createLabel)
- * - Releases: 3 tools (createTag, deleteTag, createRelease)
+ * GitHub Tools Aggregator — exports 45 tools across 10 domains via factory functions.
  */
 
 import { ToolDefinition } from '@speedwave/mcp-shared';
