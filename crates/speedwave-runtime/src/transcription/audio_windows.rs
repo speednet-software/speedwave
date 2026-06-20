@@ -164,7 +164,7 @@ fn build_stream(
         ($t:ty, $to_f32:expr) => {{
             let to_f32 = $to_f32;
             device.build_input_stream(
-                config,
+                config.clone(),
                 move |data: &[$t], _: &cpal::InputCallbackInfo| {
                     let frames: Vec<f32> = data.iter().map(|s| to_f32(*s)).collect();
                     resampler.feed(&frames, &sink);
