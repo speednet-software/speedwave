@@ -32,7 +32,6 @@ import { createNoteTools } from './notes-tools.js';
 
 /**
  * Allowlisted commands per OS domain.
- * Rejects any command not in this map before touching the filesystem or exec.
  */
 export const ALLOWED_COMMANDS: Record<OsDomain, ReadonlySet<string>> = {
   reminders: new Set([

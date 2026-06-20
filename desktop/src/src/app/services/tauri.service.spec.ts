@@ -3,13 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TauriService } from './tauri.service';
 
 /**
- * Verifies the thin wrapper around `@tauri-apps/api/*` by simulating the
- * Tauri runtime via a stubbed `__TAURI_INTERNALS__` object on `window`.
- * `vi.mock` of `@tauri-apps/api/core` is unreliable under
- * `@angular/build:unit-test` (the warning "is not at the top level of the
- * module" surfaces and the mock factory is occasionally applied AFTER the
- * SUT has imported the real module), so the test exercises the
- * production code path that the runtime actually executes.
+ * Simulates Tauri runtime via stubbed __TAURI_INTERNALS__ object on window.
  */
 describe('TauriService', () => {
   let service: TauriService;
@@ -46,8 +40,6 @@ describe('TauriService', () => {
 
       const result = await service.invoke('simple_cmd');
 
-      // Tauri's runtime normalises a missing args object to `{}` before
-      // forwarding to `__TAURI_INTERNALS__.invoke`.
       expect(mockInternals.invoke).toHaveBeenCalledWith('simple_cmd', {}, undefined);
       expect(result).toBe('result');
     });
@@ -61,9 +53,6 @@ describe('TauriService', () => {
 
   describe('listen()', () => {
     it('delegates to event listen and returns unlisten function', async () => {
-      // The event channel is registered through plugin:event|listen which
-      // resolves via the stubbed __TAURI_INTERNALS__.invoke. The first
-      // resolved value is the event id used to build the unlisten callback.
       mockInternals.invoke.mockResolvedValue(42);
       const handler = vi.fn();
 
@@ -84,8 +73,6 @@ describe('TauriService', () => {
 
       const result = await service.getVersion();
 
-      // `@tauri-apps/api/app` calls the plugin command with no args; the
-      // Tauri runtime normalises that to `{}`.
       expect(mockInternals.invoke).toHaveBeenCalledWith('plugin:app|version', {}, undefined);
       expect(result).toBe('1.2.3');
     });
@@ -98,7 +85,6 @@ describe('TauriService', () => {
     });
 
     it('returns true when __TAURI_INTERNALS__ is present', () => {
-      // beforeEach already installs the stub; assert the detection picks it up.
       expect(service.isRunningInTauri()).toBe(true);
     });
   });

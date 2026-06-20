@@ -35,8 +35,7 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
-  // Stub the root BetaService; default "on" so the transcription section
-  // renders as before. The beta-off case flips it.
+  // Stub the root BetaService; default "on".
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -168,9 +167,7 @@ describe('SettingsComponent', () => {
     };
 
     mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-    // dispatchEvent kicks off an async loadProjectInfo() via the onProjectReady
-    // callback; whenStable alone resolves before that nested promise settles,
-    // so we yield a macrotask first to let the chained await fall through.
+    // Yield a macrotask so the nested loadProjectInfo() promise settles before whenStable.
     await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     expect(component.activeProject).toBe('other-project');

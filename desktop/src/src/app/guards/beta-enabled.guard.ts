@@ -5,9 +5,7 @@ import { TauriService } from '../services/tauri.service';
 
 /**
  * Guards beta-only routes (e.g. /meeting-transcription, ADR-058/056).
- * Queries `get_beta_enabled` directly rather than reading `BetaService`'s
- * signal, since that signal is seeded asynchronously and could still be
- * `false` on the first navigation. Redirects to /chat when beta is off.
+ * Redirects to /chat when beta is off.
  */
 export const betaEnabledGuard: CanActivateFn = async () => {
   const router = inject(Router);

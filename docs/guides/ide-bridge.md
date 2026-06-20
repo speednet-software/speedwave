@@ -12,6 +12,8 @@ Speedwave.app acts as an active MCP proxy between Claude (isolated in a Lima VM 
 4. **IDE Bridge receives events** from Claude (e.g. `openFile`, `getDiagnostics`) and forwards them to the real IDE extension.
 5. **The IDE responds** — VS Code opens files automatically as Claude edits them.
 
+The connection is automatic — you never need to run `/ide` by hand. The container both forces the attempt (`CLAUDE_CODE_AUTO_CONNECT_IDE=true`, for when terminal auto-detection fails) and enables the lock-file detection path (`--ide`). When no lock file is present — CLI-only use without the Desktop app — Claude Code silently skips both.
+
 ### Lock File Format
 
 The Bridge writes a lock file with the following JSON structure:

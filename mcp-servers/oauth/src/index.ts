@@ -1,11 +1,6 @@
 /**
  * `oauth` MCP worker — host-side, per-project (ADR-060).
- *
- * Holds per-service OAuth state (refresh token + provider-specific data such
- * as Microsoft `clientId` / `tenantId` in `providerData`) for each configured
- * OAuth-using service in the project. Exposes `refresh` and `forget` tools to
- * authenticated consumers (today: SharePoint). NOT visible to Claude — not in
- * ENABLED_SERVICES, the hub has no bearer for it.
+ * Exposes `refresh` and `forget` tools to authenticated consumers.
  *
  * Env inputs (set by the Rust supervisor `oauth_process.rs`):
  *   PORT             — listening port (0 = OS picks)
@@ -52,16 +47,12 @@ async function main(): Promise<void> {
   const auditLogPath = process.env.OAUTH_LOG_FILE ?? join(stateDir, 'audit.log');
   const project = requireEnv('OAUTH_PROJECT');
   const supervisorToken = requireEnv('OAUTH_SUPERVISOR_TOKEN');
-  // Fail-fast: the Rust supervisor always sets OAUTH_TOKENS_BASE; a missing
-  // value would have access tokens land in a relative `<project>/<service>/
-  // access_token` path that nothing else reads.
   const tokensBase = requireEnv('OAUTH_TOKENS_BASE');
 
   // Load consumer bearers — bearer → service id.
   const bearerMap = await loadBearerMap(stateDir);
 
-  // ADR-060 §"Threat model" claims the refresh rate limit is configurable
-  // via OAUTH_REFRESH_RATE_LIMIT_SECONDS. Honour that contract here.
+  // Refresh rate limit configurable via OAUTH_REFRESH_RATE_LIMIT_SECONDS (ADR-060).
   const rateLimitOverride = process.env.OAUTH_REFRESH_RATE_LIMIT_SECONDS;
   const rateLimitSeconds = rateLimitOverride ? Number.parseInt(rateLimitOverride, 10) : undefined;
   if (

@@ -1,5 +1,4 @@
-// Shared OAuth Device Flow scaffolding. Per-provider `FlowRegistry` owns
-// state + event name; the surrounding state machine is identical.
+// Shared OAuth Device Flow scaffolding; per-provider `FlowRegistry` owns state + event name.
 
 use serde::Serialize;
 use std::sync::Mutex;
@@ -22,9 +21,8 @@ struct OAuthProgressEvent {
 }
 
 /// Every `status` the host emits on an OAuth progress event. TS mirror:
-/// `OAuthProgressEvent['status']` in `models/integration.ts` (which adds the
-/// frontend-only `starting`/`polling`); `progress_statuses_match_ts_union`
-/// keeps the two in sync.
+/// `OAuthProgressEvent['status']` in `models/integration.ts`; guarded by
+/// `progress_statuses_match_ts_union`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ProgressStatus {
     AwaitingRedirect,
@@ -85,9 +83,7 @@ impl FlowRegistry {
         }
     }
 
-    /// Recovers from poisoning: `FlowState` is two plain fields that stay
-    /// coherent across a panic, and `cancel`/`clear_if_current` must still
-    /// work mid-teardown (a poisoned lock must not leave a flow uncancelled).
+    /// Recovers from poisoning so cancellation still works mid-teardown.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, FlowState> {
         self.state
             .lock()
@@ -223,19 +219,15 @@ impl PollAction {
     }
 }
 
-/// Per-provider token-endpoint behaviour. The shared `run_device_code_poll`
-/// owns the deadline / cancel / sleep / HTTP / read-body state machine; the
-/// provider supplies only what differs: the request and the response handling
-/// (including any token persistence, which classifies its own failures).
+/// Per-provider token-endpoint behaviour: the request and the response
+/// handling (including token persistence and failure classification).
 pub(crate) trait DeviceCodeProvider: Send + Sync + 'static {
     /// Builds the token-endpoint POST (URL, body, provider-specific headers).
     /// Called once per poll iteration from the shared loop.
     fn token_request(&self, client: &reqwest::Client) -> reqwest::RequestBuilder;
 
-    /// Classifies a token-endpoint response. `body_bytes` is the size-limited
-    /// body. On success the provider persists tokens and returns a terminal
-    /// `Emit`; on `authorization_pending`/`slow_down` it returns `KeepPolling`;
-    /// on a terminal error it returns `Emit` with the user-facing message.
+    /// Classifies a token-endpoint response into a `PollStep`. `body_bytes`
+    /// is the size-limited body; provider persists tokens on success.
     fn handle_token_response(
         &self,
         http_status: reqwest::StatusCode,
@@ -243,11 +235,8 @@ pub(crate) trait DeviceCodeProvider: Send + Sync + 'static {
     ) -> PollStep;
 }
 
-/// Shared device-code polling loop (RFC 8628 §3.4–3.5). Drives the deadline,
-/// cancellation, fixed-interval sleep, token POST, body-size guard, and
-/// progress emission; delegates request construction + response classification
-/// to `provider`. Always clears the `FLOW_STATE` entry for `request_id` on
-/// every exit so a superseding flow is never erased.
+/// Inputs to the shared device-code polling loop (RFC 8628 §3.4–3.5);
+/// `run_device_code_poll` clears the flow slot for `request_id` on every exit.
 pub(crate) struct DeviceCodePoll {
     pub app: tauri::AppHandle,
     pub registry: &'static FlowRegistry,
@@ -416,8 +405,7 @@ mod tests {
         assert!(reg.current_generation() > before);
     }
 
-    // A panic while holding the lock must not disable cancellation — every
-    // FlowRegistry method recovers from poisoning via lock_state.
+    // A poisoned lock must not disable cancellation.
     #[test]
     #[serial]
     fn registry_methods_survive_poisoned_lock() {
@@ -480,9 +468,7 @@ mod tests {
         }
     }
 
-    // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union):
-    // the TS OAuthProgressEvent['status'] union must equal the Rust-emitted
-    // statuses plus the two frontend-only states ('starting', 'polling').
+    // SSOT guard: TS OAuthProgressEvent['status'] == Rust statuses + 'starting'/'polling'.
     #[test]
     fn progress_statuses_match_ts_union() {
         let src = include_str!("../../src/src/app/models/integration.ts");
@@ -513,8 +499,7 @@ mod tests {
 
     #[test]
     fn device_code_expired_msg_is_reconciled_single_wording() {
-        // Both providers emit this exact string on expiry — the GitHub
-        // ("reconnect") / SharePoint ("try again") drift was reconciled here.
+        // Both providers emit this exact string on expiry.
         assert_eq!(
             DEVICE_CODE_EXPIRED_MSG,
             "Device code expired — please try again."

@@ -1,7 +1,5 @@
-//! Regression tests pinning security/correctness invariants of
-//! `windows/installer-hooks.nsh` (and its inputs:
-//! `installer-hooks-template.nsh`, `sweep.ps1`, `firewall.ps1`).
-//! See ADR-048 for the full design.
+//! Regression tests for `windows/installer-hooks.nsh` and its inputs
+//! (`installer-hooks-template.nsh`, `sweep.ps1`, `firewall.ps1`). See ADR-048.
 
 #[cfg(test)]
 mod tests {
@@ -97,11 +95,6 @@ mod tests {
 
     #[test]
     fn installer_hooks_nsh_matches_template_plus_generated_macros() {
-        // installer-hooks.nsh = template (with @@SPEEDWAVE_EMBEDDED_MACROS@@
-        // replaced) + macros emitted by scripts/generate-installer-nsh.sh.
-        // We re-derive the expected output here so any drift between the
-        // committed installer-hooks.nsh and its inputs fails CI with a clear
-        // "run make generate-installer-nsh" message.
         let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
         assert_eq!(
             HOOKS, expected,
@@ -111,8 +104,7 @@ mod tests {
 
     #[test]
     fn run_hidden_vbs_has_no_bom() {
-        // wscript.exe fails to parse a .vbs with a UTF-8 BOM. The generator
-        // strips BOM on materialize, but the source must also be BOM-free.
+        // wscript.exe fails to parse a .vbs with a UTF-8 BOM.
         assert!(
             !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
             "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
@@ -121,8 +113,7 @@ mod tests {
 
     #[test]
     fn install_hooks_run_powershell_via_hidden_shim() {
-        // All three PowerShell-invoking hooks must go through the wscript shim
-        // (no console flash) and materialize the vbs first.
+        // All three PowerShell-invoking hooks go through the wscript shim.
         let shim_calls = HOOKS
             .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
             .count();
@@ -137,8 +128,7 @@ mod tests {
             3,
             "each shim hook must materialize run-hidden.vbs first"
         );
-        // No hook may launch powershell.exe directly via nsExec — that is the
-        // flash path. powershell.exe appears ONLY inside the wscript argument.
+        // No hook may launch powershell.exe directly via nsExec.
         assert!(
             !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
             "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
@@ -226,8 +216,7 @@ mod tests {
 
     #[test]
     fn firewall_ps1_creates_wdf_allow_rules() {
-        // The actual fix for the per-binary WDF prompt: host application ALLOW
-        // rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
+        // Host application ALLOW rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
         assert!(
             FIREWALL_PS1.contains("New-NetFirewallRule")
                 && FIREWALL_PS1.contains("Action      = 'Allow'")
@@ -238,8 +227,7 @@ mod tests {
 
     #[test]
     fn firewall_ps1_accepts_programs_param_split_on_semicolon() {
-        // Paths arrive as one ';'-joined string ([string], not [string[]]) because
-        // PowerShell -File cannot bind a multi-element array. Verified on Windows.
+        // Paths arrive as one ';'-joined [string] (PowerShell -File cannot bind a [string[]]).
         assert!(
             FIREWALL_PS1.contains("[string]$Programs")
                 && FIREWALL_PS1.contains("$Programs -split ';'"),
@@ -261,8 +249,7 @@ mod tests {
 
     #[test]
     fn firewall_ps1_installer_modes_fail_open() {
-        // The installer-invoked modes (install/uninstall) must never brick a
-        // policy-locked machine. Several exit-0 paths cover success + catch.
+        // Installer-invoked modes (install/uninstall) fail open via several exit-0 paths.
         let exits = FIREWALL_PS1.matches("exit 0").count();
         assert!(
             exits >= 4,
@@ -280,8 +267,7 @@ mod tests {
 
     #[test]
     fn firewall_ps1_ensure_checks_existence_before_signalling_elevation() {
-        // Runtime 'ensure' must do the non-admin existence check (no UAC) and
-        // only exit 3 (needs-elevation) when the rule is genuinely missing.
+        // 'ensure' does the non-admin existence check and exits 3 only when the rule is missing.
         let ensure_idx = FIREWALL_PS1
             .find("$Mode -eq 'ensure'")
             .expect("ensure branch must exist");
@@ -300,9 +286,7 @@ mod tests {
 
     #[test]
     fn firewall_ps1_elevated_mode_does_not_self_relaunch() {
-        // install-elevated runs the privileged body directly; self-elevation is
-        // driven from Rust, so the script must NOT contain -Verb RunAs (no UAC
-        // loop) and must NOT re-check admin in the elevated branch.
+        // install-elevated runs the privileged body directly; self-elevation is Rust-driven.
         assert!(
             !FIREWALL_PS1.contains("-Verb RunAs") && !FIREWALL_PS1.contains("RunAs"),
             "firewall.ps1 must not self-elevate; elevation is driven from Rust"
@@ -311,12 +295,8 @@ mod tests {
 
     #[test]
     fn installers_invoke_only_install_and_uninstall_modes() {
-        // The self-elevating/runtime modes (ensure, install-elevated) are
-        // reachable only from the Desktop runtime. The installers must INVOKE
-        // firewall.ps1 only with -Mode install / -Mode uninstall. Note: the
-        // mode strings legitimately appear inside the materialized firewall.ps1
-        // body (ValidateSet) in installer-hooks.nsh — so we assert on the
-        // invocation pattern (`firewall.ps1...-Mode <runtime>`), not presence.
+        // Runtime-only modes (ensure, install-elevated) are Desktop-only; assert on the
+        // invocation pattern, not presence (the strings appear in the materialized ValidateSet).
         for needle in [
             "firewall.ps1\" -Mode ensure",
             "firewall.ps1\" -Mode install-elevated",
@@ -336,9 +316,7 @@ mod tests {
 
     #[test]
     fn materialized_ps1_scripts_contain_no_backtick() {
-        // A backtick is the NSIS FileWrite string delimiter and has no escape,
-        // so a literal backtick truncates the NSIS string and aborts makensis.
-        // The generator rejects such scripts; this guards the SSOT sources.
+        // Backtick is the NSIS FileWrite delimiter with no escape; it truncates the string.
         for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
             assert!(
                 !ps1.contains('`'),
@@ -471,8 +449,7 @@ mod tests {
     }
 
     fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
-        // NSIS !define/label tokens cannot contain '-'; the generator normalizes
-        // name -> UPPER with '-' replaced by '_'.
+        // NSIS !define/label tokens cannot contain '-'; normalize to UPPER with '-' -> '_'.
         let upper = name.to_uppercase().replace('-', "_");
         let file = format!("{name}.{ext}");
         let id = format!("SW_{upper}_ID");
@@ -496,8 +473,7 @@ mod tests {
             for c in line.chars() {
                 match c {
                     '$' => esc.push_str("$$"),
-                    // Backtick has no NSIS escape; the generator rejects any
-                    // source containing one, so it never reaches here.
+                    // Backtick has no NSIS escape; the generator rejects sources containing one.
                     '"' => esc.push_str("$\\\""),
                     other => esc.push(other),
                 }

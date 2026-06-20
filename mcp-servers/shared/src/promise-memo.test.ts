@@ -69,8 +69,6 @@ describe('memoizedPromise', () => {
   });
 
   it('does not call fetch on subsequent calls after timeout resolution', async () => {
-    // After a timeout, the underlying promise is still pending. Subsequent
-    // calls during that pending window share the cached race-promise.
     const fetch = vi.fn().mockImplementation(() => new Promise(() => {}));
     const get = memoizedPromise<string | null>({
       fetch,

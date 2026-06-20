@@ -22,11 +22,7 @@ import { UpdateSectionComponent } from './update-section/update-section.componen
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
 
-/**
- * One theme card in the Appearance accent grid. The preview swatch reads the
- * live `--accent` value per theme via `data-theme`, so it stays correct in
- * both light and dark mode without duplicating CSS hex values here.
- */
+/** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
   /** Theme identifier — drives `ThemeService.setTheme()` and the active-state binding. */
   readonly id: ThemeId;

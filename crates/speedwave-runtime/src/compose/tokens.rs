@@ -9,10 +9,8 @@ pub(crate) fn resolve_tokens_dir_in(data_dir: &Path, project_name: &str) -> Path
     data_dir.join("tokens").join(project_name)
 }
 
-/// Creates the secrets directory for a project with restrictive permissions (chmod 700).
-/// Path: `~/.speedwave/secrets/<project>/`
-///
-/// Also sets `0o700` on the parent `secrets/` directory.
+/// Creates `~/.speedwave/secrets/<project>/` with `0o700` on it and the
+/// parent `secrets/` directory.
 pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
     init_secrets_dir_in(consts::data_dir(), project)
 }
@@ -39,24 +37,14 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 }
 
 // ── Local-LLM token paths ────────────────────────────────────────────────
-//
-// Per-project secrets for the "local" LLM provider (Bearer token + custom
-// headers) live at `~/.speedwave/tokens/<project>/local-llm/<file>` with
-// owner-only perms (Unix 0o600 files, 0o700 dirs; Windows ACL deny-others).
-//
-// `tokens_path` and `ensure_token_dir` are the SSOT for resolving these paths.
-// Service and file names are whitelisted to prevent path traversal — adding a
-// new local-LLM artifact = edit one constant, not the helper signature.
 
 /// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
 /// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
 /// (validated by `plugin::validate_manifest`).
 const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
 
-/// LiteLLM per-provider key namespace (ADR-073). Mounted `:ro` at `/tokens`
-/// in the litellm container; its entrypoint exports each file as
-/// `SPW_KEY_<PROVIDER_ID>`. The namespace is reserved against plugin slugs
-/// in `consts::BUILT_IN_SERVICE_IDS`.
+/// LiteLLM per-provider key namespace (ADR-073), reserved against plugin
+/// slugs in `consts::BUILT_IN_SERVICE_IDS`.
 pub const LLM_TOKEN_SERVICE: &str = "llm";
 
 /// Suffix every LiteLLM provider key file carries: `<provider_id>_api_key`.
@@ -67,9 +55,7 @@ pub const LLM_TOKEN_FILE_SUFFIX: &str = "_api_key";
 const ALLOWED_TOKEN_FILES_LOCAL_LLM: &[&str] = &["api_key", "custom_headers"];
 
 /// Validates a file name for the given token service. `local-llm` uses a
-/// static whitelist; `llm` file names embed a user-defined provider id, so
-/// the id segment is validated against the plugin-grade slug shape instead
-/// (`^[a-z][a-z0-9-]{0,63}$` — no dots, no slashes, no traversal).
+/// static whitelist; `llm` file names embed a slug-validated provider id.
 fn validate_token_file(service: &str, file: &str) -> anyhow::Result<()> {
     match service {
         "local-llm" => {

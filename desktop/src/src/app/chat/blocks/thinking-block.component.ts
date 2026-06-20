@@ -2,10 +2,7 @@ import { ChangeDetectionStrategy, Component, OnInit, input, signal } from '@angu
 import { IconComponent } from '../../shared/icon.component';
 
 /**
- * Collapsible "thinking" block — terminal-minimal timeline event with a violet
- * left border. Pure-Tailwind classes; the chevron is an inline SVG that
- * rotates 90° on open via the `rotate-90` utility (no glyph swap).
- *
+ * Collapsible thinking block with violet left border. Chevron rotates 90° on toggle.
  * Mockup reference: lines 591–613.
  */
 @Component({
@@ -62,9 +59,7 @@ export class ThinkingBlockComponent implements OnInit {
   }
 
   /**
-   * Mirrors the native `<details>` open/closed state into the signal so the
-   * chevron and `aria-expanded` stay in sync with the user's interaction
-   * (clicks the summary toggle the disclosure natively).
+   * Sync native `<details>` open/closed state to the signal for chevron and aria-expanded.
    * @param event Native toggle event from the `<details>` element.
    */
   onToggle(event: Event): void {

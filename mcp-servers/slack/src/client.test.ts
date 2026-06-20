@@ -31,18 +31,13 @@ const mockWebClientInstance = {
   users: {
     lookupByEmail: vi.fn(),
   },
-  // `auth.test` is invoked by the background connection test that
-  // initializeSlackClients schedules after successful token load. The default
-  // resolves so that path is exercised in the happy-token test; specific
-  // tests can override via mockWebClientInstance.auth.test.mockResolvedValueOnce.
+  // Background auth.test defaults to success; override per-test with mockResolvedValueOnce
   auth: {
     test: vi.fn().mockResolvedValue({ ok: true }),
   },
 };
 
-// Mock @slack/web-api - use class for vitest 4.x compatibility. The mock
-// records the constructor token so slackCall's recreate-on-rotation check
-// (`client.token !== token`) behaves like the real WebClient.
+// Class mock records the token so slackCall's rotate-on-change check (client.token !== token) works
 vi.mock('@slack/web-api', () => ({
   WebClient: vi.fn().mockImplementation(function (
     this: typeof mockWebClientInstance & { token?: string },
@@ -53,11 +48,7 @@ vi.mock('@slack/web-api', () => ({
   }),
 }));
 
-// Mock fs/promises. The named `readFile` mirrors the default-object one
-// because @speedwave/mcp-shared's oauth-client imports it as a named binding
-// from 'node:fs/promises' (the slackCall refresh path reads the bearer file).
-// `mkdir`/`writeFile` back downloadFile's workspace write — both shapes are
-// exported so named (`import { mkdir }`) and default-object access resolve.
+// Mock both named and default-object fs exports (oauth-client imports named; refresh reads bearer)
 const { readFileMock, mkdirMock, writeFileMock } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   mkdirMock: vi.fn().mockResolvedValue(undefined),
@@ -257,9 +248,7 @@ describe('slack client', () => {
     });
 
     it('wraps a non-Error fs rejection into an errno-aware message (still returns missing)', async () => {
-      // The shared loadTokenFile wraps any non-Error rejection into a proper
-      // Error ("Failed to read token file: … (plain string failure)"), so the
-      // message — not "Unknown error" — surfaces in the warning.
+      // Non-Error rejection is wrapped so its message (not "Unknown error") surfaces in the warning
       vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
 
       const result = await initializeSlackClients();
@@ -457,8 +446,7 @@ describe('slack client', () => {
     });
 
     it('resolves a channel that lives on a later list page', async () => {
-      // Slack pages can carry far fewer entries than `limit` — a channel on
-      // page 2+ must still resolve (the original single-page read missed it).
+      // Pagination: a channel on page 2+ must still resolve even when pages are sparse
       const mockList = vi
         .fn()
         .mockResolvedValueOnce({
@@ -1085,8 +1073,7 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F4/notes.md',
       });
       stubDownload('<html>login</html>', 'text/html');
-      // No WORKER_OAUTH_URL in tests → the triggered refresh fails loudly
-      // instead of returning the login page as content.
+      // No WORKER_OAUTH_URL: refresh fails instead of returning the login page as content
       await expect(getFileContent(mockClients, { file: 'F4' })).rejects.toThrow();
     });
 
@@ -1266,8 +1253,7 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F5/doc.pdf',
       });
       stubDownload(Buffer.from('<html>login</html>'), 'text/html');
-      // No WORKER_OAUTH_URL in tests → the triggered refresh fails loudly
-      // instead of persisting the login page as a "file".
+      // No WORKER_OAUTH_URL: refresh fails instead of persisting the login page
       await expect(downloadFile(mockClients, { file: 'F5' })).rejects.toThrow();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });

@@ -4,9 +4,7 @@
  */
 
 /**
- * No-op error handler — pass to `.catch()` on best-effort cleanup (`fs.rm` of a temp file)
- * where a failure is genuinely not actionable. Centralised so the pattern is documented once
- * rather than scattered as anonymous `() => undefined` arrows.
+ * No-op error handler for `.catch()` on best-effort cleanup where failure is not actionable.
  */
 export function ignoreError(): void {
   /* deliberately empty — used for best-effort cleanup */

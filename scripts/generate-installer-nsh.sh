@@ -10,15 +10,9 @@
 # Output (generated, committed):
 #   desktop/src-tauri/windows/installer-hooks.nsh
 #
-# Why this shape: Tauri inlines installerHooks content into a generated .nsi
-# placed in target/release/bundle/nsis/<arch>/. `!include` of sibling .nsh
-# files does not work (Tauri does not copy them). makensis CWD is the bundle
-# temp dir, so `File "windows\sweep.ps1"` cannot resolve either. The only
-# working pattern is single-file installerHooks with everything inline.
+# Single-file .nsh required: Tauri does not copy sibling .nsh files to the bundle temp dir.
 #
-# Drift detector: SSOT pin tests in installer_hooks.rs re-derive the embedded
-# macros from the current .ps1 files and assert byte-for-byte equality with
-# installer-hooks.nsh. If you edit any .ps1, run:
+# Drift detector: installer_hooks.rs pins installer-hooks.nsh byte-for-byte. After editing any .ps1, run:
 #
 #   make generate-installer-nsh
 #
@@ -41,8 +35,7 @@ if ! grep -q "$MARKER" "$TEMPLATE"; then
   exit 1
 fi
 
-# Emit one !macro SPEEDWAVE_MATERIALIZE_<NAME> that writes <name>.<ext> to
-# $PLUGINSDIR\<name>.<ext> at install time via FileWrite literals.
+# Emit !macro SPEEDWAVE_MATERIALIZE_<NAME> writing <name>.<ext> to $PLUGINSDIR at install time.
 # Args: <name> [<ext>]  (ext defaults to ps1; e.g. "run-hidden" "vbs").
 emit_materialize_macro() {
   local name="$1"
@@ -58,17 +51,13 @@ emit_materialize_macro() {
     exit 1
   fi
 
-  # A backtick is the NSIS FileWrite string delimiter and has no escape, so a
-  # literal backtick in the source silently truncates the NSIS string and aborts
-  # makensis. Fail loudly here instead. Use splatting, not backtick-continuation.
+  # A literal backtick truncates the NSIS FileWrite delimiter (no escape exists). Fail loudly.
   if grep -q '`' "$src"; then
     echo "ERROR: $src contains a backtick — breaks NSIS FileWrite. Use splatting." >&2
     exit 1
   fi
 
-  # Strip UTF-8 BOM before embedding — NSIS writes literal bytes, and the
-  # materialized file needs none (PowerShell handles ASCII fine; wscript REQUIRES
-  # no BOM for .vbs). So the materialized .vbs is always ANSI/BOM-free here.
+  # Strip UTF-8 BOM (NSIS writes literal bytes; wscript requires no BOM for .vbs).
   local stripped
   stripped="$(mktemp)"
   if head -c 3 "$src" | od -An -t x1 | tr -d ' \n' | grep -qi '^efbbbf$'; then
@@ -77,9 +66,7 @@ emit_materialize_macro() {
     cp "$src" "$stripped"
   fi
 
-  # Labels are uniquified per !insertmacro site via __LINE__ so the macro
-  # can be inserted multiple times in the same NSIS context (e.g. firewall
-  # is inserted in both POSTINSTALL and POSTUNINSTALL).
+  # Labels uniquified per !insertmacro site via __LINE__ (firewall is inserted twice).
   echo "!macro SPEEDWAVE_MATERIALIZE_${upper}"
   echo "  !define SW_${upper}_ID \${__LINE__}"
   echo "  InitPluginsDir"
@@ -90,11 +77,7 @@ emit_materialize_macro() {
   echo "    Goto sw_${upper}_write_done_\${SW_${upper}_ID}"
   echo "  sw_${upper}_write_ok_\${SW_${upper}_ID}:"
 
-  # Escape each line for NSIS backtick-delimited FileWrite literal:
-  #   $  -> $$
-  #   "  -> $\"  (NSIS escape for double quote)
-  # Backticks are rejected upstream (no NSIS escape exists). Backslashes are
-  # literal in backtick strings. Line endings emitted as $\r$\n.
+  # Escape for NSIS backtick FileWrite: $ -> $$, " -> $\"; line ends $\r$\n.
   local line esc
   while IFS= read -r line || [[ -n "$line" ]]; do
     esc="$line"

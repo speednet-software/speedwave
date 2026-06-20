@@ -124,9 +124,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Renders the transcript as markdown and sends it to Claude via the existing
-   * chat path. The UI should show a confirm dialog before calling this — the
-   * markdown leaves the machine.
+   * Renders the transcript as markdown and sends it to Claude via the chat path.
    * @param sessionId - the session to send.
    */
   async sendToChat(sessionId: string): Promise<void> {

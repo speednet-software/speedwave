@@ -5,8 +5,7 @@
 use std::path::Path;
 
 /// Open a log file for appending with chmod 600 on Unix. `None` on error
-/// (logged via the `log` facade — a different sink, so no recursion — so a
-/// path that loses all session logging is visible, not silently swallowed).
+/// (logged via the `log` facade).
 pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.append(true).create(true);
@@ -41,11 +40,8 @@ pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str
 }
 
 /// Rotate a log file if it exceeds `max_bytes` by keeping the last half
-/// (line-aligned). Preserves the most recent entries. Best-effort.
-///
-/// Cheap on the common case: only a `metadata` stat runs when the file
-/// is under the threshold (no full read until truncation is actually
-/// warranted).
+/// (line-aligned). Best-effort. Stat-only when under threshold; full read
+/// only if truncation needed.
 pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
     match std::fs::metadata(path) {
         Ok(m) if m.len() > max_bytes => {}
@@ -101,8 +97,7 @@ mod tests {
 
     #[test]
     fn open_log_file_returns_none_for_invalid_path() {
-        // Exercises the error arm: returns None (and logs a warn so the
-        // lost-logging condition is visible rather than silently swallowed).
+        // Exercises the error arm: returns None.
         let path = std::path::Path::new("/nonexistent/dir/impossible.log");
         let file = open_log_file(path);
         assert!(file.is_none(), "should return None for invalid path");

@@ -86,15 +86,7 @@ describe('PluginsComponent', () => {
   let projectState: ProjectStateService;
 
   beforeEach(async () => {
-    // The Angular `unit-test` builder configures Vitest with
-    // `isolate: false` (see @angular/build/.../vitest/executor.js), which
-    // means module mocks live across spec files in the same run. Without
-    // an explicit reset here, `openMock` retains whatever mockResolvedValue
-    // the previous spec configured — most visibly,
-    // `create-project-modal.component.spec.ts` resolves `open` to a path
-    // string, and the next plugins-spec test that calls `open` without
-    // setting its own resolved value gets that stale path back. Reset
-    // first thing in every beforeEach to keep specs self-contained.
+    // Reset openMock to clear stale mock values from previous specs (isolate: false).
     openMock.mockReset();
 
     mockTauri = new MockTauriService();
@@ -370,11 +362,7 @@ describe('PluginsComponent', () => {
   });
 
   describe('installPlugin()', () => {
-    /**
-     * Default install handler used by these tests: peeks an MCP plugin
-     * (with `service_id`) and installs successfully. Override per-test for
-     * other scenarios.
-     */
+    /** Peeks an MCP plugin (with `service_id`) and installs successfully. */
     function defaultInstallHandler(): (cmd: string) => Promise<unknown> {
       return async (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
@@ -459,9 +447,7 @@ describe('PluginsComponent', () => {
         return undefined;
       };
       await component.installPlugin();
-      // After install completes, the steps signal still holds the last list
-      // used during the run — we can assert resource-only plugins never get
-      // a `building` step.
+      // Resource-only plugins never get a `building` step.
       const steps = component.installSteps();
       expect(steps.map((s) => s.id)).toEqual(['verifying', 'extracting']);
     });
@@ -509,8 +495,7 @@ describe('PluginsComponent', () => {
     it('marks the active step as error and sets installError on phase=failed', async () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/bad.zip');
-      // Hold install_plugin pending so the dispatched phase events are
-      // delivered while the listener is still registered.
+      // Hold install_plugin pending so phase events arrive while the listener is registered.
       let rejectFn!: (e: Error) => void;
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
@@ -754,9 +739,7 @@ describe('PluginsComponent', () => {
       const target = component.plugins[0];
       const before = target.enabled;
       await component.onRowToggle(target, new MouseEvent('click'));
-      // Hold a direct reference because ngOnInit's project-ready listener
-      // can re-fetch and replace the plugins array between the await and
-      // the assertion in some Angular zone flushes.
+      // Hold a direct reference: the project-ready listener may replace the plugins array.
       expect(target.enabled).toBe(!before);
       expect(navSpy).not.toHaveBeenCalled();
     });

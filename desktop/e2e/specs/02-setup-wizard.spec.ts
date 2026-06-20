@@ -22,15 +22,7 @@ import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
 
-/** Check if setup is complete by invoking the Tauri command directly.
- *
- * This is the SSOT — if Rust says setup is complete, it is complete.
- * DOM state (data-status attributes, element existence) is secondary and
- * subject to WebDriver timing issues.
- *
- * Uses executeAsync because __TAURI_INTERNALS__.invoke() returns a Promise.
- * browser.execute() cannot await Promises — it returns null for them.
- */
+/** Check if setup is complete by invoking the Tauri command directly (SSOT). */
 async function isSetupComplete(): Promise<boolean> {
   return browser.executeAsync((done: (result: boolean) => void) => {
     (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<boolean> } })
@@ -41,14 +33,7 @@ async function isSetupComplete(): Promise<boolean> {
 }
 
 /** Wait for a setup wizard step (0-based index) to reach a terminal state.
- *
- * When steps complete very fast (cached images), the wizard may jump straight
- * to phase='complete' before a poll catches the individual step's status.
- * We treat the presence of `[data-testid="setup-success"]` as "all steps done".
- *
- * If DOM polling times out but Tauri reports setup complete, the step is
- * considered done — fast transitions can cause the wizard to skip past
- * individual step DOM states before WebDriver catches them.
+ * `[data-testid="setup-success"]` or a Tauri-reported complete setup both count as done.
  */
 async function waitForStepTerminal(index: number, timeout: number): Promise<string> {
   let status = '';
@@ -74,8 +59,6 @@ async function waitForStepTerminal(index: number, timeout: number): Promise<stri
     );
   } catch (e) {
     // DOM poll timed out — check Tauri state as fallback.
-    // On fast second installs, steps 4-5 complete and the wizard redirects
-    // before WebDriver catches the individual step's data-status change.
     const complete = await isSetupComplete();
     if (complete) {
       status = 'done';
@@ -106,9 +89,7 @@ describe('Setup Wizard — Full Flow', function () {
     const wizard = await $('[data-testid="setup-wizard"]');
     await wizard.waitForExist({ timeout: 10_000 });
 
-    // The wizard renders the headline + subtitle + description region — assert
-    // each by testid. Text content is intentionally not checked: it is part of
-    // the design copy and changes between releases.
+    // Assert headline + subtitle + description region by testid (not text — design copy).
     await wizard.$('[data-testid="setup-headline"]').waitForExist({ timeout: 5_000 });
     await wizard.$('[data-testid="setup-subtitle"]').waitForExist({ timeout: 5_000 });
     await wizard.$('[data-testid="setup-description"]').waitForExist({ timeout: 5_000 });
@@ -135,9 +116,7 @@ describe('Setup Wizard — Full Flow', function () {
     const firstStatus = await stepElements[0].getAttribute('data-status');
     expect(['active', 'done']).toContain(firstStatus);
 
-    // Each step row exposes a step-title sub-element; presence is enough,
-    // text varies with platform (macOS "Verify Lima / nerdctl" vs Windows
-    // "Verify system requirements") and would couple the test to copy.
+    // Verify step-title sub-element exists (not text — platform/copy dependent).
     const firstTitle = await stepElements[0].$('[data-testid="step-title"]');
     await firstTitle.waitForExist({ timeout: 5_000 });
   });
@@ -182,9 +161,7 @@ describe('Setup Wizard — Full Flow', function () {
   it('should fill the project form via the picker stub and create the project', async function () {
     this.timeout(60_000);
 
-    // Stub the OS folder picker BEFORE clicking browse — the native dialog
-    // cannot be driven by WebDriver; we intercept the plugin-dialog IPC
-    // channel and resolve to a known path.
+    // Stub the OS folder picker (plugin-dialog IPC) before clicking browse — WebDriver cannot drive the native dialog.
     await mockDialogOpen(E2E_PROJECT_DIR);
 
     const modal = await $('[data-testid="create-project-modal"]');
@@ -199,8 +176,7 @@ describe('Setup Wizard — Full Flow', function () {
       timeoutMsg: 'Project directory was not populated by the dialog stub',
     });
 
-    // Name auto-fills from the dir basename. Override with the canonical e2e
-    // project name so other specs can reference it deterministically.
+    // Name auto-fills from the dir basename; override with the canonical e2e project name.
     const nameInput = await modal.$('[data-testid="create-project-name"]');
     await nameInput.setValue(E2E_PROJECT_NAME);
     expect(await nameInput.getValue()).toBe(E2E_PROJECT_NAME);
@@ -233,14 +209,10 @@ describe('Setup Wizard — Full Flow', function () {
     const complete = await isSetupComplete();
     expect(complete).toBe(true);
 
-    // The wizard's setTimeout + router.navigate redirect can be blocked by
-    // stale-element JS exceptions injected by WebDriver DOM polling during
-    // fast step transitions. Force a navigation to root so setupCompleteGuard
-    // re-evaluates and routes to the main shell.
+    // WebDriver stale-element during fast transitions; force nav to root to re-evaluate setupCompleteGuard.
     await browser.execute(() => (window.location.href = '/'));
 
-    // The shell is identified by the project pill in the header — it appears
-    // exactly when the user is past the setup phase and inside the main app.
+    // The shell is identified by the project pill in the header.
     const projectPill = await $('[data-testid="project-pill"]');
     await projectPill.waitForExist({ timeout: 15_000 });
   });

@@ -35,9 +35,7 @@ describe('ChatHeaderComponent', () => {
   });
 
   // ── Project pill ──────────────────────────────────────────────────────
-  // The project pill was extracted to <app-project-pill> (single SSOT used
-  // across every view header). Behaviour is covered by project-pill.spec.ts;
-  // here we just verify the chat header still renders the host element.
+  // Project pill extracted to <app-project-pill>; behaviour in project-pill.spec.ts.
 
   it('renders the shared project pill component', () => {
     fixture.detectChanges();

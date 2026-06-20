@@ -167,10 +167,7 @@ describe('PluginDetailComponent', () => {
   }
 
   /**
-   * setup() variant whose get_plugins returns the default plugin carrying an
-   * `instructions` value (and an optional verification_status override).
-   * Collapses the repeated mockTauri + JSON-clone boilerplate the instruction
-   * tests would otherwise duplicate.
+   * setup() variant whose get_plugins returns a plugin with `instructions`.
    * @param instructions - Markdown to put on the plugin's `instructions` field
    * @param verificationStatus - wire `verification_status` (defaults to 'verified')
    * @returns the component + fixture, ready for `initAndDetect`
@@ -589,8 +586,7 @@ describe('PluginDetailComponent', () => {
 
   describe('terminal-minimal tabs + master toggle', () => {
     it('renders three tabs: dashboard / settings / logs', async () => {
-      // `tools` tab was removed (YAGNI — backend never exposed per-plugin
-      // tool stats, so `exposedTools` was always `[]`).
+      // `tools` tab was removed.
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       expect(fixture.nativeElement.querySelector('[data-testid="tab-bar"]')).not.toBeNull();
@@ -713,8 +709,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_plugin_oauth') {
-          // The host's spawned task can emit before the IPC return resolves —
-          // such an event must be buffered and replayed, not dropped.
+          // Event can arrive before the IPC return resolves; must be buffered.
           mockTauri.dispatchEvent('plugin_oauth_progress', {
             status: 'awaiting_redirect',
             message: 'http://127.0.0.1:6001/callback',
@@ -746,8 +741,7 @@ describe('PluginDetailComponent', () => {
         message: '',
         request_id: 'rid',
       });
-      // The success handler awaits loadPlugin (an async invoke) before
-      // requestRestart — let the macrotask queue drain.
+      // Success handler awaits loadPlugin before requestRestart; drain macrotasks.
       await new Promise((r) => setTimeout(r, 0));
       expect(restartSpy).toHaveBeenCalled();
       expect(component.oauthRedirectUri).toBeNull();
@@ -836,8 +830,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Open confirm prompt by clicking the uninstall button (UI-driven path
-      // — keeps OnPush change detection consistent with real user interaction).
+      // Open confirm prompt by clicking the uninstall button.
       const uninstallBtn = fixture.nativeElement.querySelector(
         '[data-testid="uninstall-btn"]'
       ) as HTMLButtonElement;
@@ -911,8 +904,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Hold remove_plugin pending so we observe the buttons in their
-      // mid-flight (`removing = true`) state before the invoke resolves.
+      // Hold remove_plugin pending to observe the mid-flight button state.
       let resolveFn!: () => void;
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'remove_plugin') {
@@ -930,11 +922,9 @@ describe('PluginDetailComponent', () => {
       uninstallBtn.click();
       fixture.detectChanges();
 
-      // Kick off uninstall but do not await — we want to observe the UI
-      // while the invoke is still pending.
+      // Kick off uninstall without await; observe UI while invoke pending.
       const promise = component.onConfirmUninstall();
-      // Yield once so onConfirmUninstall sets `removing = true` and calls
-      // markForCheck before we re-render.
+      // Yield so onConfirmUninstall sets `removing = true` before re-render.
       await new Promise((r) => setTimeout(r, 0));
       fixture.detectChanges();
 
@@ -1169,10 +1159,7 @@ describe('PluginDetailComponent', () => {
     });
 
     it('save refreshes the plugin entry so the configured badge can flip', async () => {
-      // PLUGIN_WITH_AUTH starts configured:false. After a successful save,
-      // loadPlugin re-fetches; if the backend now reports configured:true,
-      // the component reflects it. We simulate that by switching the
-      // get_plugins response post-save.
+      // Simulate backend reporting configured:true after save.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       expect(component.plugin?.configured).toBe(false);
@@ -1191,8 +1178,7 @@ describe('PluginDetailComponent', () => {
     });
 
     it('save success message survives a post-save refresh failure', async () => {
-      // Invariant (2) from runPluginMutation: a loadPlugin failure must not
-      // clobber the success message — the credentials were already saved.
+      // Credentials already saved; loadPlugin failure must not clobber success message.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       mockTauri.invokeHandler = (cmd: string) => {

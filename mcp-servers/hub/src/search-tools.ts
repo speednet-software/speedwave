@@ -1,16 +1,7 @@
 /**
- * Progressive Discovery - search_tools implementation
+ * Progressive discovery — lazy tool definitions (names_only/with_descriptions/full_schema).
+ * Tool metadata from tool-registry.ts (SSOT).
  * @module search-tools
- *
- * Implements lazy loading of tool definitions:
- * - names_only: ~50 tokens (just tool paths)
- * - with_descriptions: ~200 tokens (paths + descriptions)
- * - full_schema: ~500 tokens (complete schema for specific tool)
- *
- * This reduces token usage from ~25K (all tools upfront) to ~50-500 per query
- *
- * Tool metadata is dynamically loaded from tools/{service}/index.ts files
- * to maintain a single source of truth and avoid duplication.
  */
 
 import { ToolSearchResult, ToolMetadata } from './hub-types.js';

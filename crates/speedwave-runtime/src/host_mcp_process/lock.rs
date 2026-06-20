@@ -176,7 +176,7 @@ fn cleanup_legacy_files(state_dir: &Path, port_file: &str, pid_file: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     fn fixture() -> LockFile {

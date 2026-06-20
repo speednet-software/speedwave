@@ -9,13 +9,7 @@ import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { IntegrationStatusEntry } from '../models/integration';
 
-/**
- * Mock LoggerService for tests. Real LoggerService calls `@tauri-apps/plugin-log`
- * which has no Tauri context in unit tests; it would throw or no-op silently.
- * The mock lets us assert that the component logged the expected lifecycle
- * events (toggle clicks, validate outcomes, auto-disabled services) which is
- * what makes the user-supplied logs ZIP useful for support triage.
- */
+/** Mock LoggerService for unit tests (no Tauri context). */
 function makeMockLogger() {
   return {
     info: vi.fn(),
@@ -164,8 +158,7 @@ function setupMockTauri(mockTauri: MockTauriService): void {
       case 'get_selected_ide':
         return null;
       case 'validate_os_integrations_on_startup':
-        // Default: no auto-disabled integrations. Tests that exercise the
-        // migration banner override the handler explicitly.
+        // Default: no auto-disabled integrations.
         return [];
       default:
         return undefined;
@@ -188,9 +181,7 @@ describe('IntegrationsComponent', () => {
     setupMockTauri(mockTauri);
     mockLogger = makeMockLogger();
 
-    // Reset the static "already validated" map so each test starts clean —
-    // the production guard prevents re-validation when re-entering the route,
-    // but tests need to observe a fresh validate flow.
+    // Reset the static validation map so each test observes a fresh validate flow.
     (
       IntegrationsComponent as unknown as { validationByProject: Map<string, Promise<void>> }
     ).validationByProject.clear();
@@ -878,9 +869,7 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      // The "X services · Y running" counter was dropped — the integrations
-      // table itself already conveys per-row status, so the header counter
-      // was redundant noise.
+      // Counter was dropped; the table conveys per-row status.
       const count = fixture.nativeElement.querySelector('[data-testid="integrations-count"]');
       expect(count).toBeNull();
 
@@ -897,9 +886,7 @@ describe('IntegrationsComponent', () => {
         '[data-testid="integrations-table-wrapper"]'
       );
       expect(wrapper).not.toBeNull();
-      // Scope the row count to the integrations table — `<app-ide-bridge>`
-      // now also renders a tbody, so a global `tbody tr` selector picks up
-      // unrelated rows.
+      // Scope to the table wrapper; `<app-ide-bridge>` also renders a tbody.
       const rows = wrapper.querySelectorAll('tbody tr');
       expect(rows.length).toBe(component.services.length);
     });
@@ -922,8 +909,7 @@ describe('IntegrationsComponent', () => {
       fixture.detectChanges();
       const before = component.services[0].enabled;
       const svc = component.services[0];
-      // Use the parent click handler directly — the JSDOM click() does not
-      // bubble through stopPropagation reliably across the @if scope.
+      // Call the parent handler directly; JSDOM click() doesn't bubble reliably.
       await component.onRowToggle(svc, new MouseEvent('click'));
       expect(svc.enabled).toBe(!before);
       // Row click must NOT expand because onRowToggle calls stopPropagation.
@@ -1086,8 +1072,7 @@ describe('IntegrationsComponent', () => {
         credentials: { client_id: '550e8400-e29b-41d4-a716-446655440000', tenant_id: 'common' },
       });
 
-      // It was 'starting' when save_integration_credentials was called (before start_sharepoint_oauth)
-      // but by the time start_sharepoint_oauth runs it's still 'starting'
+      // Status is 'starting' when start_sharepoint_oauth is invoked.
       expect(statusDuringInvoke).toBe('starting');
     });
 
@@ -1118,8 +1103,7 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('Slack OAuth flow (ADR-071)', () => {
-    // Slack is beta-gated; flip beta on so the row would be present. The
-    // flow itself only needs the service id + active project.
+    // Slack is beta-gated; flip beta on so the row is present.
     beforeEach(() => {
       betaEnabled.set(true);
     });
@@ -1251,9 +1235,7 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('GitHub OAuth flow', () => {
-    // GitHub is in BETA_ONLY_SERVICES (ADR-058). The OAuth refactor doesn't
-    // change that — beta gating is an orthogonal product decision. Tests flip
-    // beta on so the GitHub row is present in `component.services`.
+    // GitHub is in BETA_ONLY_SERVICES (ADR-058); enable beta so its row is present.
     beforeEach(() => {
       betaEnabled.set(true);
     });
@@ -1283,8 +1265,7 @@ describe('IntegrationsComponent', () => {
 
       await component.handleStartOAuth({ svc: githubSvc, credentials: {} });
 
-      // GitHub uses bundled client_id (consts.rs::GITHUB_OAUTH_CLIENT_ID);
-      // the Tauri command takes only `project`.
+      // GitHub uses bundled client_id (consts.rs::GITHUB_OAUTH_CLIENT_ID).
       expect(invokeSpy).toHaveBeenCalledWith('start_github_oauth', {
         project: 'test-project',
       });
@@ -1322,8 +1303,7 @@ describe('IntegrationsComponent', () => {
         request_id: 'gh-rid-3',
       };
 
-      // Need a polling response for handleStartOAuth-style success path. Here
-      // we dispatch directly to the listener registered in ngOnInit.
+      // Dispatch directly to the listener registered in ngOnInit.
       mockTauri.dispatchEvent('github_oauth_progress', {
         status: 'success',
         message: 'Authentication successful',
@@ -1808,8 +1788,7 @@ describe('IntegrationsComponent', () => {
 
       expect(component.osIntegrationsAutoDisabled.length).toBe(2);
       expect(component.osIntegrationsAutoDisabled[0].service).toBe('calendar');
-      // Calendar reason must contain the calendar sub-identifier and the Calendar
-      // TCC service (not Mail/AppleEvents — that would be a regression).
+      // Calendar reason uses the Calendar TCC service, not Mail/AppleEvents.
       expect(component.osIntegrationsAutoDisabled[0].reason).toContain(
         'tccutil reset Calendar pl.speedwave.desktop.calendar'
       );
@@ -1907,8 +1886,7 @@ describe('IntegrationsComponent', () => {
     });
 
     it('handles validator errors non-fatally', async () => {
-      // Validator throws → component must continue loading integrations
-      // (UI cannot be blocked by a TCC validation failure).
+      // Validator throws → component must continue loading integrations.
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'validate_os_integrations_on_startup') {
           throw new Error('boom');
@@ -1935,9 +1913,7 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('LoggerService — TCC validation + toggle observability', () => {
-    // These tests guarantee the logs ZIP a user sends with a support ticket
-    // contains enough breadcrumbs to reconstruct what happened. If a future
-    // PR drops a log line by accident, these tests catch it before merge.
+    // These tests verify the logs ZIP contains enough breadcrumbs for support triage.
 
     it('logs info on validateOsIntegrations start', async () => {
       await component.ngOnInit();
@@ -1993,9 +1969,7 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       await component.runInitialOsValidation();
 
-      // One warn line per auto-disabled service, each carrying the recovery text
-      // (this is what makes a logs ZIP self-describing — support reads the warn,
-      // sees the exact tccutil command the user should run).
+      // One warn line per auto-disabled service, each carrying recovery text.
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.calendar'));
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
@@ -2110,9 +2084,7 @@ describe('IntegrationsComponent', () => {
     });
 
     it('renders the banner even when sharepoint reads as NOT configured (stale providerData)', async () => {
-      // Malformed/legacy providerData makes the service read as unconfigured,
-      // yet the backend now reports scope_mismatch regardless. The user must
-      // still be led to re-authorise — the banner must not hinge on configured.
+      // Banner must not hinge on `configured`: scope_mismatch alone shows it.
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
       sharepointSvc.configured = false;
       sharepointSvc.oauth_action_required = 'scope_mismatch';
@@ -2143,9 +2115,7 @@ describe('IntegrationsComponent', () => {
     });
 
     it('renders the banner for ANY service the backend flags (gate is flag-driven)', async () => {
-      // The backend only sets oauth_action_required for uses_oauth_refresh
-      // services (descriptor-gated); the template renders whatever is flagged
-      // so a new OAuth service (Slack, ADR-071) needs no template change.
+      // The template renders whatever oauth_action_required the backend flags.
       const gitlabSvc = component.services.find((s) => s.service === 'gitlab')!;
       gitlabSvc.configured = true;
       (gitlabSvc as { oauth_action_required?: string }).oauth_action_required = 'scope_mismatch';

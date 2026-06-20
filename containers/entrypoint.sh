@@ -24,19 +24,14 @@ if ! command -v claude &> /dev/null; then
     echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
     /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 else
-    # Surface image/env version skew (stale image after an interrupted update).
-    # Not auto-repaired: launchers exec the absolute /usr/local/bin/claude on
-    # the read-only image layer, so only an image rebuild can fix it.
+    # Surface image/env version skew; not auto-repaired (needs image rebuild).
     installed_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
     if [ -n "$installed_version" ] && [ "$installed_version" != "$CLAUDE_VERSION" ]; then
         echo "WARNING: image has Claude Code ${installed_version} but the pinned version is ${CLAUDE_VERSION} — run 'speedwave update' to rebuild the image" >&2
     fi
 fi
 
-# Ensure ~/.local/bin is in PATH for interactive shells (nerdctl exec runs bash).
-# Claude Code checks if ~/.local/bin/claude is in PATH and warns if not.
-# The real binary is baked into /usr/local/bin in the image layer (fast ext4).
-# The symlink at ~/.local/bin/claude points to it on the VirtioFS volume.
+# Symlink ~/.local/bin/claude → /usr/local/bin/claude so exec shells find it on PATH.
 if [ -x /usr/local/bin/claude ]; then
     mkdir -p "${HOME}/.local/bin"
     ln -sf /usr/local/bin/claude "${HOME}/.local/bin/claude"
@@ -50,10 +45,8 @@ fi
 # Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Symlink claude-resources per-entry into real dirs. Core entries always-on;
-# integrations/<svc>/ gated by ENABLED_SERVICES. Links the script owns are
-# tracked in ~/.claude/.speedwave-managed-links so toggle-off cleans them up.
-# See ADR-022 for the design rationale.
+# Symlink claude-resources per-entry; integrations/<svc>/ gated by ENABLED_SERVICES.
+# Owned links tracked in ~/.claude/.speedwave-managed-links. See ADR-022.
 
 # Reverse migration: an older run may have left whole-directory symlinks.
 for resource_type in skills commands agents hooks; do
@@ -138,9 +131,8 @@ for resource_type in skills commands agents hooks; do
         echo "${link}" >> "${new_state}"
     done
 
-    # Integration-bound entries — only symlinked when their config_key is in ENABLED_SERVICES.
-    # `os` itself never has its own integration skill: only its sub-services (reminders,
-    # calendar, mail, notes), so we filter it out here and handle the sub-services below.
+    # Integration-bound entries — symlinked when config_key in ENABLED_SERVICES.
+    # `os` is filtered here; its sub-services are handled below.
     integrations_dir="${src_dir}/integrations"
     if [ -d "${integrations_dir}" ] && [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
         for svc in "${ENABLED_SVCS[@]}"; do
@@ -173,11 +165,8 @@ for resource_file in statusline.sh CLAUDE.md; do
     fi
 done
 
-# settings.json must be a WRITABLE copy, not a symlink: Claude Code writes it
-# (`/effort`, `/model` persist the choice) and the resources mount is read-only
-# (EROFS otherwise). Replace a stale symlink (older builds linked it).
-# Key-level merge: template keys missing from the on-disk file are added so new
-# Speedwave defaults reach existing users without overwriting their choices.
+# settings.json must be a WRITABLE copy, not a symlink (Claude Code writes it).
+# Replace a stale symlink, then key-merge template keys absent from the on-disk file.
 if [ -L "${HOME}/.claude/settings.json" ]; then
     rm -f "${HOME}/.claude/settings.json"
 fi
@@ -233,9 +222,8 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     done
 fi
 
-# Atomically replace the state file. Sorted+deduplicated so successive idempotent runs
-# produce byte-identical state files. On sort failure keep the previous state_file untouched
-# (the EXIT trap cleans up new_state).
+# Atomically replace the state file (sorted+deduplicated).
+# On sort failure the previous state_file is kept untouched.
 if sort -u "${new_state}" -o "${new_state}"; then
     mv "${new_state}" "${state_file}"
 else
@@ -259,9 +247,8 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
-# Pre-seed .claude.json: always pre-accept the /workspace trust dialog (keyed by
-# working_dir, separate from --dangerously-skip-permissions); set onboarding only
-# when logged in, else leave it incomplete so `claude` shows the OAuth flow.
+# Pre-seed .claude.json: pre-accept the /workspace trust dialog.
+# Set onboarding only when logged in, else leave it for the OAuth flow.
 creds_valid() {
     local f="${HOME}/.claude/.credentials.json"
     # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
@@ -288,13 +275,7 @@ EOF
 fi
 
 
-# Wait for MCP hub to accept connections before Claude starts. Without this,
-# the first claude session hits `ConnectionRefused` on http://mcp-hub:4000
-# during compose-up race (claude container ready before hub), and runs with
-# zero tools — listFiles, search_tools, sharepoint.* all unavailable until
-# user opens a fresh chat. Hub typically responds within a second; bail
-# after ~30s so a broken hub doesn't lock the container forever.
-# Set `SPEEDWAVE_SKIP_HUB_WAIT=1` in tests or single-container runs.
+# Wait for MCP hub to accept connections before Claude starts; bail after ~30s.
 if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
     wait_for_hub() {
         local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=30
@@ -318,9 +299,7 @@ touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 if [ $# -gt 0 ]; then
     exec "$@"
 else
-    # PID1 must trap TERM — bare `sleep` ignores it and compose down waits
-    # 10s. Kill the background sleep too: an orphan would outlive the shell
-    # (and wedge the bats harness waiting on its output pipe).
+    # PID1 must trap TERM and kill the background sleep on exit.
     trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
     while :; do sleep 86400 & wait $!; done
 fi

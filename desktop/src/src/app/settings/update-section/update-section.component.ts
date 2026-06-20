@@ -62,10 +62,6 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
           {{ updateInstallError }}
         </p>
       }
-
-      <!-- Auto-check is always on with a fixed 12h interval — there is no
-           user-facing control. The values are persisted on init by the
-           component so the backend stays in sync. -->
     </section>
   `,
 })
@@ -74,17 +70,11 @@ export class UpdateSectionComponent implements OnInit {
 
   readonly errorOccurred = output<string>();
 
-  /**
-   * Hard-coded auto-check interval in hours — every user is opted in to a
-   *  12 h check, the UI no longer exposes a toggle or frequency dropdown.
-   */
+  /** Hard-coded auto-check interval in hours; the UI exposes no toggle or frequency control. */
   private static readonly DEFAULT_INTERVAL_HOURS = 12;
 
   currentVersion = '';
-  /**
-   * Always true — auto-check is non-negotiable, kept as a field so the
-   *  existing backend-sync helper (`saveUpdateSettings`) compiles unchanged.
-   */
+  /** Always true; auto-check is non-negotiable. */
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   updateChecking = false;
@@ -103,11 +93,7 @@ export class UpdateSectionComponent implements OnInit {
     this.loadUpdateSettings();
   }
 
-  /**
-   * Human-readable status line shown under the version label.
-   * Maps the four UI states (idle, checking, up-to-date, available) to the
-   * mockup's status copy so the status row mirrors the design.
-   */
+  /** Human-readable status line shown under the version label. Maps the four UI states to the mockup's status copy. */
   updateStatusText(): string {
     if (this.updateChecking) return 'checking for updates...';
     if (this.updateResult === 'up-to-date') return '✓ up to date';
@@ -117,11 +103,7 @@ export class UpdateSectionComponent implements OnInit {
     return 'tap "check now" to look for updates';
   }
 
-  /**
-   * Tailwind class applied to the status line. Green for "up to date", amber
-   * for "available", muted for the idle/checking states. Returned as a single
-   * string so the template uses `[class]="..."` rather than `ngClass`.
-   */
+  /** Tailwind class for the status line: green for up-to-date, amber for available, muted for idle/checking. Returned as single string for [class]="..." binding. */
   updateStatusClass(): string {
     if (this.updateResult === 'up-to-date') return 'text-[var(--green)]';
     if (this.updateResult === 'available') return 'text-[var(--amber)]';
@@ -137,13 +119,6 @@ export class UpdateSectionComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  /**
-   * Backend-sync on init. Auto-check + 12 h interval are non-negotiable in
-   * the UI, so on first read we *force* the persisted settings to those
-   * defaults if they drift (e.g. from an older version that exposed the
-   * dropdown). The frontend never reads `settings.check_interval_hours` for
-   * display — it just keeps the backend in sync.
-   */
   private async loadUpdateSettings(): Promise<void> {
     try {
       const settings = await this.tauri.invoke<UpdateSettings>('get_update_settings');

@@ -11,16 +11,7 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
 /** Shared number formatter for thousands separators (Intl instances are not free). */
 const NUMBER_FMT = new Intl.NumberFormat('en-US');
 
-/**
- * Terminal-minimal session stats strip — a single mono line shown below the
- * composer. Matches the mockup (lines 1143–1177):
- *
- *   `in: <n> · out: <n> · ctx [▮▮▮▯▯] N% · 116k/200k · limit [▮▮▮▯▯] N% · resets HH:MM · session: $0.018`
- *
- * Bars are 5 inline 6×6px segments coloured per-bucket (green ≤49% / amber
- * ≤76% / red). Optional segments (ctx + bar / limit + bar / cost) hide on
- * smaller breakpoints to preserve the single-line shape.
- */
+/** Terminal-minimal session stats strip — a single mono line below the composer. */
 @Component({
   selector: 'app-session-stats',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -122,9 +113,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
         }
       </div>
     } @else {
-      <!-- Zero-state: same row, just with all counters at 0. Always visible
-           so the user sees the metric set even before the first turn — it
-           also preserves vertical rhythm so the composer never reflows. -->
+      <!-- Zero-state: same row with all counters at 0. -->
       <div
         data-testid="session-stats-placeholder"
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
@@ -203,42 +192,20 @@ export class SessionStatsComponent {
   /** Stats input (signal). */
   readonly stats = input<SessionStats | null>(null);
 
-  /**
-   * Current git branch of the active project's working tree, or `null` when
-   * the project isn't a git repo. Renders as the branch-icon chip on the
-   * right side of the strip.
-   */
+  /** Current git branch of the active project's working tree, or `null` when not a git repo. */
   readonly branch = input<string | null>(null);
 
-  /**
-   * New input tokens the user sent this turn — `input_tokens` only, the
-   * uncached remainder after the last cache breakpoint. Excludes
-   * `cache_read` (the re-sent system prompt + tool catalog + history served
-   * from cache), which is what made a short chat read as 181k. For a local
-   * model (no prompt cache) the cache fields are 0, so this equals the whole
-   * prompt — correct in both cases. Drives the `in:` counter only.
-   */
+  /** New input tokens this turn — `input_tokens` only, excludes cached reads. */
   readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);
 
-  /**
-   * Total tokens occupying the context window this turn (`input` +
-   * `cache_read` + `cache_write`) — the verified Anthropic formula
-   * (input_tokens is the uncached remainder; the three are additive).
-   * `output_tokens` are excluded because they don't occupy the prompt.
-   * Drives the ctx gauge (percentage + used/max), never the `in:` counter.
-   */
+  /** Total tokens occupying the context window: `input` + `cache_read` + `cache_write`. */
   readonly ctxTotal = computed<number>(() => {
     const usage = this.stats()?.usage;
     if (!usage) return 0;
     return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
   });
 
-  /**
-   * Context window usage as an integer percentage (0–100), or `null` when
-   * the active provider didn't advertise a window (local LLM without
-   * inline metadata). Template hides the progress bar in that case rather
-   * than fabricating a default — ADR-041 "never guess".
-   */
+  /** Context window usage as integer percent (0–100), or `null` when window is unknown. */
   readonly ctxPct = computed<number | null>(() => {
     const total = this.ctxTotal();
     if (total <= 0) return 0;
@@ -259,10 +226,7 @@ export class SessionStatsComponent {
     return pct === null ? '' : barColor(pct);
   });
 
-  /**
-   * `used/max` label (e.g. `116k/200k`), or `null` when the context window
-   * is unknown — template hides the label.
-   */
+  /** `used/max` label (e.g. `116k/200k`), or `null` when the context window is unknown. */
   readonly ctxUsedMax = computed<string | null>(() => {
     const total = this.ctxTotal();
     if (total <= 0) return '';
@@ -312,7 +276,6 @@ function barColor(pct: number): string {
 
 /**
  * Converts a percentage (0–100) to the number of filled segments (0–5), rounded.
- * 30% → 1.5 → 2; 80% → 4.
  * @param pct - Percentage in the range 0–100.
  */
 function bucketFilled(pct: number): number {

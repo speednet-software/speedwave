@@ -83,10 +83,6 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeTruthy();
     });
-
-    // Read-only transcript overlay was removed — sidebar row click resumes
-    // directly. The `viewingTranscript` / `viewConversation` / `closeTranscript`
-    // surface no longer exists, so the related behaviour tests were dropped.
   });
 
   // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
@@ -203,8 +199,7 @@ describe('ChatComponent', () => {
 
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      // ComposerComponent contract: emits already-trimmed text, so an empty
-      // payload here represents a whitespace-only or empty composer state.
+      // ComposerComponent emits already-trimmed text; empty payload = empty composer state.
       await component.sendMessage({ payload: '', displayText: '' });
 
       expect(chatState.messages).toHaveLength(0);
@@ -837,8 +832,7 @@ describe('ChatComponent', () => {
 
   describe('Stop button and ESC handler', () => {
     it('shows Stop button when streaming, hides it when idle', () => {
-      // After Unit 9 (composer extraction), the Send button lives inside
-      // <app-composer>; chat.component owns only the Stop button alongside.
+      // Send button lives in <app-composer>; chat.component owns only the Stop button.
       projectState.status = 'ready';
       chatState.isStreaming = false;
       fixture.detectChanges();
@@ -856,8 +850,7 @@ describe('ChatComponent', () => {
       projectState.status = 'ready';
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
-      // Stop-button visibility is driven by `isStreamingFromState()`; the
-      // signal projection only refreshes once notifyChange rebuilds the tree.
+      // isStreamingFromState() refreshes only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
@@ -895,8 +888,7 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      // `hasUnansweredQuestion` reads `currentBlocksFromState()`; the signal
-      // projection only sees the block once notifyChange rebuilds the tree.
+      // currentBlocksFromState() sees the block only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();

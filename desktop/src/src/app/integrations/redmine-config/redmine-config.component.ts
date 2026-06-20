@@ -68,8 +68,7 @@ export const MAPPING_CATEGORIES: Record<string, string[]> = {
 };
 
 /**
- * Extracts the human-readable suffix from a mapping key by removing
- * the category prefix and normalizing underscores to spaces.
+ * Extracts the human-readable suffix from a mapping key.
  * @param key - e.g. "status_in_progress"
  * @returns e.g. "in progress"
  */
@@ -84,13 +83,6 @@ function extractSuffix(key: string): string {
 
 /**
  * Auto-matches predefined mapping keys against Redmine enum entries.
- *
- * Algorithm:
- * 1. Extract suffix after category prefix (e.g. `status_` -> `new`)
- * 2. Normalize: lowercase, replace underscores with spaces
- * 3. Case-insensitive comparison against Redmine enum entry names
- * 4. Exact match -> pre-select. Duplicate names -> first match wins
- * 5. No match -> null (= "Not mapped")
  * @param keys - predefined mapping keys for one category
  * @param entries - Redmine enum entries to match against
  * @returns mapping from key to matched entry id, or null if unmatched
@@ -402,11 +394,7 @@ export class RedmineConfigComponent implements OnDestroy {
   validating = false;
   validationError = '';
   loadingEnumerations = false;
-  /**
-   * Backing field for the {@link enumerations} accessor. Direct mutation goes
-   * through the setter so the OnPush template always re-renders without each
-   * caller having to remember `markForCheck`.
-   */
+  /** Backing field for the {@link enumerations} accessor. */
   private _enumerations: RedmineEnumerations | null = null;
   /** Currently loaded enumerations (projects, statuses, trackers, etc.). */
   get enumerations(): RedmineEnumerations | null {
@@ -436,7 +424,6 @@ export class RedmineConfigComponent implements OnDestroy {
 
   /**
    * Pre-populates form fields from the service's stored values and wizard state.
-   * Extracted from `ngOnChanges` so it can be triggered by the input effect.
    * @param svc - the integration entry to apply
    */
   private applyServiceState(svc: IntegrationStatusEntry | undefined): void {
@@ -539,9 +526,7 @@ export class RedmineConfigComponent implements OnDestroy {
   }
 
   /**
-   * Native `<select>` handler for the project picker. Empty string maps to
-   * `null` ("All projects"); anything else is parsed as the numeric Redmine
-   * project id.
+   * Native `<select>` handler for the project picker.
    * @param event - The native `change` event from the project `<select>`.
    */
   onProjectSelectChange(event: Event): void {
@@ -550,9 +535,7 @@ export class RedmineConfigComponent implements OnDestroy {
   }
 
   /**
-   * Native `<select>` handler for a mapping picker. Mirrors
-   * `onProjectSelectChange` but writes through `setMappingValue` so the
-   * edited-mappings dictionary stays the SSOT.
+   * Native `<select>` handler for a mapping picker.
    * @param key - The mapping key being edited.
    * @param event - The native `change` event from the mapping `<select>`.
    */

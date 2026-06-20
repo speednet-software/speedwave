@@ -402,13 +402,8 @@ impl McpAuthFieldDescriptor {
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
-///
-/// `Sites.Manage.All` covers `Sites.ReadWrite.All` and `Sites.Read.All` and is
-/// required by Microsoft Graph `createList` (delegated permissions)[^create-list].
-/// It typically requires tenant admin consent — the Speedflow app must be
-/// admin-consented in the Azure AD tenant before users can grant it via the
-/// device-code flow. See `docs/guides/integrations.md` for the admin-consent
-/// prerequisite.
+/// `Sites.Manage.All` covers `Sites.ReadWrite.All`/`Sites.Read.All` and is
+/// required by Microsoft Graph `createList` (delegated)[^create-list].
 ///
 /// [^create-list]: <https://learn.microsoft.com/en-us/graph/api/list-create?view=graph-rest-1.0&tabs=http#permissions>
 pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Manage.All \
@@ -416,17 +411,11 @@ pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Man
      https://graph.microsoft.com/User.Read offline_access";
 
 /// GitHub OAuth App client ID (public identifier — not a secret). Registered
-/// at <https://github.com/settings/developers> by Speednet. Device Flow is
-/// enabled on this app; the same client_id is shared across all Speedwave
-/// users (standard "public confidential client" pattern — same as `gh` CLI).
+/// at <https://github.com/settings/developers> by Speednet, Device Flow enabled.
 pub const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23lifyXPigAcJ0d4tK";
 
-/// GitHub OAuth scopes requested by Speedwave. Derived from the Octokit
-/// surface of the `mcp-github` worker (see `mcp-servers/github/src/client.ts`).
-/// `repo` covers private/public repo R/W including issues, pulls, releases,
-/// Actions; `read:user` is used by `testConnection()` (`GET /user`).
-/// Org/gist scopes intentionally NOT requested — the worker does not call
-/// those endpoints.
+/// GitHub OAuth scopes requested by Speedwave. Derived from the `mcp-github`
+/// worker surface (`mcp-servers/github/src/client.ts`).
 pub const GITHUB_OAUTH_SCOPES: &str = "repo read:user";
 
 /// Slack app client ID (public identifier — not a secret). Registered at
@@ -434,15 +423,8 @@ pub const GITHUB_OAUTH_SCOPES: &str = "repo read:user";
 /// token rotation enabled; shared across all Speedwave users. See ADR-071.
 pub const SLACK_OAUTH_CLIENT_ID: &str = "11058760208.11311852745015";
 
-/// Slack user scopes (`user_scope` — never bot scopes: Slack forbids them on
-/// desktop redirects). Derived from the `mcp-slack` worker surface:
-/// chat.postMessage (channels and DMs), conversations.list/history/replies/open,
-/// users.list/lookupByEmail, files.info.
-///
-/// Adding a scope here requires adding it to the app's **User Token Scopes**
-/// at api.slack.com first — otherwise authorize fails with `invalid_scope`.
-/// Existing grants become a strict subset and the Desktop re-auth banner
-/// fires (`required_scopes_for` in `integrations_cmd.rs`).
+/// Slack user scopes (`user_scope` — never bot scopes). Derived from the
+/// `mcp-slack` worker surface; must match the app's User Token Scopes.
 pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
     "chat:write",
     "channels:read",
@@ -653,16 +635,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         credential_files: &["access_token", "site_id"],
         oauth_state_fields: Some(&[
             // LOGICAL allowlist of fields the UI may save into oauth.json.
-            // Post-OAuthProvider refactor the on-disk layout nests IdP-specific
-            // keys (`client_id`, `tenant_id`) under `providerData` — this list
-            // still names them in their logical form because:
-            //   * `auth_fields` references them by logical key, and
-            //   * `is_allowed_field` (desktop/src-tauri/src/types.rs) uses this
-            //     allowlist to accept UI form submissions.
-            // The logical→disk mapping lives in `integrations_cmd::get_oauth_field`
-            // / `merge_oauth_state_json`. `scopes` / `grantedScopes` /
-            // `expiresAt` / `lastRefreshAt` are managed exclusively by the
-            // oauth worker (not in `auth_fields`).
+            // logical→disk mapping: `integrations_cmd::{get_oauth_field,merge_oauth_state_json}`.
             "refresh_token",
             "client_id",
             "tenant_id",
@@ -1335,6 +1308,7 @@ pub fn strip_compose_container_prefix<'a>(name: &'a str, project: &str) -> &'a s
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1646,6 +1620,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts SLACK_OAUTH_REDIRECT_PORT stays sane
     fn test_slack_oauth_consts_are_complete() {
         assert!(!SLACK_OAUTH_CLIENT_ID.is_empty());
         // client_id format: <app>.<id> — two numeric segments.
@@ -2032,6 +2007,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts WSL_SERVICE_START_DELAY_SECS stays sane
     fn test_wsl_service_start_delay_is_positive() {
         assert!(
             WSL_SERVICE_START_DELAY_SECS > 0,
@@ -2040,6 +2016,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts WSL_SERVICE_CHECK_MAX_RETRIES stays sane
     fn test_wsl_service_check_max_retries_is_positive() {
         assert!(
             WSL_SERVICE_CHECK_MAX_RETRIES > 0,
@@ -2365,6 +2342,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts EXIT_CLEANUP_TIMEOUT_SECS stays sane
     fn test_exit_cleanup_timeout_is_positive() {
         assert!(
             EXIT_CLEANUP_TIMEOUT_SECS > 0,
@@ -2373,6 +2351,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts LIMA_VM_STOP_TIMEOUT_SECS stays sane
     fn test_lima_vm_stop_timeout_is_positive() {
         assert!(
             LIMA_VM_STOP_TIMEOUT_SECS > 0,
@@ -2407,15 +2386,8 @@ mod tests {
         }
     }
 
-    // SSOT alignment guards (CLAUDE.md "WSL distro name" row).
-    //
-    // The production install path always uses the default data_dir
-    // (`~/.speedwave`), so `derive_wsl_distro_name_from` returns the literal
-    // `"Speedwave"` for it. The installer, E2E provisioning script, and
-    // installation guide all hard-code that production name. These guards
-    // catch accidental renames in any of the three files; non-production
-    // distro names (e.g. dev's `Speedwave-dev`) are derived dynamically and
-    // do not need a sync guard.
+    // SSOT alignment guards (CLAUDE.md "WSL distro name" row): pin the
+    // production literal "Speedwave" across installer, E2E script, install guide.
 
     const PRODUCTION_WSL_DISTRO: &str = "Speedwave";
 
@@ -2550,10 +2522,8 @@ mod tests {
         );
     }
 
-    // Cross-language SSOT for the single host-gateway alias. The TypeScript
-    // MCP-shared module mirrors `HOST_GATEWAY_ALIAS` as `export const`; the
-    // compose template references it as a literal in `extra_hosts`. These
-    // guards catch any drift (string mismatch or accidental removal).
+    // Cross-language SSOT for HOST_GATEWAY_ALIAS: TS MCP-shared mirrors it as
+    // `export const`; compose template references the literal in `extra_hosts`.
 
     #[test]
     fn host_gateway_alias_matches_mcp_shared_ts() {

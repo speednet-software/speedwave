@@ -82,7 +82,7 @@ const getConfigTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Builds the Redmine config tool definitions.
  * @param client - Redmine client instance
  */
 export function createConfigTools(client: RedmineClient | null): ToolDefinition[] {

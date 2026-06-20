@@ -1,7 +1,6 @@
 /**
  * Frontend mirror of `speedwave_runtime::defaults::AnthropicModelInfo`,
- * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT
- * — bumping a model means editing one const in `defaults.rs`.
+ * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT.
  */
 export interface AnthropicModel {
   /** API alias passed to Claude Code via `ANTHROPIC_MODEL` (e.g. `claude-opus-4-7`). */
@@ -14,23 +13,12 @@ export interface AnthropicModel {
   latest: boolean;
 }
 
-/**
- * Default fallback context window. Used only when a chat session reports a
- * model the SSOT doesn't yet know about (e.g. running an old snapshot id
- * still accepted by the API). Aligns with the smallest supported window so
- * the percentage bar errs on the side of "your context is fuller than it
- * looks" rather than the other way round.
- */
+/** Default fallback context window for a model the SSOT doesn't know. */
 export const DEFAULT_CONTEXT_TOKENS = 200_000;
 
 /**
  * Frontend mirror of the Rust `DiscoveredModel` DTO returned by
- * `discover_llm_models` (Tauri command). Discovery talks to the local
- * provider's own API (Ollama `/api/tags` + `/api/show`, LM Studio
- * `/api/v0/models`, llama.cpp `/v1/models`) and surfaces the context
- * window directly from the server when it advertises one; otherwise
- * `context_tokens` stays `undefined` and the chat fallback chain takes
- * over.
+ * `discover_llm_models` (Tauri command).
  */
 export interface DiscoveredModel {
   /** Model id as advertised by the local server (e.g. `llama3.3`, `qwen2.5-coder`). */
@@ -39,13 +27,7 @@ export interface DiscoveredModel {
   context_tokens?: number;
 }
 
-/**
- * Result of a `provider="local"` discovery probe. Pairs the model list with
- * a chat-endpoint sanity flag — the UI shows a warning when the server has
- * `/v1/models` but does NOT implement `/v1/messages` (Anthropic Messages).
- * `messages_endpoint_ok === undefined` means "could not determine" (timeout
- * or transport error); treat as "unknown", not "failure".
- */
+/** Result of a `provider="local"` discovery probe. */
 export interface DiscoverResult {
   models: DiscoveredModel[];
   messages_endpoint_ok?: boolean;
@@ -54,20 +36,13 @@ export interface DiscoverResult {
 /** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */
 export const LOCAL_PROVIDERS: ReadonlyArray<string> = ['ollama', 'lmstudio', 'llamacpp', 'local'];
 
-/**
- * Legacy local-provider names auto-migrated to `local` on Save. Derived
- * from {@link LOCAL_PROVIDERS} so a future rename of the canonical name
- * stays consistent without touching two arrays.
- */
+/** Legacy local-provider names auto-migrated to `local` on Save. */
 export const LEGACY_LOCAL_PROVIDERS: ReadonlyArray<string> = LOCAL_PROVIDERS.filter(
   (p) => p !== 'local'
 );
 
 /**
- * Mirror of `speedwave_runtime::config::is_local_provider`. Frontend uses
- * this to: (a) render the unified "Local" radio card for legacy configs,
- * (b) decide whether the honest context fallback applies (no `DEFAULT_CONTEXT_TOKENS`
- * fallback for local providers — ADR-041 "never guess").
+ * Mirror of `speedwave_runtime::config::is_local_provider`.
  * @param provider - Provider id from `get_llm_config().provider` (may be null).
  */
 export function isLocalProvider(provider: string | null | undefined): boolean {
@@ -76,11 +51,7 @@ export function isLocalProvider(provider: string | null | undefined): boolean {
 
 /**
  * Frontend mirror of the Rust `LlmConfigResponse` returned by the
- * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`). Fields
- * come from `claude.llm` (`speedwave_runtime::config::LlmConfig`) plus the
- * computed `default_base_url`. One-way: backend → frontend; the Rust struct
- * does not derive `Deserialize`.
- *
+ * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`).
  * Keep in sync with `LlmConfig` in `crates/speedwave-runtime/src/config.rs`.
  */
 export interface LlmConfigResponse {
@@ -88,12 +59,7 @@ export interface LlmConfigResponse {
   model: string | null;
   base_url: string | null;
   default_base_url: string | null;
-  /**
-   * Persisted context window for the active model (in tokens). For Anthropic
-   * the frontend sets this from the SSOT catalog; for local providers it
-   * comes from the discovery probe. The chat footer falls back to this
-   * value when the stream-level `context_window_size` is missing.
-   */
+  /** Persisted context window for the active model (in tokens). */
   context_tokens?: number | null;
   /** True when an api_key file exists for this project. */
   has_api_key?: boolean;
@@ -109,8 +75,7 @@ export interface LlmConfigResponse {
 
 /**
  * Provider kind discriminator (ADR-073). Mirror of the Rust
- * `speedwave_runtime::config::LlmProviderKind` serde representation
- * (snake_case strings). Drift guarded by `llm_provider_kind_matches_ts_union`.
+ * `LlmProviderKind` serde rep; drift guarded by `llm_provider_kind_matches_ts_union`.
  */
 export type LlmProviderKind =
   | 'anthropic_oauth'
@@ -121,8 +86,7 @@ export type LlmProviderKind =
 
 /**
  * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust
- * `LlmProviderEntry`. Key VALUES never reach the frontend — only the
- * `has_api_key` presence flag.
+ * `LlmProviderEntry`. Key VALUES never reach the frontend, only `has_api_key`.
  */
 export interface LlmProviderEntry {
   /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
@@ -160,11 +124,7 @@ export interface UsageBucket {
   throughput_latency_ms_sum: number;
 }
 
-/**
- * Usage dashboard payload from `get_llm_usage` (ADR-073). The single
- * source is the litellm callback JSONL; per-session chat statistics come
- * from the stream and are deliberately NOT part of this payload.
- */
+/** Usage dashboard payload from `get_llm_usage` (ADR-073). */
 export interface UsageSummary {
   /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
   days: Record<string, Record<string, UsageBucket>>;

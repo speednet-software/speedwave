@@ -1,9 +1,5 @@
 #!/usr/bin/env bats
-# Static checks on desktop/src-tauri/entitlements/audio-capture.plist (ADR-056).
-# The audio-capture-cli uses CoreAudio process taps + AVAudioEngine for the
-# microphone; under Hardened Runtime, microphone access needs the
-# com.apple.security.device.audio-input entitlement. This file guards against
-# the plist going missing or accidentally accumulating broader entitlements.
+# Guard audio-capture.plist: must have com.apple.security.device.audio-input entitlement, no broader (ADR-056).
 
 PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/audio-capture.plist"
 
@@ -33,8 +29,7 @@ PY
 }
 
 @test "audio-capture.plist declares exactly one <key>" {
-    # Stay minimal: capturing system audio via taps does not need a separate
-    # entitlement on macOS; only the mic does. A second key here is a red flag.
+    # Only the mic entitlement is needed; a second key is a regression.
     local keys
     keys="$(grep -c '<key>' "$PLIST")"
     [ "$keys" = "1" ]

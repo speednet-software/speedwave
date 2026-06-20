@@ -24,9 +24,6 @@ pub struct ImageDef {
 /// config key (`speedwave-mcp-slack` ↔ `slack`). Same naming rule as compose names.
 const MCP_IMAGE_PREFIX: &str = "speedwave-mcp-";
 
-/// SSOT for all container images — used by both Desktop (setup wizard) and the update flow.
-///
-/// All paths are relative to the build root returned by `resolve_build_root()`.
 /// Build args for the Claude container — passes the pinned version to Containerfile.claude.
 const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
 
@@ -62,8 +59,7 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
         build_args: CLAUDE_BUILD_ARGS,
-        // Explicit file list: containers/ also holds claude-resources/ (synced +
-        // mounted, never baked) and compose.template.yml — neither may rebuild claude.
+        // Explicit file list: containers/ also holds non-baked assets that must not rebuild claude.
         hash_inputs: &[
             "containers/Containerfile.claude",
             "containers/entrypoint.sh",
@@ -222,8 +218,6 @@ const DEFAULT_BUILD_WORKER_FALLBACK: usize = 4;
 const TRANSIENT_BUILD_RETRIES: u32 = 2;
 
 /// Base wait before the first transient retry; the Nth retry waits `BASE * N`.
-/// Sized so the VM's `systemd-resolved` has time to fall back from EDNS0 to plain
-/// UDP, while two attempts (3s + 6s) don't noticeably stall a genuinely-down network.
 /// Near-zero under `cfg(test)` so retry-path tests don't actually sleep.
 #[cfg(not(test))]
 const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -257,11 +251,9 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// `true` if every image that should exist for `integrations` is present —
-/// only [`enabled_images`], since disabled integrations have no image under
-/// lazy builds. Pass the union across projects when reconciling. Call
-/// `rt.ensure_ready()` first; do not guard with `is_available()` (a stopped
-/// VM is false there but `ensure_ready()` starts it).
+/// `true` if every [`enabled_images`] image for `integrations` is present.
+/// Pass the union across projects when reconciling. Call `rt.ensure_ready()`
+/// first; do not guard with `is_available()`.
 pub fn images_exist(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
@@ -298,10 +290,6 @@ pub fn images_exist_with_manifest(
 /// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/build-context/` (production — Tauri sets this)
 /// 2. `CARGO_MANIFEST_DIR` parent chain (baked at compile time — dev source tree)
 /// 3. `~/.speedwave/resources-dir` marker file → `<dir>/build-context/` (CLI reads Desktop's marker)
-///
-/// Step 2 before 3 ensures `make dev` uses local sources instead of a stale
-/// bundle path written by the installed app — same rationale as
-/// `resolve_mcp_os_script_inner`.
 pub fn resolve_build_root() -> anyhow::Result<PathBuf> {
     resolve_build_root_with_home(dirs::home_dir())
 }
@@ -333,8 +321,7 @@ fn resolve_build_root_inner(
         );
     }
 
-    // 2. Dev source tree — prefer local sources over marker so `make dev`
-    //    picks up code changes instead of a stale installed bundle.
+    // 2. Dev source tree — preferred over marker so `make dev` picks up local code changes.
     if let Some(ref root) = dev_root {
         if root.join("containers").exists() {
             return Ok(root.clone());
@@ -360,9 +347,6 @@ fn resolve_build_root_inner(
 /// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/mcp-os/os/dist/index.js`
 /// 2. `CARGO_MANIFEST_DIR` source tree → `<repo>/mcp-servers/os/dist/index.js`
 /// 3. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
-///
-/// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
-/// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
     let dev = repo_dev_path("mcp-servers/os/dist/index.js");
     resolve_worker_script_inner(
@@ -413,10 +397,8 @@ fn resolve_mcp_os_script_inner(
     )
 }
 
-/// Resolve a host-side worker script via the three-tier fallback shared by all
-/// bundled workers (`mcp-os`, `oauth`, …): SPEEDWAVE_RESOURCES_DIR (bundle)
-/// → repo source tree (`make dev`) → `~/.speedwave/resources-dir` marker (CLI).
-/// `bundled_subpath` is the path *inside* the resources dir; `label` drives logs.
+/// Resolve a host-side worker script: SPEEDWAVE_RESOURCES_DIR → repo source tree → marker.
+/// `bundled_subpath` is the path inside the resources dir; `label` drives logs.
 fn resolve_worker_script_inner(
     label: &str,
     bundled_subpath: &[&str],
@@ -440,8 +422,7 @@ fn resolve_worker_script_inner(
         log::warn!("{label} not found at bundled path: {}", p.display());
     }
 
-    // 2. Repo source tree — prefer local sources over the marker so `make dev`
-    //    picks up hoisted node_modules from the workspace.
+    // 2. Repo source tree — preferred over marker so `make dev` picks up workspace node_modules.
     if let Some(ref p) = dev_path {
         if p.exists() {
             return dev_path;
@@ -469,11 +450,9 @@ fn resolve_worker_script_inner(
     None
 }
 
-/// Reads the `~/.speedwave/resources-dir` marker file and returns the build-context
-/// path if the marker points to a valid directory containing `containers/`.
-///
-/// Consumer: called by `resolve_build_root()`. Writer: Desktop app `main.rs` on startup
-/// via `write_resources_marker()`.
+/// Reads the `~/.speedwave/resources-dir` marker and returns the build-context path
+/// if it points to a valid directory containing `containers/`.
+/// Read by `resolve_build_root()`; written by Desktop via `write_resources_marker()`.
 fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
     let marker = home
         .join(crate::consts::DATA_DIR)
@@ -509,9 +488,7 @@ fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-/// Writes the `~/.speedwave/resources-dir` marker file atomically.
-///
-/// Uses write-to-tmp + rename to prevent the CLI from reading a partial path.
+/// Writes the `~/.speedwave/resources-dir` marker file atomically (write-to-tmp + rename).
 /// Called by the Desktop app on startup so the CLI can locate bundled resources.
 pub fn write_resources_marker(resources_dir: &std::path::Path) -> anyhow::Result<()> {
     let marker_dir = crate::consts::data_dir();
@@ -539,11 +516,8 @@ fn write_resources_marker_to(
 }
 
 /// Containerd overlayfs snapshotter corruption that survived a prune attempt.
-///
-/// Produced by [`with_build_recovery`] (bundle and plugin builds) when a
-/// snapshotter error persists after `system_prune` + `prune_buildkit_cache` and
-/// a retry. Bundle-build callers (setup wizard, reconcile) downcast it to
-/// restart the container engine; other callers surface its `Display` hint.
+/// Produced by [`with_build_recovery`] when the error persists after prune + retry;
+/// bundle-build callers downcast it to restart the engine, others surface its `Display` hint.
 #[derive(Debug)]
 pub struct SnapshotterRecoveryFailed {
     /// The underlying build error after prune-and-retry also failed.
@@ -710,10 +684,9 @@ pub(crate) fn prune_replaced_images(
     Ok(())
 }
 
-/// Warn-only post-restore prune under the build lock: per-image replaced tags,
-/// plus one-time legacy single-id tags (pre-ADR-072 state without a map).
-/// Callers MUST invoke only after new containers are confirmed running —
-/// ordering pinned by `reconcile_prunes_old_images_after_full_restore`.
+/// Warn-only post-restore prune under the build lock: per-image replaced tags
+/// plus one-time legacy single-id tags. Callers MUST invoke only after new
+/// containers are confirmed running.
 pub fn prune_superseded_images(
     runtime: &crate::runtime::LockedRuntime,
     applied_image_hashes: &std::collections::BTreeMap<String, String>,
@@ -724,8 +697,7 @@ pub fn prune_superseded_images(
         if let Err(e) = prune_replaced_images(runtime, applied_image_hashes, manifest) {
             log::warn!("Failed to prune replaced image tags: {e}");
         }
-        // Legacy pre-ADR-072 state (no per-image map): the old tags share one
-        // `name:<old_bundle_id>` suffix — prune them once on migration.
+        // Legacy pre-ADR-072 tags share one `name:<old_bundle_id>` suffix — prune once on migration.
         if applied_image_hashes.is_empty() {
             if let Some(old_id) = should_prune_bundle(applied_bundle_id, &manifest.bundle_id) {
                 if let Err(e) = prune_old_bundle_images(runtime, old_id) {
@@ -829,9 +801,8 @@ pub fn build_images_for_bundle_in(
 }
 
 /// Runs `attempt`; on a recoverable failure (disk-full, snapshotter corruption,
-/// transient I/O/DNS) prunes the matching cache and retries. Snapshotter
-/// corruption surviving the retry becomes [`SnapshotterRecoveryFailed`] — bundle
-/// callers downcast it to restart the engine; plugin builds surface its hint.
+/// transient I/O/DNS) prunes the matching cache and retries. Snapshotter corruption
+/// surviving the retry becomes [`SnapshotterRecoveryFailed`].
 pub(crate) fn with_build_recovery<T>(
     runtime: &crate::runtime::LockedRuntime,
     mut attempt: impl FnMut() -> anyhow::Result<T>,
@@ -844,8 +815,7 @@ pub(crate) fn with_build_recovery<T>(
             if let Err(prune_err) = runtime.prune_unused_images() {
                 log::warn!("prune_unused_images failed: {prune_err}");
             }
-            // `nerdctl system prune` does not clear BuildKit cache-mounts; under
-            // disk pressure the cache must go too (ADR-072).
+            // `nerdctl system prune` does not clear BuildKit cache-mounts (ADR-072).
             if let Err(prune_err) = runtime.prune_buildkit_cache() {
                 log::warn!("prune_buildkit_cache failed: {prune_err}");
             }
@@ -857,8 +827,7 @@ pub(crate) fn with_build_recovery<T>(
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            // A poisoned BuildKit cache key can pin a vanished snapshot
-            // ("failed to stat parent"); system prune leaves cache-mounts.
+            // system prune leaves cache-mounts, which can pin a vanished snapshot.
             if let Err(prune_err) = runtime.prune_buildkit_cache() {
                 log::warn!("prune_buildkit_cache failed: {prune_err}");
             }
@@ -866,9 +835,7 @@ pub(crate) fn with_build_recovery<T>(
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else if is_transient_build_error(&first_err) {
-            // Transient — usually the boot-time DNS-fallback race (see
-            // `is_transient_build_error`). A few seconds' wait lets the resolver
-            // settle; two backed-off attempts cover a slow fallback.
+            // Transient (see `is_transient_build_error`): back off and retry.
             let mut last_err = first_err;
             for attempt_no in 1..=TRANSIENT_BUILD_RETRIES {
                 let delay = TRANSIENT_BUILD_RETRY_BASE_DELAY * attempt_no;
@@ -932,8 +899,7 @@ fn try_build_images(
         chunks.len()
     );
 
-    // Per-worker results collected into a flat Vec; Mutex poison unreachable
-    // (thread::scope re-panics on the calling thread if any worker panics).
+    // Mutex poison unreachable: thread::scope re-panics on the calling thread if a worker panics.
     let results = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<()>)>::with_capacity(total));
 
     std::thread::scope(|s| {
@@ -942,8 +908,7 @@ fn try_build_images(
                 for &idx in *chunk {
                     let img = images[idx];
                     let tag = tags[idx].clone();
-                    // vm_path_join, not PathBuf::join: vm_root may be a WSL/Linux
-                    // path on Windows where PathBuf::join mangles /-rooted strings.
+                    // vm_path_join, not PathBuf::join: PathBuf::join mangles /-rooted WSL paths on Windows.
                     let abs_context = crate::engine_path::vm_path_join(root_str, img.context_dir);
                     let abs_containerfile =
                         crate::engine_path::vm_path_join(root_str, img.containerfile);
@@ -981,15 +946,10 @@ fn try_build_images(
 
     let mut outcomes = results.into_inner().unwrap_or_else(|p| p.into_inner());
 
-    // Sort by IMAGES index so the classifier picks the lowest-indexed error in each
-    // priority class, independent of thread completion order. Without this sort,
-    // "the first transient error" would mean "whichever worker happened to finish
-    // first", which is non-deterministic across runs and breaks the doc claim below.
+    // Sort by IMAGES index so the classifier is deterministic, not thread-completion-ordered.
     outcomes.sort_by_key(|(idx, _)| *idx);
 
-    // Single-pass classifier: snapshotter errors require system_prune before retry;
-    // transient errors need only a plain retry. Priority: snapshotter > transient > first by index.
-    // Overflow errors (beyond one per class) are logged immediately in the loop.
+    // Single-pass classifier, priority snapshotter > transient > first by index.
     let mut snapshotter: Option<(usize, anyhow::Error)> = None;
     let mut transient: Option<(usize, anyhow::Error)> = None;
     let mut first: Option<(usize, anyhow::Error)> = None;
@@ -1042,7 +1002,6 @@ fn try_build_images(
         e
     } else {
         // Unreachable: total_errors > 0 guarantees at least one error slot is filled.
-        // Returning Err (not Ok) protects callers from acting on a broken build tree.
         return Err(anyhow::anyhow!(
             "internal bug: build_images recorded {total_errors} error(s) but no error slot was filled"
         ));
@@ -1059,9 +1018,7 @@ fn try_build_images(
 }
 
 /// `true` if `err` mentions ENOSPC anywhere in its chain.
-/// Recovery: `prune_unused_images` + retry. Covers cross-worktree image
-/// accumulation that `prune_old_bundle_images` cannot see (it only knows this
-/// worktree's last `applied_bundle_id`).
+/// Recovery: `prune_unused_images` + retry.
 fn is_disk_full_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1072,16 +1029,15 @@ fn is_disk_full_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Returns `true` if the error looks like a containerd overlayfs snapshotter bug.
-///
-/// Iterates the full error chain (`err.chain()`) so that wrapped/context errors
-/// are checked too — not just the top-level message.
-///
-/// Known error patterns from containerd (stable in Go source since 2023):
+/// `true` if any error in the chain looks like a containerd overlayfs snapshotter bug.
+/// Known containerd patterns:
 /// - `"apply layer error"` — wrapper from containerd's differ
 /// - `"failed to prepare extraction snapshot"` — from snapshotter.Prepare()
 /// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
 /// - `"failed to stat parent"` + `"snapshots/"` — overlayfs parent snapshot dir gone
+///
+/// Known upstream race (containerd#11719, nerdctl#3420), not a Speedwave bug —
+/// recovery and the expected WARN are documented in `docs/architecture/containers.md`.
 fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1096,31 +1052,14 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Registry hostnames that our `FROM` lines reference. A DNS failure mentioning
-/// one of these is the boot-time-resolver race (see `is_transient_build_error`),
-/// not a user typo — so it's worth a retry. A DNS failure for some *other* host
-/// is more likely a real misconfiguration and is left to fail fast.
+/// Registry hostnames our `FROM` lines reference; DNS failures naming these are retried
+/// (see `is_transient_build_error`), failures for other hosts fail fast.
 const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
     &["registry-1.docker.io", "docker.io", "mcr.microsoft.com"];
 
-/// Returns `true` if the build error looks transient (I/O timeout, connection reset,
-/// temporary unavailable, or a DNS hiccup resolving a base-image registry). These may
-/// succeed on retry without any recovery action.
-///
-/// The DNS cases matter for first runs behind a VPN: when the Lima VM boots, its
-/// `systemd-resolved` initially tries `UDP+EDNS0`, whose large responses do not
-/// survive a low-MTU tunnel (e.g. Tailscale's 1380). It takes a second or two to
-/// detect that and fall back to plain UDP — but BuildKit fires its
-/// `FROM <base-image>` metadata fetch inside that window, so the resolver returns
-/// `SERVFAIL` (`server misbehaving` / `failed to resolve source metadata`) or even
-/// `NXDOMAIN` (`no such host`) for `docker.io` / `mcr.microsoft.com`. A retry a few
-/// seconds later hits the now-degraded resolver and succeeds. *All* DNS-shaped cases
-/// are scoped to `BASE_IMAGE_REGISTRY_HOSTS` so a typo'd — or rogue — custom registry
-/// URL fails fast instead of silently retrying (it could otherwise embed any of these
-/// strings in its error body to force up to `TRANSIENT_BUILD_RETRIES` retries).
-///
-/// Uses case-insensitive matching because kernel/libc/BuildKit error messages vary
-/// in casing across distros and locales.
+/// `true` if the build error is transient (I/O timeout, connection reset, temporary
+/// unavailable, or a DNS hiccup naming a base-image registry) and may succeed on retry.
+/// DNS-shaped cases are scoped to `BASE_IMAGE_REGISTRY_HOSTS`; matching is case-insensitive.
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1129,8 +1068,7 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
-            // DNS hiccups (SERVFAIL / NXDOMAIN / dial-lookup) are transient only when
-            // they name one of our base-image registries — see the doc above.
+            // DNS hiccups are transient only when they name a base-image registry.
             || (is_dns_shaped(&msg) && mentions_base_image_registry(&msg))
         {
             return true;
@@ -1159,9 +1097,7 @@ fn is_dns_shaped(msg: &str) -> bool {
 fn is_network_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
-        // Both branches are scoped to a base-image registry: the network
-        // enrichment names docker.io / mcr.microsoft.com, so a reset during an
-        // apt layer (registry not involved) must NOT route here.
+        // Scoped to a base-image registry so a reset during an apt layer does not route here.
         if (is_dns_shaped(&msg) || msg.contains("connection reset"))
             && mentions_base_image_registry(&msg)
         {
@@ -1172,7 +1108,7 @@ fn is_network_build_error(err: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1252,10 +1188,7 @@ mod tests {
     /// source change would not change the image hash and ship stale code.
     #[test]
     fn every_base_image_is_digest_pinned() {
-        // Retained BuildKit cache (ADR-072) freezes whatever base was first
-        // pulled; a floating tag would silently diverge between users and
-        // never receive upstream security patches. Every external FROM must
-        // carry an @sha256 digest; bumping a base is a deliberate edit.
+        // Every external FROM must carry an @sha256 digest (ADR-072).
         let root = repo_root();
         let mut violations = Vec::new();
         for img in IMAGES {
@@ -1351,8 +1284,7 @@ mod tests {
 
     #[test]
     fn claude_hash_inputs_exclude_resources_and_template() {
-        // claude-resources are synced + mounted (never baked into the image);
-        // the compose template is embedded in the binary. Neither may rebuild claude.
+        // claude-resources (mounted) and the compose template (embedded) must not rebuild claude.
         let claude = IMAGES.iter().find(|i| i.name == IMAGE_CLAUDE).unwrap();
         for input in claude.hash_inputs {
             assert!(
@@ -1408,12 +1340,8 @@ mod tests {
         }
     }
 
-    /// Verifies that shell scripts COPY'd into Containerfile.claude have their
-    /// shebang interpreter (`bash`) explicitly installed via `apt-get install`.
-    ///
-    /// node:24-bookworm-slim does NOT include bash — only dash (/bin/sh).
-    /// If a COPY'd script uses `#!/bin/bash` but the Containerfile doesn't
-    /// `apt-get install bash`, the build fails with "not found" at runtime.
+    /// Verifies shell scripts COPY'd into Containerfile.claude have their shebang
+    /// interpreter (`bash`) installed via `apt-get install` — bookworm-slim ships only dash.
     #[test]
     fn test_containerfile_claude_installs_bash_for_copied_scripts() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
@@ -1784,8 +1712,7 @@ mod tests {
     fn test_resolve_mcp_os_script_dev_mode() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
-        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
-        // The script may or may not exist depending on whether mcp-os was built.
+        // Dev mode with None home falls through to CARGO_MANIFEST_DIR (script existence depends on build).
         let result = resolve_mcp_os_script_with_home(None);
         // Just verify it doesn't panic — existence depends on build state
         let _ = result;
@@ -1867,8 +1794,7 @@ mod tests {
 
     #[test]
     fn test_images_count() {
-        // Catalogue size, not build behaviour — the build set is filtered per
-        // project by `enabled_images`. Bump this when adding a built-in worker.
+        // Catalogue size (not the per-project build set) — bump when adding a built-in worker.
         assert_eq!(IMAGES.len(), 12);
     }
 
@@ -1911,9 +1837,7 @@ mod tests {
 
     #[test]
     fn test_every_worker_image_maps_to_a_toggleable_service() {
-        // SSOT tie: every non-claude/mcp-hub image name's `speedwave-mcp-<key>`
-        // suffix must be a known integration config key, so `enabled_images`
-        // can never silently drop (or keep) a worker.
+        // SSOT tie: every non-claude/mcp-hub image's `speedwave-mcp-<key>` suffix must be a known config key.
         for img in IMAGES {
             let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
                 assert!(
@@ -2030,8 +1954,7 @@ mod tests {
 
     #[test]
     fn test_is_snapshotter_error_rejects_missing_copy_source() {
-        // A missing build-context file is a real user error — fail fast, never
-        // prune-and-retry on it.
+        // A missing build-context file is a real user error — fail fast, never prune-and-retry.
         let err = anyhow::anyhow!(
             "failed to compute cache key: failed to calculate checksum of ref: \
              \"/app/missing.txt\": not found"
@@ -2041,8 +1964,7 @@ mod tests {
 
     #[test]
     fn test_is_snapshotter_error_rejects_stat_parent_outside_snapshotter() {
-        // "failed to stat parent" without a snapshots/ path is not our corruption
-        // signature (e.g. user RUN output) — must not prune-and-retry.
+        // "failed to stat parent" without a snapshots/ path is not the corruption signature.
         let err = anyhow::anyhow!(
             "failed to stat parent: stat /home/user/app: no such file or directory"
         );
@@ -2060,8 +1982,7 @@ mod tests {
             .with_prepare_build_context_root(translated.clone())
             .build();
 
-        // Explicit fake build root keeps the test off SPEEDWAVE_RESOURCES_DIR and
-        // the production marker; the mock returns the translated path regardless.
+        // Explicit fake build root keeps the test off SPEEDWAVE_RESOURCES_DIR and the production marker.
         let (_tmp, root) = create_fake_build_root();
         let bundle_id = "test-bundle";
         let result = build_all_for_bundle(&rt, bundle_id, &root);
@@ -2133,10 +2054,8 @@ mod tests {
         }
     }
 
-    /// Build a `MockRuntimeBuilder` configured for retry-with-prune tests:
-    /// `prepare_build_context` returns `build_root`, and `build_image(tag)`
-    /// fails on the (tag, attempt) pairs listed in `fail_on` (keyed as
-    /// `"{tag}:{attempt}"`, mirroring the old `RetryMockRuntime` contract).
+    /// `MockRuntimeBuilder` for retry-with-prune tests: `prepare_build_context` returns
+    /// `build_root`; `build_image(tag)` fails on the `"{tag}:{attempt}"` pairs in `fail_on`.
     fn retry_mock(
         build_root: PathBuf,
         fail_on: std::collections::HashMap<String, String>,
@@ -2219,10 +2138,8 @@ mod tests {
         (tmp, root)
     }
 
-    /// Build a mock with `image_exists(tag) = true` for any tag whose image
-    /// name contains one of the `present` substrings. Mirrors the old
-    /// `LazyBuildMock` contract: tags whose name matches one of `present`
-    /// resolve to true; everything else resolves to false.
+    /// Build a mock where `image_exists(tag)` is `true` iff the tag's image name
+    /// contains one of the `present` substrings.
     fn lazy_build_mock(
         build_root: PathBuf,
         present: Vec<&str>,
@@ -2230,17 +2147,10 @@ mod tests {
         crate::runtime::LockedRuntime,
         crate::runtime::mock_runtime::MockHandles,
     ) {
-        // `images_exist`-style queries pass the full bundle-suffixed tag; the
-        // substring check `tag.contains(image_name)` is the legal-equivalent
-        // of the old `LazyBuildMock` lookup. We layer one "present" substring
-        // per requested image name on top of `image_exists_default(false)`.
+        // Layer one "present" entry per requested image name on top of default-false existence.
         let mut b = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(build_root);
-        // Seed each image name as a "present" override via per-(name, bundle)
-        // entries — but builder's exact-match table can't substring. Instead,
-        // we use the inverse: default false (so absent images report false),
-        // and explicitly seed every IMAGES name across the bundle ids these
-        // tests use. Since the test only uses bundle id "b1", that's enough.
+        // Seed present IMAGES names for bundle id "b1" (default false covers absent images).
         for img in IMAGES {
             if present.iter().any(|p| img.name.contains(p)) {
                 let tag = image_ref(img.name, "b1");
@@ -2397,8 +2307,7 @@ mod tests {
 
     #[test]
     fn test_disk_full_unrecovered_gets_friendly_error() {
-        // Disk-full on attempts 1 AND 2 → prune attempted, build still fails,
-        // and the user-facing message must mention disk space (not "VM memory").
+        // Disk-full on attempts 1 AND 2 → message must mention disk space, not "VM memory".
         let mut fail_on = std::collections::HashMap::new();
         for attempt in 1..=2 {
             fail_on.insert(
@@ -2827,9 +2736,7 @@ mod tests {
         use crate::runtime::mock_runtime::MockRuntimeBuilder;
 
         /// `image_exists(tag)` returns `true` unless `tag` contains one of
-        /// `missing_name_substrings`. Mirrors the old `ImageCheckRuntime`
-        /// substring contract for `images_exist`, which queries by a runtime-
-        /// computed bundle id we cannot enumerate up front.
+        /// `missing_name_substrings`.
         fn image_check_mock(missing_name_substrings: &[&str]) -> crate::runtime::LockedRuntime {
             let mut b = MockRuntimeBuilder::new().with_image_exists_default(true);
             for s in missing_name_substrings {
@@ -2955,8 +2862,7 @@ mod tests {
 
     #[test]
     fn test_connection_reset_off_registry_is_not_network() {
-        // Reset during an apt layer (no base-image registry) must NOT route to
-        // the network message that names docker.io / mcr.microsoft.com.
+        // Reset during an apt layer (no base-image registry) must NOT route to the network message.
         let err = anyhow::anyhow!("apt: connection reset by peer (deb.debian.org)");
         assert!(!is_network_build_error(&err));
         assert!(is_transient_build_error(&err), "still transient → retried");
@@ -3012,8 +2918,6 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // is_transient_build_error() — DNS hiccup while pulling a base image
-    // (VM's systemd-resolved still falling back from EDNS0 right after boot;
-    // BuildKit's `FROM <image>` metadata fetch lands in that window).
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3051,30 +2955,25 @@ mod tests {
 
     #[test]
     fn test_is_transient_build_error_plain_dial_tcp_without_lookup_is_not_transient() {
-        // A bare `dial tcp` without a DNS lookup (e.g. connection refused to a fixed IP)
-        // is not the DNS-fallback race; don't widen the net unnecessarily.
+        // A bare `dial tcp` without a DNS lookup is not the DNS-fallback race.
         let err = anyhow::anyhow!("dial tcp 10.0.0.5:443: connect: connection refused");
         assert!(!is_transient_build_error(&err));
     }
 
     #[test]
     fn test_is_transient_build_error_dns_for_unknown_registry_is_not_transient() {
-        // NXDOMAIN / dial-lookup failure for a host that is NOT one of our base-image
-        // registries — most likely a typo'd custom registry URL. Should fail fast, not
-        // silently retry (the host scoping in `is_transient_build_error`).
+        // NXDOMAIN / dial-lookup for a non-base-image-registry host must fail fast.
         let nxdomain = anyhow::anyhow!("dial tcp: lookup myregistry.example.com: no such host");
         assert!(!is_transient_build_error(&nxdomain));
         let dial_lookup =
             anyhow::anyhow!("dial tcp: lookup ghcr.io on 127.0.0.53:53: server can't find ghcr.io");
-        // `ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS — a DNS-shaped error for it fails fast
-        // regardless of which DNS-failure string it carries.
+        // `ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS — a DNS-shaped error for it fails fast.
         assert!(!is_transient_build_error(&dial_lookup));
     }
 
     #[test]
     fn test_is_transient_build_error_servfail_for_known_registry_is_transient() {
-        // SERVFAIL-shaped errors that DO name a base-image registry are the boot-time
-        // resolver race — transient.
+        // SERVFAIL-shaped errors that name a base-image registry are transient.
         let servfail = anyhow::anyhow!(
             "Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: server misbehaving"
         );
@@ -3087,9 +2986,7 @@ mod tests {
 
     #[test]
     fn test_is_transient_build_error_servfail_for_unknown_host_is_not_transient() {
-        // SERVFAIL / "failed to resolve source metadata" for a host that is NOT a base-image
-        // registry must fail fast — a rogue or typo'd custom registry could otherwise embed
-        // these strings to force retries.
+        // SERVFAIL / "failed to resolve source metadata" for a non-base-image host must fail fast.
         let servfail = anyhow::anyhow!("Head \"https://example.invalid/v2/\": server misbehaving");
         assert!(!is_transient_build_error(&servfail));
         let no_metadata = anyhow::anyhow!("foo:bar: failed to resolve source metadata for foo/bar");
@@ -3271,9 +3168,7 @@ mod tests {
 
     #[test]
     fn test_prune_old_bundle_images_keeps_buildkit_cache() {
-        // ADR-072: routine pruning must NOT clear the BuildKit cache — apt/npm
-        // layers are reused across updates. Cache is pruned only on disk
-        // pressure or snapshotter recovery (see with_build_recovery).
+        // ADR-072: routine pruning must NOT clear the BuildKit cache.
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         prune_old_bundle_images(&rt, "abc123").unwrap();
 
@@ -3327,9 +3222,7 @@ mod tests {
 
     #[test]
     fn test_prune_replaced_images_never_touches_current_tags() {
-        // Adversarial: applied hash differs, but the OLD tag equals another
-        // image's CURRENT tag must never happen by construction (tags embed the
-        // image name); verify removal list contains only `name:old_hash` pairs.
+        // Tags embed the image name, so an old tag never equals another image's current tag.
         let manifest = crate::bundle::BundleManifest::for_tests("cur");
         let mut applied = manifest.image_hashes.clone();
         applied.insert(IMAGE_MCP_HUB.to_string(), "old".to_string());
@@ -3344,8 +3237,7 @@ mod tests {
 
     #[test]
     fn test_prune_replaced_images_rmi_failure_propagates_to_warn_only_callers() {
-        // remove_images error propagates; callers (maybe_prune_previous_bundle,
-        // reconcile) downgrade it to a warning — pin the Err here.
+        // remove_images error propagates; callers downgrade it to a warning — pin the Err here.
         let manifest = crate::bundle::BundleManifest::for_tests("new1");
         let mut applied = manifest.image_hashes.clone();
         applied.insert(IMAGE_CLAUDE.to_string(), "old1".to_string());
@@ -3402,12 +3294,9 @@ mod tests {
         let result = try_build_all(&rt, &build_root, "test-bundle");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        // Use {:#} to print the full chain; the chosen slack error is wrapped by a
-        // context message because multiple errors occurred.
+        // Use {:#} to print the full error chain.
         let msg = format!("{err:#}");
-        // Both errors are transient. After sorting outcomes by IMAGES index, the
-        // lowest-indexed transient error wins deterministically. Slack (index 2)
-        // beats GitLab (index 5).
+        // Lowest IMAGES index wins among transient errors: Slack (index 2) beats GitLab (index 5).
         assert!(
             msg.contains("slack"),
             "expected earliest-indexed transient error (slack) to win, got: {msg}"
@@ -3459,9 +3348,7 @@ mod tests {
 
     #[test]
     fn test_parallel_build_transient_error_retries_without_prune() {
-        // Injects exactly one transient failure (attempt 1), so the first retry succeeds —
-        // see `test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt` for the
-        // path where it takes more than one retry (TRANSIENT_BUILD_RETRIES = 2).
+        // One transient failure (attempt 1), so the first retry succeeds.
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
             format!("{}:1", image_ref(IMAGE_MCP_HUB, "test-bundle")),
@@ -3488,8 +3375,7 @@ mod tests {
 
     #[test]
     fn test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt() {
-        // The DNS-fallback race: attempts 1 AND 2 fail with `server misbehaving`,
-        // attempt 3 succeeds (resolver has settled). Exercises the >1 retry path.
+        // Attempts 1 and 2 fail, attempt 3 succeeds — exercises the >1 retry path.
         let mut fail_on = std::collections::HashMap::new();
         let tag = image_ref(IMAGE_MCP_GITHUB, "test-bundle");
         fail_on.insert(
@@ -3589,16 +3475,13 @@ mod tests {
 
     #[test]
     fn test_parallel_build_worker_panic_propagates() {
-        // `std::thread::scope` re-panics on the calling thread when a spawned thread
-        // panics, so a panicking `build_image` will propagate out of `try_build_all`.
-        // This verifies that worker panics are not silently swallowed.
+        // thread::scope re-panics on the calling thread, so a panicking build_image propagates out.
         let (_tmp, build_root) = create_fake_build_root();
         let (rt, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(build_root.clone())
             .with_build_panic_for("speedwave-mcp-slack")
             .build();
-        // std::thread::scope re-panics on the calling thread when any spawned thread
-        // panics — wrap in catch_unwind here at the test boundary only.
+        // catch_unwind at the test boundary: thread::scope re-panics on the calling thread.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             try_build_all(&rt, &build_root, "test-bundle")
         }));

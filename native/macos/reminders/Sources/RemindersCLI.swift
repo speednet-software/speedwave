@@ -27,8 +27,7 @@ struct RemindersCLI {
         "check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder"
 
     static func main() {
-        // Shared store: the access guard requests permission, then the command
-        // handlers operate on the same store. check_permission uses its own gate.
+        // Shared store; check_permission uses its own gate.
         let store = EKEventStore()
         runCLI(
             cliName: "reminders-cli",
@@ -58,7 +57,6 @@ struct RemindersCLI {
 
 /// Requests Reminders access from EventKit. Uses the macOS 14+ full-access API
 /// when available, falling back to the legacy requestAccess(to:) API.
-/// The optional timeout (default: unbounded) is a safety net for check_permission.
 func requestReminderAccess(store: EKEventStore, timeout: TimeInterval? = nil) -> (granted: Bool, error: Error?) {
     let semaphore = DispatchSemaphore(value: 0)
     var accessGranted = false

@@ -10,11 +10,7 @@
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
 
-# Per-test temp DEST so the suite can run in parallel with `make dev` (which
-# writes to the real desktop/src-tauri/). The script honours $BUNDLE_DEST.
-# macOS EDR products (Bitdefender, Microsoft Defender) open freshly-written
-# files for real-time scanning, so a follow-up `rm -rf` can race the scanner's
-# open fd — retry with a short backoff.
+# Per-test temp DEST (script honours $BUNDLE_DEST). Retry rm to survive EDR open fds.
 rm_with_retry() {
     local target="$1"
     local attempt
@@ -96,9 +92,7 @@ teardown() {
 @test "mcp-os bundle: full import chain resolves (spawn and check)" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    # Spawn mcp-os with PORT=0 and a token. If imports fail,
-    # node exits immediately with ERR_MODULE_NOT_FOUND (exit 1).
-    # On success, it prints {"port":N} and keeps running — we kill it.
+    # Failed imports exit 1; success prints {"port":N} and keeps running.
     local script="$DEST/mcp-os/os/dist/index.js"
     local tmpout
     tmpout="$(mktemp)"
@@ -156,9 +150,7 @@ teardown() {
 }
 
 @test "bundle script references only existing source files" {
-    # Extract all cp/cp -r source paths from the script and verify they exist.
-    # This catches bugs like referencing shared/package-lock.json when the
-    # lockfile is at the workspace root.
+    # Extract all cp source paths from the script and verify they exist.
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 
     # Collect non-variable literal paths used as cp sources (skip $DEST targets)
@@ -233,9 +225,7 @@ teardown() {
     local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
     local dst="$DEST/build-context/containers/install-claude.sh"
 
-    # GNU stat (Linux/Git Bash) first; BSD stat (macOS) is the fallback. Order
-    # matters: GNU `stat -f` means `--file-system` (exit 0 with garbage output),
-    # so probing BSD first on Linux yields wrong results without errors.
+    # GNU stat (-c) first, BSD stat (-f) fallback: GNU `stat -f` means --file-system.
     local src_perms
     local dst_perms
     src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
@@ -262,19 +252,13 @@ teardown() {
 }
 
 @test "lock held by a live holder blocks a second run until released" {
-    # Directly proves mutual exclusion (not just final-state). Hold the lock with
-    # OUR (live) PID, launch the script, assert it does NOT proceed while held,
-    # then release and assert it completes. Without the mutex it would race in
-    # immediately.
+    # Hold the lock with our live PID; the script must block until release.
     mkdir -p "$DEST/.bundle.lock"
     echo "$$" > "$DEST/.bundle.lock/pid"   # $$ is bats — a live process
 
     "$SCRIPT" &
     local pid=$!
-    # While WE hold the lock, the script must never start its body no matter how
-    # long we wait — so observe across several polls. A longer wall-clock only
-    # strengthens the "stayed blocked" assertion; it cannot make this flaky on a
-    # slow host (unlike a single fixed sleep that could fire before the body).
+    # While we hold the lock the script must never start its body — poll repeatedly.
     local i
     for i in 1 2 3 4 5 6 7 8 9 10; do
         [ ! -d "$DEST/build-context" ] || {
@@ -298,10 +282,7 @@ teardown() {
 }
 
 @test "concurrent runs on the same DEST both finish with a valid package.json" {
-    # The incident: `make dev` building an image while `make test` re-bundles the
-    # SAME DEST captured a 0-byte mcp-shared/package.json. Serialization itself is
-    # proven by the mutual-exclusion test above; this asserts the end state is
-    # never corrupt under real concurrency.
+    # Two runs on the same DEST must both finish with a non-corrupt package.json.
     "$SCRIPT" &
     local p1=$!
     "$SCRIPT" &

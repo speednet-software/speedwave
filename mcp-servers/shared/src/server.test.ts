@@ -478,8 +478,7 @@ describe('server', () => {
       });
 
       it('logs health check failures even when auth is configured', async () => {
-        // Every prod worker sets auth, so health failures must still be logged
-        // (the former `!auth` gate silenced them where they matter most).
+        // Health failures must be logged even when auth is configured.
         const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         const customHealthCheck = vi.fn().mockRejectedValue(new Error('connection refused'));
 
@@ -936,8 +935,7 @@ describe('server', () => {
       });
 
       it('DELETE route on / invokes handleMCPDelete — returns 400 when session header missing', () => {
-        // Covers line 281: handleMCPDelete(req, res) call inside app.delete('/', ...)
-        // We call the DELETE route handler directly with a request missing the session header.
+        // DELETE route handler invokes handleMCPDelete.
         const server = createMCPServer({
           name: 'delete-test',
           version: '1.0.0',
@@ -1101,9 +1099,7 @@ describe('server', () => {
     });
 
     describe('Server Lifecycle', () => {
-      // All lifecycle tests bind port 0 (OS-assigned ephemeral) so parallel
-      // vitest workers / multiple worktrees never collide on a fixed port
-      // (EADDRINUSE). start() returns the actual port for assertions.
+      // Port 0 (OS-assigned ephemeral) avoids collisions between parallel workers and worktrees.
       it('starts server successfully', async () => {
         const server = createMCPServer({
           name: 'test-server',
@@ -1229,11 +1225,9 @@ describe('server', () => {
 
         await server.start();
 
-        // Patch the internal http.Server's close to call back with an error
+        // Patch net.Server.close to invoke the callback with an error.
         const httpServer = (server.app as any).listen ? null : null; // unused — we access it differently
 
-        // Access the underlying server instance via the closure by re-starting
-        // the server and then forcing close to error. We spy on the net.Server.close.
         const net = await import('net');
         const originalClose = net.Server.prototype.close;
         net.Server.prototype.close = function (cb?: (err?: Error) => void) {
@@ -1421,9 +1415,7 @@ describe('server', () => {
         ).toThrow('auth.token must be a non-empty string');
       });
 
-      // ADR-060 per-service bearer: auth.callerTokens lets the oauth worker
-      // map bearer → caller identity. The constructor rejects malformed maps
-      // so a corrupt bearer file cannot land an unauth caller silently.
+      // auth.callerTokens maps bearer → caller id; constructor rejects malformed maps.
       it('rejects empty bearer key in auth.callerTokens', () => {
         expect(() =>
           createMCPServer({
@@ -2209,9 +2201,8 @@ describe('server', () => {
       });
 
       const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
-      // app.all() registers the last route on '/'; it comes after POST and DELETE routes
+      // app.all() is the last route on '/'; catch-all for unsupported methods.
       const allRoutes = routes.filter((layer: any) => layer.route?.path === '/');
-      // The app.all catch-all is the last of the '/' routes
       const catchAllRoute = allRoutes[allRoutes.length - 1];
 
       expect(catchAllRoute).toBeDefined();

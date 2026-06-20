@@ -1,8 +1,5 @@
 // Redmine API proxy — Tauri commands for direct Redmine API calls.
-//
 // Used during integration configuration before the MCP container exists.
-// The Desktop host calls the Redmine API directly to validate credentials
-// and fetch enumerations (projects, statuses, trackers, priorities, activities).
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -100,11 +97,8 @@ struct RedmineActivitiesResponse {
 // ---------------------------------------------------------------------------
 
 /// Validates and normalizes a Redmine host URL for API use.
-///
-/// Rejects backslashes, embedded credentials, and non-HTTP schemes.
-/// Allows RFC1918 private IPs and IPv6 ULA addresses (common for on-premise
-/// Redmine) with a warning, but blocks loopback, link-local, and unspecified
-/// addresses. Strips trailing slashes for consistent URL construction.
+/// Allows private on-premise IPs (RFC1918/ULA/CGNAT) with a warning; blocks
+/// loopback, link-local, embedded credentials, and non-HTTP schemes.
 fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
@@ -114,9 +108,7 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Parse URL first to check for RFC1918 before delegating to base validation
     let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
 
-    // If private on-premise address (RFC1918 or IPv6 ULA), skip base validation
-    // (which blocks all private IPs) and validate scheme/host ourselves.
-    // Redmine policy blocks loopback — use `PrivatePolicy::BlockLoopback`.
+    // Private on-premise: validate scheme/host ourselves; Redmine policy blocks loopback.
     let parsed = if crate::url_validation::is_private_on_premise(
         &candidate,
         crate::url_validation::PrivatePolicy::BlockLoopback,
@@ -153,15 +145,13 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
         log::warn!("Redmine credentials will be transmitted in cleartext over HTTP");
     }
 
-    // Strip trailing slash from the string representation for consistent URL construction.
-    // url::Url always appends a trailing `/` for root paths, so we trim at string level.
+    // Strip trailing slash for consistent URL construction.
     let result = parsed.as_str().trim_end_matches('/').to_string();
 
     Ok(result)
 }
 
-// read_body_limited + MAX_RESPONSE_BODY_BYTES moved to `crate::http_util`
-// (Rule of Three: the LLM discovery command is the second consumer).
+// read_body_limited + MAX_RESPONSE_BODY_BYTES moved to `crate::http_util`.
 
 // ---------------------------------------------------------------------------
 // HTTP client helper
@@ -349,9 +339,7 @@ async fn do_fetch_enumerations(
 // ---------------------------------------------------------------------------
 
 /// Validates Redmine credentials by calling `/users/current.json`.
-///
-/// Returns a `RedmineValidationResult` indicating whether the credentials
-/// are valid, along with the authenticated user's info on success.
+/// Returns a `RedmineValidationResult` with the authenticated user's info on success.
 #[tauri::command]
 pub async fn validate_redmine_credentials(
     host_url: String,
@@ -366,11 +354,7 @@ pub async fn validate_redmine_credentials(
 }
 
 /// Fetches Redmine enumerations (projects, statuses, trackers, priorities, activities).
-///
-/// Makes 5 parallel requests via `tokio::join!`. Per-endpoint error handling:
-/// - 404 → empty vec + log::info (endpoint may be disabled)
-/// - 500 → empty vec + log::warn
-/// - Success → validate JSON shape, then parse
+/// Makes 5 parallel requests via `tokio::join!`; each endpoint maps 404/500 to an empty vec.
 #[tauri::command]
 pub async fn fetch_redmine_enumerations(
     host_url: String,
@@ -385,9 +369,7 @@ pub async fn fetch_redmine_enumerations(
 }
 
 /// Fetches and parses a single Redmine enumeration endpoint.
-///
-/// Returns `Ok(T)` on success, `Err(())` on non-success status codes
-/// (with appropriate logging), or propagates errors for connection failures.
+/// Returns `Ok(T)` on success, `Err(())` on non-success status, or propagates connection errors.
 async fn fetch_enum_endpoint<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     base_url: &str,
@@ -495,10 +477,7 @@ mod tests {
 
     #[test]
     fn validate_url_allows_cgnat_lower_boundary() {
-        // RFC 6598 CGNAT (100.64.0.0/10) — commonly seen on Tailscale and
-        // carrier-grade NAT networks. Previously blocked by Redmine's
-        // is_private_on_premise (which only covered RFC 1918); now accepted
-        // via the shared url_validation::is_private_on_premise(BlockLoopback).
+        // RFC 6598 CGNAT (100.64.0.0/10) is accepted as on-premise (Tailscale).
         let result = validate_redmine_host_url("http://100.64.1.1:3000/");
         assert!(
             result.is_ok(),
@@ -520,16 +499,9 @@ mod tests {
 
     #[test]
     fn validate_url_rejects_just_outside_cgnat() {
-        // 100.128.x.x is outside /10 — must NOT be classified as CGNAT and
-        // must NOT be mistaken for on-premise by the IP classifier.
-        // It's a regular public IP, which Redmine accepts with a warn; this
-        // test documents that it goes through the public-IP path, not CGNAT.
+        // 100.128.x.x is outside /10 — a public IP, not CGNAT/on-premise.
         let result = validate_redmine_host_url("http://100.128.0.1/");
-        // Public IP — Redmine's policy is to allow with warn (user-written).
-        // The important invariant is that it does NOT go through the
-        // CGNAT/on-premise arm; this is exercised indirectly by the test
-        // passing (if the classifier were wrong, validate_url rejection
-        // logic would differ).
+        // Public IP — allowed with a warn.
         assert!(
             result.is_ok(),
             "100.128.0.1 (outside CGNAT) should still resolve as a public IP: {:?}",
@@ -661,8 +633,7 @@ mod tests {
 
     #[test]
     fn validate_url_octal_ip_blocked() {
-        // The url crate correctly interprets octal notation: 0177 = 127 decimal.
-        // So "0177.0.0.1" is parsed as 127.0.0.1 (loopback) and blocked.
+        // 0177.0.0.1 parses as 127.0.0.1 (octal) and is blocked as loopback.
         let result = validate_redmine_host_url("http://0177.0.0.1/");
         assert!(
             result.is_err(),
@@ -783,18 +754,8 @@ mod tests {
     }
 
     // ── HTTP integration tests (mockito) ────────────────────────────────
-    //
-    // These tests call the core functions (do_validate_credentials,
-    // do_fetch_enumerations) directly with the mockito server URL,
-    // bypassing URL validation (mockito runs on 127.0.0.1 which is
-    // intentionally blocked by validate_redmine_host_url).
-    //
-    // Not covered here:
-    // - TLS certificate errors: mockito serves plain HTTP, so the reqwest
-    //   TLS error path (certificate keyword detection) cannot be triggered.
-    // - Connection timeout: mockito doesn't support delaying responses past
-    //   the reqwest timeout. The connection-refused test below verifies the
-    //   error path for unreachable servers instead.
+    // Mockito runs on 127.0.0.1, so these call do_* core fns directly, bypassing URL validation.
+    // Not covered: TLS cert errors (mockito is plain HTTP), connection timeout (see connection_refused test).
 
     #[tokio::test]
     async fn http_401_returns_invalid() {
@@ -1039,8 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_refused_returns_error() {
-        // Bind a port, get its number, then close the listener to guarantee
-        // nothing is listening when we connect.
+        // Bind a port then drop the listener so nothing is listening on connect.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -1155,9 +1115,7 @@ mod tests {
         );
     }
 
-    // Note: is_private_on_premise helper + its coverage moved to url_validation.rs
-    // as part of the consolidation for LLM model discovery (ADR-041). Redmine uses
-    // PrivatePolicy::BlockLoopback; LLM discovery uses PrivatePolicy::AllowLoopback.
+    // is_private_on_premise helper + coverage moved to url_validation.rs (ADR-041).
     // See url_validation::tests for private_on_premise_*_policy tests.
 
     #[test]
@@ -1226,9 +1184,7 @@ mod tests {
             result.is_err(),
             "Body one byte over limit should be rejected"
         );
-        // The error mentions either "too large" (Content-Length pre-check) or
-        // "exceeded" (streaming check) depending on whether mockito includes
-        // a Content-Length header.
+        // Error is "too large" (Content-Length pre-check) or "exceeded" (streaming check).
         let err = result.unwrap_err();
         assert!(
             err.contains("too large") || err.contains("exceeded"),
@@ -1284,11 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn body_too_large_content_length_preflight_rejected() {
-        // Exercises the Content-Length pre-flight guard in read_body_limited
-        // using a real HTTP server. mockito sets Content-Length automatically
-        // from the body, so reqwest sees it in the response header and the
-        // pre-flight guard rejects before streaming. We assert on "bytes, limit"
-        // to distinguish from the streaming guard ("exceeded ... byte limit").
+        // Exercises the Content-Length pre-flight guard; assert "bytes, limit" to distinguish from the streaming guard.
         let mut server = mockito::Server::new_async().await;
         let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
         let _mock = server

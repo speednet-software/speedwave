@@ -36,8 +36,7 @@ const SERVICE_DOT_COLOURS: readonly string[] = [
 ];
 
 /**
- * Returns the deterministic dot colour for a service row based on its name.
- * Configured + enabled services use the cycle palette; unconfigured stay muted.
+ * Returns the deterministic dot colour for a service row.
  * @param svc - the integration status entry
  * @param index - the row index in the rendered list
  */
@@ -346,23 +345,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   error = '';
   /** Name of the currently active project. */
   activeProject: string | null = null;
-  /**
-   * OS integrations auto-disabled at startup because macOS TCC denies the
-   * permission they previously had. Populated by validate_os_integrations_on_startup
-   * — non-empty after upgrades that change the binary identity (e.g. embedded
-   * Info.plist + sub-identifier change), where the prior TCC.db row no longer
-   * matches. Each entry carries a recovery reason from composeErrorMessage
-   * (typically a `tccutil reset` command). User clicks the toggle again to
-   * trigger a fresh permission prompt.
-   */
+  /** OS integrations auto-disabled at startup because macOS TCC denies their prior permission. */
   osIntegrationsAutoDisabled: OsIntegrationValidation[] = [];
-  /**
-   * In-flight or completed validation promises keyed by project. Static so
-   *  that route navigation (component remount) does NOT re-spawn 4 native
-   *  CLIs every time the user opens /integrations. The cached promise lets
-   *  later mounts await the original validate when they need its outcome
-   *  (tests do; production fire-and-forgets).
-   */
+  /** In-flight or completed validation promises keyed by project. */
   private static validationByProject = new Map<string, Promise<void>>();
 
   /** OAuth state */
@@ -401,18 +386,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
     await this.loadActiveProject();
-    // Render the integrations table immediately. Validation runs in the
-    // background (see runInitialOsValidation) and only once per project —
-    // re-entering the view, project-settled events, etc. must NOT re-spawn
-    // 4 native CLIs each time, the cost is 400ms-1.4s of CPU + Mail.app
-    // launch attempts.
     await this.loadIntegrations();
     this.runInitialOsValidation();
-    // Subscribe to settled (not just ready) so we also reload after
-    // `auth_required` / `error` settle — the integrations table itself
-    // does not require Claude auth, so users still need to see and toggle
-    // services in those states. Without this, navigating to /integrations
-    // before the shell has fully initialized leaves the table empty.
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       if (this.activeOAuthRequestId || this.oauthStatus === 'starting') {
         await this.handleCancelOAuth();
@@ -420,8 +395,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       await this.loadActiveProject();
       await this.loadIntegrations();
     });
-    // After a failed restart (build/compose), backend may have rolled the
-    // just-enabled service back to disabled — refresh the rows to match.
+    // Backend may roll a just-enabled service back on failed restart; refresh rows.
     this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
       void this.loadIntegrations();
     });
@@ -436,9 +410,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   /**
    * Subscribe to an OAuth-progress event channel emitted by the Tauri side.
-   * Shared between SharePoint (`sharepoint_oauth_progress`) and GitHub
-   * (`github_oauth_progress`); the `service` arg drives autoEnableIfConfigured
-   * on success.
    * @param eventName - the Tauri event channel to listen on
    * @param service - the integration the events belong to
    */
@@ -580,9 +551,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         );
       }
     } catch (e: unknown) {
-      // Non-fatal: validation failure should not block the integrations view.
-      // The user can still toggle services manually; failures will surface
-      // through the existing error path on click.
+      // Non-fatal; validation failure does not block the integrations view.
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.error(`[integrations] validateOsIntegrations failed (non-fatal): ${msg}`);
       this.osIntegrationsAutoDisabled = [];
@@ -603,8 +572,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058); Slack is
-      // beta-gated for its first OAuth release (ADR-071).
+      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058, ADR-071).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
         (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
@@ -797,11 +765,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Per-service dispatcher for the `start_*_oauth` Tauri commands. Keeps the
-   * service-specific argument shape (SharePoint needs client_id/tenant_id;
-   * GitHub uses a bundled client_id in `consts.rs`) out of `handleStartOAuth`.
+   * Per-service dispatcher for the `start_*_oauth` Tauri commands.
    * @param service - the integration to start OAuth for
-   * @param credentials - non-oauth field values from the form (used by SharePoint)
+   * @param credentials - non-oauth field values from the form
    */
   private invokeOAuthStart(
     service: string,
@@ -813,8 +779,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       });
     }
     if (service === 'slack') {
-      // Loopback PKCE flow with a bundled client_id (ADR-071) — no typed
-      // prerequisites, no device code.
+      // Loopback PKCE flow with a bundled client_id (ADR-071).
       return this.tauri.invoke<LoopbackFlowStart>('start_slack_oauth', {
         project: this.activeProject,
       });
@@ -884,11 +849,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * SSOT for "user flipped an MCP service toggle".
-   * Persists the new value, marks `pendingJustEnabled` on enable so a failed
-   * restart can roll it back, and requests the container restart.
-   * @param svc - the integration being toggled.
-   * @param enabled - target enabled state.
+   * SSOT for user-toggled MCP service. Persists enabled state and requests restart.
+   * @param svc - the integration being toggled
+   * @param enabled - target enabled state
    */
   private async applyServiceToggle(svc: IntegrationStatusEntry, enabled: boolean): Promise<void> {
     await this.tauri.invoke('set_integration_enabled', {
@@ -924,8 +887,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         enabled: next,
       });
       this.logger.info(`[integrations] os toggle persisted service=${os.service} enabled=${next}`);
-      // Drop the auto-disabled banner entry for this service — the toggle
-      // succeeded so the banner's "Mail.app is not running" text is stale.
+      // Drop the auto-disabled banner entry for this service.
       if (this.osIntegrationsAutoDisabled.some((e) => e.service === os.service)) {
         this.osIntegrationsAutoDisabled = this.osIntegrationsAutoDisabled.filter(
           (e) => e.service !== os.service

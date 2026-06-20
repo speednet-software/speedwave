@@ -15,8 +15,7 @@ jobs:
     steps:
       - name: Validate conventional commit title
         env:
-          # Pass the title via env (never interpolated into the run: body) so a
-          # malicious PR title cannot inject shell commands. Mirrors
+          # Pass title via env (never interpolated into run: body); mirrors
           # merge-strategy-check.yml.
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |

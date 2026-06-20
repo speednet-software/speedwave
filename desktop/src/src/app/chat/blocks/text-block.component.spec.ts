@@ -74,14 +74,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('does NOT rewrite data: or vbscript: URLs — only javascript: is prefixed with unsafe:', () => {
-    // Angular's URL sanitizer for [innerHTML] anchors only rewrites the
-    // javascript: scheme (SRC_URL_SANITIZATION_REGEX = /^(?!javascript:)/i).
-    // data: and vbscript: pass through unchanged. Any future user-facing
-    // render path that can receive attacker-controlled URLs must rely on
-    // CSP (img-src/frame-src restrictions) or its own pre-sanitization —
-    // it cannot assume Angular's HTML sanitizer will block these schemes.
-    // This test locks that contract in so a future refactor can't silently
-    // widen the trust boundary.
+    // Angular's [innerHTML] URL sanitizer rewrites only javascript:; data: and vbscript: pass through unchanged.
     fixture.componentRef.setInput('content', '[d](data:text/html,x) [v](vbscript:MsgBox(1))');
     fixture.detectChanges();
 

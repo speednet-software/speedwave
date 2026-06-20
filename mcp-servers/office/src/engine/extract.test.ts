@@ -1,6 +1,5 @@
 /**
- * Tests for the extraction engine: SheetJS spreadsheet → Markdown, the markitdown-first
- * chain with format-specific fallbacks, truncation, and `readPdfText`.
+ * Tests for the extraction engine: SheetJS/markitdown/pdftotext chains with truncation.
  * @module mcp-office/engine/extract.test
  */
 
@@ -31,8 +30,7 @@ vi.mock('node:fs/promises', async (orig) => {
 import * as XLSX from 'xlsx';
 function makeWorkbookBuffer(): Buffer {
   const wb = XLSX.utils.book_new();
-  // Ragged sheet: header row is 3 wide, a later row is 1 wide (short-row padding path). One cell
-  // contains a comma and one contains a pipe — exercises both the comma-safe parsing and pipe-escaping.
+  // Ragged rows, commas, pipes, escaping.
   const ws = XLSX.utils.aoa_to_sheet([
     ['Name', 'Score', 'Note'],
     ['Ada', 10, 'hello, world'],

@@ -11,9 +11,7 @@ struct NotesCLI {
         "check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note"
 
     static func main() {
-        // check_permission validates Notes automation via the unified
-        // AppleEventsGate. 30s data-access timeout matches the original probe
-        // budget (Notes can take longer than Mail to enumerate). See mail/MailCLI.swift.
+        // check_permission validates Notes automation via AppleEventsGate.
         runCLI(
             cliName: "notes-cli",
             commandList: commandList,

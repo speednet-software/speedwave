@@ -1,12 +1,6 @@
 /**
  * Tests for SharePoint list / item / column / page-deletion tools (PR5).
- *
- * Covers:
- * - Metadata: tool names + critical schema invariants.
- * - Site-policy by omission: NO tool's input schema accepts `site_id`.
- * - Happy path for each handler (mocked graphRequest).
- * - Error paths via NOT_CONFIGURED + Graph rejections.
- * - Column type enum is exactly the 6 supported types.
+ * Metadata, site-policy-by-omission (no site_id), happy/error paths, column type enum.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolsCallResult } from '@speedwave/mcp-shared';
@@ -150,10 +144,8 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('createList returns empty strings (not undefined) when Graph response omits id/webUrl', async () => {
-    // Some Graph environments return a 204/empty body for fast-create flows.
-    // The tool contract is "always return a {listId, webUrl} pair" — empty
-    // string is the documented fallback so downstream callers don't crash on
-    // `out.listId.startsWith(...)`.
+    // Contract: always return a {listId, webUrl} pair; empty string is the
+    // fallback when Graph omits them (e.g. 204).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -245,9 +237,8 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('addListColumn returns empty columnId when Graph response omits id', async () => {
-    // Same contract as createList: always return a {columnId} key, never
-    // undefined. Empty string signals to callers that the create succeeded
-    // server-side but the id was not echoed back (e.g. 204 / async create).
+    // Contract: always return a {columnId} key; empty string when Graph omits
+    // the id (e.g. 204 / async create).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -283,9 +274,7 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('listItems returns an empty items array when Graph response omits value', async () => {
-    // Graph occasionally returns `{}` or null on empty pages; the tool must
-    // surface a stable `{items: []}` shape so the model can treat "empty
-    // list" the same as "no value field".
+    // Contract: stable {items: []} shape when Graph omits value (e.g. {} or null).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -394,9 +383,7 @@ describe('list-tools handlers — error paths', () => {
     expect(parsed.code).toBe('LIST_LISTS_FAILED');
   });
 
-  // Each handler wraps Graph failures in its own `XXX_FAILED` code. One
-  // table-driven test per code so every `wrapErr` line gets a corresponding
-  // 500-response path.
+  // One table-driven case per handler's XXX_FAILED code (each wrapErr path).
   it.each([
     ['getList', { listId: 'L1' }, 'GET_LIST_FAILED'],
     ['createList', { displayName: 'X', description: 'd', template: 't' }, 'CREATE_LIST_FAILED'],
@@ -420,8 +407,7 @@ describe('list-tools handlers — error paths', () => {
   });
 
   it('updateList errors when description is provided alone', async () => {
-    // Covers the `if (params.description !== undefined)` branch when
-    // displayName is omitted (the dual-branch matters for branch coverage).
+    // Covers the description-only branch (displayName omitted).
     const graph = vi.fn().mockResolvedValueOnce(undefined);
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createListTools(client);
@@ -442,8 +428,7 @@ describe('list-tools handlers — error paths', () => {
     expect(body).not.toHaveProperty('description');
   });
 
-  // Per-tool listId / itemId / columnId validateGraphId rejections. Covers
-  // every `if (XErr) return XErr;` line in list-tools.ts.
+  // Per-tool listId / itemId / columnId validateGraphId rejections.
   it.each([
     ['getList', { listId: 'bad/../path' }],
     ['updateList', { listId: 'bad/../path', displayName: 'X' }],
@@ -480,8 +465,7 @@ describe('list-tools handlers — error paths', () => {
   });
 
   it('listItems passes through optional filter and top', async () => {
-    // Covers the `if (params.filter)` and `if (params.top)` branches in
-    // handleListItems — without this only the no-args path was exercised.
+    // Covers the filter and top branches in handleListItems.
     const graph = vi.fn().mockResolvedValueOnce({ value: [] });
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createListTools(client);

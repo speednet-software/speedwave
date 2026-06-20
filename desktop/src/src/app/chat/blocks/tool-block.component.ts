@@ -11,12 +11,7 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 
-/**
- * Semantic status → timeline border color class.
- *
- * Mirrors the design-proposals/06-terminal-minimal.html mockup: amber while
- * running, green on success, red-500 on error.
- */
+/** Semantic status → timeline border color class. */
 const STATUS_BORDER: Readonly<Record<ToolUseBlock['status'], string>> = Object.freeze({
   running: 'border-[var(--amber)]/50',
   done: 'border-[var(--green)]/50',
@@ -32,16 +27,7 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
 
 /**
  * Renders a Claude tool invocation as a collapsible timeline event.
- *
- * The header row (status glyph · tool name · inline summary) is always
- * visible; clicking it toggles the body. The body template is chosen by
- * `NormalizedToolInput.kind` — bash, read, edit, write, todo_write, glob,
- * grep, web_search, web_fetch, agent, or a generic JSON fallback. Edit and
- * Write delegate their diff pane to `<app-diff-view>`.
- *
- * Default collapsed state: every tool block starts collapsed regardless of
- * status. The user expands a block by clicking the header — explicit choices
- * override the default and survive status transitions (running → done).
+ * Body template chosen by `NormalizedToolInput.kind`; starts collapsed.
  */
 @Component({
   selector: 'app-tool-block',
@@ -244,15 +230,7 @@ export class ToolBlockComponent {
   readonly headerId = `tool-block-header-${this.instanceId}`;
   readonly bodyId = `tool-block-body-${this.instanceId}`;
 
-  /**
-   * User-toggle state, keyed by tool_id.
-   *
-   * Absent entries fall back to the status-derived default (`running` →
-   * expanded, everything else → collapsed). Keying by id means the user's
-   * explicit choice survives a status transition (running → done) without
-   * snapping back to the "done collapses" default; swapping the bound tool
-   * instance starts fresh.
-   */
+  /** User-toggle state keyed by tool_id; survives status transitions. */
   private readonly overrides: Record<string, boolean> = {};
 
   /** Returns the normalized tool input — recomputes only when input_json changes. */
@@ -267,8 +245,7 @@ export class ToolBlockComponent {
     if (override !== undefined) {
       return override;
     }
-    // All tool blocks default to collapsed regardless of status — the user
-    // expands them on demand by clicking the header.
+    // Default to collapsed regardless of status.
     return true;
   }
 
@@ -281,10 +258,7 @@ export class ToolBlockComponent {
 
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   readonly borderClass = computed<string>(() => {
-    // Stopped tools surface as status="error" but visually use a muted gray rail
-    // (matches the "stopped gray" rule in the design-system spec). The host
-    // element already carries `border-l-2 pl-4`, so only the color class is
-    // returned here.
+    // Stopped tools use a muted gray rail.
     if (this.isStopped()) return 'border-[var(--ink-mute)]/50';
     return STATUS_BORDER[this.tool().status];
   });

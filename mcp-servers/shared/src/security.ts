@@ -21,9 +21,7 @@ export function tokensDir(): string {
 }
 
 /**
- * Load a credential file by name from {@link tokensDir}. Thin wrapper over
- * {@link loadToken} so workers stop hand-rolling `path.join(TOKENS_DIR, name)`.
- * Errors are errno-differentiated by {@link loadToken} (cause forwarded).
+ * Load a credential file by name from {@link tokensDir}.
  * @param name - File name under the tokens directory (e.g. `bot_token`).
  * @returns Trimmed file contents.
  * @throws {Error} With errno cause forwarded (ENOENT/EACCES/EISDIR/…).
@@ -47,9 +45,6 @@ export async function loadToken(tokenPath: string): Promise<string> {
     // Differentiate error types for better debugging
     const code = (error as NodeJS.ErrnoException).code;
 
-    // Forward `cause` so callers that need the original errno (e.g.
-    // mcp-context7's optional-key fallback) can read `(e.cause as
-    // ErrnoException).code` without falling back to message matching.
     if (code === 'ENOENT') {
       throw new Error(`Token file not found: ${tokenPath}`, { cause: error });
     } else if (code === 'EACCES') {
@@ -65,10 +60,8 @@ export async function loadToken(tokenPath: string): Promise<string> {
 }
 
 /**
- * Core allowlist of env var names safe to pass to child processes — the
- * identical 14-key set shared by every worker that spawns a child. Workers
- * with extra needs spread this and append.
- * Anything carrying a secret (`MCP_*_AUTH_TOKEN`, API keys) is never here.
+ * Core allowlist of env var names safe to pass to child processes.
+ * Never includes secret-carrying names (`MCP_*_AUTH_TOKEN`, API keys).
  */
 export const BASE_SAFE_ENV_KEYS: readonly string[] = [
   // Process / shell environment
@@ -206,8 +199,7 @@ export function validateWorkerUrl(url: string): boolean {
   const port = Number(parsed.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
 
-  // URL constructor lowercases hostname, so also check the original string
-  // to reject uppercase input (Docker DNS is lowercase)
+  // URL constructor lowercases hostname; check raw string to reject uppercase input.
   const hostnameStart = url.indexOf('://') + 3;
   const hostnameEnd = url.indexOf(':', hostnameStart);
   const rawHostname = url.substring(hostnameStart, hostnameEnd);
@@ -221,9 +213,7 @@ export function validateWorkerUrl(url: string): boolean {
   if (parsed.pathname !== '/') return false;
   if (parsed.search !== '') return false;
   if (parsed.hash !== '') return false;
-  // The password sub-condition is defense-in-depth: the raw-hostname check above already
-  // rejects any URL with credentials (they shift the colon position). The branch is kept
-  // for correctness but is unreachable in practice — hence c8 ignore on the || right side.
+  // Credentials are already rejected by the raw-hostname check above.
   /* c8 ignore next */
   if (parsed.username !== '' || parsed.password !== '') return false;
 

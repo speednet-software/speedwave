@@ -12,16 +12,7 @@ import { OAuthFlowStatus } from '../../models/integration';
 /**
  * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
  * on submit; emits a separate event when the user requests a full reset.
- *
- * Existing stored token values are **never read back** (the backend treats
- * them as secrets — files are not exposed via any tauri command). The form
- * is always rendered with empty inputs; the placeholder hints at the
- * expected token format. Leaving a field empty preserves whatever is
- * currently on disk; entering a value overwrites it.
- *
- * Per-field byte cap mirrors the Rust-side `MAX_CREDENTIAL_BYTES = 4096`
- * via the `maxlength` attribute, surfaced in the UI before the user hits
- * Save instead of as a backend error response.
+ * Stored token values are never read back; inputs render empty.
  */
 @Component({
   selector: 'app-plugin-credentials-form',
@@ -89,11 +80,7 @@ import { OAuthFlowStatus } from '../../models/integration';
               </p>
             }
             @if (field.field_type === 'textarea') {
-              <!-- Multi-line secret (PEM, service-account JSON). The HTML
-                   pattern attribute is invalid on textarea, so the regex is
-                   checked by JS at submit + the backend. Masked with
-                   -webkit-text-security when is_secret (Tauri webviews are
-                   Chromium/WebKit). -->
+              <!-- Multi-line secret; regex checked by JS at submit + backend (pattern invalid on textarea). -->
               <textarea
                 [id]="'cred-' + field.key"
                 rows="3"
@@ -189,9 +176,7 @@ import { OAuthFlowStatus } from '../../models/integration';
     }
   `,
   styles: [
-    // Mask multi-line secrets the way <input type=password> masks single-line.
-    // Tauri webviews are Chromium (Windows/WebView2) / WebKit (macOS), both
-    // support the vendor-prefixed property.
+    // Mask multi-line secrets via -webkit-text-security (Chromium/WebKit webviews).
     `
       .cred-secret-mask {
         -webkit-text-security: disc;
@@ -203,18 +188,14 @@ export class PluginCredentialsFormComponent {
   private readonly log = inject(LoggerService);
   readonly authFields = input.required<PluginAuthField[]>();
   /**
-   * Keys of fields that currently have a value stored on disk (from
-   * `PluginStatusEntry.configured_fields`). Drives the per-field "✓ set"
-   * badge + "clear" button. Secrets are never read back, so this is the
-   * only signal the form has that a value already exists.
+   * Keys of fields with a value stored on disk (from
+   * `PluginStatusEntry.configured_fields`); drives the "✓ set" badge + clear button.
    */
   readonly configuredFields = input<string[]>([]);
   readonly save = output<PluginSaveCredentialsEvent>();
   /**
-   * Renamed from `reset` (which collides with the DOM-native form
-   * `reset` event — `@angular-eslint/no-output-native` flags it).
-   * Semantics unchanged: the host component should call
-   * `delete_plugin_credentials` (clear ALL) when this fires.
+   * Fires when the user requests a full reset; host clears ALL credentials.
+   * Named `clear` (not `reset`) to avoid the DOM-native `reset` event collision.
    */
   readonly clear = output<void>();
   /**
@@ -223,9 +204,7 @@ export class PluginCredentialsFormComponent {
    */
   readonly clearField = output<string>();
   /**
-   * True while a save/clear is in flight upstream. When true the Save button
-   * is disabled to block double-submit (each click would re-trigger the
-   * `save_plugin_credentials` Tauri call + container restart).
+   * True while a save/clear is in flight upstream; disables Save to block double-submit.
    */
   readonly inFlight = input<boolean>(false);
 
@@ -256,9 +235,7 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Whether every typed prerequisite is SAVED. Authorize reads credentials from
-   * the host-side seed (written by Save), so freshly-typed-but-unsaved values
-   * do not count — the user must Save first, then Authorize.
+   * Whether every prerequisite is SAVED (Authorize reads only saved credentials).
    */
   oauthPrerequisitesMet(): boolean {
     return this.oauthPrerequisiteFields().every((f) => this.isConfigured(f.key));
@@ -301,10 +278,8 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Space-joined list of `id`s the field is described by, for screen
-   * readers — the help text `<p>` and/or the validation error `<p>`. Returns
-   * `null` (not empty string) when neither is present so Angular drops the
-   * attribute entirely instead of binding an empty `aria-describedby`.
+   * Space-joined `id`s for `aria-describedby` (help and/or error `<p>`);
+   * `null` when neither is present so Angular drops the attribute.
    * @param key the field key
    * @returns the attribute value, or `null`
    */
@@ -348,10 +323,8 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Local edit buffer. Never seeded from server — secrets are write-only.
-   * Cleared after a successful save so the next render shows empty inputs
-   * (otherwise the password field would still hold the just-typed token
-   * in memory).
+   * Local edit buffer. Never seeded from server (secrets are write-only);
+   * cleared after a successful save.
    */
   private values: Record<string, string> = {};
 
@@ -367,22 +340,16 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Captures a single input event into the local edit buffer. Does not
-   * trim — the trim happens at submit time so the user can still see
-   * trailing spaces as they type.
+   * Captures an input event into the edit buffer; trims only at submit.
    * @param key the field key being edited
    * @param event the DOM input event from the bound `<input>` or `<textarea>`
    */
   onFieldInput(key: string, event: Event): void {
-    // Guard the cast — a synthetic event (e.g. dispatched in a test or
-    // by an extension) with a non-field target would otherwise write
-    // `undefined` into the buffer and break `hasAnyValue()`'s `.trim()`.
-    // Both <input> (text/password) and <textarea> (multi-line) are accepted.
+    // Guard the cast against a non-field event target.
     const target = event.target;
     if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return;
     this.values[key] = target.value;
-    // Clear a stale validation error as soon as the user edits the field —
-    // it's re-evaluated on the next submit.
+    // Clear a stale validation error on edit; re-evaluated on next submit.
     delete this.validationErrors[key];
   }
 
@@ -403,11 +370,8 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Tests a trimmed value against a field's optional regex constraint,
-   * anchored full-match to mirror both the HTML `pattern` attribute and the
-   * Rust host-side check. A field with no `validation`, or a compile error
-   * in the (manifest-validated) pattern, is treated as valid here — the
-   * backend remains the authority.
+   * Tests a trimmed value against a field's optional regex (anchored full-match).
+   * No `validation` or an uncompilable pattern is treated as valid here.
    * @param field the auth field whose constraint to apply
    * @param value the trimmed candidate value
    * @returns the error message on mismatch, or `null` when acceptable
@@ -419,9 +383,7 @@ export class PluginCredentialsFormComponent {
     try {
       re = new RegExp(`^(?:${validation.pattern})$`);
     } catch (err) {
-      // Pattern compiled in Rust (RE2) but not in JS (e.g. a construct the
-      // JS engine rejects). The backend still enforces it on save, so we
-      // pass the client check — but log rather than swallow silently.
+      // Pattern compiles in Rust (RE2) but not JS; backend still enforces on save.
       this.log.warn(
         `auth_field "${field.key}" pattern not compilable in JS; skipping client check: ${String(err)}`
       );
@@ -432,10 +394,8 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * True if at least one field has a non-empty, non-whitespace value in
-   * the edit buffer. Drives the Save button's `disabled` state — a
-   * submit with only whitespace would emit `{ credentials: {} }` which
-   * the host component drops anyway, so we block the click earlier.
+   * True if any field has a non-whitespace value in the edit buffer;
+   * drives the Save button's `disabled` state.
    * @returns whether any input has typed content worth saving
    */
   hasAnyValue(): boolean {
@@ -443,10 +403,8 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Handles `<form>` submit. Trims every value, drops whitespace-only
-   * entries, and emits `save` with the filtered map. Whitespace-only or
-   * fully-empty submits are no-ops (the host component would also
-   * filter, but blocking earlier avoids a flash of "saving…" state).
+   * Handles `<form>` submit: trims values, drops empty entries, emits `save`.
+   * Whitespace-only or fully-empty submits are no-ops.
    * @param event the form submit event (preventDefault called immediately)
    */
   onSubmit(event: Event): void {
@@ -458,10 +416,7 @@ export class PluginCredentialsFormComponent {
     }
     if (Object.keys(credentials).length === 0) return;
 
-    // Validate each filled field against its regex constraint before
-    // emitting. Collect every error (not just the first) so the user sees
-    // all problems at once. Any error blocks the save; the buffer is kept
-    // so the user can correct it.
+    // Validate each filled field against its regex, collecting all errors.
     const errors: Record<string, string> = {};
     const fields = this.authFields();
     for (const [key, value] of Object.entries(credentials)) {

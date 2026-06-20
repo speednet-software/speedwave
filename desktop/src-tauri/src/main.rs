@@ -38,10 +38,7 @@ mod oauth_providers;
 mod paste_cmd;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
-// `path_util` is consumed only by `oauth_login_cmd::open_terminal_with_command`
-// which is Windows-only (gnome-terminal / xterm spawning was removed with the
-// Linux backend in ADR-059). Gating the module declaration keeps clippy quiet
-// on macOS without needing per-fn `#[cfg(target_os = "windows")]`.
+// `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.
 #[cfg(target_os = "windows")]
 mod path_util;
 mod plugin_cmd;
@@ -62,8 +59,7 @@ mod updater;
 mod url_validation;
 mod window;
 
-// `check_project` is re-exported at the crate root because `diagnostics`
-// reaches it via `super::check_project`; keep it resolvable here.
+// Re-exported at crate root so `diagnostics` can reach it via `super::check_project`.
 use types::check_project;
 
 use chat::{ChatSession, SharedChatSession};
@@ -84,12 +80,8 @@ use reconcile::{
 pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
-/// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
-/// code 1. If it completes normally, returns and the caller may exit cleanly.
-///
-/// `drop(watchdog)` detaches the watchdog thread (does NOT cancel it), but
-/// `process::exit` from the main path terminates the process before the
-/// sleeping watchdog fires.
+/// `EXIT_CLEANUP_TIMEOUT_SECS`. Exits with code 1 if the cleanup thread
+/// panics; returns on normal completion.
 pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     let watchdog = std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(
@@ -108,18 +100,8 @@ pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
 }
 
 /// Stashes a cleanup `JoinHandle` into the shared slot so `RunEvent::Exit`
-/// can join it before the process exits.
-///
-/// If the slot is already occupied (the other exit path beat us to it, which
-/// the `CLEANUP_ONCE` guard makes effectively impossible) or the mutex is
-/// poisoned, drops the handle — the cleanup thread will run to completion
-/// independently and the process exit path in `RunEvent::Exit` will join
-/// whatever handle arrived first.
-///
-/// **Must not be called on the Tauri event-loop thread with blocking intent** —
-/// both call sites (WindowEvent::Destroyed and RunEvent::ExitRequested) only
-/// stash the handle; the actual join happens in `RunEvent::Exit` on the same
-/// thread after Tauri has finished processing events.
+/// can join it before the process exits. Drops the handle if the slot is
+/// already occupied or the mutex is poisoned.
 pub(crate) fn stash_cleanup_handle(
     slot: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     handle: std::thread::JoinHandle<()>,
@@ -129,8 +111,7 @@ pub(crate) fn stash_cleanup_handle(
             if guard.is_none() {
                 *guard = Some(handle);
             }
-            // else: slot already occupied — CLEANUP_ONCE guarantees the
-            // cleanup body runs once, so this handle is a no-op. Drop it.
+            // else: slot occupied; cleanup runs once (CLEANUP_ONCE), so drop this handle.
         }
         Err(e) => {
             log::warn!("exit cleanup handle slot poisoned, cleanup will not be joined: {e}");
@@ -149,10 +130,7 @@ static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// Chat / history / project / health / IDE-bridge commands now live in their
-// own domain modules: `chat_session_cmd`, `history_cmd`, `project_cmd`,
-// `health_cmd`, `ide_bridge_cmd`. The shared "not authenticated" message stays
-// at crate root because `chat_session_cmd` references it via `crate::`.
+// Shared "not authenticated" message; kept at crate root for `chat_session_cmd` (`crate::`).
 pub(crate) const MSG_NOT_AUTHENTICATED: &str =
     "Claude is not authenticated. Please authenticate first.";
 
@@ -344,8 +322,7 @@ pub(crate) fn ensure_ide_bridge_running(
     ide_bridge: &SharedIdeBridge,
     app_handle: &tauri::AppHandle,
 ) {
-    // Ensure the WSL Hyper-V firewall rule before binding the host listener
-    // (ADR-067). No-op off Windows; runs at most once per process.
+    // Ensure the WSL Hyper-V firewall rule before binding the host listener (ADR-067; no-op off Windows).
     firewall::ensure_firewall_rule();
     let mut guard = match ide_bridge.lock() {
         Ok(g) => g,
@@ -363,9 +340,7 @@ pub(crate) fn ensure_ide_bridge_running(
 }
 
 /// Start mcp-os if not already running. Holds the mutex for the entire
-/// spawn to prevent races (two callers both seeing None and double-spawning).
-/// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
-/// single-user desktop app where concurrent Tauri commands are rare.
+/// spawn to prevent races, and can block up to `PORT_READ_TIMEOUT` (10 s).
 fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     firewall::ensure_firewall_rule();
     let mut guard = match mcp_os.lock() {
@@ -386,10 +361,6 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
                 log::info!("ensure_mcp_os_running: started (port {})", proc.port());
                 *guard = Some(proc);
                 drop(guard); // release before spawning watchdog thread
-                             // Narrow TOCTOU: factory_reset could set WATCHDOG_STOP=true
-                             // between drop(guard) and the store below, causing a no-op
-                             // watchdog loop on None. Harmless in single-user desktop app
-                             // — the watchdog exits on the next iteration when it sees None.
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
             }
@@ -398,10 +369,8 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     }
 }
 
-// (`is_service_enabled` lives on `ResolvedIntegrationsConfig` in
-// `speedwave-runtime::config` so the match arms stay in one place. The CLI no
-// longer spawns oauth workers — Desktop is the sole supervisor; see
-// the dual-supervisor exit-137 note in `speedwave-cli::main`.)
+// `is_service_enabled` lives on `ResolvedIntegrationsConfig` in `speedwave-runtime::config`.
+// Desktop is the sole oauth-worker supervisor (see the exit-137 note in `speedwave-cli::main`).
 
 /// What to do with a running oauth worker given current vs. desired consumers.
 #[derive(Debug, PartialEq, Eq)]
@@ -453,16 +422,13 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     };
     let resolved = config::resolve_integrations(&project_dir, &user_config, project);
 
-    // OAuth-consuming services enabled for this project (built-ins + plugins
-    // with `oauth`). SSOT helper keeps this list identical to the one compose
-    // injection reads from the bearer-map.
+    // OAuth-consuming services for this project via the SSOT helper (matches compose injection).
     let installed = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
     let mut oauth_consumers =
         speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
     oauth_consumers.sort();
 
-    // A running worker may hold a stale consumer set (its bearer-map is fixed
-    // at spawn). Reconcile against the desired set — see oauth_reconcile_action.
+    // A running worker's consumer set is fixed at spawn; reconcile against the desired set.
     if let Some(running) = map.get(project) {
         let mut current: Vec<String> = running.spec().consumers().to_vec();
         current.sort();
@@ -477,8 +443,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
                     proc.cleanup_files();
                 }
                 if clear_bearer_map {
-                    // Drop the stale bearer-map so compose stops injecting into
-                    // now-orphaned containers (no respawn rewrites it).
+                    // Drop the stale bearer-map so compose stops injecting into orphaned containers.
                     let dir = speedwave_runtime::oauth_process::oauth_project_dir(
                         speedwave_runtime::consts::data_dir(),
                         project,
@@ -499,8 +464,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
     let consumer_refs: Vec<&str> = oauth_consumers.iter().map(String::as_str).collect();
 
-    // Only now that a spawn is certain — the rule must precede the worker's
-    // bind, but a NoChange / no-consumer toggle should not pay for it.
+    // Ensure the firewall rule only once a spawn is certain (must precede the worker's bind).
     firewall::ensure_firewall_rule();
 
     let script = match speedwave_runtime::build::resolve_oauth_script() {
@@ -534,10 +498,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
 }
 
 /// Decide which per-project workers in the map are unhealthy, respawn them,
-/// and return the names of those that should have their consumer containers
-/// recreated. Generic over [`WatchdogWorker`] so the same selection logic
-/// drives the oauth watchdog (and is unit-testable with a fake worker —
-/// see `FakeWorker` in this file's tests).
+/// and return the names of those whose consumer containers must be recreated.
 fn sweep_per_project_workers<P>(
     workers: &mut std::collections::HashMap<String, P>,
     log_prefix: &str,
@@ -588,15 +549,9 @@ impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
     }
 }
 
-/// Shared watchdog loop for per-project host-side workers (oauth).
-/// Polls every 30 s; under the map mutex, calls [`sweep_per_project_workers`]
-/// to respawn dead workers; releases the lock; then recreates each respawned
-/// project's hub containers so they observe the new worker port (e.g. a fresh
-/// `WORKER_OAUTH_URL`).
-///
-/// Stops cleanly when `stop_flag` is set (used by app exit cleanup). Catches
-/// panics from `recreate_project_containers_if_running` so a single bad
-/// project does not kill the watchdog thread silently.
+/// Shared watchdog loop for per-project host-side workers (oauth). Polls every
+/// 30 s, respawns dead workers via [`sweep_per_project_workers`], then recreates
+/// each respawned project's hub containers. Stops when `stop_flag` is set.
 fn start_per_project_watchdog<P>(
     workers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, P>>>,
     stop_flag: &'static std::sync::atomic::AtomicBool,
@@ -612,8 +567,7 @@ fn start_per_project_watchdog<P>(
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            // Respawn under the lock; defer container recreate until after we release it
-            // so consumer workers see the new WORKER_<name>_URL.
+            // Respawn under the lock; defer container recreate until after release.
             let respawned: Vec<String> = {
                 let mut map = match workers.lock() {
                     Ok(g) => g,
@@ -624,8 +578,7 @@ fn start_per_project_watchdog<P>(
                 };
                 sweep_per_project_workers(&mut map, log_prefix)
             };
-            // Lock released — recreate containers so consumers pick up the new port.
-            // Catch panics so a single bad project does not kill the watchdog thread silently.
+            // Recreate containers (panic-isolated per project) so consumers pick up the new port.
             for name in respawned {
                 let n = name.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -660,9 +613,7 @@ fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> !
 }
 
 /// Formats the per-plugin failures from `plugin::audit_all` into a
-/// user-actionable dialog message. Tells the user what failed and how
-/// to recover via CLI/manual cleanup — Settings UI is unreachable
-/// while the audit fails.
+/// user-actionable dialog message with CLI/manual recovery steps.
 fn format_audit_failure_message(failures: &[(String, String)]) -> String {
     let mut body = String::from(
         "Speedwave detected one or more plugins that no longer match their\n\
@@ -701,8 +652,7 @@ fn main() {
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook; // suppress unused warning
-                                   // Sanctioned panic-hook last-resort fallback (logging.md): the
-                                   // logger may be dead mid-panic, so write to stderr directly.
+                                   // Sanctioned panic-hook stderr fallback (logging.md).
             #[allow(clippy::print_stderr)]
             {
                 eprintln!("PANIC: {sanitized}");
@@ -711,9 +661,6 @@ fn main() {
     }));
 
     // True when setup has been *started* (at least check_runtime passed).
-    // After factory reset or fresh install, runtime_ready is false so we
-    // skip IDE Bridge / mcp-os / link_cli / resources marker to keep
-    // ~/.speedwave/ non-existent until the wizard explicitly creates it.
     let setup_started = setup_wizard::SetupState::load().runtime_ready;
 
     // Bundled binary resolution for app bundles.
@@ -722,9 +669,7 @@ fn main() {
             if let Some(res) = reconcile::resolve_resources_dir(parent) {
                 // Env var always set — Desktop uses it directly, never reads the marker file
                 std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, &res);
-                // Marker written to disk only if setup was completed at least once.
-                // After factory reset or fresh install: don't recreate ~/.speedwave/.
-                // CLI needs the marker only after the wizard finishes and links the binary.
+                // Marker written to disk only after setup completed at least once.
                 if setup_started {
                     if let Err(e) = speedwave_runtime::build::write_resources_marker(&res) {
                         log::warn!("could not write resources-dir marker: {e}");
@@ -736,9 +681,7 @@ fn main() {
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
-    // Meeting-transcription stores (ADR-056). Active sessions live in memory;
-    // both stores walk the disk lazily on first access. `transcript_drivers`
-    // maps an in-flight recording to its stop signal.
+    // Meeting-transcription stores (ADR-056); `transcript_drivers` maps a recording to its stop signal.
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
     let model_store: transcription_cmd::ModelStoreHandle =
@@ -757,9 +700,7 @@ fn main() {
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
-    // Publish the plugin-bridges map globally so compose-render call sites
-    // in setup_wizard / containers_cmd can read it without taking tauri::State
-    // (they are free functions and reachable from CLI helpers too).
+    // Publish the plugin-bridges map globally so compose-render call sites can read it without tauri::State.
     reconcile::set_global_plugin_bridges(plugin_bridges.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
@@ -784,15 +725,10 @@ fn main() {
         .unwrap_or(false);
     let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
 
-    // Register SIGTERM/SIGINT handler so process signals trigger the same
-    // cleanup as graceful window close. The CLEANUP_ONCE guard in
-    // run_exit_cleanup ensures the body runs at most once even when both
-    // the signal handler and WindowEvent::Destroyed fire concurrently.
+    // Register SIGTERM/SIGINT handler so signals run the same cleanup as window close
+    // (idempotent via the CLEANUP_ONCE guard in run_exit_cleanup).
     let cleanup_ctx_signal = cleanup_ctx.clone();
-    // The ctrlc crate runs handlers on a dedicated thread (not a real signal
-    // handler), so blocking with `.join()` here is safe and necessary —
-    // `std::process::exit` would otherwise kill the cleanup thread mid-flight
-    // and the Lima VM would never stop.
+    // ctrlc runs handlers on a dedicated thread, so blocking with `.join()` here is safe.
     match ctrlc::set_handler(move || {
         if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_signal) {
             join_with_exit_watchdog(handle);
@@ -807,11 +743,7 @@ fn main() {
         }
     }
 
-    // Shared slot for the cleanup `JoinHandle` produced inside
-    // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` (whichever fires
-    // first for the given exit path). The Tauri `RunEvent::Exit` hook drains
-    // and joins it so the Lima VM stop completes before `Builder::run`
-    // returns (and the process exits).
+    // Shared slot for the cleanup `JoinHandle`; `RunEvent::Exit` drains and joins it before exit.
     let exit_cleanup_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> =
         Arc::new(Mutex::new(None));
     let exit_cleanup_handle_window = exit_cleanup_handle.clone();
@@ -819,11 +751,7 @@ fn main() {
 
     let builder = tauri::Builder::default();
 
-    // WebDriver server for E2E tests — only present when the "e2e" feature is
-    // enabled. The plugin embeds a W3C WebDriver server on 127.0.0.1:4445 so
-    // E2E specs can drive the real app via WebdriverIO.
-    // Production releases are built without the feature — the crate is not
-    // compiled or linked, so zero attack surface.
+    // WebDriver server for E2E tests on 127.0.0.1:4445; only compiled under the "e2e" feature.
     #[cfg(feature = "e2e")]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
 
@@ -892,60 +820,34 @@ fn main() {
 
             clipboard_bridge::spawn(app.handle().clone());
 
-            // Hard-fail on tampered plugins. `plugin::audit_all` re-verifies
-            // every plugin under `~/.speedwave/plugins/`; failures are
-            // collected and shown to the user in one dialog. Recovery
-            // path is the CLI (`speedwave plugin remove <slug>`) or
-            // manual deletion — Settings UI is behind this gate.
-            //
-            // Hard-fail semantics: the dialog shows the user every failed
-            // plugin synchronously, then the process exits. Returning
-            // `Ok(())` from `setup` would let Tauri continue starting
-            // the webview and registering command handlers — a tampered
-            // plugin would still be inert (`#[tauri::command]` callers
-            // go through the verified-only command gates), but the
-            // command surface would be live for unrelated calls. We
-            // refuse to bring the rest of the app online at all: the
-            // dialog is shown via the OS-native blocking path and the
-            // process exits the moment the user dismisses it.
+            // Hard-fail on tampered plugins: `plugin::audit_all` re-verifies every plugin,
+            // collects failures into one blocking dialog, then exits. Recovery is CLI/manual deletion.
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
-                // Diverges (`-> !`) — `process::exit` is the last call.
-                // No `Ok(())` / `Err(...)` follows because Tauri must
-                // not bring up the webview / command surface for a
-                // tampered plugin set.
                 show_audit_failure_dialog_and_exit(app.handle(), body);
             }
 
-            // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` —
-            // tauri-plugin-log prunes on every rotation. No separate timer needed.
+            // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` (pruned on rotation).
 
             if setup_started {
-                // Sanitise any v1 SharePoint secrets still in the worker-mounted
-                // token dir (refresh_token / client_id / tenant_id). Best-effort,
-                // idempotent. Secrets are never migrated — see module docs.
+                // Sanitise v1 SharePoint secrets from the worker-mounted token dir (best-effort, idempotent).
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
                 if cleaned > 0 {
                     log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
                 }
 
-                // Self-heal legacy/partial oauth.json whose clientId/tenantId sit
-                // top-level instead of under providerData (ADR-060 addendum).
-                // Shape-only, idempotent — never moves secrets. It logs its own
-                // summary; do not re-log the return value (CodeQL taints it).
+                // Self-heal legacy oauth.json shape (ADR-060 addendum); shape-only, never moves secrets.
+                // Do not re-log the return value (CodeQL taints it).
                 let _ =
                     speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
                 // Start IDE Bridge
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
 
-                // Start a `PluginHostBridge` for every verified plugin whose
-                // manifest declares a `host_bridge` block. Always on,
-                // mirroring IDE Bridge's "passive listener" behavior — when
-                // the corresponding plugin is disabled in a project the
-                // bridge sits idle on its loopback port.
+                // Start a `PluginHostBridge` for every verified plugin declaring a `host_bridge` block.
+                // Always on; sits idle on its loopback port when the plugin is disabled in a project.
                 crate::bridges::plugin_bridge_manager::init_and_start(
                     &plugin_bridges,
                     app.handle(),
@@ -974,9 +876,7 @@ fn main() {
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
-                // Start the per-project oauth watchdog. No worker is spawned
-                // here — oauth workers are per-project and spawned on demand;
-                // the watchdog simply respawns any that die.
+                // Start the per-project oauth watchdog; workers are spawned on demand, not here.
                 OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_oauth_watchdog(oauth.clone());
             } else {
@@ -991,8 +891,6 @@ fn main() {
             }
 
             // Re-link CLI binary on every startup to keep it in sync after updates.
-            // Gated behind setup_started: CLI doesn't exist on fresh install,
-            // and we must not recreate ~/.speedwave/ after factory reset.
             if setup_started {
                 #[cfg(target_os = "macos")]
                 if let Err(e) = setup_wizard::ensure_lima_vm_config() {
@@ -1004,9 +902,7 @@ fn main() {
                     log::warn!(".wslconfig VPN-compat migration failed: {e}");
                 }
 
-                // Startup/post-update: apply automount=metadata for existing
-                // distros via `IfIdle` (terminates only when idle). Err is
-                // non-fatal here — never block app launch (see ADR-052).
+                // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
                 #[cfg(target_os = "windows")]
                 {
                     use setup_wizard::TerminateOnChange;
@@ -1113,11 +1009,8 @@ fn main() {
             // macOS/Windows: left-click on tray icon toggles window visibility.
             {
                 use std::sync::atomic::AtomicU64;
-                // Debounce: ignore clicks within 500ms of the previous one
-                // to prevent double-toggle from rapid clicks. 500ms equals the
-                // Windows default double-click interval, though users with
-                // accessibility settings may have a longer interval (up to 900ms).
-                // On Windows a double-click fires two Click::Up events.
+                // Debounce: ignore clicks within 500ms (Windows default double-click interval,
+                // which fires two Click::Up events) to prevent double-toggle.
                 static LAST_CLICK_MS: AtomicU64 = AtomicU64::new(0);
                 const DEBOUNCE_MS: u64 = 500;
 
@@ -1176,8 +1069,7 @@ fn main() {
                     tray_available_setup.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    // Tray creation failed. Window is already visible
-                    // (tauri.conf.json: visible=true), so no fallback needed.
+                    // Tray creation failed; window is already visible (tauri.conf.json: visible=true).
                     log::error!("tray: failed to create system tray: {e}");
                 }
             }
@@ -1335,8 +1227,7 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
-            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS
-            // Microphone / Audio Recording privacy panes for permission recovery.
+            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS Microphone / Audio panes.
             system_settings_cmd::open_microphone_pane,
             system_settings_cmd::open_audio_capture_pane,
         ])
@@ -1356,10 +1247,7 @@ fn main() {
                     if !should_run_cleanup(window.label()) {
                         return;
                     }
-                    // Spawn cleanup but DO NOT join here — joining on the
-                    // Tauri main thread would deadlock the event loop. Stash
-                    // the handle so `RunEvent::Exit` can join before the
-                    // process actually exits.
+                    // Do NOT join here (would deadlock the event loop); stash the handle for `RunEvent::Exit`.
                     if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_window) {
                         stash_cleanup_handle(&exit_cleanup_handle_window, handle);
                     }
@@ -1378,58 +1266,20 @@ fn main() {
     };
 
     app.run(move |app_handle, event| match event {
-        // `ExitRequested` covers the paths where `WindowEvent::Destroyed`
-        // does NOT fire on the main window before exit:
-        //   - Tray menu "Quit" (calls `app.exit(0)`)
-        //   - macOS app menu "Quit Speedwave" / Cmd+Q (NSApplication terminate)
-        //   - SIGTERM via the Tauri runtime
-        // In tray mode the main window is hidden (not destroyed), so the
-        // `WindowEvent::Destroyed` branch never runs and the VM would stay
-        // up after the process exits. Spawning cleanup here guarantees it
-        // runs for every exit path. `CLEANUP_ONCE` inside
-        // `run_exit_cleanup` makes this idempotent with respect to the
-        // `WindowEvent::Destroyed` call site.
+        // Covers exit paths where `WindowEvent::Destroyed` does not fire (tray Quit, macOS Cmd+Q, SIGTERM).
+        // `CLEANUP_ONCE` in `run_exit_cleanup` makes this idempotent with the `Destroyed` call site.
         tauri::RunEvent::ExitRequested { .. } => {
-            // Hide the main window immediately so macOS stops waiting for
-            // the window to respond during the cleanup join in
-            // `RunEvent::Exit`. Without this, the user sees a beachball
-            // for ~1s on Cmd+Q because the event loop blocks joining the
-            // limactl stop thread while the window is still visible —
-            // WindowServer then draws the beachball.
-            //
-            // Safe on Windows too: the window is typically already being
-            // destroyed when ExitRequested fires (tray-less setups),
-            // making this a harmless no-op. Do NOT gate this to macOS —
-            // a `#[cfg(target_os = "macos")]` guard would re-introduce
-            // the beachball if macOS ever reorders event delivery, and
-            // removing it costs nothing elsewhere.
+            // Hide the window first to avoid a beachball on Cmd+Q; harmless no-op on Windows.
             hide_main_window(app_handle);
             if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
                 stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);
             }
         }
         tauri::RunEvent::Exit => {
-            // Drain and join the cleanup thread spawned in
-            // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` so
-            // `limactl stop` finishes before Tauri returns from `.run()`
-            // and the process exits.
-            //
-            // Fallback: on macOS, Cmd+Q / app-menu-Quit delivers
-            // `applicationWillTerminate`, which tao maps to
-            // `Event::LoopDestroyed`, which tauri-runtime-wry maps
-            // directly to `RunEvent::Exit` — bypassing
-            // `RunEvent::ExitRequested` and (for a hidden tray-mode
-            // window) `WindowEvent::Destroyed` entirely. If neither
-            // earlier arm ran, the slot is empty here and the Lima VM
-            // would be orphaned. Spawn cleanup inline as a last resort.
-            // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
-            // idempotent with the other entry points.
-            //
-            // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
-            // the tests below asserts that this arm contains the literal
-            // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
-            // `hide_main_window(app_handle)` — if you rename either
-            // identifier, update the test assertions too.
+            // Join the stashed cleanup thread so `limactl stop` finishes before `.run()` returns.
+            // Fallback: macOS Cmd+Q bypasses earlier arms, so spawn cleanup inline if the slot is empty.
+            // Test `exit_arm_runs_cleanup_when_handle_slot_is_empty` asserts the literals
+            // `run_exit_cleanup(&cleanup_ctx_runevent)` and `hide_main_window(app_handle)` — update it on rename.
             let handle = match exit_cleanup_handle_runevent.lock() {
                 Ok(mut slot) => slot.take(),
                 Err(e) => {
@@ -1608,8 +1458,7 @@ mod tests {
         }
         fn respawn(&mut self) -> anyhow::Result<u16> {
             self.respawn_calls.set(self.respawn_calls.get() + 1);
-            // After a successful respawn the fake reports alive=true so a
-            // re-sweep wouldn't pick it again (matches real OauthProcess behaviour).
+            // After a successful respawn the fake reports alive=true (matches real OauthProcess).
             match &self.respawn_result {
                 Ok(p) => {
                     self.alive = true;
@@ -1648,8 +1497,7 @@ mod tests {
 
     #[test]
     fn sweep_per_project_workers_failed_respawn_excluded_from_respawned() {
-        // Bug class: caller would recreate containers for a project whose
-        // worker actually didn't come back up — wasted compose churn.
+        // Bug class: recreating containers for a worker that didn't come back up.
         let mut map = std::collections::HashMap::new();
         map.insert(
             "bad".to_string(),
@@ -1683,9 +1531,6 @@ mod tests {
         //   1. fn join_with_exit_watchdog definition
         //   2. ctrlc signal handler call site (blocks — safe on ctrlc's dedicated thread)
         //   3. RunEvent::Exit call site (blocks — after Tauri finishes processing events)
-        // The stash_cleanup_handle helper used by WindowEvent::Destroyed and
-        // RunEvent::ExitRequested drops handles rather than joining on the event-loop
-        // thread, so it does NOT add occurrences here.
         // Total: at least 3 (fn def + 2 call sites) outside the test module.
         let non_test_count = occurrences
             .iter()
@@ -1694,8 +1539,7 @@ mod tests {
                 let before = &source[..*idx];
                 let last_mod_tests = before.rfind("mod tests");
                 let last_cfg_test = before.rfind("#[cfg(test)]");
-                // If both markers are found and cfg(test) is close before mod tests,
-                // this occurrence is inside the test module.
+                // Inside the test module when cfg(test) precedes the nearest `mod tests`.
                 match (last_mod_tests, last_cfg_test) {
                     (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
                     _ => true,
@@ -1711,15 +1555,7 @@ mod tests {
     }
 
     /// Regression guard: the `ExitRequested` arm must hide the main window
-    /// BEFORE spawning cleanup. Without this, the user sees a beachball
-    /// on Cmd+Q because the event loop blocks joining the cleanup thread
-    /// while the main window is still visible — macOS WindowServer then
-    /// draws the beachball. Hiding the window first releases WindowServer
-    /// from expecting paint responses.
-    ///
-    /// The hide is performed via `hide_main_window(app_handle)` — the
-    /// canonical helper in `window.rs` that also sets the macOS activation
-    /// policy to Accessory so the Dock icon disappears immediately.
+    /// (via `hide_main_window`) before spawning cleanup, to avoid a Cmd+Q beachball.
     #[test]
     fn exit_requested_arm_hides_main_window_before_cleanup() {
         let source = include_str!("main.rs");
@@ -1745,10 +1581,8 @@ mod tests {
         );
     }
 
-    /// Regression guard: the `ExitRequested` arm must stash its cleanup handle
-    /// into `exit_cleanup_handle_runevent` so that `RunEvent::Exit` can join it
-    /// before the process exits. A future refactor that drops the stash would
-    /// silently break the join and leave the Lima VM running after quit.
+    /// Regression guard: the `ExitRequested` arm must stash its cleanup handle into
+    /// `exit_cleanup_handle_runevent` so `RunEvent::Exit` can join it before the process exits.
     #[test]
     fn exit_requested_arm_stashes_handle_for_exit_join() {
         let source = include_str!("main.rs");
@@ -1772,14 +1606,8 @@ mod tests {
         );
     }
 
-    /// Regression guard: the `RunEvent::Exit` arm must have a fallback that
-    /// calls `run_exit_cleanup` when the handle slot is empty. On macOS,
-    /// Cmd+Q / app-menu-Quit delivers `applicationWillTerminate`, which tao
-    /// maps to `Event::LoopDestroyed`, which tauri-runtime-wry maps directly
-    /// to `RunEvent::Exit` — bypassing `RunEvent::ExitRequested` and (for a
-    /// hidden tray-mode window) `WindowEvent::Destroyed`. Without the
-    /// fallback, the slot stays empty, nothing is joined, and the Lima VM
-    /// is orphaned after quit.
+    /// Regression guard: the `RunEvent::Exit` arm must call `run_exit_cleanup` as a
+    /// fallback when the handle slot is empty (macOS Cmd+Q bypasses the earlier arms).
     #[test]
     fn exit_arm_runs_cleanup_when_handle_slot_is_empty() {
         let source = include_str!("main.rs");
@@ -1808,9 +1636,7 @@ mod tests {
     }
 
     /// Behavioral test for `stash_cleanup_handle` happy path: handle is
-    /// stashed into an empty slot. Covers the dominant branch; other
-    /// branches (slot-occupied, poisoned-mutex) are unreachable under
-    /// `CLEANUP_ONCE` or documented-contract-only.
+    /// stashed into an empty slot.
     #[test]
     fn stash_cleanup_handle_stores_into_empty_slot() {
         let slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
@@ -1818,8 +1644,7 @@ mod tests {
         stash_cleanup_handle(&slot, handle);
 
         let stashed = slot.lock().unwrap().take();
-        // Regression guard: if the empty-slot branch were ever inverted
-        // (e.g. `if guard.is_some()` instead of `is_none()`), this would be None.
+        // Regression guard: an inverted empty-slot branch would leave this None.
         assert!(
             stashed.is_some(),
             "first handle must be stashed into empty slot"

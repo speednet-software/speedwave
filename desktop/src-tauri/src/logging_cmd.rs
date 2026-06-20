@@ -2,8 +2,7 @@ use std::sync::OnceLock;
 
 const DEFAULT_BUNDLE_IDENTIFIER: &str = "pl.speedwave.desktop";
 
-// `make dev` overrides identifier to `.dev` via TAURI_CONFIG; must match
-// tauri-plugin-log's runtime LogDir target, not the value in tauri.conf.json.
+// `make dev` overrides identifier to `.dev` via TAURI_CONFIG.
 static BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 pub(crate) fn init_bundle_identifier(identifier: String) {
@@ -16,10 +15,7 @@ fn bundle_identifier() -> &'static str {
     match BUNDLE_IDENTIFIER.get() {
         Some(s) => s.as_str(),
         None => {
-            // Production build: return the default silently (Tauri setup might not
-            // have run yet during early panic-hook output, etc.). Debug build:
-            // surface the miss — it means desktop_log_dir() was consulted before
-            // init_bundle_identifier and will return the release path under dev.
+            // Debug build warns; production returns the default silently.
             #[cfg(all(debug_assertions, not(test)))]
             log::warn!(
                 "bundle_identifier(): BUNDLE_IDENTIFIER not initialised yet; falling back to {DEFAULT_BUNDLE_IDENTIFIER}"

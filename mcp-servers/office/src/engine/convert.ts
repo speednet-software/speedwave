@@ -1,6 +1,5 @@
 /**
- * Document generation and conversion: Markdown/HTML → PDF/DOCX/PPTX (pandoc + weasyprint)
- * and Office → PDF / Office ↔ Office (LibreOffice headless, serialized via the LO queue).
+ * Markdown/HTML → PDF/DOCX/PPTX (pandoc + weasyprint), Office → PDF / Office ↔ Office (LibreOffice headless).
  * @module mcp-office/engine/convert
  */
 
@@ -60,9 +59,7 @@ async function materializeTextInput(
 }
 
 /**
- * Base URL for WeasyPrint's `url_fetcher` so relative `<img>` etc. in the source resolve correctly.
- * Inline content lives in `/tmp` (which `url_fetcher` rejects), so we point at `/workspace/` and let
- * `![](chart.png)` still work; a `/workspace` path uses its own directory.
+ * Base URL for WeasyPrint's `url_fetcher`: `/workspace/` for inline content, else the file's own directory.
  * @param filePath - The materialized file path.
  * @param isTemp - Whether the materialization wrote to `/tmp` (inline content).
  * @returns A `file://` base URL under `/workspace`.
@@ -85,10 +82,7 @@ function isCssMargin(value: string): boolean {
 }
 
 /**
- * Validate `opts` and build the safe `@page` declaration (`size: …; margin: …;`). Rejects anything
- * that is not a CSS page-size keyword (optionally with an orientation), a `<length>` list (1–4 tokens,
- * since `size` also accepts `<width> <height>`), or — for `margin` — 1–4 CSS lengths, so caller-supplied
- * option strings cannot inject arbitrary CSS into the rendered document.
+ * Validate `opts` and build the safe `@page` declaration (`size: …; margin: …;`).
  * @param opts - Page-rendering options.
  * @returns The validated `size: <...>; margin: <...>;` string for an `@page` block.
  * @throws {ValidationError} If `pageSize` or `margin` is not a recognized CSS value.
@@ -100,8 +94,7 @@ function pageRuleBody(opts: PdfOptions): string {
       `pageSize must be a CSS page-size keyword (A4, Letter, …) or "<width> <height>" lengths, got: ${rawSize}`
     );
   }
-  // Strip any trailing orientation already present in the keyword so `landscape: true` + "A4 landscape"
-  // does not produce the invalid "A4 landscape landscape".
+  // Strip any trailing orientation already present in the keyword.
   const baseSize = rawSize.replace(/\s+(portrait|landscape)\s*$/i, '');
   const size = opts.landscape ? `${baseSize} landscape` : rawSize;
   const margin = (opts.margin ?? '18mm').trim();
@@ -130,9 +123,7 @@ img { max-width: 100%; }
 }
 
 /**
- * Render an HTML file to PDF via WeasyPrint (`scripts/weasyprint_render.py`), which restricts
- * resource loading to `file://` under `/workspace` and writes the PDF atomically. The script's
- * output path is a `/tmp` file we then move onto the validated destination.
+ * Render an HTML file to PDF via WeasyPrint (`scripts/weasyprint_render.py`), atomically moved onto `destAbs`.
  * @param htmlAbs - Absolute path of the source HTML.
  * @param baseUrl - Base URL for resolving relative resources (a `file://` URL under `/workspace`).
  * @param destAbs - Absolute destination path for the PDF (already validated).
@@ -227,8 +218,7 @@ export async function htmlToPdf(
 }
 
 /**
- * Markdown (path or inline) → another format via pandoc, writing to a `/tmp` file first and then
- * `atomicMoveOnto` the validated destination — so a SIGKILL mid-write never leaves a partial `dest`.
+ * Markdown (path or inline) → another format via pandoc, atomically moved onto the validated destination.
  * @param input - The Markdown source.
  * @param writer - Pandoc output writer (`"docx"` | `"pptx"`).
  * @param defaultBase - Default base filename when `outName` is omitted.

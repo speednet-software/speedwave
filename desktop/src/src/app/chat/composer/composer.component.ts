@@ -44,24 +44,14 @@ interface AttachmentRecord {
   preprocessed: PreprocessedImage | null;
 }
 
-/**
- * Inline directive prepended to a user message when plan mode is active.
- * Stream-json has no first-class plan toggle, so we encode the intent in the
- * prompt itself. The wording mirrors Claude Code's CLI plan mode banner.
- */
+/** Inline directive prepended to a user message when plan mode is active. */
 const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
 /**
- * Stateless composer that wraps a textarea, slash button, slash-menu popover, and a
- * send button. Input is managed by a reactive `FormControl<string>`; Enter
- * submits while Shift+Enter inserts a newline. Typing `/` at the start of the
- * textarea (or clicking the `/` toolbar button) opens the slash-menu popover.
- *
- * ADR-045: when `streaming` is true and a user submits, the composer emits
- * `queueRequested` instead of `submitted`; the parent wires the queue
- * Tauri command. The "queued: …" preview line surfaces the active slot
- * with an X button that emits `queueCancelled`.
+ * Stateless composer: textarea, slash button, slash-menu popover, send button.
+ * Enter submits, Shift+Enter inserts a newline; `/` at start opens the slash menu.
+ * ADR-045: while `streaming`, submit emits `queueRequested` instead of `submitted`.
  */
 @Component({
   selector: 'app-composer',
@@ -147,11 +137,7 @@ const PLAN_MODE_PREFIX =
       <div
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]"
       >
-        <!-- Plan / Act mode toggle — first control in the toolbar so the
-             active mode is the most visible piece of the row. Plan mode
-             prepends a planning directive to the backend payload (Claude
-             produces a plan and asks before acting); the local bubble
-             keeps the user's raw text. -->
+        <!-- Plan / Act mode toggle. -->
         <button
           type="button"
           data-testid="composer-plan-toggle"
@@ -262,11 +248,7 @@ export class ComposerComponent implements AfterViewInit {
   /** True to disable input and prevent submits, false to enable. */
   readonly disabled = input(false);
 
-  /**
-   * True when a turn is currently streaming (ADR-045). The composer stays
-   * enabled — the user can keep typing — but submits route to
-   * `queueRequested` instead of `submitted`.
-   */
+  /** True when a turn is streaming (ADR-045); submits route to `queueRequested`. */
   readonly streaming = input(false);
 
   /** Current queued message preview, when one is set (ADR-045). */
@@ -315,11 +297,7 @@ export class ComposerComponent implements AfterViewInit {
   /** Active query used to filter the slash menu (text after `/`). */
   readonly slashQuery = signal<string>('');
 
-  /**
-   * Plan mode state. When true, the next submitted message is prefixed with
-   * the planning directive (`PLAN_MODE_PREFIX`). Persists across messages
-   * until the user toggles it off — mirrors the CLI's plan mode behaviour.
-   */
+  /** Plan mode state; when true the next submit is prefixed with `PLAN_MODE_PREFIX`. */
   readonly planMode = signal<boolean>(false);
 
   /** Pending image attachments; cleanup effect below revokes blob URLs on remove. */
@@ -360,12 +338,7 @@ export class ComposerComponent implements AfterViewInit {
     this.textareaRef?.nativeElement ? `${this.textareaRef.nativeElement.offsetWidth}px` : 'auto'
   );
 
-  /**
-   * True when the user explicitly closed the slash menu (Esc / backdrop click)
-   * while the textarea still matches the slash trigger. Prevents the menu from
-   * immediately re-opening on the next keystroke until the user clears the
-   * trigger or explicitly clicks the slash button again.
-   */
+  /** True when the user closed the slash menu while the trigger still matches, suppressing auto-reopen. */
   private slashSuppressedByUser = false;
 
   /**
@@ -377,8 +350,7 @@ export class ComposerComponent implements AfterViewInit {
       const id = this.projectState.activeProject;
       if (id) void this.slashService.refresh(id);
     });
-    // Mirror the legacy setter side-effect: enable/disable the FormControl
-    // whenever the `disabled` input changes.
+    // Enable/disable the FormControl when the `disabled` input changes.
     effect(() => {
       const value = this.disabled();
       if (value) this.text.disable({ emitEvent: false });
@@ -540,8 +512,7 @@ export class ComposerComponent implements AfterViewInit {
   private async ingest(files: File[]): Promise<void> {
     const images = files.filter((f) => f.type.startsWith('image/'));
     if (images.length === 0) {
-      // Non-image drop/paste is silently ignored — surfacing an error
-      // would be noisy (e.g. user dragging a PDF onto the window by mistake).
+      // Non-image drop/paste is silently ignored.
       return;
     }
     const project = this.projectState.activeProject;
@@ -657,11 +628,7 @@ export class ComposerComponent implements AfterViewInit {
     this.closeSlash();
   }
 
-  /**
-   * Closes the popover and returns focus to the textarea. If the textarea
-   * still matches the slash trigger, suppress automatic re-opening until the
-   * user clears the trigger or explicitly clicks the slash button again.
-   */
+  /** Closes the popover, refocuses the textarea, and suppresses auto-reopen while the trigger matches. */
   closeSlash(): void {
     const ta = this.textareaRef?.nativeElement;
     if (ta) {
@@ -676,9 +643,7 @@ export class ComposerComponent implements AfterViewInit {
   }
 
   /**
-   * Handle keystrokes inside the overlay. Esc closes the menu without
-   * propagating up to the textarea (which would otherwise re-trigger
-   * the menu via `updateSlashState`).
+   * Handle keystrokes inside the overlay; Esc closes the menu without propagating.
    * @param event Keyboard event raised by the CDK overlay.
    */
   onOverlayKeydown(event: KeyboardEvent): void {

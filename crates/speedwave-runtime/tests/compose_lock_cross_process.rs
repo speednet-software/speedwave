@@ -2,6 +2,8 @@
 //! per `tests/data_dir_integration.rs` pattern, asserts the second process
 //! blocks until the first releases.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+
 use std::process::Command;
 use std::time::Duration;
 
@@ -9,12 +11,8 @@ const CHILD_ENV: &str = "__SPEEDWAVE_COMPOSE_LOCK_CHILD";
 const ROOT_ENV: &str = "__SPEEDWAVE_COMPOSE_LOCK_ROOT";
 const HOLD_MS_ENV: &str = "__SPEEDWAVE_COMPOSE_LOCK_HOLD_MS";
 
-/// Holder acquires the file lock, writes a "ready" sentinel file, then sleeps
-/// for `HOLD_MS`. The parent polls for the sentinel (file-based synchronisation
-/// — no hardcoded wait); then spawns the waiter and measures how long the
-/// waiter blocked. The threshold is derived from the remaining hold time, not
-/// a hard-coded constant, so the test is robust to runner load and process
-/// spawn overhead.
+/// Holder acquires the lock, writes a sentinel, sleeps `HOLD_MS`; parent polls
+/// for the sentinel, then spawns the waiter and measures its blocking time.
 const READY_SENTINEL: &str = "ready.lock";
 const HOLD_MS: u64 = 800;
 const MIN_BLOCK_MS: u64 = 200;
@@ -42,8 +40,7 @@ fn second_process_blocks_until_first_releases() {
         .spawn()
         .expect("spawn holder");
 
-    // File-based handshake: wait until holder writes the sentinel — proves
-    // it has acquired the lock before we spawn the waiter.
+    // Wait until holder writes the sentinel (lock acquired).
     let deadline = std::time::Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
     while !sentinel.exists() {
         if std::time::Instant::now() >= deadline {
@@ -78,9 +75,7 @@ fn second_process_blocks_until_first_releases() {
         "waiter process failed:\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // MIN_BLOCK_MS is a conservative lower bound: even with worst-case spawn
-    // overhead the waiter should observe at least ~200 ms of blocking
-    // (HOLD_MS minus the time the sentinel-write+ready-poll took).
+    // MIN_BLOCK_MS: conservative lower bound for observed blocking time.
     assert!(
         waiter_wallclock >= Duration::from_millis(MIN_BLOCK_MS),
         "waiter returned in {waiter_wallclock:?}; expected ≥ {MIN_BLOCK_MS} ms of blocking"
@@ -99,8 +94,7 @@ fn run_child_role(role: &str) {
     let result =
         with_project_compose_lock_in(&root_path, "cross-proc-test", || -> anyhow::Result<()> {
             if role == "hold" {
-                // Signal "lock acquired" to the parent via sentinel file —
-                // race-free synchronisation, no sleep guesses.
+                // Signal "lock acquired" to the parent via sentinel file.
                 std::fs::write(root_path.join(READY_SENTINEL), b"ok")?;
             }
             if hold_ms > 0 {

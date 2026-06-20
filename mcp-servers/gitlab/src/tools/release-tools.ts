@@ -161,7 +161,7 @@ const createReleaseTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Builds the GitLab release tool definitions.
  * @param client - GitLab client instance
  */
 export function createReleaseTools(client: GitLabClient | null): ToolDefinition[] {

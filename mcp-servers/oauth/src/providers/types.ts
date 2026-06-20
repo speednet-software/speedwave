@@ -1,11 +1,5 @@
 /**
  * Generic OAuth provider contract used by the host-side `oauth` worker.
- *
- * Each IdP (Microsoft, Atlassian, …) implements one `OAuthProvider`. The
- * worker reads `state.provider` from `oauth/<project>/<service>.json`, looks
- * the implementation up in the registry, and calls `refresh()` with the
- * stored `providerData` (IdP-specific fields like Microsoft `clientId` /
- * `tenantId`).
  */
 
 /** SSOT — widen this union when adding an IdP. */
@@ -51,16 +45,9 @@ export type RefreshResult =
 /** One IdP implementation registered in the provider registry. */
 export interface OAuthProvider {
   readonly id: ProviderId;
-  /**
-   * Required keys of `providerData`; dispatcher validates pre-call. Used
-   * when the provider does not supply its own {@link validateRequest}.
-   */
+  /** Required keys of `providerData`; dispatcher validates pre-call. */
   readonly requiredFields: readonly string[];
-  /**
-   * Per-request validation when requirements depend on grant/auth style
-   * (generic provider). Returns an error to reject, or `null` to proceed.
-   * When absent, the dispatcher falls back to {@link requiredFields}.
-   */
+  /** Per-request validation; returns an error to reject, or `null` to proceed. */
   validateRequest?(req: RefreshRequest): RefreshError | null;
   refresh(req: RefreshRequest): Promise<RefreshResult>;
 }

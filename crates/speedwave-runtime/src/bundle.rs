@@ -70,9 +70,7 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `oauth` worker (ADR-060) — a host process like `mcp-os` (not a
-    // container, not in `build::IMAGES`), bundled the same way. Resolved
-    // by `build::resolve_oauth_script` at `oauth/oauth/dist/index.js`.
+    // `oauth` worker (ADR-060): host process like `mcp-os`, not in `build::IMAGES`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
         kind: BundledAssetKind::File,
@@ -256,9 +254,7 @@ pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
 }
 
 /// Env-free core of [`load_current_bundle_manifest`]: takes an explicit build
-/// root so tests can inject a path and never read the process-global
-/// `SPEEDWAVE_RESOURCES_DIR` (which other tests mutate — see the test-isolation
-/// guard). The public no-arg shim resolves the root from env at the call site.
+/// root instead of reading `SPEEDWAVE_RESOURCES_DIR` from env.
 pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<BundleManifest> {
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
     if manifest_path.exists() {
@@ -621,9 +617,7 @@ fn collect_directory_entries(
     if !dir.exists() {
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
-    // Single-file hash input (e.g. containers/entrypoint.sh) — see ADR-072.
-    // is_file()/is_dir() follow symlinks — the copier dereferences them, so
-    // a symlinked input could change image content without changing the hash.
+    // Reject symlinks: the copier dereferences them, changing content without changing the hash.
     if dir.is_symlink() {
         anyhow::bail!(
             "symlink not allowed in image hash inputs: {}",
@@ -641,9 +635,11 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // Fail loud: the build-context copier dereferences symlinks, so a
-        // silently-skipped link would change image content WITHOUT changing
-        // the hash — users would keep the stale tag after an update.
+        // node_modules is not copied into the build context, so it is not image content.
+        if child.is_dir() && child.file_name().is_some_and(|n| n == "node_modules") {
+            continue;
+        }
+        // Reject symlinks: the copier dereferences them, changing content without changing the hash.
         if child.is_symlink() {
             anyhow::bail!(
                 "symlink not allowed in image hash inputs: {}",
@@ -722,6 +718,87 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_node_modules_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/index.ts"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("node_modules/pkg/index.js"), "dep").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/index.ts")), "{rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.contains("node_modules")),
+            "node_modules must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
+        // node_modules/.bin/<tool> symlinks must be skipped, not bailed on.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+        let real = dir.join("node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("node_modules/.bin/vitest")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        let mut out = Vec::new();
+        let res = collect_directory_entries(&dir, "p", &mut out);
+        assert!(
+            res.is_ok(),
+            "must not bail on node_modules symlinks: {res:?}"
+        );
+        assert!(out.iter().any(|(r, _)| r.ends_with("package.json")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_nested_node_modules() {
+        // The skip applies at every recursion depth, not just the top level.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        let nested = dir.join("packages/pkg/node_modules/.bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let real = dir.join("packages/pkg/node_modules/tool/tool.js");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nested.join("tool")).unwrap();
+        std::fs::write(dir.join("packages/pkg/index.ts"), "real").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        assert!(out.iter().any(|(r, _)| r.ends_with("pkg/index.ts")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn node_modules_changes_do_not_alter_manifest_hash() {
+        // node_modules is not image content; adding it must not change any image hash (ADR-072).
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        let nm = tmp.path().join("mcp-servers/hub/node_modules/.bin");
+        std::fs::create_dir_all(&nm).unwrap();
+        let real = tmp
+            .path()
+            .join("mcp-servers/hub/node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nm.join("vitest")).unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(
+            before.image_hashes, after.image_hashes,
+            "node_modules must not affect image hashes"
+        );
     }
 
     fn write_resource_tree(root: &Path) {
@@ -1075,8 +1152,7 @@ mod tests {
 
     #[test]
     fn new_state_file_readable_by_legacy_shape() {
-        // Downgrade safety: old releases deserialize the new file (serde
-        // ignores unknown fields) and fall back to a full rebuild via id mismatch.
+        // Old releases deserialize the new file (serde ignores unknown fields).
         #[derive(Deserialize)]
         struct LegacyBundleState {
             applied_bundle_id: Option<String>,

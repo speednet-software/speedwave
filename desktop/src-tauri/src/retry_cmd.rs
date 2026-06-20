@@ -1,22 +1,5 @@
 //! Tauri command — retry the last assistant turn via Claude Code's native
 //! `--resume-session-at` flag (ADR-046).
-//!
-//! The frontend owns the conversation state-tree and passes the retry
-//! anchor explicitly: the current
-//! `session_id` and the UUID of the user prompt to rewind to. The backend
-//! does not mutate the session JSONL file — Claude Code's native resume
-//! handles the trim-and-regenerate atomically.
-//!
-//! Flow:
-//! 1. Validate the session id and user UUID.
-//! 2. Swap the live `ChatSession` out of its mutex so `stop()` runs without
-//!    starving other commands.
-//! 3. Stop the old session (kills the child, drains reader threads).
-//! 4. Start a new session with `--resume <session> --resume-session-at <uuid>`.
-//!
-//! Errors are serialised as a tagged `RetryError` enum so the frontend can
-//! react (disable the button, show a banner, prompt re-auth, …) without
-//! string-matching error messages.
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -52,9 +35,6 @@ impl std::fmt::Display for RetryError {
 impl std::error::Error for RetryError {}
 
 /// Pure core of `retry_last_turn` — does not touch Tauri types.
-///
-/// Extracted so unit tests can exercise the validation/stop/spawn sequence
-/// against a mocked `ChatSession` layer via the `SessionDriver` trait below.
 pub(crate) fn retry_last_turn_inner(
     session_id: &str,
     user_uuid: &str,
@@ -118,10 +98,7 @@ impl SessionDriver for ChatSessionDriver<'_> {
 
 /// Tauri command — retry the last assistant turn in the active session.
 ///
-/// The frontend passes the `session_id` of the current conversation and
-/// `user_uuid` of the user message to rewind to (ADR-046). On success, a
-/// fresh Claude Code spawn starts streaming a replacement turn via the
-/// usual `chat_stream` event channel.
+/// The frontend passes the `session_id` and the `user_uuid` to rewind to (ADR-046).
 #[tauri::command]
 pub async fn retry_last_turn(
     session_id: String,
@@ -129,12 +106,7 @@ pub async fn retry_last_turn(
     app_handle: AppHandle,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), RetryError> {
-    // Don't log the session_id at all — even a short prefix is flagged by
-    // CodeQL `rust/cleartext-logging`, and the desktop log file is
-    // readable by any process running as the same user. Logging only the
-    // structural metadata (id length / uuid length) keeps the trace useful
-    // for diagnosing malformed-input regressions without leaking either
-    // identifier.
+    // Log only lengths, never the session_id/user_uuid (CodeQL cleartext-logging).
     log::info!(
         "retry_last_turn: session_id_len={} user_uuid_len={}",
         session_id.len(),
@@ -226,9 +198,6 @@ mod tests {
 
     #[test]
     fn retry_with_empty_uuid_returns_no_assistant_turn() {
-        // An empty UUID in this architecture means the frontend tried to
-        // retry without a committed user UUID — which the `canRetry` signal
-        // should have prevented, but we belt-and-brace it on the backend.
         let mut drv = MockDriver::default();
         let r = retry_last_turn_inner(VALID_SESSION, "", &mut drv);
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
@@ -245,8 +214,7 @@ mod tests {
 
     #[test]
     fn retry_stop_failure_returns_resume_failed_without_start() {
-        // If stop fails we MUST NOT proceed to start — otherwise the old
-        // child could race stdout with the new one.
+        // If stop fails, start must not run.
         let mut drv = MockDriver {
             stop_err: Some("stop boom".to_string()),
             ..Default::default()
@@ -285,8 +253,7 @@ mod tests {
 
     #[test]
     fn retry_error_round_trips() {
-        // Round-trip every variant to prove the serde tag/content layout is
-        // stable for the frontend kind-matching.
+        // Round-trip every variant.
         let cases = [
             RetryError::NoAssistantTurn,
             RetryError::SessionNotFound,
@@ -303,15 +270,7 @@ mod tests {
 
     #[test]
     fn retry_does_not_open_session_jsonl_in_mock_driver() {
-        // The mock driver never touches disk. This test documents the
-        // contract: retry_last_turn_inner does NOT interact with the
-        // session JSONL file directly — file mutation is delegated to
-        // Claude Code's native `--resume-session-at` flag (ADR-046).
-        //
-        // An E2E test in `desktop-e2e/` checksums the file before/after
-        // and asserts equality against the pre-retry state. This unit
-        // test stands as a type-level guard against future changes that
-        // might sneak in fs::File::open calls.
+        // retry_last_turn_inner does not touch the session JSONL file.
         let mut drv = MockDriver::default();
         let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
         assert!(r.is_ok());

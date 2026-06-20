@@ -55,9 +55,7 @@ final class ScriptRunnerTests: XCTestCase {
     func testEscapeAppleScriptNeutralizesDoShellScript() {
         let payload = "harmless\"\ndo shell script \"rm -rf /\"\n\""
         let result = escapeAppleScript(payload)
-        // Newlines are stripped, quotes are escaped — no breakout possible.
-        // The text "do shell script" remains in the output but is harmless:
-        // escaped quotes prevent AppleScript from interpreting it as a command.
+        // Newlines stripped, quotes escaped — no breakout possible.
         XCTAssertFalse(result.contains("\n"))
         XCTAssertTrue(result.contains("\\\""))
     }
@@ -166,8 +164,7 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseDelimitedDropsRowsWithLiteralDelimiterInValue() {
-        // A row whose field count after splitting on "||" doesn't match fields is silently dropped.
-        // "foo||bar||baz" splits into 3 parts but only 2 fields → dropped.
+        // Rows whose field count after splitting on "||" mismatches fields are dropped.
         let result = parseDelimited("foo||bar||baz", fields: ["x", "y"])
         XCTAssertEqual(result.count, 0)
     }
@@ -282,11 +279,7 @@ final class ScriptRunnerTests: XCTestCase {
 
     // MARK: - Classifier Tests
 
-    // These fixtures verify the classifier's substring-match invariant, not production TCC stderr strings.
-    // Actual macOS stderr for TCC denials (e.g. "execution error: Not authorized to send Apple events to Mail. (-1743)")
-    // is NOT matched by the current "not allowed" / "not permitted" / "assistive access" substrings —
-    // a pre-existing gap in macOS TCC stderr coverage that predates and is independent of this refactor.
-    // Tracking and closing that gap is out of scope here.
+    // These fixtures verify the classifier's substring-match invariant, not production TCC stderr.
 
     func testClassifyFailureNotAllowed() {
         let err = ScriptRunner.classifyFailure(stderr: "osascript: not allowed to send Apple events")

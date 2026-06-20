@@ -10,27 +10,21 @@ struct SanitizeRule {
 }
 
 static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
-    // Each tuple: (pattern, replacement). If a regex fails to compile (should never
-    // happen with static literals), a CRITICAL warning is printed to stderr.
+    // Each tuple: (pattern, replacement).
     let definitions: Vec<(&str, &'static str)> = vec![
         // PEM private keys (multi-line: mask entire block)
         (
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             "-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----",
         ),
-        // Home paths: /Users/<name>, /home/<name>, C:\Users\<name>.
-        // Username segment replaced with `<user>`; following path tail preserved.
+        // Home paths: username segment replaced with `<user>`, path tail preserved.
         (
             r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
             "${1}<user>",
         ),
-        // HTTP Cookie / Set-Cookie header values.
-        // Set-Cookie value = `name=value` up to the first `;` (attrs are not
-        // secrets but the name=value pair is). `\S+` would stop at the first
-        // space inside an unusual cookie value and leak the rest.
+        // Set-Cookie value: `name=value` up to the first `;`, attrs preserved.
         (r"(?i)(Set-Cookie:\s*)[^;\r\n]+", "${1}***REDACTED***"),
-        // Cookie request header: anchor at start-of-line/whitespace so
-        // `Set-Cookie:` does not double-match via `\b` on the `-C` boundary.
+        // Cookie request header: anchored at start-of-line/whitespace.
         (r"(?i)(^|\s)(Cookie:\s*)[^\r\n]+", "${1}${2}***REDACTED***"),
         // Bearer tokens: Bearer <token>
         (r"(?i)(Bearer\s+)\S+", "${1}***REDACTED***"),
@@ -41,8 +35,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
             "***REDACTED_JWT***",
         ),
-        // Slack rotating tokens first (xoxe.xoxp-…, xoxe-1-…) so the whole
-        // token is consumed before the xox[bpars]- rule matches its substring.
+        // Slack rotating tokens (xoxe.xoxp-…, xoxe-1-…) — must run before xox[bpars]-.
         (r"xoxe[.-][A-Za-z0-9.-]+", "***REDACTED_SLACK_TOKEN***"),
         // Slack tokens: xoxb-, xoxp-, xoxa-, xoxr-, xoxs-
         (r"xox[bpars]-[A-Za-z0-9-]+", "***REDACTED_SLACK_TOKEN***"),
@@ -64,14 +57,9 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
-        // Google API keys (Gemini via LiteLLM, ADR-073): AIza + exactly 35
-        // base64url chars per Google's documented key shape.
+        // Google API keys (ADR-073): AIza + exactly 35 base64url chars.
         (r"\bAIza[0-9A-Za-z_-]{35}\b", "***REDACTED_GOOGLE_KEY***"),
-        // Bare sk-prefixed keys: sk-proj-*, sk-test-*, sk-or-* (OpenRouter),
-        // vLLM/LiteLLM/LM Studio user-configured keys. ≥16 trailing chars to
-        // avoid false positives on short identifiers like "sk-short" or words
-        // ending in "sk-…". Order matters: this runs AFTER sk-ant- so Anthropic
-        // keys keep their dedicated marker.
+        // Bare sk- keys (≥16 trailing chars); runs after sk-ant- to keep its marker.
         (r"\bsk-[A-Za-z0-9_-]{16,}", "***REDACTED_API_KEY***"),
         // URL userinfo credentials: ://user:password@host — redact password
         (r"(://[^:/@\s]+:)[^@\s]+(@)", "${1}***REDACTED***${2}"),
@@ -83,10 +71,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Redmine API key header: X-Redmine-API-Key: <value>
         (r"(?i)(X-Redmine-API-Key:\s*)\S+", "${1}***REDACTED***"),
-        // Generic secret assignments: password=<value>, secret=<value>, api_key=<value>
-        // Matches key=value, key="value", and key='value' patterns (not in URLs — no ? or & prefix).
-        // The trailing `"?` catches a lone closing quote that follows an unquoted value
-        // (e.g. password=abc" where the opening quote was on a previous token).
+        // Generic secret assignments: key=value, key="value", key='value' (not in URLs).
         (
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             "${1}***REDACTED***",
@@ -102,9 +87,7 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
                     replacement,
                 }),
                 Err(e) => {
-                    // Safety-critical one-time init warning. The logger may not be
-                    // initialized when LazyLock evaluates, so we write stderr
-                    // directly. A dropped rule means secrets leak unredacted.
+                    // Logger may be uninitialized during LazyLock eval — write stderr directly.
                     use std::io::Write;
                     let _ = writeln!(
                         std::io::stderr(),
@@ -117,14 +100,8 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Masks known secret patterns in log message content.
-///
-/// This function applies regex-based redaction rules to replace sensitive
-/// data (tokens, keys, passwords, PEM blocks) with `***REDACTED***` markers.
-///
-/// Used in two places:
-/// 1. Real-time in the log pipeline (format callbacks in Desktop/CLI loggers)
-/// 2. In diagnostic export (second pass over container/Lima logs)
+/// Masks secret patterns (tokens, keys, passwords, PEM blocks) in log content
+/// with `***REDACTED***` markers.
 pub fn sanitize(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -139,18 +116,8 @@ pub fn sanitize(input: &str) -> String {
     result
 }
 
-/// Extract a safe string from a `catch_unwind` panic payload.
-///
-/// A `Box<dyn Any + Send>` carries whatever value `panic!` produced — usually
-/// a `String` or `&str`, but in principle anything. We only surface the
-/// `String`/`&str` cases (the common ones for `panic!("…")` / `unwrap_failed`)
-/// and pass them through `sanitize()`. Anything else collapses to
-/// `"unknown panic payload"` so a misbehaving panic value can't leak local
-/// variables into logs via `{:?}` debug format.
-///
-/// This is the helper to use whenever you log a panic — `log::error!("…{e:?}")`
-/// would trip the `rust/cleartext-logging` CodeQL rule because the payload
-/// type is `dyn Any` and the data flow analyzer cannot prove safety.
+/// Extract a sanitized string from a `catch_unwind` panic payload; non-`String`/`&str`
+/// payloads collapse to `"unknown panic payload"`.
 pub fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     let raw = payload
         .downcast_ref::<String>()
@@ -167,9 +134,7 @@ mod tests {
 
     // ── Guard tests — ensure no rules are silently dropped ────────────────
 
-    /// The definitions vec contains exactly this many rules. If a new rule is
-    /// added to the vec but fails to compile, RULES.len() will be less than
-    /// this constant and the test will fail, catching the silent drop.
+    /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
     const EXPECTED_RULE_COUNT: usize = 23;
 
     #[test]
@@ -187,9 +152,7 @@ mod tests {
 
     #[test]
     fn test_all_static_patterns_are_valid_regex() {
-        // Re-declare the same patterns from the production definitions vec.
-        // If any pattern is invalid, Regex::new will return Err and the test
-        // fails explicitly instead of being silently filtered out.
+        // Re-declared production patterns; each must compile or the test fails explicitly.
         let patterns: &[&str] = &[
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
@@ -451,8 +414,7 @@ mod tests {
 
     #[test]
     fn test_worker_auth_token_uuid_redaction() {
-        // Worker bearer tokens are bare UUIDs in MCP_<SVC>_AUTH_TOKEN env vars —
-        // no sk-/xox- prefix, so only the *_token assignment rule catches them.
+        // Bare-UUID worker token, no sk-/xox- prefix — only the *_token rule catches it.
         let input = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
         let output = sanitize(input);
         assert!(
@@ -484,8 +446,7 @@ mod tests {
 
     #[test]
     fn test_bare_uuid_not_redacted() {
-        // A UUID NOT in a *_token= assignment (e.g. a request/container id) must
-        // survive — redacting bare UUIDs would erase debugging context.
+        // A UUID outside a *_token= assignment must survive.
         let input = "request_id 550e8400-e29b-41d4-a716-446655440000 completed";
         let output = sanitize(input);
         assert_eq!(
@@ -496,8 +457,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_not_redacted() {
-        // `_key` suffix is intentionally NOT in the rule: cache_key / sort_key
-        // are common non-secret identifiers. Only `_token` suffix is redacted.
+        // `_key` suffix is not a rule; only `_token` suffix is redacted.
         let input = "cache_key=user_123";
         let output = sanitize(input);
         assert_eq!(output, input, "cache_key must not be redacted: {output}");
@@ -997,8 +957,7 @@ mod tests {
 
     #[test]
     fn test_atlassian_basic_auth_header_redaction() {
-        // base64("bot@acme.com:ATATT3xSecret") — must not leak through the
-        // existing Authorization: header rule.
+        // base64("bot@acme.com:ATATT3xSecret") must not leak through the Authorization rule.
         let input = "header set: Authorization: Basic Ym90QGFjbWUuY29tOkFUQVRUM3hTZWNyZXQ=";
         let output = sanitize(input);
         assert!(
@@ -1042,10 +1001,7 @@ mod tests {
 
     #[test]
     fn test_bare_sk_proj_key_redaction() {
-        // OpenAI project-scoped key shape, also used by self-hosted servers.
-        // `_AUTH_TOKEN=` now also matches the assignment rule, which runs after
-        // the `sk-` rule and collapses the marker to the generic one — either
-        // way the key body is gone, which is the security property that matters.
+        // sk-proj- inside a *_AUTH_TOKEN= assignment: marker collapses, key body is gone.
         let input = "ANTHROPIC_AUTH_TOKEN=sk-proj-abc123def456ghi789xyz";
         let output = sanitize(input);
         assert!(
@@ -1184,13 +1140,9 @@ mod tests {
 
     #[test]
     fn test_redmine_api_key_header_false_positive() {
-        // "X-Redmine-API-Key-Length: 40" — not a key value, just a header name
-        // containing the prefix. The regex matches `\S+` after the colon, so
-        // "40" will be redacted. This is acceptable (security > false negatives).
+        // Different header name (no colon after "Key") — must not match the rule.
         let input = "X-Redmine-API-Key-Length: 40";
         let output = sanitize(input);
-        // The regex pattern `X-Redmine-API-Key:\s*` won't match because the
-        // header name is "X-Redmine-API-Key-Length" (no colon after "Key").
         assert_eq!(
             output, input,
             "X-Redmine-API-Key-Length should not be redacted (different header name)"
@@ -1225,10 +1177,7 @@ mod tests {
 
     #[test]
     fn panic_payload_unknown_type_collapses_to_placeholder() {
-        // A panic that produced an arbitrary struct (rare but legal). We must
-        // NOT leak its Debug representation — collapse to a placeholder so a
-        // misbehaving panic value can't smuggle local-variable contents into
-        // logs and trip the cleartext-logging rule.
+        // An arbitrary struct payload must collapse to a placeholder, not leak its Debug.
         #[derive(Debug)]
         struct SecretCarrier {
             _token: String,
@@ -1243,8 +1192,7 @@ mod tests {
 
     #[test]
     fn panic_payload_string_is_sanitized() {
-        // If a panic message happens to carry a token-shaped substring, the
-        // sanitizer redacts it the same way log lines are redacted.
+        // A token-shaped substring in a panic message is sanitized like a log line.
         let payload: Box<dyn std::any::Any + Send> =
             Box::new("crashed with token xoxb-1234567890-leak".to_string());
         let out = panic_payload_to_string(&*payload);
@@ -1302,9 +1250,7 @@ mod tests {
 
     #[test]
     fn redacts_set_cookie_value_with_embedded_space() {
-        // Non-RFC value with a space — the previous `\S+` regex stopped at the
-        // first space and leaked the trailing token. `[^;\r\n]+` covers the
-        // whole name=value pair up to the attribute separator.
+        // Non-RFC value with a space: whole name=value pair redacted up to the `;`.
         let out = sanitize("Set-Cookie: id=secret extra_data; Path=/");
         assert!(!out.contains("secret"), "first token leaked: {out}");
         assert!(

@@ -29,9 +29,7 @@ export async function writeRestrictedSecret(
 ): Promise<void> {
   const parent = path.dirname(filePath);
 
-  // Defense in depth: refuse to write into a world-readable parent dir.
-  // The Rust supervisor creates `~/.speedwave/oauth/<project>/` with mode 0o700;
-  // if that invariant is violated we don't want to silently leak secrets.
+  // Refuse to write into a world-readable parent dir.
   if (process.platform !== 'win32') {
     const stat = await fs.stat(parent);
     const mode = stat.mode & 0o777;
@@ -53,8 +51,7 @@ export async function writeRestrictedSecret(
   try {
     handle = await fs.open(tmpPath, 'wx', 0o600);
     await handle.writeFile(contents);
-    // chmod again post-open: O_CREAT honors umask, so explicit chmod is needed
-    // on systems where umask masks group/other bits in unexpected ways.
+    // O_CREAT honors umask; explicit chmod ensures mode 0o600.
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();

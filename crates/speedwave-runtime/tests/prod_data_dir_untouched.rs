@@ -1,19 +1,6 @@
 //! Runtime backstop for the static scanner (`no_raw_data_dir_in_tests.rs`):
-//! a representative data-dir-rooted smoke must never touch the production
-//! `~/.speedwave`. This is the ONLY guard that catches *transitive* leaks — a
-//! test calling a no-arg production fn that internally resolves
-//! `consts::data_dir()` — which the static scan is structurally blind to.
-//!
-//! Design (why this is robust, not OnceLock-fragile):
-//! The real invariant is "production `~/.speedwave` is untouched", NOT
-//! "`data_dir()` resolves to the tempdir". So the smoke drives the **`_in`
-//! variants** with an explicit tempdir and never asserts on the OnceLock. We
-//! still point `SPEEDWAVE_DATA_DIR` at the tempdir as defense-in-depth (any
-//! *transitive* bare-`data_dir()` a future addition introduces also lands in
-//! the tempdir on the first resolution), but no assertion DEPENDS on that
-//! resolution order. Consequently this binary is safe to grow a second test:
-//! the prod-untouched invariant holds regardless of which test resolves the
-//! OnceLock first.
+//! catches *transitive* data-dir leaks. Drives the `_in` variants with an
+//! explicit tempdir and never asserts on OnceLock state.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -22,9 +9,8 @@ use std::time::SystemTime;
 
 use speedwave_runtime::{compose, consts};
 
-/// Minimal compose YAML with a resolvable network ref — `save_compose_in`
-/// validates network refs in-memory and on read-back, so the document must be
-/// internally consistent.
+/// Minimal compose YAML with a resolvable network ref (`save_compose_in`
+/// validates refs in-memory and on read-back).
 const VALID_YAML: &str = "version: '3'\nnetworks:\n  default:\n    driver: bridge\nservices:\n  app:\n    image: nginx\n    networks:\n      - default\n";
 
 /// `SPEEDWAVE_DATA_DIR` basename must match `^[a-z][a-z0-9-]{0,63}$`
@@ -48,25 +34,16 @@ fn snapshot(path: &std::path::Path) -> Option<SystemTime> {
 fn representative_smoke_does_not_touch_prod_data_dir() {
     let prod = dirs::home_dir().expect("home dir").join(consts::DATA_DIR);
 
-    // Record production state BEFORE the smoke. Missing is the strongest
-    // assertion; if a developer happens to have a real install, we fall back
-    // to an mtime-unchanged check.
+    // Record production state before the smoke (missing, or mtime fallback).
     let before_exists = prod.exists();
     let before_mtime = snapshot(&prod);
 
     let (_outer, tmp_data_dir) = regex_valid_data_dir();
 
-    // Defense-in-depth only: routes any *transitive* bare-`data_dir()` into the
-    // tempdir too. The assertions below do NOT depend on this resolving (the
-    // smoke uses the explicit-`data_dir` `_in` variants), so the OnceLock
-    // ordering is irrelevant to correctness — that is what makes this binary
-    // safe to extend with additional tests.
+    // Defense-in-depth: routes any transitive bare-`data_dir()` into the tempdir.
     std::env::set_var(consts::DATA_DIR_ENV, &tmp_data_dir);
 
-    // Representative smoke: a real, data-dir-rooted filesystem write
-    // (`save_compose_in` creates `compose/<project>/` and writes the file) plus
-    // a path-resolution op — both via the explicit-`data_dir` `_in` variants,
-    // so every path derives from the tempdir, never from the OnceLock.
+    // Representative smoke: a data-dir-rooted write plus a path-resolution op.
     let project = "prod-untouched-smoke";
     compose::save_compose_in(&tmp_data_dir, project, VALID_YAML).expect("save_compose_in");
     let compose_path =
@@ -82,8 +59,7 @@ fn representative_smoke_does_not_touch_prod_data_dir() {
         "smoke did not write the compose file at {compose_path:?}"
     );
 
-    // Production must be untouched: still absent (strongest), or — if it
-    // pre-existed on this machine — its mtime must be unchanged.
+    // Production must be untouched: still absent, or mtime unchanged.
     let after_exists = prod.exists();
     let after_mtime = snapshot(&prod);
 

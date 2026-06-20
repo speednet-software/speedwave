@@ -1,12 +1,4 @@
-/**
- * Tests for MR Notes Tools
- *
- * Tests 4 tools:
- * - list_mr_commits: List commits in a merge request
- * - list_mr_pipelines: List pipelines associated with a merge request
- * - list_mr_notes: List notes/comments on a merge request
- * - create_mr_note: Add a comment/note to a merge request
- */
+/** Tests for MR Notes Tools: list_mr_commits, list_mr_pipelines, list_mr_notes, create_mr_note. */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';

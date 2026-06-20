@@ -35,11 +35,7 @@ const FIXTURE: AnthropicModel[] = [
   },
 ];
 
-// Pricing fields the real `list_anthropic_models` payload carries (the Rust
-// SSOT serialized). The mock returns them so the service can seed the pricing
-// index; the `AnthropicModel` type omits them, so cast on assignment. Rates
-// are deliberately off-catalog so the "seeds the pricing index" test proves
-// the backend numbers overrode the bootstrap seed.
+// Payload carries pricing fields the `AnthropicModel` type omits (cast on assignment); rates off-catalog.
 const PRICED_FIXTURE = FIXTURE.map((m) => ({
   ...m,
   pricing: { input: 9, cachedInput: 0.9, cacheWrite: 11.25, output: 45 },
@@ -113,14 +109,12 @@ describe('AnthropicModelsService', () => {
         cache_read_tokens: 0,
         cache_write_tokens: 0,
       };
-      // 1M input @ the off-catalog fixture rate ($9) — proves pricing.ts was
-      // populated from the backend payload, overriding the bootstrap seed ($5).
+      // 1M input @ the off-catalog fixture rate ($9), not the bootstrap seed ($5).
       expect(calculateCost('claude-opus-4-8', usage)).toBeCloseTo(9, 6);
     });
 
     afterEach(() => {
-      // Restore the bootstrap seed so off-catalog fixture rates don't leak
-      // into other specs that read pricing.ts.
+      // Restore the bootstrap seed so fixture rates don't leak into other specs.
       _resetPricingToSeedForTest();
     });
 
@@ -135,9 +129,7 @@ describe('AnthropicModelsService', () => {
     });
 
     it('does NOT cache on failure — the next call retries the backend', async () => {
-      // Regression: a transient failure used to cache `[]`, permanently
-      // emptying the model list. The cache must stay null so a recovered
-      // backend repopulates on the next call.
+      // Regression: a transient failure must not cache `[]`; cache stays null.
       let calls = 0;
       mockTauri.invokeHandler = async () => {
         calls++;
@@ -197,8 +189,7 @@ describe('AnthropicModelsService', () => {
     });
 
     it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
-      // Fable 5 leads the catalog but costs 2x Opus — the placeholder must
-      // keep nudging users toward the balanced Sonnet tier.
+      // Fable 5 leads the catalog but is premium — placeholder must pick Sonnet.
       const withFable = [
         { id: 'claude-fable-5', family: 'Fable 5', context_tokens: 1_000_000, latest: true },
         { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
@@ -213,8 +204,6 @@ describe('AnthropicModelsService', () => {
 
   describe('contextTokensFor()', () => {
     it('returns null before the catalog has loaded', () => {
-      // Pre-list() — cache empty by design so consumers can fall back without
-      // forcing a synchronous fetch.
       expect(service.contextTokensFor('claude-opus-4-7')).toBeNull();
     });
 
@@ -226,9 +215,7 @@ describe('AnthropicModelsService', () => {
     });
 
     it('resolves the short alias Claude Code emits in session metadata', async () => {
-      // Claude Code sometimes reports `opus-4.7` instead of `claude-opus-4-7`
-      // in the modelUsage chunk — the alias path replaces `.` with `-` and
-      // re-prepends `claude-`.
+      // Alias `opus-4.7`: `.` becomes `-`, `claude-` re-prepended.
       await service.list();
       expect(service.contextTokensFor('opus-4.7')).toBe(1_000_000);
       expect(service.contextTokensFor('haiku-4.5')).toBe(200_000);

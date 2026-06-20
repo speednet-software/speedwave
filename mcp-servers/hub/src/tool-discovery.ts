@@ -196,12 +196,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
   const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
   return {
     name: methodName,
-    // Preserve the worker's original tool name (often snake_case for strict
-    // MCP servers like `@playwright/mcp` which expose `browser_navigate`
-    // rather than the camelCase `browserNavigate` used in our JS bridge
-    // API). Without this the hub discovers the tool, rewrites the name to
-    // camelCase, and then fails `tools/call` because the worker has never
-    // heard of `browserNavigate`.
+    // Worker's original tool name (often snake_case); used verbatim for tools/call
     workerToolName: tool.name,
     description: tool.description,
     keywords: tool.keywords ?? [],

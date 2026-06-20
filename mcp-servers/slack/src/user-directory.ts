@@ -1,8 +1,6 @@
 /**
- * User Directory — lazy, cached workspace user map built from `users.list`
- * (requires only the already-granted `users:read`). One mechanism serves both
- * directions: ID→name (message author enrichment) and name→ID (findUsers).
- * Slack has no server-side name search, so the full listing is unavoidable.
+ * User Directory — lazy, cached workspace user map built from `users.list`.
+ * Serves ID→name and name→ID lookups.
  */
 
 import type { UsersListResponse } from '@slack/web-api';
@@ -87,8 +85,7 @@ async function fetchAllUsers(clients: SlackClients): Promise<Map<string, SlackDi
 }
 
 /**
- * Start (or join) a directory build; clears `inflight` on settle so a failed
- * build retries on the next call instead of latching the rejection.
+ * Start (or join) a directory build, clearing `inflight` on settle.
  * @param clients - Slack client container
  */
 function buildDirectory(clients: SlackClients): Promise<Map<string, SlackDirectoryUser>> {
@@ -109,8 +106,7 @@ function buildDirectory(clients: SlackClients): Promise<Map<string, SlackDirecto
 }
 
 /**
- * Fresh-or-rebuilt directory. With stale data present, a rebuild failure
- * degrades to the stale map (warn); with no data at all it throws.
+ * Fresh-or-rebuilt directory; degrades to stale data on rebuild failure, else throws.
  * @param clients - Slack client container
  */
 export async function ensureUserDirectory(
@@ -133,9 +129,7 @@ export async function ensureUserDirectory(
 }
 
 /**
- * Non-blocking, never-throwing directory lookup for read paths. Stale data is
- * returned immediately (kicking a background rebuild); otherwise the build is
- * raced against `waitMs` and null is returned on timeout/failure.
+ * Non-blocking, never-throwing directory lookup; returns stale data immediately, else races build against `waitMs`.
  * @param clients - Slack client container
  * @param waitMs - Maximum time to wait for a first build
  */
@@ -171,9 +165,7 @@ export function displayNameOf(u: SlackDirectoryUser): string {
 }
 
 /**
- * Set `author` on each message from the directory. Unknown IDs fall back to
- * the message's own `username` (bots). Never throws — reads must not fail
- * because name resolution did.
+ * Set `author` on each message from the directory; unknown IDs fall back to the message's `username`. Never throws.
  * @param clients - Slack client container
  * @param messages - Messages to enrich in place
  */
@@ -194,8 +186,7 @@ export async function enrichMessagesWithAuthors(
 }
 
 /**
- * Search-normalize: lowercase, strip diacritics. The explicit ł→l step is
- * load-bearing — U+0142 does not decompose under NFD, unlike ą/ć/ę/ń/ó/ś/ź/ż.
+ * Search-normalize: lowercase, strip diacritics, explicit ł→l (U+0142 does not decompose under NFD).
  * @param s - Raw string
  */
 export function normalizeForSearch(s: string): string {
@@ -207,9 +198,7 @@ export function normalizeForSearch(s: string): string {
 }
 
 /**
- * Case- and diacritic-insensitive substring search over name/real_name/
- * display_name. Excludes deleted users. Uses ensureUserDirectory — a failed
- * build surfaces as an error (explicit user intent, no silent empty result).
+ * Case- and diacritic-insensitive substring search over name/real_name/display_name; excludes deleted users.
  * @param clients - Slack client container
  * @param params - Parameters
  * @param params.query - Partial name to match

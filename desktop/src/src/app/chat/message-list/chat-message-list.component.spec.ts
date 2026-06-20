@@ -22,11 +22,7 @@ describe('ChatMessageListComponent', () => {
     fixture.componentRef.setInput('messages', []);
   });
 
-  /**
-   * Replays `ngOnChanges` after a manual property set — mirrors what Angular
-   * does when a template binding changes. Signal `input()` does NOT trigger
-   * lifecycle `ngOnChanges`, so tests must invoke it explicitly.
-   */
+  /** Replays `ngOnChanges` after a manual property set. */
   function fakeOnChanges(): void {
     component.ngOnChanges();
   }
@@ -72,9 +68,7 @@ describe('ChatMessageListComponent', () => {
     );
     expect(streamingEl).not.toBeNull();
 
-    // When the last block is a text block, the per-block streaming caret renders
-    // (data-testid="streaming-caret") and the message-level cursor is suppressed
-    // by lastBlockIsText.
+    // A text last block renders the per-block streaming caret.
     const caret = fixture.nativeElement.querySelector('[data-testid="streaming-caret"]');
     expect(caret).not.toBeNull();
   });
@@ -175,10 +169,7 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('re-arms auto-scroll on a new message even after the user scrolled up', () => {
-    // Product decision: a new turn (length grew) snaps the view back to the
-    // bottom unconditionally. Streaming deltas that arrive on the *same*
-    // turn still respect a manual scroll-up, but the next user-visible
-    // message wins so the freshly-arrived content is always in sight.
+    // A new turn snaps the view back to the bottom unconditionally.
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ]);
