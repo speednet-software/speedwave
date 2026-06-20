@@ -1614,7 +1614,6 @@ mod tests {
             projects,
             active_project: active.map(str::to_string),
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
