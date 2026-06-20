@@ -176,10 +176,9 @@ pub const NERDCTL_FULL_SHA256_AMD64: &str =
 pub const NERDCTL_FULL_SHA256_ARM64: &str =
     "55d68d2613b5f065021146bac21f620cde9e7fdd4bd3eff74cd324f5462e107a";
 
-/// Ubuntu rootfs download URLs for WSL2 import (per-architecture).
-/// Uses the `releases/24.04/current` path (latest daily build of 24.04 LTS).
-/// SHA256 checksums below pin the exact rootfs version — update both URL and SHA256 when bumping.
-/// See issue #183 for planned migration to a self-built rootfs.
+/// Ubuntu rootfs download URLs for WSL2 import (per-architecture); SHA256 below pins the version.
+/// `current` is rolling: a "Failed to download or verify Ubuntu rootfs" on clean dev/CI means bump the SHA256.
+/// Self-built rootfs migration tracked in issue #183.
 /// amd64 Ubuntu WSL rootfs download URL.
 pub const WSL_ROOTFS_URL_AMD64: &str =
     "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz";
