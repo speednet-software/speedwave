@@ -343,6 +343,14 @@ fn run_wasapi_loopback(
     let block_align = format.get_blockalign() as usize;
     let bytes_per_sample = block_align / src_channels.max(1);
     let is_float = matches!(format.get_subformat(), Ok(SampleType::Float));
+    // The format is fixed per session — warn once here (not per buffer) if it's
+    // one we can't decode (e.g. 24-bit int), so "records but silent" is visible.
+    if !matches!(
+        (is_float, bytes_per_sample),
+        (true, 4) | (false, 2) | (false, 4)
+    ) {
+        log::warn!(target: "transcription::capture", "unsupported WASAPI format (float={is_float}, bps={bytes_per_sample}) — recording will be silent");
+    }
 
     // Loopback always captures in shared, event-driven mode. `autoconvert`
     // lets WASAPI resample to our requested format where it can.
@@ -413,14 +421,8 @@ fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec
     if bytes_per_sample == 0 {
         return Vec::new();
     }
-    // Unsupported formats (e.g. 24-bit int) decode to silence — warn once so the
-    // "records but silent" symptom is diagnosable, rather than per-sample spam.
-    if !matches!(
-        (is_float, bytes_per_sample),
-        (true, 4) | (false, 2) | (false, 4)
-    ) {
-        log::warn!(target: "transcription::capture", "unsupported WASAPI format (float={is_float}, bps={bytes_per_sample}) — decoding as silence");
-    }
+    // An unsupported format (logged once per session by the caller) decodes to
+    // silence via the wildcard arm below.
     let n = raw.len() / bytes_per_sample;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
