@@ -8,12 +8,10 @@ import type {
   DownloadProgress,
   Language,
   ModelsAck,
-  Segment,
-  SpeakerNamePairs,
+  RecommendedModelAck,
   StartAck,
   SubscribeAck,
   TranscriptEvent,
-  TranscriptionConfig,
   TranscriptSession,
 } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
@@ -22,16 +20,6 @@ import { LoggerService } from './logger.service';
 
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
-
-/**
- * Converts the wire `[[id, name], …]` pairs into a `{ id: name }` record.
- * @param pairs - speaker-name pairs as carried inside a `TranscriptEvent`.
- */
-function pairsToRecord(pairs: SpeakerNamePairs): Record<number, string> {
-  const out: Record<number, string> = {};
-  for (const [id, name] of pairs) out[id] = name;
-  return out;
-}
 
 /**
  * Meeting-transcription state + Tauri-command facade. Mirrors the ADR-056
@@ -51,32 +39,6 @@ export class TranscriptionService {
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
 
-  /** `true` if the user toggled meeting transcription on in Settings. */
-  isEnabled(): Promise<boolean> {
-    return this.tauri.invoke<boolean>('transcription_enabled');
-  }
-
-  /**
-   * Persists the on/off toggle.
-   * @param enabled - `true` to enable, `false` to disable.
-   */
-  setEnabled(enabled: boolean): Promise<void> {
-    return this.tauri.invoke<void>('set_transcription_enabled', { enabled });
-  }
-
-  /** Reads the full meeting-transcription preferences block. */
-  getConfig(): Promise<TranscriptionConfig> {
-    return this.tauri.invoke<TranscriptionConfig>('get_transcription_config');
-  }
-
-  /**
-   * Persists the full meeting-transcription preferences block (whole replace).
-   * @param config - the new preferences.
-   */
-  setConfig(config: TranscriptionConfig): Promise<void> {
-    return this.tauri.invoke<void>('set_transcription_config', { config });
-  }
-
   /** Capture capabilities + compiled whisper.cpp backends for this build. */
   getCapabilities(): Promise<CapabilitiesAck> {
     return this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
@@ -89,17 +51,12 @@ export class TranscriptionService {
 
   /**
    * Starts recording the given source, then subscribes to its live stream.
-   * @param source - what to capture (system / process / mic / mixed).
+   * @param source - what to capture (system / mic / mixed).
    * @param language - forced PL/EN; never auto-detected.
-   * @param expectedSpeakers - hint for the diarizer (`null` = auto-estimate).
    */
-  async startRecording(
-    source: AudioSource,
-    language: Language,
-    expectedSpeakers: number | null = null
-  ): Promise<StartAck> {
+  async startRecording(source: AudioSource, language: Language): Promise<StartAck> {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
-      params: { source, language, liveModelOverride: null, expectedSpeakers },
+      params: { source, language },
     });
     this.activateSnapshot(ack.snapshot);
     await this.attachListener(ack.event_name);
@@ -159,25 +116,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Drops the recorded audio file (the transcript stays).
-   * @param sessionId - the session whose audio to discard.
-   */
-  discardAudio(sessionId: string): Promise<void> {
-    return this.tauri.invoke<void>('discard_transcript_audio', { sessionId });
-  }
-
-  /**
-   * Assigns a user-supplied display name to a speaker.
-   * @param sessionId - the session.
-   * @param speakerId - 0-indexed speaker id.
-   * @param name - new label; empty string clears it.
-   */
-  relabelSpeaker(sessionId: string, speakerId: number, name: string): Promise<void> {
-    return this.tauri.invoke<void>('relabel_speaker', { sessionId, speakerId, name });
-  }
-
-  /**
-   * Renders the session as markdown (with the "approximate labels" footer).
+   * Renders the session as a timestamped markdown transcript.
    * @param sessionId - the session to render.
    */
   getMarkdown(sessionId: string): Promise<string> {
@@ -193,7 +132,12 @@ export class TranscriptionService {
     await this.chatState.sendMessage(md, 'Meeting transcript');
   }
 
-  /** Status of all Whisper + diarization models on disk. */
+  /** The single best model for this hardware + its download state. */
+  recommendedModel(): Promise<RecommendedModelAck> {
+    return this.tauri.invoke<RecommendedModelAck>('recommended_transcription_model');
+  }
+
+  /** Status of all Whisper models on disk. */
   listModels(): Promise<ModelsAck> {
     return this.tauri.invoke<ModelsAck>('list_transcription_models');
   }
@@ -270,21 +214,8 @@ export class TranscriptionService {
       case 'segments_replaced':
         next.live_segments = [...cur.live_segments.slice(0, ev.from_index), ...ev.segments];
         break;
-      case 'speaker_assigned':
-        next.live_segments = cur.live_segments.map((s, i) =>
-          i === ev.segment_index ? ({ ...s, speaker: ev.speaker } as Segment) : s
-        );
-        if (cur.final_segments) {
-          next.final_segments = cur.final_segments.map((s, i) =>
-            i === ev.segment_index ? ({ ...s, speaker: ev.speaker } as Segment) : s
-          );
-        }
-        break;
       case 'status_changed':
         next.status = ev.status;
-        break;
-      case 'speaker_relabeled':
-        next.speaker_names = pairsToRecord(ev.speaker_names);
         break;
       case 'finalize_progress':
         next.status = { state: 'finalizing', progress: ev.progress };
@@ -292,7 +223,6 @@ export class TranscriptionService {
       case 'final_segments_ready':
         // The offline pass produced a higher-quality transcript; swap it in.
         next.final_segments = ev.segments;
-        next.speaker_names = pairsToRecord(ev.speaker_names);
         break;
       case 'finished':
         next.status = { state: 'done' };

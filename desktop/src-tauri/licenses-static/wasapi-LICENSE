@@ -1,16 +1,13 @@
-ONNX Runtime — cross-platform inference and training machine-learning
-accelerator. Linked into Speedwave (Desktop, meeting-transcription feature)
-transitively via the `sherpa-onnx` Rust crate's bundled static library, which
-provides the diarization model runtime.
+wasapi (wasapi-rs) — safe Rust bindings to the Windows WASAPI audio API. Used
+by Speedwave (Desktop, meeting-transcription feature) on Windows only, for
+system-audio loopback capture. Linked statically into the Windows build.
 
-Upstream: https://github.com/microsoft/onnxruntime
-License: MIT
-
----
+Upstream: https://github.com/HEnquist/wasapi-rs
+License: MIT. The full MIT license text follows.
 
 MIT License
 
-Copyright (c) Microsoft Corporation
+Copyright (c) 2021 Henrik Enquist
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

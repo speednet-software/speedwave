@@ -212,8 +212,8 @@ pub const RESOURCES_MARKER: &str = "resources-dir";
 /// Directory perms `0o700`, files `0o600` — these contain microphone/system audio.
 pub const TRANSCRIPTS_SUBDIR: &str = "transcripts";
 
-/// Subdirectory of `data_dir()` holding downloaded Whisper + diarization models.
-/// Layout: `<data_dir>/models/whisper/ggml-*.bin`, `<data_dir>/models/diarization/*.onnx`.
+/// Subdirectory of `data_dir()` holding downloaded Whisper models.
+/// Layout: `<data_dir>/models/whisper/ggml-*.bin`.
 /// Directory perms `0o700`, files `0o600`.
 pub const MODELS_SUBDIR: &str = "models";
 

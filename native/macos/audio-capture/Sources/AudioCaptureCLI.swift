@@ -22,7 +22,10 @@ import SharedCLI
 /// 16 kHz mono float32 — the only output format. Whisper expects this rate.
 let kSampleRate: Double = 16_000.0
 
-/// Owns all stdout writes (header + binary chunks); never runs on an audio thread.
+/// Owns all stdout writes (header + binary chunks). CoreAudio IOProc threads
+/// and the mic-engine tap only hand it already-copied raw frames and let the
+/// resample + write happen here — never on a real-time audio thread (a full
+/// stdout pipe blocking the audio path would glitch the whole system).
 final class WriterQueue {
     static let shared = WriterQueue()
     private let queue = DispatchQueue(label: "pl.speedwave.audio-capture.writer")
@@ -35,7 +38,9 @@ final class WriterQueue {
 
     /// Writes the JSON header line synchronously (called once, before any chunk).
     func writeHeader(streams: [String]) {
-        // `started_at_ns` is wall-clock; the Rust reader ignores it (per-chunk offset is monotonic).
+        // `started_at_ns` uses wall-clock; per-chunk `offset_ns` is a monotonic
+        // mach-time delta. They are in different clock domains — the Rust reader
+        // ignores `started_at_ns`, so this is informational only.
         let startedAtNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
         let header: [String: Any] = [
             "sample_rate": Int(kSampleRate), "channels": 1, "format": "f32le",
@@ -68,7 +73,9 @@ final class WriterQueue {
                   let inBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: inFrames)
             else { return }
             inBuf.frameLength = inFrames
-            // Copy raw samples into the input buffer (non-interleaved float per channel).
+            // Copy the raw interleaved samples into the input buffer. The input
+            // format we hand the converter is always non-interleaved float (we
+            // build it that way in the callers), so write one channel at a time.
             if format.isInterleaved {
                 if let dst = inBuf.floatChannelData?[0] {
                     interleaved.withUnsafeBufferPointer { src in
@@ -132,12 +139,11 @@ func logErr(_ message: String) {
 
 // MARK: - Argument parsing
 
-/// Source for `--record --source`. `all` = system-wide tap; `pid:N` = single
-/// process; `all-except:N` = system minus one process; `mic-only` = microphone only.
+/// Source for `--record --source`. `all` = system-wide tap; `mic-only` = no
+/// system tap at all, just the microphone (uses the public AVCaptureDevice
+/// consent API, so the OS prompt fires — unlike CoreAudio process taps).
 enum AudioSource {
     case all
-    case pid(pid_t)
-    case allExcept(pid_t)
     /// Microphone only, no system tap. Optional device UID (`nil` = default input).
     case micOnly(String?)
 }
@@ -175,12 +181,6 @@ func parseRecordOptions(_ args: [String]) -> RecordOptions? {
                 source = .micOnly(nil)
             } else if val.hasPrefix("mic-only:") {
                 source = .micOnly(String(val.dropFirst("mic-only:".count)))
-            } else if val.hasPrefix("pid:") {
-                guard let p = pid_t(val.dropFirst(4)) else { return nil }
-                source = .pid(p)
-            } else if val.hasPrefix("all-except:") {
-                guard let p = pid_t(val.dropFirst("all-except:".count)) else { return nil }
-                source = .allExcept(p)
             } else {
                 return nil
             }
@@ -201,82 +201,95 @@ func parseRecordOptions(_ args: [String]) -> RecordOptions? {
     return RecordOptions(source: s, mic: mic)
 }
 
-// MARK: - Process enumeration (--list)
+// MARK: - Input device enumeration (--list-mics)
 
-/// Emits a JSON array of running audio processes (one element per pid) on stdout
-/// from `kAudioHardwarePropertyProcessObjectList`.
+/// Emits a JSON array of input-capable audio devices (`{uid, name, default}`)
+/// on stdout so the UI can offer a microphone picker.
 @available(macOS 14.4, *)
-func listAudioProcesses() throws -> Data {
+func listInputDevices() throws -> Data {
     var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mSelector: kAudioHardwarePropertyDevices,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-
     var dataSize: UInt32 = 0
-    let sizeStatus = AudioObjectGetPropertyDataSize(
-        AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize)
-    guard sizeStatus == noErr else {
+    guard
+        AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr
+    else {
         throw NSError(
-            domain: "AudioCapture", code: Int(sizeStatus),
-            userInfo: [NSLocalizedDescriptionKey: "ProcessObjectList size query failed"])
+            domain: "AudioCapture", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "device list size query failed"])
     }
-
     let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
     var ids = [AudioObjectID](repeating: 0, count: count)
-    let getStatus = ids.withUnsafeMutableBufferPointer { buf -> OSStatus in
-        guard let base = buf.baseAddress else { return kAudioHardwareUnspecifiedError }
-        return AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, base)
+    _ = ids.withUnsafeMutableBufferPointer { buf in
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize,
+            buf.baseAddress!)
     }
-    guard getStatus == noErr else {
-        throw NSError(
-            domain: "AudioCapture", code: Int(getStatus),
-            userInfo: [NSLocalizedDescriptionKey: "ProcessObjectList fetch failed"])
-    }
-
+    let defaultId = defaultInputDevice()
     var out: [[String: Any]] = []
-    for id in ids {
-        guard let pid = pidForAudioProcess(id) else { continue }
-        let bundleId = bundleIdForAudioProcess(id) ?? ""
-        out.append([
-            "pid": Int(pid),
-            "bundle_id": bundleId,
-            "object_id": Int(id),
-        ])
+    for id in ids where deviceHasInput(id) {
+        guard let uid = deviceStringProperty(id, kAudioDevicePropertyDeviceUID) else { continue }
+        let name = deviceStringProperty(id, kAudioObjectPropertyName) ?? uid
+        out.append(["uid": uid, "name": name, "default": id == defaultId])
     }
     return try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
 }
 
-/// Reads the `kAudioProcessPropertyPID` of an audio process object.
+/// `true` if `device` has at least one input channel.
 @available(macOS 14.4, *)
-func pidForAudioProcess(_ object: AudioObjectID) -> pid_t? {
+func deviceHasInput(_ device: AudioObjectID) -> Bool {
     var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioProcessPropertyPID,
-        mScope: kAudioObjectPropertyScopeGlobal,
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioObjectPropertyScopeInput,
         mElement: kAudioObjectPropertyElementMain
     )
-    var pid: pid_t = -1
-    var size = UInt32(MemoryLayout<pid_t>.size)
-    let status = AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &pid)
-    return status == noErr && pid > 0 ? pid : nil
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size > 0 else {
+        return false
+    }
+    let buf = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { buf.deallocate() }
+    guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, buf) == noErr else {
+        return false
+    }
+    let list = buf.assumingMemoryBound(to: AudioBufferList.self)
+    let abl = UnsafeMutableAudioBufferListPointer(list)
+    return abl.contains { $0.mNumberChannels > 0 }
 }
 
-/// Reads the bundle identifier of an audio process object (often empty for
-/// background processes and helpers).
+/// The system default input device id, or `0` if unavailable.
 @available(macOS 14.4, *)
-func bundleIdForAudioProcess(_ object: AudioObjectID) -> String? {
+func defaultInputDevice() -> AudioObjectID {
     var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioProcessPropertyBundleID,
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-    // The selector returns a +1-retained CFString; receive it via an opaque
-    // pointer slot, then take ownership through Unmanaged so ARC balances it.
+    var id: AudioObjectID = 0
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    _ = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
+    return id
+}
+
+/// Reads a CFString device property (e.g. UID or name) as a Swift `String`.
+@available(macOS 14.4, *)
+func deviceStringProperty(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector)
+    -> String?
+{
+    var addr = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
     var sz = UInt32(MemoryLayout<CFString?>.size)
     var raw: Unmanaged<CFString>?
     let status = withUnsafeMutablePointer(to: &raw) { ptr -> OSStatus in
-        AudioObjectGetPropertyData(object, &addr, 0, nil, &sz, ptr)
+        AudioObjectGetPropertyData(device, &addr, 0, nil, &sz, ptr)
     }
     guard status == noErr, let cf = raw?.takeRetainedValue() else { return nil }
     let s = cf as String
@@ -287,16 +300,16 @@ func bundleIdForAudioProcess(_ object: AudioObjectID) -> String? {
 
 /// audio-capture-cli <command> [args]
 /// Commands:
-///   --list                                     enumerate audio processes (JSON, stdout)
-///   --record --source <all|pid:N|all-except:N> --mic <none|default|<uid>>
-///                                              stream framed PCM to stdout
+///   --list-mics                                  enumerate input devices (JSON, stdout)
+///   --record --source <all|mic-only[:uid]> --mic <none|default|<uid>>
+///                                                stream framed PCM to stdout
 @main
 struct AudioCaptureCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
             exitWithError(
-                "Usage: audio-capture-cli --list | --record --source <all|pid:N|all-except:N> --mic <none|default|<uid>>"
+                "Usage: audio-capture-cli --list-mics | --record --source <all|mic-only[:uid]> --mic <none|default|<uid>>"
             )
         }
 
@@ -308,25 +321,25 @@ struct AudioCaptureCLI {
         }
 
         switch args[1] {
-        case "--list":
+        case "--list-mics":
             do {
-                let data = try listAudioProcesses()
+                let data = try listInputDevices()
                 if let s = String(data: data, encoding: .utf8) { print(s) }
             } catch {
-                exitWithError("list failed: \(error.localizedDescription)")
+                exitWithError("list-mics failed: \(error.localizedDescription)")
             }
 
         case "--record":
             let tail = Array(args.dropFirst(2))
             guard let opts = parseRecordOptions(tail) else {
                 exitWithError(
-                    "Bad --record flags. Need --source <all|pid:N|all-except:N> --mic <none|default|<uid>>"
+                    "Bad --record flags. Need --source <all|mic-only[:uid]> --mic <none|default|<uid>>"
                 )
             }
             runRecord(opts)
 
         default:
-            exitWithError("Unknown command: \(args[1]). Use --list or --record.")
+            exitWithError("Unknown command: \(args[1]). Use --list-mics or --record.")
         }
     }
 }
@@ -423,8 +436,9 @@ func runRecord(_ opts: RecordOptions) {
         return
     }
 
-    // System tap path: request system-audio TCC consent via the private API first
-    // (no public trigger; ADR-056 decision 3).
+    // System tap path. The system-audio TCC prompt has no public trigger, so
+    // request it via the private API first — without it the tap silently
+    // delivers zeroed buffers (ADR-056 decision 3).
     guard preflightSystemAudioConsent() else {
         logErr(
             "system audio recording permission denied — grant it in System Settings → Privacy & Security → System Audio Recording Only")
@@ -462,25 +476,6 @@ func runRecord(_ opts: RecordOptions) {
     RunLoop.main.run()
 }
 
-/// Translates a Unix pid to the matching CoreAudio process object id.
-/// Returns 0 if the pid does not currently own an audio process object.
-@available(macOS 14.4, *)
-func translatePidToProcessObject(_ pid: pid_t) -> AudioObjectID {
-    var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    var inPid = pid
-    var outObject: AudioObjectID = 0
-    let inSize = UInt32(MemoryLayout<pid_t>.size)
-    var outSize = UInt32(MemoryLayout<AudioObjectID>.size)
-    let status = AudioObjectGetPropertyData(
-        AudioObjectID(kAudioObjectSystemObject), &addr,
-        inSize, &inPid, &outSize, &outObject)
-    return status == noErr ? outObject : 0
-}
-
 /// Creates the process tap + aggregate device and starts an IOProc that emits
 /// stream 0 ("app"). Falls through to the caller on success; throws on error.
 @available(macOS 14.4, *)
@@ -492,24 +487,6 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     case .all:
         description.processes = []
         description.isExclusive = true  // empty exclude-list = capture everything
-    case .pid(let p):
-        let obj = translatePidToProcessObject(p)
-        guard obj != 0 else {
-            throw NSError(
-                domain: "AudioCapture", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "pid \(p) has no audio process object"])
-        }
-        description.processes = [obj]
-        description.isExclusive = false  // include-only this pid
-    case .allExcept(let p):
-        let obj = translatePidToProcessObject(p)
-        guard obj != 0 else {
-            throw NSError(
-                domain: "AudioCapture", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "pid \(p) has no audio process object"])
-        }
-        description.processes = [obj]
-        description.isExclusive = true
     case .micOnly:
         // Unreachable — runRecord handles mic-only before getting here.
         throw NSError(
@@ -553,7 +530,10 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
     session.aggregateId = aggId
 
-    // Query the aggregate device's real input format; the tap mixdown arrives interleaved.
+    // The aggregate device's input stream format tells us the *real* sample
+    // rate + channel count CoreAudio will deliver — never assume 48 kHz. A tap
+    // mixdown arrives as one interleaved float buffer, so we hand the writer
+    // queue an interleaved float format matching it.
     let inputFormat = inputStreamFormat(of: aggId)
     let inChannels = max(1, inputFormat.mChannelsPerFrame)
     guard let avInFormat = AVAudioFormat(
@@ -565,8 +545,9 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
             userInfo: [NSLocalizedDescriptionKey: "could not build input AVAudioFormat (rate \(inputFormat.mSampleRate))"])
     }
 
-    // IOProc runs on a real-time CoreAudio thread: copy samples to the writer queue only,
-    // no resampling/stdout/locking on the audio path.
+    // IOProc runs on a real-time CoreAudio thread: it only copies the buffer's
+    // float samples into a Swift array and hands them to the writer queue. No
+    // resampling, no stdout, no locking on the audio path.
     var procId: AudioDeviceIOProcID?
     let procStatus = AudioDeviceCreateIOProcIDWithBlock(
         &procId, aggId, nil
@@ -624,11 +605,18 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
     return fallback
 }
 
-/// Requests system-audio (TCC `kTCCServiceAudioCapture`) consent via the private
-/// `TCCAccessRequest` API (dlopen/dlsym-guarded). Blocks; returns `true` if granted.
+/// Requests the "System Audio Recording" (TCC `kTCCServiceAudioCapture`) consent
+/// via the private `TCCAccessRequest` API — there is no public trigger for this
+/// prompt (decision 3, ADR-056). `dlopen`/`dlsym`-guarded: if the symbol is
+/// missing on a future macOS, returns `false` and the caller exits "permission
+/// unavailable" (the UI then deep-links the user to System Settings) — it does
+/// not crash. Blocks for the prompt result. Returns `true` if granted.
 func preflightSystemAudioConsent() -> Bool {
+    // `TCCAccessRequest(service, options, completion)` — 3 args; the nullable
+    // options dictionary must be passed or TCC treats the block as the options
+    // and crashes with `-[__NSMallocBlock__ objectForKey:]`.
     typealias TCCRequestFn = @convention(c) (
-        CFString, @escaping @convention(block) (Bool) -> Void
+        CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void
     ) -> Void
     guard let handle = dlopen(
         "/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW)
@@ -645,7 +633,7 @@ func preflightSystemAudioConsent() -> Bool {
     let service = "kTCCServiceAudioCapture" as CFString
     let sema = DispatchSemaphore(value: 0)
     var granted = false
-    request(service) { ok in
+    request(service, nil) { ok in
         granted = ok
         sema.signal()
     }
@@ -653,8 +641,11 @@ func preflightSystemAudioConsent() -> Bool {
     return granted
 }
 
-/// Requests microphone consent via the public `AVCaptureDevice` API (shows the
-/// macOS prompt). Blocks until decided; returns `true` if granted.
+/// Requests microphone consent via the public `AVCaptureDevice` API. This DOES
+/// show the macOS consent prompt (the embedded `NSMicrophoneUsageDescription`
+/// supplies the text) — unlike CoreAudio process taps, which have no public
+/// trigger. Blocks until the user responds (or, if already decided, returns
+/// immediately). Returns `true` if access is granted.
 func requestMicrophoneAccess() -> Bool {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized:
@@ -682,13 +673,31 @@ func requestMicrophoneAccess() -> Bool {
 func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) throws {
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
+
+    // Route to a named device before reading the format — the engine's input
+    // format follows the bound device. A missing/unknown UID falls back to the
+    // system default (logged), so a stale picked device never fails capture.
+    if case .device(let uid) = selector {
+        if let deviceId = inputDeviceId(forUID: uid) {
+            do {
+                try inputNode.auAudioUnit.setDeviceID(deviceId)
+            } catch {
+                logErr("mic device '\(uid)' could not be set (\(error)); using default")
+            }
+        } else {
+            logErr("mic device UID '\(uid)' not found; using default")
+        }
+    }
     let format = inputNode.outputFormat(forBus: 0)
 
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buf, _ in
         let frames = Int(buf.frameLength)
         let channels = Int(buf.format.channelCount)
         guard frames > 0, let chan = buf.floatChannelData else { return }
-        // Interleave engine channels for the writer queue; engine float format unchanged.
+        // Interleave the engine's non-interleaved channels into one array, then
+        // hand a matching interleaved format to the writer queue (which will
+        // deinterleave + down-mix + resample). Keeping it simple: the engine's
+        // float format is what we pass through unchanged otherwise.
         var interleaved = [Float](repeating: 0, count: frames * channels)
         for f in 0..<frames {
             for c in 0..<channels { interleaved[f * channels + c] = chan[c][f] }
@@ -703,15 +712,30 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             offsetNs: offset)
     }
 
-    // Device routing not yet wired; the selector is logged for transparency.
-    switch selector {
-    case .device(let uid):
-        logErr("mic selector device='\(uid)' (default device used; named routing not yet wired)")
-    case .defaultDevice, .none:
-        break
-    }
-
     engine.prepare()
     try engine.start()
     session.micEngine = engine
+}
+
+/// Resolves a device UID string to its `AudioDeviceID`, or `nil` if no input
+/// device matches (the UID is stale or the device was unplugged).
+@available(macOS 14.4, *)
+func inputDeviceId(forUID uid: String) -> AudioDeviceID? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard
+        AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr
+    else { return nil }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: 0, count: count)
+    _ = ids.withUnsafeMutableBufferPointer { buf in
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, buf.baseAddress!)
+    }
+    return ids.first { deviceHasInput($0) && deviceStringProperty($0, kAudioDevicePropertyDeviceUID) == uid }
 }

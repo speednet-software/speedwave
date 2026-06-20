@@ -11,13 +11,12 @@ class MockChatState {
   sendMessage = vi.fn(async (_text: string, _label?: string) => undefined);
 }
 
-function seg(start: number, end: number, text: string, speaker: number | null = null): Segment {
+function seg(start: number, end: number, text: string): Segment {
   return {
     start: { secs: start, nanos: 0 },
     end: { secs: end, nanos: 0 },
     text,
     words: [],
-    speaker,
   };
 }
 
@@ -31,12 +30,9 @@ function snapshot(overrides: Partial<TranscriptSession> = {}): TranscriptSession
     live_segments: [],
     final_segments: null,
     audio_path: '/tmp/sess-1/audio.wav',
-    speaker_names: {},
     models_used: {
       live: null,
       finalize: null,
-      diarization_segmentation: null,
-      diarization_embedding: null,
     },
     last_seq: 0,
     ...overrides,
@@ -91,49 +87,29 @@ describe('TranscriptionService', () => {
       };
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
       const spy = vi.spyOn(mockTauri, 'invoke');
-      const mixed = { kind: 'mixed' as const, system: { kind: 'system_wide' as const }, mic: null };
+      const mixed = { kind: 'mixed' as const, mic: null };
       await svc.startRecording(mixed, 'pl');
       expect(spy).toHaveBeenCalledWith('start_transcription', {
         params: {
           source: mixed,
           language: 'pl',
-          liveModelOverride: null,
-          expectedSpeakers: null,
-        },
-      });
-    });
-
-    it('forwards a non-null expectedSpeakers hint to start_transcription', async () => {
-      const ack = {
-        session_id: 'sess-1',
-        event_name: 'transcript_event::sess-1',
-        snapshot: snapshot(),
-      };
-      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
-      const spy = vi.spyOn(mockTauri, 'invoke');
-      const src = { kind: 'system_wide' as const };
-      await svc.startRecording(src, 'pl', 4);
-      expect(spy).toHaveBeenCalledWith('start_transcription', {
-        params: {
-          source: src,
-          language: 'pl',
-          liveModelOverride: null,
-          expectedSpeakers: 4,
         },
       });
     });
   });
 
-  describe('isEnabled / setEnabled', () => {
-    it('reads the toggle via transcription_enabled', async () => {
-      mockTauri.invokeHandler = async (cmd) => (cmd === 'transcription_enabled' ? true : undefined);
-      expect(await svc.isEnabled()).toBe(true);
-    });
-
-    it('persists via set_transcription_enabled', async () => {
-      const spy = vi.spyOn(mockTauri, 'invoke');
-      await svc.setEnabled(false);
-      expect(spy).toHaveBeenCalledWith('set_transcription_enabled', { enabled: false });
+  describe('recommendedModel', () => {
+    it('reads the recommended model via recommended_transcription_model', async () => {
+      const ack = {
+        key: 'large-v3',
+        display_name: 'Large v3',
+        size_bytes: 3_100_000_000,
+        downloaded: false,
+        accel_label: 'Metal (GPU)',
+      };
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'recommended_transcription_model' ? ack : undefined;
+      expect(await svc.recommendedModel()).toEqual(ack);
     });
   });
 
@@ -198,21 +174,6 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.live_segments.map((s) => s.text)).toEqual(['keep', 'new1', 'new2']);
     });
 
-    it('stamps a speaker via speaker_assigned', () => {
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'segment_appended',
-        seq: 1,
-        segment: seg(0, 2, 'x'),
-      });
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'speaker_assigned',
-        seq: 2,
-        segment_index: 0,
-        speaker: 1,
-      });
-      expect(svc.active()?.live_segments[0].speaker).toBe(1);
-    });
-
     it('updates status on status_changed and finalize_progress', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'finalize_progress',
@@ -227,21 +188,7 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.status).toEqual({ state: 'done' });
     });
 
-    it('converts the wire pair-array into a record on speaker_relabeled', () => {
-      // The Rust event sends [[id, name], …]; the reducer must normalise it
-      // to the { id: name } shape the snapshot uses.
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'speaker_relabeled',
-        seq: 1,
-        speaker_names: [
-          [0, 'Ola'],
-          [1, 'Bartek'],
-        ],
-      });
-      expect(svc.active()?.speaker_names).toEqual({ 0: 'Ola', 1: 'Bartek' });
-    });
-
-    it('swaps in final_segments on final_segments_ready (pair-array → record)', () => {
+    it('swaps in final_segments on final_segments_ready', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'segment_appended',
         seq: 1,
@@ -250,12 +197,10 @@ describe('TranscriptionService', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'final_segments_ready',
         seq: 2,
-        segments: [seg(0, 5, 'higher-quality', 0)],
-        speaker_names: [[0, 'Ola']],
+        segments: [seg(0, 5, 'higher-quality')],
       });
       const s = svc.active()!;
-      expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality', 0)]);
-      expect(s.speaker_names).toEqual({ 0: 'Ola' });
+      expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality')]);
       // live_segments untouched (the offline pass doesn't rewrite them).
       expect(s.live_segments[0].text).toBe('live-text');
     });

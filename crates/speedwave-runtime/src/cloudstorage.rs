@@ -127,6 +127,8 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
     None
 }
 
+/// Detects whether `path` lives under a known cloud-storage sync root. Not yet
+/// implemented on Windows — always `None`.
 #[cfg(target_os = "windows")]
 pub fn detect_cloudstorage_provider(_path: &Path) -> Option<CloudStorageProvider> {
     None

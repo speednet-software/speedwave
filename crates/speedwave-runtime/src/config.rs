@@ -467,21 +467,6 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
-/// Meeting-transcription preferences (ADR-056). Top-level user config only —
-/// **not** part of `ProjectRepoConfig` (a checked-in repo file must not be
-/// able to turn on host-audio recording — privacy-sensitive host capability).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct TranscriptionConfig {
-    /// Feature toggle. `None` or `Some(false)` keeps the feature off.
-    pub enabled: Option<bool>,
-    /// Default Whisper model key for the live pass (e.g. `"small"`).
-    pub default_live_model: Option<String>,
-    /// Default forced language (`"pl"` / `"en"`).
-    pub default_language: Option<String>,
-    /// Keep `audio.wav` after the offline pass finishes. Default = keep.
-    pub keep_audio_after_finalize: Option<bool>,
-}
-
 /// UI preferences (ADR-058). Top-level user-only — a checked-in repo
 /// `.speedwave.json` is not allowed to flip beta UI on or off.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -499,8 +484,6 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     /// IDE selected for the bridge.
     pub selected_ide: Option<SelectedIde>,
-    /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
-    pub transcription: Option<TranscriptionConfig>,
     /// UI preferences (ADR-058). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
 }
@@ -528,14 +511,6 @@ impl SpeedwaveUserConfig {
         self.active_project
             .as_deref()
             .and_then(|n| self.find_project(n))
-    }
-
-    /// `true` if the user toggled meeting transcription on (top-level only).
-    pub fn transcription_enabled(&self) -> bool {
-        self.transcription
-            .as_ref()
-            .and_then(|t| t.enabled)
-            .unwrap_or(false)
     }
 
     /// `true` if beta-features UI surface is enabled (top-level only).
@@ -939,73 +914,41 @@ mod tests {
         );
     }
 
-    // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
+    // ---- Transcription config retired (ADR-056) -----------------------------
 
     #[test]
-    fn transcription_disabled_by_default() {
-        let cfg = SpeedwaveUserConfig::default();
-        assert!(!cfg.transcription_enabled(), "off by default");
-        assert!(cfg.transcription.is_none());
-    }
-
-    #[test]
-    fn transcription_enabled_only_when_user_set_it() {
-        let cfg = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(true),
-                default_language: Some("pl".to_string()),
-                default_live_model: Some("small".to_string()),
-                keep_audio_after_finalize: Some(true),
-            }),
-            ..Default::default()
-        };
-        assert!(cfg.transcription_enabled());
-
-        let cfg_off = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(!cfg_off.transcription_enabled());
-
-        let cfg_none = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig::default()),
-            ..Default::default()
-        };
-        assert!(!cfg_none.transcription_enabled(), "enabled: None is off");
-    }
-
-    #[test]
-    fn transcription_config_round_trips_through_serde() {
-        let cfg = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(true),
-                default_language: Some("en".to_string()),
-                default_live_model: Some("large-v3-turbo".to_string()),
-                keep_audio_after_finalize: Some(false),
-            }),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(
-            back.transcription, cfg.transcription,
-            "round-trip preserves the field"
+    fn old_user_config_with_a_transcription_block_still_loads() {
+        // The `transcription` field was removed (no toggle, no per-feature
+        // defaults). An existing config that still carries the block must
+        // deserialize fine — the key is tolerated as unknown.
+        let old_json = r#"{
+            "projects": [],
+            "transcription": {
+                "enabled": true,
+                "default_language": "pl",
+                "default_live_model": "small",
+                "keep_audio_after_finalize": false
+            },
+            "ui": { "beta_enabled": true }
+        }"#;
+        let cfg: SpeedwaveUserConfig = serde_json::from_str(old_json).expect("deserialize");
+        assert!(cfg.beta_enabled(), "the rest of the config still parses");
+        let json_back = serde_json::to_string(&cfg).expect("reserialize");
+        assert!(
+            !json_back.contains("transcription"),
+            "the retired field is not re-emitted; got {json_back}"
         );
     }
 
     #[test]
-    fn repo_config_cannot_enable_transcription() {
-        // ProjectRepoConfig has no `transcription` field, so a repo key is dropped.
+    fn repo_config_has_no_transcription_field() {
+        // Repo .speedwave.json has no transcription field — a stray key is dropped.
         let repo_json = r#"{
             "claude": null,
             "integrations": null,
-            "transcription": { "enabled": true, "default_language": "pl" }
+            "transcription": { "enabled": true }
         }"#;
         let parsed: ProjectRepoConfig = serde_json::from_str(repo_json).expect("repo parse");
-        // The repo struct has no transcription field; the json is ignored.
         let json_back = serde_json::to_string(&parsed).expect("repo reserialize");
         assert!(
             !json_back.contains("transcription"),
@@ -1181,7 +1124,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1238,7 +1180,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1620,7 +1561,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1698,7 +1638,6 @@ mod tests {
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -1723,7 +1662,6 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1745,7 +1683,6 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1768,7 +1705,6 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1828,7 +1764,6 @@ mod tests {
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         save_user_config_to(&config, &config_path).unwrap();
@@ -1859,7 +1794,6 @@ mod tests {
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
@@ -1875,7 +1809,6 @@ mod tests {
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
@@ -1918,7 +1851,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
@@ -1963,7 +1895,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -2188,7 +2119,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -2262,7 +2192,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -2300,7 +2229,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -2596,7 +2524,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -2631,7 +2558,6 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
@@ -2706,7 +2632,6 @@ mod tests {
             ],
             active_project: Some("beta".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let entry = config.active_project_entry();
@@ -2732,7 +2657,6 @@ mod tests {
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         assert!(

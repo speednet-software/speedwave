@@ -36,9 +36,9 @@ pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
-/// Host-side meeting transcription (audio capture, Whisper, diarization, model
-/// catalogue) — gated behind the `audio-transcription` feature so the CLI
-/// (which never enables it) stays lean. See `docs/adr/ADR-056-*`.
+/// Host-side meeting transcription (audio capture, Whisper, model catalogue) —
+/// gated behind the `audio-transcription` feature so the CLI (which never
+/// enables it) stays lean. See `docs/adr/ADR-056-*`.
 #[cfg(feature = "audio-transcription")]
 pub mod transcription;
 pub mod tz;

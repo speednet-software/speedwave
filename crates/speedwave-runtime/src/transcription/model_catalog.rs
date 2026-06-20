@@ -1,6 +1,15 @@
-//! SSOT catalogue of Whisper and speaker-diarization models (ADR-056).
-//! Bumping a model = editing one const here. Mirrors `defaults::ANTHROPIC_MODELS`:
-//! the frontend reads it via the `list_transcription_models` Tauri command.
+//! SSOT catalogue of the Whisper transcription models the meeting-transcription
+//! feature downloads on demand (ADR-056; speaker diarization removed — ADR-075).
+//!
+//! Bumping a model = editing one const here. Nothing else hard-codes a model
+//! filename, URL, or hash. Mirrors the `defaults::ANTHROPIC_MODELS` pattern:
+//! the frontend reads this via the `list_transcription_models` Tauri command
+//! rather than hard-coding model names.
+//!
+//! URLs, sizes, and SHA256 values were established in ADR-056 spike 0C:
+//! Whisper GGML models come from `ggerganov/whisper.cpp` on Hugging Face
+//! (NOT `ggml-org/whisper.cpp`, which 401s anonymously). Sizes/SHA256 from
+//! the HF API; `small`/`medium` SHA256 additionally confirmed by download.
 
 /// Hugging Face repo path the Whisper GGML models are downloaded from.
 pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -10,8 +19,12 @@ pub fn whisper_model_url(file: &str) -> String {
     format!("https://huggingface.co/{WHISPER_HF_REPO}/resolve/main/{file}")
 }
 
-/// Where in the live/offline transcription pipeline a Whisper model is used
-/// (ADR-056 decision 8).
+/// Where in the live/offline transcription pipeline a Whisper model is meant
+/// to be used. The default-download set for v1 (ADR-056 decision 8): `Small`
+/// for CPU-only live, `LargeV3Turbo` for live when a GPU/Metal backend was
+/// compiled in, `LargeV3` lazily for the higher-quality offline pass; `Medium`
+/// is the middle ground if Polish quality on `Small`/`Turbo` disappoints;
+/// `Tiny`/`Base` exist mainly for dev/tests and the smallest-footprint case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -27,6 +40,17 @@ pub enum ModelRole {
     GpuLive,
     /// `large-v3` — the higher-quality offline-pass model.
     Finalize,
+}
+
+/// SSOT for "which model to pick" per pass (one model per value). Read by
+/// `accel::best_model_for_backends` + `pick_offline_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRecommendation {
+    /// Recommended live (low-latency) model.
+    Live,
+    /// Recommended highest-quality model for the offline finalize pass.
+    FinalQuality,
 }
 
 /// Whether a model is a full-precision GGML model or a quantised variant.
@@ -64,6 +88,8 @@ pub struct WhisperModelInfo {
     /// `true` for the models v1 considers "live-capable" on the relevant
     /// backend (`small` on CPU, `large-v3-turbo` on GPU/Metal).
     pub live_capable: bool,
+    /// UI recommendation badge, if any (at most one model per recommendation).
+    pub recommendation: Option<ModelRecommendation>,
     /// SPDX-ish licence string for the model weights.
     pub license: &'static str,
 }
@@ -88,6 +114,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::CpuLive,
         quantization: Quantization::Full,
         live_capable: true,
+        recommendation: Some(ModelRecommendation::Live),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -99,6 +126,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::CpuLive,
         quantization: Quantization::Q5_1,
         live_capable: true,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -110,6 +138,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Mid,
         quantization: Quantization::Full,
         live_capable: false,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -121,6 +150,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Mid,
         quantization: Quantization::Q5_0,
         live_capable: false,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -132,6 +162,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::GpuLive,
         quantization: Quantization::Full,
         live_capable: true,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -143,6 +174,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::GpuLive,
         quantization: Quantization::Q5_0,
         live_capable: true,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -154,6 +186,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Finalize,
         quantization: Quantization::Full,
         live_capable: false,
+        recommendation: Some(ModelRecommendation::FinalQuality),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -165,6 +198,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::Finalize,
         quantization: Quantization::Q5_0,
         live_capable: false,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -176,6 +210,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::SmallestUsable,
         quantization: Quantization::Full,
         live_capable: true,
+        recommendation: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -187,75 +222,8 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         role: ModelRole::DevTest,
         quantization: Quantization::Full,
         live_capable: true,
+        recommendation: None,
         license: "MIT",
-    },
-];
-
-/// Which part of the diarization pipeline a model is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiarizationModelKind {
-    /// Speaker segmentation (pyannote-3.0, ONNX).
-    Segmentation,
-    /// Speaker embedding (NeMo TitaNet-small) — a single `.onnx` file.
-    Embedding,
-}
-
-/// One entry in the diarization model catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DiarizationModelInfo {
-    /// Stable catalogue key.
-    pub key: &'static str,
-    /// Which part of the pipeline.
-    pub kind: DiarizationModelKind,
-    /// Direct download URL (a GitHub release asset).
-    pub url: &'static str,
-    /// Human-readable label.
-    pub display_name: &'static str,
-    /// Approximate download size in bytes (the artifact actually downloaded —
-    /// for `Segmentation` that is the `.tar.bz2` archive).
-    pub approx_bytes: u64,
-    /// SHA256 of the downloaded artifact (lowercase hex, 64 chars).
-    pub sha256: &'static str,
-    /// SPDX-ish licence string.
-    pub license: &'static str,
-    /// `true` if this is the model the runtime uses by default.
-    pub default: bool,
-}
-
-/// Diarization model catalogue (ADR-056). The `speaker-recongition-models` URL
-/// segment (missing an "i") is the actual upstream k2-fsa release tag.
-pub const DIARIZATION_MODELS: &[DiarizationModelInfo] = &[
-    DiarizationModelInfo {
-        key: "pyannote-segmentation-3-0",
-        kind: DiarizationModelKind::Segmentation,
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-        display_name: "Pyannote segmentation 3.0 (ONNX)",
-        approx_bytes: 6_958_444,
-        sha256: "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
-        license: "MIT",
-        default: true,
-    },
-    DiarizationModelInfo {
-        key: "campplus-en-voxceleb",
-        kind: DiarizationModelKind::Embedding,
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
-        display_name: "3D-Speaker CAM++ speaker embedding (English, VoxCeleb)",
-        approx_bytes: 29_596_978,
-        sha256: "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
-        license: "Apache-2.0",
-        default: true,
-    },
-    // Non-default fallback for old recordings that name the NeMo model.
-    DiarizationModelInfo {
-        key: "nemo-titanet-small",
-        kind: DiarizationModelKind::Embedding,
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
-        display_name: "NeMo TitaNet-small speaker embedding",
-        approx_bytes: 40_257_283,
-        sha256: "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
-        license: "CC-BY-4.0",
-        default: false,
     },
 ];
 
@@ -264,18 +232,11 @@ pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
     WHISPER_MODELS.iter().find(|m| m.key == key)
 }
 
-/// Looks up a diarization model by its catalogue [`key`](DiarizationModelInfo::key).
-pub fn diarization_model(key: &str) -> Option<&'static DiarizationModelInfo> {
-    DIARIZATION_MODELS.iter().find(|m| m.key == key)
-}
-
-/// The default diarization model of the given [`kind`](DiarizationModelKind).
-pub fn default_diarization_model(
-    kind: DiarizationModelKind,
-) -> Option<&'static DiarizationModelInfo> {
-    DIARIZATION_MODELS
+/// The model the catalogue marks with `rec` (the selection SSOT).
+pub fn model_for_recommendation(rec: ModelRecommendation) -> Option<&'static WhisperModelInfo> {
+    WHISPER_MODELS
         .iter()
-        .find(|m| m.default && m.kind == kind)
+        .find(|m| m.recommendation == Some(rec))
 }
 
 #[cfg(test)]
@@ -340,7 +301,8 @@ mod tests {
 
     #[test]
     fn whisper_catalogue_has_the_v1_default_set() {
-        // Decision 8: CPU-live, GPU/Metal-live and finalize models are required.
+        // Decision 8: a CPU-live model, a GPU/Metal-live model, a finalize
+        // model. If any of these disappear, the v1 strategy breaks.
         assert!(
             whisper_model("small").is_some(),
             "v1 needs the `small` CPU-live model"
@@ -363,51 +325,32 @@ mod tests {
     }
 
     #[test]
-    fn diarization_catalogue_is_well_formed_and_has_a_default_pair() {
-        assert!(
-            !DIARIZATION_MODELS.is_empty(),
-            "diarization catalogue must not be empty"
-        );
-        let mut keys: HashSet<&str> = HashSet::new();
-        for m in DIARIZATION_MODELS {
-            assert!(keys.insert(m.key), "duplicate diarization key: {}", m.key);
-            assert!(
-                m.url
-                    .starts_with("https://github.com/k2-fsa/sherpa-onnx/releases/download/"),
-                "diarization {} url not a sherpa-onnx release asset: {}",
-                m.key,
-                m.url
-            );
-            assert!(
-                is_hex64(m.sha256),
-                "diarization {} sha256 must be 64 lowercase hex chars, got {:?}",
-                m.key,
-                m.sha256
-            );
-            assert!(
-                m.approx_bytes > 1_000_000,
-                "diarization {} approx_bytes implausibly small: {}",
-                m.key,
-                m.approx_bytes
-            );
-            assert!(!m.license.is_empty(), "diarization {} license empty", m.key);
-        }
-        let seg = default_diarization_model(DiarizationModelKind::Segmentation);
-        let emb = default_diarization_model(DiarizationModelKind::Embedding);
-        assert!(seg.is_some(), "need a default segmentation model");
-        assert!(emb.is_some(), "need a default embedding model");
-        // The pyannote conversion must stay redistributable (decision 7/14):
+    fn recommendations_have_exactly_one_final_quality_and_at_least_one_live() {
+        // PR-4: the download list badges one model "Recommended for final
+        // quality" (large-v3) and at least one "Recommended for live".
+        let final_q: Vec<&str> = WHISPER_MODELS
+            .iter()
+            .filter(|m| m.recommendation == Some(ModelRecommendation::FinalQuality))
+            .map(|m| m.key)
+            .collect();
         assert_eq!(
-            seg.unwrap().license,
-            "MIT",
-            "default segmentation model must be MIT (redistributable)"
+            final_q,
+            vec!["large-v3"],
+            "exactly one model must be recommended for final quality"
         );
-        // The embedding model needs a redistributable licence too:
-        assert!(
-            matches!(emb.unwrap().license, "CC-BY-4.0" | "Apache-2.0" | "MIT"),
-            "default embedding model licence must be redistributable, got {:?}",
-            emb.unwrap().license
-        );
+        let live: Vec<&str> = WHISPER_MODELS
+            .iter()
+            .filter(|m| m.recommendation == Some(ModelRecommendation::Live))
+            .map(|m| m.key)
+            .collect();
+        assert!(!live.is_empty(), "need at least one live-recommended model");
+        // A live-recommended model must actually be live-capable.
+        for key in &live {
+            assert!(
+                whisper_model(key).is_some_and(|m| m.live_capable),
+                "live-recommended {key} must be live_capable"
+            );
+        }
     }
 
     #[test]
@@ -417,11 +360,6 @@ mod tests {
             Some("ggml-medium.bin")
         );
         assert!(whisper_model("nope").is_none());
-        assert_eq!(
-            diarization_model("pyannote-segmentation-3-0").map(|m| m.kind),
-            Some(DiarizationModelKind::Segmentation)
-        );
-        assert!(diarization_model("nope").is_none());
     }
 
     #[test]
@@ -441,25 +379,27 @@ mod tests {
             let j = serde_json::to_string(&q).unwrap();
             assert_eq!(serde_json::from_str::<Quantization>(&j).unwrap(), q);
         }
-        for k in [
-            DiarizationModelKind::Segmentation,
-            DiarizationModelKind::Embedding,
-        ] {
-            let j = serde_json::to_string(&k).unwrap();
-            assert_eq!(serde_json::from_str::<DiarizationModelKind>(&j).unwrap(), k);
+        for rec in [ModelRecommendation::Live, ModelRecommendation::FinalQuality] {
+            let j = serde_json::to_string(&rec).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ModelRecommendation>(&j).unwrap(),
+                rec
+            );
         }
     }
 
     #[test]
     fn a_realistic_model_set_fits_under_the_global_dome() {
-        // Worst case: one full-precision model per role plus every diarization model.
-        let full_whisper: u64 = WHISPER_MODELS
+        // A realistic worst case: keep one full-precision model per role (no
+        // point keeping a `full` and its `q5_*` variant at once — that's the
+        // redundant case). This must fit under the dome in consts.rs with room
+        // to spare; if it doesn't, raise the dome (and revisit whether the
+        // catalogue is getting too large).
+        let total: u64 = WHISPER_MODELS
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))
             .map(|m| m.approx_bytes)
             .sum();
-        let all_diar: u64 = DIARIZATION_MODELS.iter().map(|m| m.approx_bytes).sum();
-        let total = full_whisper + all_diar;
         assert!(
             total < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "realistic model set ({total} B = {:.1} GiB) exceeds the global dome ({} B = {:.1} GiB) — raise MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES",
@@ -467,7 +407,8 @@ mod tests {
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES as f64 / 1_073_741_824.0,
         );
-        // The single biggest entry (`large-v3`) must fit under the dome.
+        // And `large-v3` alone (the single biggest entry) must be allowed —
+        // the dome can't be smaller than the largest model.
         let biggest = WHISPER_MODELS.iter().map(|m| m.approx_bytes).max().unwrap();
         assert!(biggest < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES);
     }

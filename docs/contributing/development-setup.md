@@ -95,10 +95,6 @@ export PATH="${_VCVARS_PATH:-}:/c/ProgramData/chocolatey/bin:/c/Users/<you>/.car
 
 PATH order matters: MSVC bin must precede `/usr/bin` so cargo's child processes find MSVC `cl.exe` first. The `.cargo/config.toml` linker pin makes this less critical for `link.exe` specifically, but other MSVC tools (`cl.exe`, `dumpbin.exe`) still rely on PATH.
 
-### Sherpa-onnx CRT alignment
-
-`make dev` automatically pre-fetches the sherpa-onnx MD-Release prebuilt for Windows (see [ADR-061](../adr/ADR-061-windows-crt-runtime-alignment.md)) and pins `SHERPA_ONNX_LIB_DIR` to a persistent cache under `target/sherpa-onnx-md/`. No manual step needed beyond `make download-sherpa-onnx` (called as a prerequisite of `make dev`).
-
 ### Run
 
 Always from **interactive Git Bash** (VSCode terminal or standalone Git Bash window) — not over SSH and not from `cmd.exe` / PowerShell:

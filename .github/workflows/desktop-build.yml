@@ -9,17 +9,14 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".node-version"
-      - ".sherpa-onnx-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
-      - ".github/actions/download-sherpa-onnx/**"
       - "mcp-servers/package.json"
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
-      - "scripts/lib/fetch-sherpa-onnx-md.sh"
   push:
     branches: [main, dev]
     paths:
@@ -28,17 +25,14 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".node-version"
-      - ".sherpa-onnx-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
-      - ".github/actions/download-sherpa-onnx/**"
       - "mcp-servers/package.json"
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
-      - "scripts/lib/fetch-sherpa-onnx-md.sh"
 
 permissions:
   contents: read

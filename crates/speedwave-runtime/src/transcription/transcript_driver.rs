@@ -1,4 +1,4 @@
-//! Background task pumping AudioStream → Transcriber → Diarizer → TranscriptStore.
+//! Background task pumping AudioStream → Transcriber → TranscriptStore.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::transcription::audio::{AudioStream, SAMPLE_RATE_HZ};
-use crate::transcription::diarizer::{DiarizeOptions, Diarizer};
 use crate::transcription::transcriber::{Segment, TranscribeOptions, Transcriber};
 use crate::transcription::transcript::TranscriptStatus;
 use crate::transcription::transcript_store::TranscriptStore;
@@ -21,13 +20,16 @@ const LIVE_WINDOW_SECS: f32 = 12.0;
 /// How often (in seconds of audio accumulated) the live transcriber re-decodes.
 const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
-/// Diarize the live buffer every N seconds of audio (cheaper than per-chunk).
-const LIVE_DIARIZE_EVERY_SECS: f32 = 10.0;
-/// Log a `warn` for every multiple of this many seconds of accumulated audio.
+/// Log a `warn` for every multiple of this many seconds of accumulated audio
+/// — long meetings keep the whole PCM buffer in RAM (`~115 MB / hour` at
+/// 16 kHz mono f32) and operators want a hint when something's running long.
 const PCM_WARN_STEP_SECS: f32 = 30.0 * 60.0;
 
-/// A stop signal shared with the driver task. Carries a `Notify` the driver
-/// host pulses once `run()` has exited, releasing `await_finished()` waiters.
+/// A stop signal shared with the driver task; flip it to `true` to ask the
+/// driver to wind down at the next chunk boundary. Carries a `Notify` the
+/// driver host can pulse once `run()` has actually exited, so the Tauri
+/// `stop_transcription` callsite can `await` the wind-down instead of
+/// spin-polling.
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
@@ -75,9 +77,6 @@ pub enum DriverError {
     /// Transcription failed.
     #[error("transcription failed: {0}")]
     Transcribe(String),
-    /// Diarization failed (non-fatal — we keep the live transcript, no labels).
-    #[error("diarization failed: {0}")]
-    Diarize(String),
     /// WAV writer failed.
     #[error("audio write failed: {0}")]
     AudioWrite(String),
@@ -96,12 +95,8 @@ pub struct DriverConfig {
     pub audio: Box<dyn AudioStream>,
     /// Whisper transcriber (one per recording).
     pub transcriber: Box<dyn Transcriber>,
-    /// Optional diarizer (no labels if `None`).
-    pub diarizer: Option<Box<dyn Diarizer>>,
     /// Forced language + word-timestamps toggle.
     pub transcribe_opts: TranscribeOptions,
-    /// Diarization clustering options.
-    pub diarize_opts: DiarizeOptions,
     /// Shared stop flag.
     pub stop: StopSignal,
 }
@@ -112,14 +107,11 @@ pub struct TranscriptDriver {
     store: Arc<TranscriptStore>,
     audio: Box<dyn AudioStream>,
     transcriber: Box<dyn Transcriber>,
-    diarizer: Option<Box<dyn Diarizer>>,
     transcribe_opts: TranscribeOptions,
-    diarize_opts: DiarizeOptions,
     stop: StopSignal,
     /// All audio accumulated so far (mono 16 kHz `f32`).
     pcm: Vec<f32>,
     last_decode_at: f32,
-    last_diarize_at: f32,
     /// Last logged "PCM is big" threshold (in seconds), so we warn once per
     /// step instead of every chunk.
     next_pcm_warn_at: f32,
@@ -133,32 +125,32 @@ impl TranscriptDriver {
             store: cfg.store,
             audio: cfg.audio,
             transcriber: cfg.transcriber,
-            diarizer: cfg.diarizer,
             transcribe_opts: cfg.transcribe_opts,
-            diarize_opts: cfg.diarize_opts,
             stop: cfg.stop,
             pcm: Vec::new(),
             last_decode_at: 0.0,
-            last_diarize_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
         }
     }
 
-    /// Runs until the audio stream ends or `stop` is tripped, writing a WAV at
-    /// `audio_wav_path`. On error flips the session to `Failed{reason}` and
-    /// closes the partial WAV before propagating.
+    /// Runs the driver to completion (until the audio stream ends or `stop`
+    /// is tripped). Writes a WAV at `audio_wav_path` along the way. On any error
+    /// the session is flipped to `Failed{reason}` and the (partial) WAV is
+    /// closed before the error propagates.
     pub fn run(mut self, audio_wav_path: &Path) -> Result<(), DriverError> {
         let mut wav = WavWriter::create(audio_wav_path)?;
         // Mark the session as Recording (a no-op transition from new()).
         let _ = self.store.set_status(self.id, TranscriptStatus::Recording);
 
         let result = self.pump_loop(&mut wav);
-        // Always close the WAV, even on error.
+        // Always close the WAV — even on error, a partial recording is better
+        // than a truncated/locked file.
         let _ = wav.finalize();
 
         match result {
             Ok(()) => {
-                // Final live decode over what's left, then hand off to finalize.
+                // Final live decode over what's left (so the user sees the last
+                // chunk), then hand off to the finalize pass.
                 let _ = self.decode_window();
                 let _ = self
                     .store
@@ -177,9 +169,9 @@ impl TranscriptDriver {
         }
     }
 
-    /// The capture→transcribe→diarize loop. Returns `Ok` when the stream ends
-    /// or `stop` is tripped; `Err` on a capture, transcribe, WAV, or store
-    /// failure (the caller flips the session to `Failed`).
+    /// The capture→transcribe loop. Returns `Ok` when the stream ends or `stop`
+    /// is tripped; `Err` on a capture, transcribe, WAV, or store failure (the
+    /// caller flips the session to `Failed`).
     fn pump_loop(&mut self, wav: &mut WavWriter) -> Result<(), DriverError> {
         loop {
             if self.stop.is_stopped() {
@@ -208,22 +200,15 @@ impl TranscriptDriver {
                 self.decode_window()?;
                 self.last_decode_at = accumulated_secs;
             }
-            if let Some(d) = self.diarizer.as_mut() {
-                if accumulated_secs - self.last_diarize_at >= LIVE_DIARIZE_EVERY_SECS {
-                    if let Err(e) =
-                        run_diarize_pass(d, &self.diarize_opts, &self.pcm, &self.store, self.id)
-                    {
-                        // Non-fatal: log and keep going.
-                        log::warn!("diarization pass failed: {e}");
-                    }
-                    self.last_diarize_at = accumulated_secs;
-                }
-            }
         }
     }
 
     /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and replaces exactly
-    /// the segments that fall inside that window.
+    /// the segments that fall inside that window. `feed()` returns segments for
+    /// the *whole* window each time, so the splice index must be "the first
+    /// `live_segments` entry whose start is ≥ the window's start" — not a
+    /// running count, which would duplicate the earlier segments once the
+    /// window starts at offset 0 and re-covers them.
     fn decode_window(&mut self) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -245,7 +230,6 @@ impl TranscriptDriver {
                 end: window_start + s.end,
                 text: s.text,
                 words: s.words,
-                speaker: s.speaker,
             })
             .collect();
 
@@ -271,22 +255,13 @@ pub struct FinalizeConfig {
     pub id: Uuid,
     /// The session store.
     pub store: Arc<TranscriptStore>,
-    /// Recorded audio (`<session_dir>/audio.wav`). Must exist — if the user
-    /// discarded the audio, the caller shouldn't reach here (and `run_finalize`
-    /// returns `Failed` if it's missing).
+    /// Recorded audio (`<session_dir>/audio.wav`). `run_finalize` returns
+    /// `Failed` if it's missing.
     pub audio_path: std::path::PathBuf,
     /// Higher-quality transcriber (e.g. `large-v3`).
     pub transcriber: Box<dyn Transcriber>,
-    /// Optional diarizer for the whole-recording pass (better clustering with
-    /// full context — but the clusters may differ from the live pass).
-    pub diarizer: Option<Box<dyn Diarizer>>,
     /// Forced language + word-timestamps toggle.
     pub transcribe_opts: TranscribeOptions,
-    /// Diarization clustering options.
-    pub diarize_opts: DiarizeOptions,
-    /// The diarizer turns from the live pass — used to remap speaker IDs so
-    /// user relabels survive (`TranscriptStore::merge_final_segments`).
-    pub live_turns: Vec<crate::transcription::diarizer::SpeakerTurn>,
 }
 
 /// Offline-pass decode window (seconds). The recording is transcribed in
@@ -299,19 +274,18 @@ const FINALIZE_WINDOW_SECS: f32 = 30.0;
 /// window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
-/// Runs the offline pass: load the recorded WAV, transcribe with the
-/// higher-quality model, (optionally) re-diarize, merge preserving user speaker
-/// relabels, mark `Done`. On failure flips to `Failed{reason}` and returns it.
+/// Runs the offline pass: load the recorded WAV, transcribe it with the
+/// higher-quality model, install the result as `final_segments`, and mark the
+/// session `Done`. On failure the session is flipped to `Failed{reason}` and
+/// the error returned — the caller can still fall back to the live transcript
+/// (it's untouched).
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
         store,
         audio_path,
         mut transcriber,
-        mut diarizer,
         transcribe_opts,
-        diarize_opts,
-        live_turns,
     } = cfg;
 
     // Helper to flip the session to Failed before returning an error.
@@ -338,7 +312,11 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
     };
 
-    // 2) + 3) Transcribe in ~30 s overlapping windows; progress fills 5%..60%.
+    // 2) + 3) Transcribe in ~30 s windows with a short overlap, stitching the
+    //    results and emitting real per-window progress. Chunking (vs one
+    //    whole-recording call) loses a little cross-utterance context but lets
+    //    the progress bar actually move; the overlap + de-dup keeps boundaries
+    //    clean. Progress here fills the 5%..60% band.
     let _ = store.finalize_progress(id, 0.05);
     let final_segs =
         match transcribe_chunked(transcriber.as_mut(), &pcm, &transcribe_opts, |frac| {
@@ -347,32 +325,14 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             Ok(s) => s,
             Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
         };
-    let _ = store.finalize_progress(id, 0.65);
-
-    // 4) Optional re-diarization over the whole recording; best-effort.
-    let (final_segs, final_turns) = match diarizer.as_mut() {
-        Some(d) => match d.diarize(&pcm, &diarize_opts) {
-            Ok(turns) if !turns.is_empty() => {
-                let mut segs = final_segs;
-                crate::transcription::diarizer::assign_speakers_by_overlap(&mut segs, &turns);
-                (segs, turns)
-            }
-            Ok(_) => (final_segs, Vec::new()),
-            Err(e) => {
-                log::warn!(target: "transcription::finalize", "offline diarization failed: {e}");
-                (final_segs, Vec::new())
-            }
-        },
-        None => (final_segs, Vec::new()),
-    };
     let _ = store.finalize_progress(id, 0.9);
 
-    // 5) Merge: install final_segments, remapping speaker IDs to preserve relabels.
-    if let Err(e) = store.merge_final_segments(id, final_segs, &final_turns, &live_turns) {
-        return Err(fail(&store, format!("merge final segments: {e}")));
+    // 4) Install the higher-quality segments as final_segments.
+    if let Err(e) = store.set_final_segments(id, final_segs) {
+        return Err(fail(&store, format!("install final segments: {e}")));
     }
 
-    // 6) Done.
+    // 5) Done.
     store
         .finish(id)
         .map_err(|e| DriverError::Store(e.to_string()))?;
@@ -381,7 +341,9 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
 
 /// Transcribes `pcm` (16 kHz mono) in `FINALIZE_WINDOW_SECS` windows with a
 /// `FINALIZE_WINDOW_OVERLAP_SECS` overlap, stitching the per-window segments
-/// into one absolute-timestamped list. Calls `progress` (0.0→1.0) per window.
+/// into one absolute-timestamped list. Calls `progress` with a 0.0→1.0 fraction
+/// after each window so a UI bar can move. Segments whose start falls inside the
+/// *next* window's overlap are dropped to de-dup the boundary.
 fn transcribe_chunked(
     transcriber: &mut dyn Transcriber,
     pcm: &[f32],
@@ -410,7 +372,9 @@ fn transcribe_chunked(
         let is_last = end >= total;
         let window = &pcm[start..end];
         let window_start = Duration::from_secs_f64(start as f64 / rate as f64);
-        // Keep segments up to the next window's overlap to de-dup boundaries.
+        // Window-relative-end below which we *keep* segments: everything for the
+        // last window; up to where the next window starts (its overlap zone) for
+        // earlier windows, so straddling segments come from exactly one window.
         let keep_until = if is_last {
             Duration::from_secs_f64(window.len() as f64 / rate as f64)
         } else {
@@ -429,7 +393,6 @@ fn transcribe_chunked(
                 end: window_start + s.end,
                 text: s.text,
                 words: s.words,
-                speaker: s.speaker,
             });
         }
         progress((end as f32 / total as f32).min(1.0));
@@ -447,41 +410,6 @@ fn read_wav_to_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
     super::audio::parse_wav_to_mono_f32(path)
         .map(|(mono, _rate)| mono)
         .map_err(|e| e.to_string())
-}
-
-/// One diarization pass over the live buffer; stamps speakers on the latest
-/// segments in the store (by index). Best-effort — failures are logged, not
-/// propagated.
-fn run_diarize_pass(
-    diarizer: &mut Box<dyn Diarizer>,
-    opts: &DiarizeOptions,
-    pcm: &[f32],
-    store: &TranscriptStore,
-    id: Uuid,
-) -> Result<(), DriverError> {
-    let turns = diarizer
-        .diarize(pcm, opts)
-        .map_err(|e| DriverError::Diarize(e.to_string()))?;
-    if turns.is_empty() {
-        return Ok(());
-    }
-    // Assign speakers locally, then emit a SpeakerAssigned event per change.
-    let snap = store
-        .get(id)
-        .map_err(|e| DriverError::Store(e.to_string()))?;
-    let mut segs = snap.live_segments.clone();
-    crate::transcription::diarizer::assign_speakers_by_overlap(&mut segs, &turns);
-    for (i, new_seg) in segs.iter().enumerate() {
-        let old_speaker = snap.live_segments.get(i).and_then(|s| s.speaker);
-        if let Some(new_spk) = new_seg.speaker {
-            if old_speaker != Some(new_spk) {
-                store
-                    .assign_speaker(id, i, new_spk)
-                    .map_err(|e| DriverError::Store(e.to_string()))?;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Tiny `hound`-backed WAV writer (16 kHz mono int16 — Whisper's canonical
@@ -530,7 +458,6 @@ mod tests {
     use crate::transcription::audio::{
         AudioCapture, AudioSource, AudioSourceInfo, CaptureError, FileAudioCapture,
     };
-    use crate::transcription::diarizer::MockDiarizer;
     use crate::transcription::transcriber::{Language, MockTranscriber};
     use std::path::PathBuf;
 
@@ -580,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn happy_path_with_file_capture_mock_transcriber_no_diarizer() {
+    fn happy_path_with_file_capture_mock_transcriber() {
         // 20 s of audio at 16 kHz → at LIVE_DECODE_EVERY_SECS=5 s, ~3 decodes
         // (plus the final flush). MockTranscriber emits one segment per
         // `seg_secs`, so we get sensible live_segments to inspect.
@@ -597,9 +524,7 @@ mod tests {
                 seg_secs: 2.0,
                 text_template: "s{n}".to_string(),
             }),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
             stop: StopSignal::new(),
         });
         let out_wav = store.session_dir(id).join("audio.wav");
@@ -650,9 +575,7 @@ mod tests {
                 seg_secs: 2.0,
                 text_template: "s{n}".to_string(),
             }),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
             stop: StopSignal::new(),
         });
         let out_wav = store.session_dir(id).join("audio.wav");
@@ -680,40 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn diarizer_assigns_speakers_to_live_segments() {
-        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
-        let store_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
-
-        let driver = TranscriptDriver::new(DriverConfig {
-            id,
-            store: store.clone(),
-            audio: stream_from(&fixture),
-            // One segment per 3 s → 5 segments over 15 s.
-            transcriber: Box::new(MockTranscriber {
-                seg_secs: 3.0,
-                text_template: "s{n}".to_string(),
-            }),
-            // Two speakers, equal halves.
-            diarizer: Some(Box::new(MockDiarizer::new(2))),
-            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            stop: StopSignal::new(),
-        });
-        let out_wav = store.session_dir(id).join("audio.wav");
-        driver.run(&out_wav).unwrap();
-
-        let snap = store.get(id).unwrap();
-        assert!(!snap.live_segments.is_empty());
-        // At least one segment got a speaker stamped by the diarizer.
-        assert!(
-            snap.live_segments.iter().any(|s| s.speaker.is_some()),
-            "diarizer should have stamped at least one segment"
-        );
-    }
-
-    #[test]
     fn stop_signal_winds_down_at_the_next_chunk_boundary() {
         let (_fixture_guard, fixture) = make_fixture_wav(30.0); // long fixture
         let store_dir = tempfile::tempdir().unwrap();
@@ -727,9 +616,7 @@ mod tests {
             store: store.clone(),
             audio: stream_from(&fixture),
             transcriber: Box::new(MockTranscriber::new()),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
             stop,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
@@ -764,9 +651,7 @@ mod tests {
             store: store.clone(),
             audio: Box::new(FailingStream),
             transcriber: Box::new(MockTranscriber::new()),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
             stop: StopSignal::new(),
         });
         let out_wav = store.session_dir(id).join("audio.wav");
@@ -791,9 +676,6 @@ mod tests {
     }
 
     // --- offline finalize pass ---------------------------------------------
-
-    use crate::transcription::diarizer::SpeakerTurn;
-    use crate::transcription::transcriber::SpeakerId;
 
     /// Records a recorded WAV under `<session_dir>/audio.wav` with `secs` of a
     /// quiet tone, leaving the session in Finalizing state (the post-stop state).
@@ -843,10 +725,7 @@ mod tests {
                 seg_secs: 4.0,
                 text_template: "f{n}".to_string(),
             }),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            live_turns: vec![],
         })
         .unwrap();
 
@@ -861,59 +740,11 @@ mod tests {
     }
 
     #[test]
-    fn finalize_preserves_user_relabels_via_overlap() {
-        let store_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let (id, wav) = seed_finalizing_session(&store, 12.0);
-        // User named the live speakers.
-        store.relabel_speaker(id, SpeakerId(0), "Ola").unwrap();
-        store.relabel_speaker(id, SpeakerId(1), "Bartek").unwrap();
-        // Live turns: speaker 0 first half, speaker 1 second half.
-        let live_turns = vec![
-            SpeakerTurn {
-                start: Duration::from_secs(0),
-                end: Duration::from_secs(6),
-                speaker: SpeakerId(0),
-            },
-            SpeakerTurn {
-                start: Duration::from_secs(6),
-                end: Duration::from_secs(12),
-                speaker: SpeakerId(1),
-            },
-        ];
-
-        run_finalize(FinalizeConfig {
-            id,
-            store: store.clone(),
-            audio_path: wav,
-            transcriber: Box::new(MockTranscriber {
-                seg_secs: 6.0,
-                text_template: "f{n}".to_string(),
-            }),
-            // 2 speakers, equal halves → MockDiarizer flips ids relative to live.
-            diarizer: Some(Box::new(MockDiarizer::new(2))),
-            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            live_turns,
-        })
-        .unwrap();
-
-        let snap = store.get(id).unwrap();
-        let finals = snap.final_segments.as_ref().unwrap();
-        // Whatever speaker IDs the offline diarizer used, they were remapped to
-        // the live IDs (0 and 1), so the user names still resolve.
-        let used: std::collections::BTreeSet<_> = finals.iter().filter_map(|s| s.speaker).collect();
-        assert!(used.contains(&SpeakerId(0)) || used.contains(&SpeakerId(1)));
-        assert_eq!(snap.speaker_label(SpeakerId(0)), "Ola");
-        assert_eq!(snap.speaker_label(SpeakerId(1)), "Bartek");
-    }
-
-    #[test]
     fn finalize_with_missing_audio_flips_to_failed() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let (id, _wav) = seed_finalizing_session(&store, 4.0);
-        // Delete the audio after seeding (simulates "discard audio" / corruption).
+        // Delete the audio after seeding (simulates a missing/corrupt WAV).
         let _ = std::fs::remove_file(store.session_dir(id).join("audio.wav"));
 
         let err = run_finalize(FinalizeConfig {
@@ -921,10 +752,7 @@ mod tests {
             store: store.clone(),
             audio_path: store.session_dir(id).join("audio.wav"),
             transcriber: Box::new(MockTranscriber::new()),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            live_turns: vec![],
         })
         .unwrap_err();
         assert!(matches!(err, DriverError::Transcribe(_)), "got {err:?}");
@@ -962,10 +790,7 @@ mod tests {
             store: store.clone(),
             audio_path: wav,
             transcriber: Box::new(FailingTranscriber),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            live_turns: vec![],
         })
         .unwrap_err();
         assert!(matches!(err, DriverError::Transcribe(_)), "got {err:?}");
@@ -1005,10 +830,7 @@ mod tests {
             store: store.clone(),
             audio_path: wav,
             transcriber: Box::new(MockTranscriber::new()),
-            diarizer: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
-            diarize_opts: DiarizeOptions::default(),
-            live_turns: vec![],
         })
         .unwrap_err();
         assert!(matches!(err, DriverError::Transcribe(_)));

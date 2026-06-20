@@ -7,12 +7,25 @@ import {
   output,
   signal,
 } from '@angular/core';
-import { Router } from '@angular/router';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type { ModelStatusEntry, TranscriptionConfig } from '../../models/transcript';
+import type { RecommendedModelAck } from '../../models/transcript';
 
-/** Settings → Meeting transcription. ADR-056 opt-in toggle (user-level, OFF by default) + defaults. */
+/**
+ * Formats a byte count as a short `GB`/`MB` string.
+ * @param bytes - size in bytes.
+ */
+function humanSize(bytes: number): string {
+  const gb = bytes / 1_000_000_000;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+/**
+ * Settings → Meeting transcription (ADR-056). One auto-selected model for this
+ * hardware (large-v3 on GPU, large-v3-turbo on CPU) with a single download /
+ * remove control. No toggle, no model list, no per-feature defaults.
+ */
 @Component({
   selector: 'app-transcription-section',
   imports: [],
@@ -26,82 +39,55 @@ import type { ModelStatusEntry, TranscriptionConfig } from '../../models/transcr
     >
       <h2 class="view-title view-title-section text-[var(--ink)]">Meeting transcription</h2>
       <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        When enabled, Speedwave can record system audio and your microphone on this machine.
-        Transcription runs locally. Model downloads and sending transcripts to Claude use the
-        network.
+        Speedwave can record system audio and your microphone on this machine and transcribe it
+        locally. The model download uses the network; transcription itself stays on-device.
       </p>
 
-      <div
-        class="mt-4 flex items-center justify-between rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2"
-      >
-        <div>
-          <div class="mono text-[12px] text-[var(--ink)]">enable meeting transcription</div>
-          <div class="text-[11px] text-[var(--ink-mute)]">
-            opens the Meeting transcription tab (⌘4)
+      @if (error()) {
+        <p class="mt-2 text-[12px] text-red-300" data-testid="transcription-error">{{ error() }}</p>
+      }
+
+      @if (model(); as m) {
+        <div class="mt-4 space-y-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3">
+          <div class="mono text-[11px] text-[var(--ink-mute)]" data-testid="accel-label">
+            Acceleration: {{ m.accel_label }}
           </div>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          [attr.aria-checked]="enabled() === true"
-          class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
-          data-testid="transcription-toggle"
-          (click)="toggle()"
-          [disabled]="busy()"
-        >
-          {{ enabled() === true ? 'on' : 'off' }}
-        </button>
-      </div>
 
-      @if (enabled() === true) {
-        <div class="mt-3 space-y-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2">
-          <label class="flex items-center justify-between gap-2 text-[12px]">
-            <span class="text-[var(--ink)]">default language</span>
-            <select
-              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px]"
-              data-testid="default-language"
-              (change)="onLanguage($any($event.target).value)"
-            >
-              <option value="pl" [selected]="defaultLanguage() === 'pl'">Polish</option>
-              <option value="en" [selected]="defaultLanguage() === 'en'">English</option>
-            </select>
-          </label>
-
-          <label class="flex items-center justify-between gap-2 text-[12px]">
-            <span class="text-[var(--ink)]">default live model</span>
-            <select
-              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px]"
-              data-testid="default-live-model"
-              (change)="onLiveModel($any($event.target).value)"
-            >
-              <option value="" [selected]="!defaultLiveModel()">(recommended)</option>
-              @for (m of liveModelOptions(); track m.key) {
-                <option [value]="m.key" [selected]="defaultLiveModel() === m.key">
-                  {{ m.key }}
-                </option>
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-[12px] text-[var(--ink)]">Speech recognition model</div>
+              @if (m.downloaded) {
+                <div class="text-[11px] text-[var(--ink-mute)]" data-testid="model-state">
+                  Downloaded ({{ m.display_name }}) · best quality for your hardware
+                </div>
+              } @else {
+                <div class="text-[11px] text-[var(--ink-mute)]" data-testid="model-state">
+                  Not downloaded · {{ size(m) }} · best quality for your hardware
+                </div>
               }
-            </select>
-          </label>
+            </div>
 
-          <label class="flex items-center justify-between gap-2 text-[12px]">
-            <span class="text-[var(--ink)]">keep audio after the offline pass</span>
-            <input
-              type="checkbox"
-              data-testid="keep-audio"
-              [checked]="keepAudio()"
-              (change)="onKeepAudio($any($event.target).checked)"
-            />
-          </label>
-
-          <div>
-            <button
-              type="button"
-              class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-              data-testid="transcription-manage"
-              (click)="goToTab()"
-            >
-              manage models &rarr;
-            </button>
+            @if (m.downloaded) {
+              <button
+                type="button"
+                class="mono rounded border border-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="remove-model"
+                [disabled]="busy()"
+                (click)="remove(m.key)"
+              >
+                remove
+              </button>
+            } @else {
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="download-model"
+                [disabled]="busy()"
+                (click)="download(m.key)"
+              >
+                {{ busy() ? progressLabel() : 'download model' }}
+              </button>
+            }
           </div>
         </div>
       }
@@ -112,114 +98,86 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  /** Current toggle value; `null` while loading. */
-  readonly enabled = signal<boolean | null>(null);
-  /** Default forced language (`'pl'` if unset). */
-  readonly defaultLanguage = signal<'pl' | 'en'>('pl');
-  /** Default live model key (`''` = "use the recommendation"). */
-  readonly defaultLiveModel = signal<string>('');
-  /** Keep `audio.wav` after the offline pass (default: true). */
-  readonly keepAudio = signal(true);
-  /** Whisper models available as a default-live-model choice. */
-  readonly liveModelOptions = signal<ModelStatusEntry[]>([]);
-  /** Disables the toggle while a save is in flight. */
+  /** The recommended model + its state; `null` while loading. */
+  readonly model = signal<RecommendedModelAck | null>(null);
+  /** Disables the button while a download/remove is in flight. */
   readonly busy = signal(false);
+  /** Live download progress label (e.g. `downloading 42%`). */
+  readonly progressLabel = signal('downloading…');
+  /** Local error string. */
+  readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
-  private readonly router = inject(Router);
   private readonly cdr = inject(ChangeDetectorRef);
 
-  /** Reads the current config + model list from the backend on first paint. */
+  /** Reads the recommended model + its download state on first paint. */
   async ngOnInit(): Promise<void> {
+    await this.refresh();
+  }
+
+  /** Re-reads the recommended-model state from the backend. */
+  private async refresh(): Promise<void> {
     try {
-      const cfg = await this.transcription.getConfig();
-      this.enabled.set(cfg.enabled === true);
-      this.defaultLanguage.set(cfg.default_language ?? 'pl');
-      this.defaultLiveModel.set(cfg.default_live_model ?? '');
-      this.keepAudio.set(cfg.keep_audio_after_finalize !== false);
-      if (cfg.enabled === true) {
-        const models = await this.transcription.listModels();
-        this.liveModelOptions.set(models.whisper);
-      }
+      this.model.set(await this.transcription.recommendedModel());
+      this.error.set('');
     } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-      this.enabled.set(false);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
     }
     this.cdr.markForCheck();
   }
 
-  /** Builds the current `TranscriptionConfig` from the signals. */
-  private currentConfig(): TranscriptionConfig {
-    return {
-      enabled: this.enabled() ?? false,
-      default_language: this.defaultLanguage(),
-      default_live_model: this.defaultLiveModel() || null,
-      keep_audio_after_finalize: this.keepAudio(),
-    };
-  }
-
-  /** Saves the current config; reports errors to the shell. */
-  private async save(): Promise<void> {
-    try {
-      await this.transcription.setConfig(this.currentConfig());
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    }
-    this.cdr.markForCheck();
-  }
-
-  /** Flips the on/off toggle and persists. */
-  async toggle(): Promise<void> {
-    if (this.busy()) {
-      return;
-    }
-    const next = !(this.enabled() ?? false);
+  /**
+   * Downloads the recommended model, surfacing progress on the button.
+   * @param key - the model catalogue key.
+   */
+  async download(key: string): Promise<void> {
     this.busy.set(true);
-    this.enabled.set(next);
-    await this.save();
-    if (next) {
-      try {
-        const models = await this.transcription.listModels();
-        this.liveModelOptions.set(models.whisper);
-      } catch {
-        // Non-fatal — the dropdown just stays empty.
-      }
+    this.progressLabel.set('downloading…');
+    this.cdr.markForCheck();
+    try {
+      const { done } = await this.transcription.downloadModel(key, (p) => {
+        if (p.total_bytes) {
+          const pct = Math.round((p.downloaded_bytes / p.total_bytes) * 100);
+          this.progressLabel.set(`downloading ${pct}%`);
+          this.cdr.markForCheck();
+        }
+      });
+      await done;
+      await this.refresh();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
     }
     this.busy.set(false);
     this.cdr.markForCheck();
   }
 
   /**
-   * Updates the default language and persists.
-   * @param v - 'pl' or 'en'.
+   * Removes the downloaded model.
+   * @param key - the model catalogue key.
    */
-  async onLanguage(v: string): Promise<void> {
-    if (v === 'pl' || v === 'en') {
-      this.defaultLanguage.set(v);
-      await this.save();
+  async remove(key: string): Promise<void> {
+    this.busy.set(true);
+    try {
+      await this.transcription.deleteModel(key);
+      await this.refresh();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
     }
+    this.busy.set(false);
+    this.cdr.markForCheck();
   }
 
   /**
-   * Updates the default live model and persists.
-   * @param key - a Whisper catalogue key, or '' for "recommended".
+   * Human-readable download size for a model.
+   * @param m - the recommended-model ack.
    */
-  async onLiveModel(key: string): Promise<void> {
-    this.defaultLiveModel.set(key);
-    await this.save();
-  }
-
-  /**
-   * Updates the keep-audio-after-finalize preference and persists.
-   * @param keep - whether to keep the recorded WAV after the offline pass.
-   */
-  async onKeepAudio(keep: boolean): Promise<void> {
-    this.keepAudio.set(keep);
-    await this.save();
-  }
-
-  /** Navigates to the Meeting transcription tab. */
-  goToTab(): void {
-    void this.router.navigateByUrl('/meeting-transcription');
+  size(m: RecommendedModelAck): string {
+    return humanSize(m.size_bytes);
   }
 }

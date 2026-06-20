@@ -1,6 +1,7 @@
 //! macOS audio capture: spawns the bundled `audio-capture-cli` (CoreAudio
 //! process taps, macOS 14.4+) and parses its framed stdout protocol. The CLI
-//! carries its own embedded Info.plist for TCC permissions (ADR-056, ADR-049).
+//! ships its own embedded Info.plist so TCC sees `NSAudioCaptureUsageDescription`
+//! / `NSMicrophoneUsageDescription` when we spawn it (ADR-056, ADR-049 lesson).
 //!
 //! Protocol (frozen — must match `native/macos/audio-capture/Sources/AudioCaptureCLI.swift`):
 //!   one UTF-8 JSON header line, then length-prefixed chunks:
@@ -15,7 +16,7 @@ use serde::Deserialize;
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, ProcessSelector,
+    CaptureError,
 };
 use super::mix::{MixBuffer, MixSource, CHUNK_SAMPLES};
 
@@ -38,19 +39,20 @@ impl Default for MacOsAudioCapture {
     }
 }
 
-/// One entry from `audio-capture-cli --list`. `object_id` is part of the CLI's
-/// JSON contract but the Rust side keys on `pid` only — kept as `_object_id`
-/// so serde still accepts the field without a dead-code warning.
+/// One entry from `audio-capture-cli --list-mics` — an input device's CoreAudio
+/// `uid` (the selector `--mic` understands), display `name`, and whether it is
+/// the system default.
 #[derive(Debug, Deserialize)]
-struct ProcessListEntry {
-    pid: i32,
-    bundle_id: String,
-    #[serde(rename = "object_id")]
-    _object_id: i64,
+struct MicListEntry {
+    uid: String,
+    name: String,
+    default: bool,
 }
 
-/// Header line emitted once at the start of a `--record` stream. `streams` lists
-/// the emitted streams (>1 = mix mic with system); `started_at_ns` is informational.
+/// Header line emitted once at the start of a `--record` stream. `streams` tells
+/// us whether the CLI is emitting a mic stream alongside the system one (so we
+/// know to mix); `started_at_ns` is informational (offsets are relative) — kept
+/// underscored so serde accepts it.
 #[derive(Debug, Deserialize)]
 struct StreamHeader {
     sample_rate: u32,
@@ -63,9 +65,9 @@ struct StreamHeader {
 
 impl AudioCapture for MacOsAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
-        // The CLI enforces macOS 14.4 and surfaces a clean error on older systems.
+        // The CLI enforces macOS 14.4 and surfaces a clean error on older
+        // systems (ADR-056 decision 2/3 for the permission model).
         CaptureCapabilities {
-            supports_per_process: true,
             supports_system_audio: true,
             supports_microphone: true,
             note: Some(
@@ -76,64 +78,43 @@ impl AudioCapture for MacOsAudioCapture {
     }
 
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
-        let output = super::super::binary::command(CLI_NAME)
-            .arg("--list")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| CaptureError::Failed(format!("spawn {CLI_NAME} --list: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // The CLI prints "requires macOS 14.4" on old systems.
-            if stderr.contains("14.4") {
-                return Err(CaptureError::Unsupported(stderr.trim().to_string()));
-            }
-            return Err(CaptureError::Failed(format!(
-                "{CLI_NAME} --list exited {:?}: {}",
-                output.status.code(),
-                stderr.trim()
-            )));
-        }
-
-        let entries: Vec<ProcessListEntry> = serde_json::from_slice(&output.stdout)
-            .map_err(|e| CaptureError::Failed(format!("parse --list JSON: {e}")))?;
-
-        let mut sources = Vec::with_capacity(entries.len() + 3);
-        // "Whole meeting" (system + mic, the product default) first, then the
-        // system-only and mic-only options.
-        sources.push(AudioSourceInfo {
-            source: AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
+        // Three curated sources: "Whole meeting" (system + mic, the product
+        // default), system-only, then one entry per real input device.
+        let mut sources = vec![
+            AudioSourceInfo {
+                source: AudioSource::Mixed { mic: None },
+                label: super::audio::DEFAULT_MIXED_SOURCE_LABEL.to_string(),
+                app_id: None,
             },
-            label: super::audio::DEFAULT_MIXED_SOURCE_LABEL.to_string(),
-            app_id: None,
-        });
-        sources.push(AudioSourceInfo {
-            source: AudioSource::SystemWide,
-            label: "System (everything)".to_string(),
-            app_id: None,
-        });
-        sources.push(AudioSourceInfo {
-            source: AudioSource::Microphone { device: None },
-            label: "Microphone (default input)".to_string(),
-            app_id: None,
-        });
-        for e in entries {
-            // Skip our own helpers and the obvious system daemons that have no
-            // bundle id — they're noise in the picker.
-            if e.bundle_id.is_empty() {
-                continue;
+            AudioSourceInfo {
+                source: AudioSource::SystemWide,
+                label: "System (everything)".to_string(),
+                app_id: None,
+            },
+        ];
+        // Named input devices (default flagged); generic fallback if it fails.
+        match list_microphones() {
+            Ok(mics) if !mics.is_empty() => {
+                for m in mics {
+                    let label = if m.default {
+                        format!("Microphone: {} (default)", m.name)
+                    } else {
+                        format!("Microphone: {}", m.name)
+                    };
+                    sources.push(AudioSourceInfo {
+                        source: AudioSource::Microphone {
+                            device: Some(m.uid),
+                        },
+                        label,
+                        app_id: None,
+                    });
+                }
             }
-            let label = friendly_app_label(&e.bundle_id);
-            sources.push(AudioSourceInfo {
-                source: AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: e.pid },
-                },
-                label,
-                app_id: Some(e.bundle_id),
-            });
+            Ok(_) => sources.push(generic_default_mic()),
+            Err(e) => {
+                log::warn!(target: "transcription::capture", "mic enumeration failed, using the default mic: {e}");
+                sources.push(generic_default_mic());
+            }
         }
         Ok(sources)
     }
@@ -202,15 +183,20 @@ impl AudioCapture for MacOsAudioCapture {
     }
 }
 
-/// Reads the CLI child's framed stdout chunks (the JSON header is already consumed
-/// by `start()`). Owns the child; killed gracefully on drop.
+/// Reads the CLI child's framed stdout: a JSON header (already consumed by
+/// `start()`), then `<u32 stream> <u32 nframes> <u64 offset_ns> <f32 * nframes>`
+/// chunks. Owns the child; on drop it's killed (graceful via `try_wait` first,
+/// then SIGKILL if still running).
 struct CliRawReader {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
     done: bool,
 }
 
-/// Detects desynced or corrupt stream state. 5 s of 16 kHz = MAX_FRAME_SAMPLES; 24 h = MAX_SESSION_NS.
+/// A `nframes`/`offset_ns` past this is a desynced or corrupt stream — kill the
+/// CLI rather than try to allocate gigabytes (`nframes`) or buffer hours of
+/// silence (`offset_ns` → see `MixBuffer`'s own cap). 5 s of 16 kHz audio is a
+/// generous upper bound on a single chunk; 24 h is a generous session length.
 const MAX_FRAME_SAMPLES: usize = super::audio::SAMPLE_RATE_HZ as usize * 5;
 const MAX_SESSION_NS: u64 = 24 * 3600 * 1_000_000_000;
 
@@ -363,15 +349,39 @@ impl AudioStream for MixedCliStream {
     }
 }
 
-/// Maps an `AudioSource` to the CLI's `--source` / `--mic` argument strings.
-/// `Mixed`'s inner `system` must be `SystemWide`/`Process` (not nested `Mixed`/`Microphone`).
+/// The fallback picker entry when device enumeration yields nothing/errors.
+fn generic_default_mic() -> AudioSourceInfo {
+    AudioSourceInfo {
+        source: AudioSource::Microphone { device: None },
+        label: "Microphone (default input)".to_string(),
+        app_id: None,
+    }
+}
+
+/// Lists input devices via `audio-capture-cli --list-mics` (uid, name, default).
+fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
+    let output = super::super::binary::command(CLI_NAME)
+        .arg("--list-mics")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| CaptureError::Failed(format!("spawn {CLI_NAME} --list-mics: {e}")))?;
+    if !output.status.success() {
+        return Err(CaptureError::Failed(format!(
+            "{CLI_NAME} --list-mics exited {:?}",
+            output.status.code()
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| CaptureError::Failed(format!("parse --list-mics JSON: {e}")))
+}
+
+/// Maps an `AudioSource` to the CLI's `--source` / `--mic` args. `SystemWide`
+/// → `all`, `Microphone` → `mic-only[:uid]`, `Mixed` → `all` + the mic uid (the
+/// CLI emits system on stream 0 and mic on stream 1; `MixedCliStream` sums them).
 fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureError> {
     match source {
         AudioSource::SystemWide => Ok(("all".to_string(), "none".to_string())),
-        AudioSource::Process { selector } => {
-            let pid = pid_of(selector)?;
-            Ok((format!("pid:{pid}"), "none".to_string()))
-        }
         AudioSource::Microphone { device } => {
             let src = match device {
                 Some(uid) => format!("mic-only:{uid}"),
@@ -379,45 +389,14 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
             };
             Ok((src, "none".to_string()))
         }
-        AudioSource::Mixed { system, mic } => {
-            let source_arg = match system.as_ref() {
-                AudioSource::SystemWide => "all".to_string(),
-                AudioSource::Process { selector } => format!("pid:{}", pid_of(selector)?),
-                other => {
-                    return Err(CaptureError::Unsupported(format!(
-                        "mixed capture's system source must be System or a process, got {other:?}"
-                    )))
-                }
-            };
+        AudioSource::Mixed { mic } => {
             let mic_arg = match mic {
                 Some(uid) => uid.clone(),
                 None => "default".to_string(),
             };
-            Ok((source_arg, mic_arg))
+            Ok(("all".to_string(), mic_arg))
         }
     }
-}
-
-/// Extracts a PID from a `ProcessSelector`, rejecting the reserved `NodeId` variant.
-fn pid_of(selector: &ProcessSelector) -> Result<i32, CaptureError> {
-    match selector {
-        ProcessSelector::Pid { pid } => Ok(*pid),
-        ProcessSelector::NodeId { id } => Err(CaptureError::Unsupported(format!(
-            "macOS capture needs a PID, got node id {id:?}"
-        ))),
-    }
-}
-
-/// Turns a reverse-DNS bundle id into a friendlier label for the source picker
-/// (`com.microsoft.teams2` → `teams2`). Best-effort — the raw id is kept as
-/// `app_id` regardless.
-fn friendly_app_label(bundle_id: &str) -> String {
-    bundle_id
-        .rsplit('.')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(bundle_id)
-        .to_string()
 }
 
 #[cfg(test)]
@@ -426,9 +405,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_advertise_per_process_and_microphone_on_macos() {
+    fn capabilities_advertise_system_and_microphone_on_macos() {
         let caps = MacOsAudioCapture::new().capabilities();
-        assert!(caps.supports_per_process);
         assert!(caps.supports_system_audio);
         assert!(
             caps.supports_microphone,
@@ -445,72 +423,38 @@ mod tests {
     }
 
     #[test]
-    fn process_maps_to_pid_arg() {
-        let src = AudioSource::Process {
-            selector: ProcessSelector::Pid { pid: 4242 },
-        };
-        let (s, m) = source_to_cli_args(&src).unwrap();
-        assert_eq!(s, "pid:4242");
-        assert_eq!(m, "none");
-    }
-
-    #[test]
     fn mixed_system_plus_mic_maps_to_source_and_mic_args() {
-        // SystemWide + default mic → ("all", "default").
-        let (s, m) = source_to_cli_args(&AudioSource::Mixed {
-            system: Box::new(AudioSource::SystemWide),
-            mic: None,
-        })
-        .unwrap();
+        // Mixed + default mic → ("all", "default").
+        let (s, m) = source_to_cli_args(&AudioSource::Mixed { mic: None }).unwrap();
         assert_eq!(s, "all");
         assert_eq!(m, "default");
-        // A process + a named mic → ("pid:N", "<uid>").
+        // Mixed + a named mic → ("all", "<uid>").
         let (s2, m2) = source_to_cli_args(&AudioSource::Mixed {
-            system: Box::new(AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 99 },
-            }),
             mic: Some("BuiltInMic".to_string()),
         })
         .unwrap();
-        assert_eq!(s2, "pid:99");
+        assert_eq!(s2, "all");
         assert_eq!(m2, "BuiltInMic");
     }
 
     #[test]
-    fn mixed_with_a_nonsensical_system_source_is_rejected() {
-        // Inner system can't be a microphone or another Mixed.
-        let mic_as_system = AudioSource::Mixed {
-            system: Box::new(AudioSource::Microphone { device: None }),
-            mic: None,
-        };
-        assert!(matches!(
-            source_to_cli_args(&mic_as_system).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
-        let nested = AudioSource::Mixed {
-            system: Box::new(AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            }),
-            mic: None,
-        };
-        assert!(matches!(
-            source_to_cli_args(&nested).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
-        // A node-id inside Mixed → still rejected (macOS needs a PID).
-        let node = AudioSource::Mixed {
-            system: Box::new(AudioSource::Process {
-                selector: ProcessSelector::NodeId {
-                    id: "7".to_string(),
-                },
-            }),
-            mic: None,
-        };
-        assert!(matches!(
-            source_to_cli_args(&node).unwrap_err(),
-            CaptureError::Unsupported(_)
-        ));
+    fn list_mics_json_parses_uid_name_default() {
+        let json = br#"[
+            {"uid":"BuiltInMicrophoneDevice","name":"MacBook Pro Microphone","default":true},
+            {"uid":"AppleUSBAudioEngine:USB MIC:1","name":"USB MIC","default":false}
+        ]"#;
+        let mics: Vec<MicListEntry> = serde_json::from_slice(json).unwrap();
+        assert_eq!(mics.len(), 2);
+        assert_eq!(mics[0].uid, "BuiltInMicrophoneDevice");
+        assert_eq!(mics[0].name, "MacBook Pro Microphone");
+        assert!(mics[0].default);
+        assert!(!mics[1].default);
+    }
+
+    #[test]
+    fn list_mics_rejects_malformed_json() {
+        let mics: Result<Vec<MicListEntry>, _> = serde_json::from_slice(b"{not json}");
+        assert!(mics.is_err());
     }
 
     #[test]
@@ -526,36 +470,6 @@ mod tests {
     }
 
     #[test]
-    fn node_id_selector_is_rejected_on_macos() {
-        let src = AudioSource::Process {
-            selector: ProcessSelector::NodeId {
-                id: "42".to_string(),
-            },
-        };
-        let err = source_to_cli_args(&src).unwrap_err();
-        assert!(matches!(err, CaptureError::Unsupported(_)));
-    }
-
-    #[test]
-    fn friendly_label_strips_reverse_dns() {
-        assert_eq!(friendly_app_label("com.microsoft.teams2"), "teams2");
-        assert_eq!(friendly_app_label("org.mozilla.firefox"), "firefox");
-        // Degenerate inputs fall back to the raw id.
-        assert_eq!(friendly_app_label("noslasheshere"), "noslasheshere");
-        assert_eq!(friendly_app_label("trailing."), "trailing.");
-    }
-
-    #[test]
-    fn process_list_entry_parses_cli_json() {
-        let json = r#"[{"pid":524,"bundle_id":"com.apple.mediaremoted","object_id":84}]"#;
-        let entries: Vec<ProcessListEntry> = serde_json::from_str(json).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].pid, 524);
-        assert_eq!(entries[0].bundle_id, "com.apple.mediaremoted");
-        assert_eq!(entries[0]._object_id, 84);
-    }
-
-    #[test]
     fn stream_header_parses_and_signals_mixing_by_stream_count() {
         let two = r#"{"sample_rate":16000,"channels":1,"format":"f32le","streams":["app","mic"],"started_at_ns":123}"#;
         let h: StreamHeader = serde_json::from_str(two).unwrap();
@@ -563,7 +477,7 @@ mod tests {
         assert_eq!(h.channels, 1);
         assert_eq!(h.format, "f32le");
         assert_eq!(h.streams, &["app".to_string(), "mic".to_string()]);
-        assert!(h.streams.len() > 1, "two streams → CliAudioStream mixes");
+        assert!(h.streams.len() > 1, "two streams → MixedCliStream mixes");
         assert_eq!(h._started_at_ns, 123);
 
         let one = r#"{"sample_rate":16000,"channels":1,"format":"f32le","streams":["mic"],"started_at_ns":0}"#;
@@ -590,8 +504,10 @@ mod tests {
         out
     }
 
-    /// Builds a `CliRawReader` whose stdout is `bytes` via `cat` over a temp file.
-    /// No JSON header — these tests exercise `read_frame` (called after the header).
+    /// Builds a `CliRawReader` whose stdout is `bytes`, by piping a tiny `cat`
+    /// over a temp file (no real `audio-capture-cli` needed). The JSON header is
+    /// NOT included — these tests exercise `read_frame`, which is called *after*
+    /// `start()` has consumed the header.
     fn raw_reader_over(bytes: &[u8]) -> CliRawReader {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -600,7 +516,8 @@ mod tests {
             .unwrap()
             .write_all(bytes)
             .unwrap();
-        // Leak tempdir; OS reclaims it after test.
+        // Keep the tempdir alive for the child's lifetime by leaking it — the
+        // process exits at end of test, the OS reclaims it.
         std::mem::forget(dir);
         let mut child = std::process::Command::new("cat")
             .arg(&path)

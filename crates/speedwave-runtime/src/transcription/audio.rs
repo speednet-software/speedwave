@@ -1,6 +1,11 @@
 //! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
-//! `AudioCapture` is the seam between OS-specific capture backends and the engine.
-//! `FileAudioCapture` plays back a 16 kHz mono WAV in fixed chunks for testing.
+//!
+//! `AudioCapture` is the seam between the OS-specific capture backends (Windows
+//! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
+//! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
+//! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
+//! orchestration (the transcriber, the driver) can be exercised without a real
+//! device — and doubles as the dev affordance ("transcribe a WAV file").
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,7 +14,10 @@ use std::time::Duration;
 /// backends resample their device-native rate down to this.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// Chunk granularity `FileAudioCapture` delivers: 200 ms (per ADR-056).
+/// Chunk granularity `FileAudioCapture` delivers (and the rough cadence the
+/// real backends aim for — the macOS CLI's framed stdout protocol uses ~200 ms
+/// chunks, per ADR-056). Smaller = lower live latency but more per-chunk
+/// overhead; this is a reasonable default.
 pub const CHUNK_DURATION: Duration = Duration::from_millis(200);
 
 /// UI label for the default "system loopback + your microphone" source that
@@ -23,44 +31,16 @@ pub const DEFAULT_MIXED_SOURCE_LABEL: &str = "Whole meeting (system audio + your
 pub enum AudioSource {
     /// All system audio output (the "everything" loopback). Always available.
     SystemWide,
-    /// A specific process's audio (e.g. just Teams). Requires per-process
-    /// capture support — `CaptureCapabilities::supports_per_process` (Windows
-    /// build 20348+, macOS 14.4+).
-    Process {
-        /// Process selector — a PID on Windows/macOS. `ProcessSelector::NodeId`
-        /// is reserved for non-PID backends; both current backends reject it
-        /// as `Unsupported`.
-        selector: ProcessSelector,
-    },
     /// A specific microphone input device (the user's own voice).
     Microphone {
         /// Device id (`None` = system default input).
         device: Option<String>,
     },
-    /// Both `system` and `mic` captured together as two timestamped streams.
+    /// System audio + your microphone, mixed into one mono stream (the meeting
+    /// default). The system side is always the full loopback.
     Mixed {
-        /// What to capture for the "other side" (typically `SystemWide` or a
-        /// `Process`).
-        system: Box<AudioSource>,
         /// The microphone device for "your side" (`None` = default input).
         mic: Option<String>,
-    },
-}
-
-/// How a process to capture is identified. Boxed inside `AudioSource::Process`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", tag = "by")]
-pub enum ProcessSelector {
-    /// Operating-system process id (Windows/macOS).
-    Pid {
-        /// The PID.
-        pid: i32,
-    },
-    /// An opaque backend-specific node/stream id. Reserved variant — no current
-    /// backend accepts it; both reject it as `Unsupported`.
-    NodeId {
-        /// The node id, stringified.
-        id: String,
     },
 }
 
@@ -70,28 +50,21 @@ pub enum ProcessSelector {
 pub struct AudioSourceInfo {
     /// The source to pass to `start()` if the user picks this entry.
     pub source: AudioSource,
-    /// Human-readable label (e.g. `"Microsoft Teams"`, `"System (everything)"`,
-    /// `"Built-in Microphone"`).
+    /// Human-readable label (e.g. `"System (everything)"`, `"Microphone: …"`).
     pub label: String,
-    /// Best-effort bundle/app identifier when this is a process source
-    /// (e.g. `"com.microsoft.teams2"`), else `None`.
+    /// Reserved for a best-effort app identifier; currently always `None`.
     pub app_id: Option<String>,
 }
 
-/// What a capture backend on this host can do — surfaced to the UI so it knows
-/// e.g. whether to offer a process picker.
+/// What a capture backend on this host can do — surfaced to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureCapabilities {
-    /// `true` if the backend can capture a single process's audio (Windows
-    /// build 20348+, macOS 14.4+).
-    pub supports_per_process: bool,
     /// `true` if capturing the system loopback at all is possible on this host
     /// (e.g. `false` on macOS < 14.2).
     pub supports_system_audio: bool,
     /// `true` if a microphone input is available.
     pub supports_microphone: bool,
-    /// Short human-readable note for the UI when something is limited
-    /// (e.g. `"Per-app capture requires macOS 14.4+"`), else `None`.
+    /// Short human-readable note for the UI when something is limited, else `None`.
     pub note: Option<String>,
 }
 
@@ -100,7 +73,6 @@ impl CaptureCapabilities {
     /// "capture" from a file path only; nothing real.
     pub fn file_only() -> Self {
         Self {
-            supports_per_process: false,
             supports_system_audio: false,
             supports_microphone: false,
             note: Some("File input only (no live capture backend on this build/OS)".to_string()),
@@ -110,6 +82,9 @@ impl CaptureCapabilities {
 
 /// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus
 /// the offset of this chunk's first sample from the start of the recording.
+/// (When the source is `Mixed`, the backend has already mixed or the engine
+/// requested a single mixed stream — multi-stream interleaving is a backend
+/// detail; the engine only ever sees one mono stream here.)
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// 16 kHz mono samples, `[-1.0, 1.0]`.
@@ -121,8 +96,8 @@ pub struct AudioChunk {
 /// Errors a capture backend can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
-    /// The requested source isn't supported on this host (e.g. per-process on
-    /// an old OS, or a missing sound server).
+    /// The requested source isn't supported on this host (e.g. system loopback
+    /// on macOS < 14.2, or a missing sound server).
     #[error("audio source not supported on this host: {0}")]
     Unsupported(String),
     /// The OS denied the recording permission (or, on macOS system audio,
@@ -142,7 +117,10 @@ pub enum CaptureError {
 }
 
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
-/// `Ok(None)` at end of stream. Implementations are `Send`.
+/// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
+/// for a live backend it doesn't normally end until `stop()` — represented by
+/// dropping the stream / the backend's own stop signal). Implementations are
+/// `Send` so the driver can pump them from a background task.
 pub trait AudioStream: Send {
     /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
     /// capture broke (the driver flips the session to `Failed`).
@@ -169,8 +147,13 @@ pub trait AudioCapture: Send + Sync {
 // --- FileAudioCapture: the dev/test backend ---------------------------------
 
 /// "Captures" from a WAV file by streaming it back in [`CHUNK_DURATION`] chunks.
-/// Path comes from construction or `Microphone { device: Some("<path>") }`.
-/// WAV must be 16-bit-int or 32-bit-float PCM; converted to 16 kHz mono `f32`.
+///
+/// It accepts the file path either at construction (for the dev "transcribe
+/// this file" affordance — the path is fixed) or via the `source` argument as
+/// a `Microphone { device: Some("<path>") }` overload (a convenience for tests
+/// that want to drive different fixtures through the same `Box<dyn AudioCapture>`).
+/// The WAV must be 16-bit-int or 32-bit-float PCM; any sample rate / channel
+/// count is accepted and converted to 16 kHz mono `f32` here.
 pub struct FileAudioCapture {
     /// Default path used when `start()` is called with a non-path source.
     default_path: Option<PathBuf>,
@@ -528,6 +511,18 @@ mod tests {
     }
 
     #[test]
+    fn bytes_to_f32_decodes_le_and_drops_a_trailing_partial_sample() {
+        // 2 full f32s + 3 trailing bytes — chunks_exact drops the partial.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&(-0.5f32).to_le_bytes());
+        raw.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        assert_eq!(bytes_to_f32_samples(&raw), vec![1.0, -0.5]);
+        assert!(bytes_to_f32_samples(&[]).is_empty());
+        assert!(bytes_to_f32_samples(&[1, 2, 3]).is_empty());
+    }
+
+    #[test]
     fn resample_linear_is_identity_when_rates_match() {
         let v = sine(100, 16_000, 100.0);
         assert_eq!(resample_linear(&v, 16_000, 16_000), v);
@@ -538,22 +533,11 @@ mod tests {
     fn audio_source_round_trips_through_serde() {
         let cases = [
             AudioSource::SystemWide,
-            AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1234 },
-            },
-            AudioSource::Process {
-                selector: ProcessSelector::NodeId {
-                    id: "node-42".into(),
-                },
-            },
             AudioSource::Microphone { device: None },
             AudioSource::Microphone {
                 device: Some("/tmp/x.wav".into()),
             },
             AudioSource::Mixed {
-                system: Box::new(AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: 9 },
-                }),
                 mic: Some("default".into()),
             },
         ];
@@ -562,20 +546,21 @@ mod tests {
             let back: AudioSource = serde_json::from_str(&j).unwrap();
             assert_eq!(back, c, "round-trip failed for {c:?} (json: {j})");
         }
+        // Backward compat: an old Mixed with the retired `system` field still
+        // loads (serde ignores the unknown key) into the new shape.
+        let old = r#"{"kind":"mixed","system":{"kind":"system_wide"},"mic":null}"#;
+        assert_eq!(
+            serde_json::from_str::<AudioSource>(old).unwrap(),
+            AudioSource::Mixed { mic: None }
+        );
         // Spot-check the wire shape so a frontend mirroring this type knows it.
-        let j = serde_json::to_value(AudioSource::Process {
-            selector: ProcessSelector::Pid { pid: 7 },
-        })
-        .unwrap();
-        assert_eq!(j["kind"], "process");
-        assert_eq!(j["selector"]["by"], "pid");
-        assert_eq!(j["selector"]["pid"], 7);
+        let j = serde_json::to_value(AudioSource::Microphone { device: None }).unwrap();
+        assert_eq!(j["kind"], "microphone");
     }
 
     #[test]
     fn capabilities_round_trip_through_serde() {
         let c = CaptureCapabilities {
-            supports_per_process: true,
             supports_system_audio: true,
             supports_microphone: false,
             note: Some("x".into()),
@@ -583,6 +568,6 @@ mod tests {
         let back: CaptureCapabilities =
             serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
-        assert!(!CaptureCapabilities::file_only().supports_per_process);
+        assert!(!CaptureCapabilities::file_only().supports_system_audio);
     }
 }

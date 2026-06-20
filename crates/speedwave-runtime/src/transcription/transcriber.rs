@@ -57,22 +57,8 @@ pub struct Word {
     pub end: Duration,
 }
 
-/// A speaker id from the diarizer. Rendered `Speaker 1`, `Speaker 2`, …
-/// Not stable across passes (live vs finalize cluster independently).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct SpeakerId(pub u32);
-
-impl SpeakerId {
-    /// 1-indexed display label, e.g. `"Speaker 3"`.
-    pub fn display_label(self) -> String {
-        format!("Speaker {}", self.0 + 1)
-    }
-}
-
-/// One transcript segment: a span of audio, its text, optional per-word
-/// timings, and (filled in later by the diarizer) the speaker.
+/// One transcript segment: a span of audio, its text, and optional per-word
+/// timings. (Speaker diarization was removed — ADR-075.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// Start offset from the start of the audio.
@@ -83,8 +69,6 @@ pub struct Segment {
     pub text: String,
     /// Per-word timings (empty unless requested).
     pub words: Vec<Word>,
-    /// Speaker assigned by diarization, if any.
-    pub speaker: Option<SpeakerId>,
 }
 
 /// Transcriber errors.
@@ -111,8 +95,9 @@ pub enum TranscribeError {
 }
 
 /// A speech-to-text engine. `transcribe()` is the offline/finalize path (whole
-/// buffer); `feed()` is the live path (a growing decode window). One transcriber
-/// per recording.
+/// buffer); `feed()` is the live path (a growing decode window — tail segments
+/// may change as more context arrives). One transcriber per recording (Whisper
+/// state is single-threaded).
 pub trait Transcriber: Send {
     /// Transcribe `pcm` (16 kHz mono `f32`, `[-1, 1]`) in one shot.
     fn transcribe(
@@ -222,7 +207,6 @@ impl WhisperCppTranscriber {
                 end,
                 text,
                 words: Vec::new(),
-                speaker: None,
             });
         }
         if opts.word_timestamps {
@@ -306,7 +290,6 @@ impl Transcriber for MockTranscriber {
                 end: Duration::from_secs_f32(((i + 1) as f32 * self.seg_secs).min(total)),
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
-                speaker: None,
             })
             .collect())
     }
@@ -317,7 +300,8 @@ impl Transcriber for MockTranscriber {
 mod tests {
     use super::*;
 
-    // `WhisperCppTranscriber` has no `Debug`; pattern-match the error out.
+    // `WhisperCppTranscriber` has no `Debug` (it wraps a `WhisperContext`), so
+    // `unwrap_err()` won't compile — pattern-match the error out.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
         match WhisperCppTranscriber::load(path, label) {
             Ok(_) => panic!("expected load() to fail"),
@@ -335,12 +319,6 @@ mod tests {
     fn language_codes() {
         assert_eq!(Language::Pl.code(), "pl");
         assert_eq!(Language::En.code(), "en");
-    }
-
-    #[test]
-    fn speaker_id_display_is_one_indexed() {
-        assert_eq!(SpeakerId(0).display_label(), "Speaker 1");
-        assert_eq!(SpeakerId(4).display_label(), "Speaker 5");
     }
 
     #[test]
@@ -404,9 +382,7 @@ mod tests {
         assert_eq!(segs[2].text, "s2");
         assert!((segs[1].start.as_secs_f32() - 2.0).abs() < 0.01);
         assert!((segs[2].end.as_secs_f32() - 5.0).abs() < 0.01);
-        assert!(segs
-            .iter()
-            .all(|s| s.speaker.is_none() && s.words.is_empty()));
+        assert!(segs.iter().all(|s| s.words.is_empty()));
         assert!(t.transcribe(&[], &opts).unwrap().is_empty());
         assert_eq!(t.feed(&pcm, &opts).unwrap().len(), 3);
     }
@@ -422,7 +398,6 @@ mod tests {
                 start: Duration::from_millis(1230),
                 end: Duration::from_millis(2000),
             }],
-            speaker: Some(SpeakerId(2)),
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),
@@ -436,5 +411,18 @@ mod tests {
         }
     }
 
-    // Real whisper.cpp inference is an opt-in CI job, not a unit test.
+    #[test]
+    fn old_segment_json_with_a_speaker_field_still_deserializes() {
+        // Backward compat (ADR-075): pre-removal transcripts carried a
+        // `speaker` field on each segment. Removing it must not break loading
+        // existing `transcript.json` files — serde ignores the unknown key.
+        let legacy = r#"{"start":{"secs":1,"nanos":0},"end":{"secs":2,"nanos":0},
+            "text":"hej","words":[],"speaker":3}"#;
+        let seg: Segment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(seg.text, "hej");
+        assert_eq!(seg.start, Duration::from_secs(1));
+    }
+
+    // Real whisper.cpp inference (needs a ≥75 MiB model + the C++ engine) is an
+    // opt-in CI job, not a unit test — verified end-to-end in ADR-056 spike 0A.
 }
