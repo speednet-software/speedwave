@@ -109,11 +109,7 @@ impl AudioCapture for WasapiAudioCapture {
             AudioSource::SystemWide => {
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
                 let stop = Arc::new(AtomicBool::new(false));
-                let handle = spawn_wasapi_loopback(
-                    LoopbackTarget::System,
-                    ResamplerSink::Channel(tx),
-                    &stop,
-                )?;
+                let handle = spawn_wasapi_loopback(ResamplerSink::Channel(tx), &stop)?;
                 Ok(Box::new(WasapiLoopbackStream {
                     rx,
                     _handle: handle,
@@ -135,7 +131,6 @@ impl AudioCapture for WasapiAudioCapture {
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
                 let stop = Arc::new(AtomicBool::new(false));
                 let handle = spawn_wasapi_loopback(
-                    LoopbackTarget::System,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::System,
@@ -157,13 +152,6 @@ impl AudioCapture for WasapiAudioCapture {
             }
         }
     }
-}
-
-/// What a wasapi loopback capture targets: the whole render endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoopbackTarget {
-    /// The default render endpoint's full mix (all system audio).
-    System,
 }
 
 /// Builds the cpal input stream for the given sample format, wiring its data
@@ -270,11 +258,10 @@ impl Drop for WasapiCaptureHandle {
     }
 }
 
-/// Spawns the wasapi loopback capture thread for `target`, delivering 16 kHz
-/// mono chunks into `sink` until `stop` is set. Reports setup success/failure
-/// back through a one-shot channel so a bad endpoint fails `start()` cleanly.
+/// Spawns the wasapi system-loopback capture thread, delivering 16 kHz mono
+/// chunks into `sink` until `stop` is set. Reports setup success/failure back
+/// through a one-shot channel so a bad endpoint fails `start()` cleanly.
 fn spawn_wasapi_loopback(
-    target: LoopbackTarget,
     sink: ResamplerSink,
     stop: &Arc<AtomicBool>,
 ) -> Result<WasapiCaptureHandle, CaptureError> {
@@ -286,7 +273,7 @@ fn spawn_wasapi_loopback(
     let join = std::thread::Builder::new()
         .name("wasapi-loopback".to_string())
         .spawn(move || {
-            run_wasapi_loopback(target, sink, &stop_thread, &failed_thread, ready_tx);
+            run_wasapi_loopback(sink, &stop_thread, &failed_thread, ready_tx);
         })
         .map_err(|e| CaptureError::Failed(format!("spawn wasapi capture thread: {e}")))?;
     // Wait for the thread's setup result (bounded — a wedged COM init shouldn't
@@ -316,7 +303,6 @@ fn spawn_wasapi_loopback(
 /// signal readiness, then pump frames → `Resampler` → `sink` until `stop`.
 #[cfg(windows)]
 fn run_wasapi_loopback(
-    target: LoopbackTarget,
     sink: ResamplerSink,
     stop: &AtomicBool,
     failed: &AtomicBool,
@@ -332,13 +318,10 @@ fn run_wasapi_loopback(
         return;
     }
 
-    // Open the AudioClient for the target. System loopback uses the default
-    // *render* endpoint captured in loopback.
-    let client_res = match target {
-        LoopbackTarget::System => DeviceEnumerator::new()
-            .and_then(|e| e.get_default_device(&Direction::Render))
-            .and_then(|d| d.get_iaudioclient()),
-    };
+    // System loopback captures the default *render* endpoint in loopback mode.
+    let client_res = DeviceEnumerator::new()
+        .and_then(|e| e.get_default_device(&Direction::Render))
+        .and_then(|d| d.get_iaudioclient());
     let mut client = match client_res {
         Ok(c) => c,
         Err(e) => {
@@ -347,15 +330,13 @@ fn run_wasapi_loopback(
         }
     };
 
-    // For the system endpoint the device mix format is authoritative.
-    let format = match target {
-        LoopbackTarget::System => match client.get_mixformat() {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = ready.send(Err(format!("get_mixformat: {e:?}")));
-                return;
-            }
-        },
+    // The device mix format is authoritative.
+    let format = match client.get_mixformat() {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = ready.send(Err(format!("get_mixformat: {e:?}")));
+            return;
+        }
     };
     let src_rate = format.get_samplespersec();
     let src_channels = format.get_nchannels() as usize;
@@ -432,6 +413,14 @@ fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec
     if bytes_per_sample == 0 {
         return Vec::new();
     }
+    // Unsupported formats (e.g. 24-bit int) decode to silence — warn once so the
+    // "records but silent" symptom is diagnosable, rather than per-sample spam.
+    if !matches!(
+        (is_float, bytes_per_sample),
+        (true, 4) | (false, 2) | (false, 4)
+    ) {
+        log::warn!(target: "transcription::capture", "unsupported WASAPI format (float={is_float}, bps={bytes_per_sample}) — decoding as silence");
+    }
     let n = raw.len() / bytes_per_sample;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -455,7 +444,6 @@ fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec
 /// of the surrounding logic needs the symbol to resolve.
 #[cfg(not(windows))]
 fn run_wasapi_loopback(
-    _target: LoopbackTarget,
     _sink: ResamplerSink,
     _stop: &AtomicBool,
     _failed: &AtomicBool,
@@ -661,16 +649,31 @@ struct MixedWasapiAudioStream {
     _mic: cpal::Stream,
 }
 
+impl MixedWasapiAudioStream {
+    /// `true` if the wasapi capture thread aborted on a device-read error.
+    fn aborted(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.aborted())
+    }
+
+    /// The error surfaced when the wasapi thread aborted mid-recording.
+    fn abort_err() -> CaptureError {
+        CaptureError::Failed("wasapi capture stopped on a device-read error".to_string())
+    }
+}
+
 impl AudioStream for MixedWasapiAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         // A wasapi-thread device-read abort surfaces as an error, not a quietly
-        // truncated (but "complete") recording.
-        if self.handle.as_ref().is_some_and(|h| h.aborted()) {
-            return Err(CaptureError::Failed(
-                "wasapi capture stopped on a device-read error".to_string(),
-            ));
+        // truncated "complete" recording. Re-check after a poll stall so the
+        // message is the precise abort, not the generic stall.
+        if self.aborted() {
+            return Err(Self::abort_err());
         }
-        poll_mixed_chunk(&self.buf)
+        let res = poll_mixed_chunk(&self.buf);
+        if res.is_err() && self.aborted() {
+            return Err(Self::abort_err());
+        }
+        res
     }
 }
 

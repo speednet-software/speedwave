@@ -77,9 +77,9 @@ pub fn recommended_live_model_for_this_build() -> &'static WhisperModelInfo {
     recommended_live_model(&compiled_backends())
 }
 
-/// The single best model to download for `backends`: `large-v3` (best Polish)
-/// on a GPU build — the GPU keeps the live window real-time at full quality —
-/// else `large-v3-turbo`, the best live-capable model on CPU.
+/// The single best model to download for `backends`: `large-v3` on GPU, else
+/// `large-v3-turbo` (its `GpuLive` role is the best live-capable model; on CPU
+/// it serves both passes — turbo on a weak CPU may lag live, accepted). See ADR-056.
 pub fn best_model_for_backends(backends: &[Backend]) -> &'static WhisperModelInfo {
     let want = if backends.iter().any(|b| b.is_gpu()) {
         ModelRole::Finalize

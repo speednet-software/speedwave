@@ -329,11 +329,18 @@ pub async fn stop_transcription(
 }
 
 /// Validates a requested `AudioSource` against the host's `CaptureCapabilities`.
-/// A `Mixed` (or bare microphone) source needs a microphone.
+/// `SystemWide`/`Mixed` need system audio; `Microphone`/`Mixed` need a mic.
 fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
 ) -> Result<(), String> {
+    // Guard system audio at the boundary so a direct API call (the UI already
+    // hides unsupported sources) gets a clean error, not a deep backend one.
+    if matches!(src, AudioSource::SystemWide | AudioSource::Mixed { .. })
+        && !caps.supports_system_audio
+    {
+        return Err("this host does not support system audio capture".to_string());
+    }
     // Exhaustive (no `_` arm) so a new `AudioSource` variant forces a conscious
     // validation decision here.
     let needs_microphone: bool = match src {
@@ -818,6 +825,19 @@ mod tests {
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
+        );
+        // SystemWide and Mixed are rejected on a host with no system audio.
+        let no_sys = CaptureCapabilities {
+            supports_system_audio: false,
+            supports_microphone: true,
+            note: None,
+        };
+        assert!(validate_source_against_caps(&AudioSource::SystemWide, &no_sys).is_err());
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &no_sys).is_err());
+        // A bare Microphone is still fine without system audio.
+        assert!(
+            validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_sys)
+                .is_ok()
         );
     }
 }
