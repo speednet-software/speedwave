@@ -1,5 +1,7 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 
+import { formatBytes } from '../../shared/format-bytes';
+
 /** View-model rendered as one pill in the attachment strip. */
 export interface AttachmentViewModel {
   id: string;
@@ -57,13 +59,6 @@ export class AttachmentStripComponent {
   readonly attachments = input.required<ReadonlyArray<AttachmentViewModel>>();
   readonly remove = output<string>();
 
-  /**
-   * Pretty-prints a byte count for the thumbnail title.
-   * @param bytes - Encoded size on disk.
-   */
-  formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
+  /** Pretty-prints a byte count for the thumbnail title (shared helper). */
+  readonly formatBytes = formatBytes;
 }

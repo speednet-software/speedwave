@@ -9,7 +9,7 @@ function session(id: string, createdAt: string, audioKept: boolean): TranscriptS
     id,
     created_at: createdAt,
     language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System', app_id: null },
+    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
     status: { state: 'done' },
     live_segments: [],
     final_segments: null,

@@ -10,16 +10,7 @@ import {
 
 import { TranscriptionService } from '../../services/transcription.service';
 import type { RecommendedModelAck } from '../../models/transcript';
-
-/**
- * Formats a byte count as a short `GB`/`MB` string.
- * @param bytes - size in bytes.
- */
-function humanSize(bytes: number): string {
-  const gb = bytes / 1_000_000_000;
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
-  return `${Math.round(bytes / 1_000_000)} MB`;
-}
+import { formatBytes } from '../../shared/format-bytes';
 
 /**
  * Settings → Meeting transcription (ADR-056). One auto-selected model for this
@@ -178,6 +169,6 @@ export class TranscriptionSectionComponent implements OnInit {
    * @param m - the recommended-model ack.
    */
   size(m: RecommendedModelAck): string {
-    return humanSize(m.size_bytes);
+    return formatBytes(m.size_bytes);
   }
 }

@@ -219,6 +219,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
+  /** Pending scroll-retry timer; cleared on re-entry and on destroy. */
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Loads project information on component initialization. */
   ngOnInit(): void {
@@ -242,6 +244,11 @@ export class SettingsComponent implements OnInit, OnDestroy {
    * @param attempt - internal retry counter.
    */
   private scrollToFragment(id: string | null, attempt = 0): void {
+    // Cancel any retry from a previous fragment so it can't fire post-destroy.
+    if (this.scrollTimer !== null) {
+      clearTimeout(this.scrollTimer);
+      this.scrollTimer = null;
+    }
     if (!id) return;
     // CSS.escape guards against a fragment with CSS-special chars throwing
     // (guarded — not present in every test environment).
@@ -253,15 +260,19 @@ export class SettingsComponent implements OnInit, OnDestroy {
     }
     // Give up after ~1s of retries — the section never mounted (cosmetic).
     if (attempt < 20) {
-      setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
+      this.scrollTimer = setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
     }
   }
 
-  /** Unsubscribes from the project ready listener. */
+  /** Unsubscribes from the project ready listener and cancels any scroll retry. */
   ngOnDestroy(): void {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
+    }
+    if (this.scrollTimer !== null) {
+      clearTimeout(this.scrollTimer);
+      this.scrollTimer = null;
     }
   }
 

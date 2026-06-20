@@ -139,20 +139,40 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Checks whether the speech model is downloaded; if not, the gate shows. */
+  /** Re-checks model availability when the window/tab regains focus. */
+  private readonly onActivate = (): void => {
+    void this.refreshModelReady();
+  };
+
+  /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
-    try {
-      this.modelReady.set((await this.transcription.recommendedModel()).downloaded);
-    } catch (err) {
-      // Don't trap the user behind the gate on a transient read error.
-      this.log.warn(`recommended-model check failed: ${String(err)}`);
-      this.modelReady.set(true);
-    }
+    await this.refreshModelReady();
+    // Clear the gate after a download in Settings without recreating the tab.
+    window.addEventListener('focus', this.onActivate);
+    document.addEventListener('visibilitychange', this.onActivate);
   }
 
-  /** Detaches the live-stream listener when the tab is destroyed. */
+  /** Detaches the live-stream listener and removes activation listeners. */
   async ngOnDestroy(): Promise<void> {
+    window.removeEventListener('focus', this.onActivate);
+    document.removeEventListener('visibilitychange', this.onActivate);
     await this.transcription.detach();
+  }
+
+  /**
+   * Lifts the gate when any Whisper model is downloaded — the same predicate
+   * recording-controls uses for `hasModel()`. Fails open on a read error.
+   */
+  private async refreshModelReady(): Promise<void> {
+    if (document.visibilityState === 'hidden') return;
+    try {
+      const ack = await this.transcription.listModels();
+      this.modelReady.set(ack.whisper.some((m) => m.downloaded));
+    } catch (err) {
+      // Don't trap the user behind the gate on a transient read error.
+      this.log.warn(`model-availability check failed: ${String(err)}`);
+      this.modelReady.set(true);
+    }
   }
 
   /**

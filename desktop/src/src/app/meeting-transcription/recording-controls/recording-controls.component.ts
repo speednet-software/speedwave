@@ -123,8 +123,8 @@ function accelLabel(backends: Backend[]): string {
 
       @if (modelsKnown() && !hasModel()) {
         <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
-          No speech-to-text model is downloaded yet. Download one in the Models panel (the smallest,
-          'small', is about 488 MB) — downloads use the network.
+          No speech-to-text model is downloaded yet. Download it in Settings → Meeting transcription
+          — the download uses the network.
         </p>
       }
 

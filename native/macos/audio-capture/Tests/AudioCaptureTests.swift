@@ -120,6 +120,19 @@ final class AudioCaptureTests: XCTestCase {
         }
     }
 
+    func testMicSelectorForMicOnly() {
+        // A `mic-only:<uid>` source must route to the named device, not default.
+        if case .device(let uid) = micSelector(forMicOnly: "UID-7") {
+            XCTAssertEqual(uid, "UID-7")
+        } else {
+            XCTFail("expected device(_) selector for mic-only:<uid>")
+        }
+        // Bare `mic-only` uses the default input.
+        if case .defaultDevice = micSelector(forMicOnly: nil) {} else {
+            XCTFail("expected defaultDevice selector for bare mic-only")
+        }
+    }
+
     func testParseRecordOptionsMicOnly() {
         // `--source mic-only` without `--mic` (mic-only IS the microphone).
         let opts = parseRecordOptions(["--source", "mic-only"])

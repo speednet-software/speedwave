@@ -126,8 +126,34 @@ final class WriterQueue {
         samples.withUnsafeBufferPointer { buf in stdout.write(Data(buffer: buf)) }
     }
 
-    /// Drains any queued writes (best-effort, used on shutdown).
-    func flush() { queue.sync {} }
+    /// Flushes each converter's resampler tail, then drains queued writes, so a
+    /// graceful stop is not truncated. Best-effort, used on shutdown.
+    func flush(offsetNs: UInt64) {
+        queue.sync { [self] in
+            for (idx, converter) in converters {
+                drainConverterTail(streamIndex: UInt32(idx), converter: converter, offsetNs: offsetNs)
+            }
+        }
+    }
+
+    /// Feeds `.endOfStream` to one converter and writes its tail. On `queue` only.
+    private func drainConverterTail(
+        streamIndex: UInt32, converter: AVAudioConverter, offsetNs: UInt64
+    ) {
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: 4096) else {
+            return
+        }
+        var convErr: NSError?
+        converter.convert(to: outBuf, error: &convErr) { _, status in
+            status.pointee = .endOfStream
+            return nil
+        }
+        if convErr != nil { return }
+        let n = Int(outBuf.frameLength)
+        guard n > 0, let raw = outBuf.floatChannelData else { return }
+        let mono = Array(UnsafeBufferPointer(start: raw[0], count: n))
+        writeChunk(streamIndex: streamIndex, samples: mono, offsetNs: offsetNs)
+    }
 }
 
 /// Writes a diagnostic line to stderr — never stdout.
@@ -160,6 +186,11 @@ enum MicSelector {
 struct RecordOptions {
     let source: AudioSource
     let mic: MicSelector
+}
+
+/// The mic selector for a `mic-only[:uid]` source: the named device, or default.
+func micSelector(forMicOnly uid: String?) -> MicSelector {
+    uid.map { .device($0) } ?? .defaultDevice
 }
 
 /// Parses `--record --source <s> [--mic <m>]` from argv (after the subcommand).
@@ -223,10 +254,17 @@ func listInputDevices() throws -> Data {
     }
     let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
     var ids = [AudioObjectID](repeating: 0, count: count)
-    _ = ids.withUnsafeMutableBufferPointer { buf in
-        AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize,
-            buf.baseAddress!)
+    if count > 0 {
+        let status = ids.withUnsafeMutableBufferPointer { buf -> OSStatus in
+            guard let base = buf.baseAddress else { return kAudioHardwareUnspecifiedError }
+            return AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, base)
+        }
+        guard status == noErr else {
+            throw NSError(
+                domain: "AudioCapture", code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "device list query failed"])
+        }
     }
     let defaultId = defaultInputDevice()
     var out: [[String: Any]] = []
@@ -398,12 +436,13 @@ var activeSession: RecordSession?
 
 /// SIGTERM/SIGINT handler — installed once at record start.
 let cleanupHandler: @convention(c) (Int32) -> Void = { _ in
+    var tailOffset: UInt64 = 0
     if #available(macOS 14.4, *) {
+        tailOffset = activeSession?.offsetNs() ?? 0
         activeSession?.teardown()
     }
-    // Drain any frames still queued on the writer thread, then flush the C
-    // stdio buffer so the parent doesn't see a truncated chunk.
-    WriterQueue.shared.flush()
+    // Flush converter tails + queued writes, then the C stdio buffer.
+    WriterQueue.shared.flush(offsetNs: tailOffset)
     fflush(stdout)
     _exit(0)
 }
@@ -416,17 +455,18 @@ func runRecord(_ opts: RecordOptions) {
     signal(SIGTERM, cleanupHandler)
     signal(SIGINT, cleanupHandler)
 
-    // mic-only: no system tap, just the microphone on stream 0. Uses the public
-    // AVCaptureDevice consent API so the OS prompt fires.
-    if case .micOnly = opts.source {
+    // mic-only: no system tap, mic on stream 0 (public AVCaptureDevice consent,
+    // so the OS prompt fires). `mic-only:<uid>` selects that device, bare = default.
+    if case .micOnly(let uid) = opts.source {
         guard requestMicrophoneAccess() else {
             logErr(
                 "microphone access denied — grant it in System Settings → Privacy & Security → Microphone")
             exit(2)
         }
+        let selector = micSelector(forMicOnly: uid)
         WriterQueue.shared.writeHeader(streams: ["mic"])
         do {
-            try startMicEngine(session: session, selector: .defaultDevice, streamIndex: 0)
+            try startMicEngine(session: session, selector: selector, streamIndex: 0)
         } catch {
             logErr("mic record start failed: \(error.localizedDescription)")
             session.teardown()
@@ -445,25 +485,23 @@ func runRecord(_ opts: RecordOptions) {
         exit(2)
     }
 
-    // System tap (+ optionally the mic mixed in as stream 1; the Rust side
-    // sums streams 0 and 1 into one mono stream — see CliAudioStream).
-    let streams: [String]
-    switch opts.mic {
-    case .none: streams = ["app"]
-    default: streams = ["app", "mic"]
+    // Resolve the mic permission BEFORE the header so it lists only streams we
+    // actually capture — a denied mic must not leave the reader waiting on a
+    // "mic" stream that never produces frames (ADR-056). Header is still
+    // written before the IOProc starts, so no chunk precedes it.
+    let micGranted: Bool
+    if case .none = opts.mic {
+        micGranted = false
+    } else {
+        micGranted = requestMicrophoneAccess()
+        if !micGranted { logErr("microphone access denied — recording system audio only") }
     }
-    WriterQueue.shared.writeHeader(streams: streams)
+    WriterQueue.shared.writeHeader(streams: micGranted ? ["app", "mic"] : ["app"])
 
     do {
         try startSystemTap(session: session, source: opts.source)
-        if case .none = opts.mic {} else {
-            // The mic prompt fires here too (public API), so a mixed capture
-            // gets at least the mic if the system-tap permission is missing.
-            if requestMicrophoneAccess() {
-                try startMicEngine(session: session, selector: opts.mic, streamIndex: 1)
-            } else {
-                logErr("microphone access denied — recording system audio only")
-            }
+        if micGranted {
+            try startMicEngine(session: session, selector: opts.mic, streamIndex: 1)
         }
     } catch {
         logErr("record start failed: \(error.localizedDescription)")
@@ -732,10 +770,13 @@ func inputDeviceId(forUID uid: String) -> AudioDeviceID? {
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr
     else { return nil }
     let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    guard count > 0 else { return nil }
     var ids = [AudioObjectID](repeating: 0, count: count)
-    _ = ids.withUnsafeMutableBufferPointer { buf in
-        AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, buf.baseAddress!)
+    let status = ids.withUnsafeMutableBufferPointer { buf -> OSStatus in
+        guard let base = buf.baseAddress else { return kAudioHardwareUnspecifiedError }
+        return AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, base)
     }
+    guard status == noErr else { return nil }
     return ids.first { deviceHasInput($0) && deviceStringProperty($0, kAudioDevicePropertyDeviceUID) == uid }
 }

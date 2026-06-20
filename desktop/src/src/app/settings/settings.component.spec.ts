@@ -142,6 +142,46 @@ describe('SettingsComponent', () => {
     expect(() => scroll.call(component, null)).not.toThrow();
   });
 
+  it('schedules a retry when the target section is missing, then clears it on destroy', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.detectChanges();
+      const inner = component as unknown as {
+        scrollToFragment(id: string | null): void;
+        scrollTimer: ReturnType<typeof setTimeout> | null;
+      };
+      // A fragment with no matching section → a retry timer is armed.
+      inner.scrollToFragment('section-does-not-exist');
+      expect(inner.scrollTimer).not.toBeNull();
+      // Destroy must cancel the pending retry so it can't fire post-destroy.
+      component.ngOnDestroy();
+      expect(inner.scrollTimer).toBeNull();
+      // Advancing time triggers nothing (no throw on the detached host).
+      expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears a prior retry timer when scrollToFragment is re-entered', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.detectChanges();
+      const inner = component as unknown as {
+        scrollToFragment(id: string | null): void;
+        scrollTimer: ReturnType<typeof setTimeout> | null;
+      };
+      inner.scrollToFragment('missing-one');
+      const first = inner.scrollTimer;
+      expect(first).not.toBeNull();
+      // Re-entry (e.g. a new fragment) cancels the previous timer.
+      inner.scrollToFragment('missing-two');
+      expect(inner.scrollTimer).not.toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reloads project info on project_switch_succeeded event', async () => {
     const projectState = TestBed.inject(ProjectStateService);
     await projectState.init();

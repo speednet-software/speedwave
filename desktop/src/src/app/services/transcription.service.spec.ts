@@ -25,7 +25,7 @@ function snapshot(overrides: Partial<TranscriptSession> = {}): TranscriptSession
     id: 'sess-1',
     created_at: '2026-05-12T00:00:00Z',
     language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System', app_id: null },
+    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
     status: { state: 'recording' },
     live_segments: [],
     final_segments: null,

@@ -84,12 +84,10 @@ impl AudioCapture for MacOsAudioCapture {
             AudioSourceInfo {
                 source: AudioSource::Mixed { mic: None },
                 label: super::audio::DEFAULT_MIXED_SOURCE_LABEL.to_string(),
-                app_id: None,
             },
             AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label: "System (everything)".to_string(),
-                app_id: None,
             },
         ];
         // Named input devices (default flagged); generic fallback if it fails.
@@ -106,7 +104,6 @@ impl AudioCapture for MacOsAudioCapture {
                             device: Some(m.uid),
                         },
                         label,
-                        app_id: None,
                     });
                 }
             }
@@ -354,7 +351,6 @@ fn generic_default_mic() -> AudioSourceInfo {
     AudioSourceInfo {
         source: AudioSource::Microphone { device: None },
         label: "Microphone (default input)".to_string(),
-        app_id: None,
     }
 }
 

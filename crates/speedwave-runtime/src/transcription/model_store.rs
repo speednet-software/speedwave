@@ -150,12 +150,16 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// `true` if the model file exists at ≥90% of its catalogue size estimate.
-    /// Download SHA256-verifies before rename, so the floor only rejects a
-    /// truncated leftover (the estimate drifts as upstream re-publishes).
+    /// `true` if the file size is within `[90%, 105%]` of the catalogue estimate
+    /// (download SHA-verifies before rename; the window rejects truncated or
+    /// oversized leftovers while tolerating upstream size drift).
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
-            Ok(m) => m.len() >= info.approx_bytes / 10 * 9,
+            Ok(m) => {
+                let floor = info.approx_bytes / 10 * 9;
+                let ceil = info.approx_bytes + info.approx_bytes / 20 + 1024;
+                m.len() >= floor && m.len() <= ceil
+            }
             Err(_) => false,
         }
     }
@@ -894,6 +898,19 @@ mod tests {
         assert!(
             !store.whisper_is_present(info),
             "a clearly-truncated file (<90%) is not present"
+        );
+
+        // At the +5% ceiling → present; clearly above it (corrupt/oversized) → not.
+        let ceil = info.approx_bytes + info.approx_bytes / 20 + 1024;
+        write_sparse(ceil);
+        assert!(
+            store.whisper_is_present(info),
+            "exactly at the ceiling is present"
+        );
+        write_sparse(ceil + info.approx_bytes / 10);
+        assert!(
+            !store.whisper_is_present(info),
+            "a wildly-oversized file (>105%) is not present"
         );
     }
 

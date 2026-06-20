@@ -62,7 +62,7 @@ describe('TranscriptionSectionComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="remove-model"]')).toBeNull();
     const state = fixture.nativeElement.querySelector('[data-testid="model-state"]');
-    expect(state.textContent).toContain('3.1 GB');
+    expect(state.textContent).toContain('2.9 GB');
     expect(state.textContent).toContain('best quality for your hardware');
   });
 
@@ -114,7 +114,7 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('size() formats GB and MB', () => {
-    expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('3.1 GB');
-    expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('488 MB');
+    expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
+    expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('465.4 MB');
   });
 });

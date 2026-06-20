@@ -124,13 +124,11 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: recommendation if downloaded, else any downloaded.
-    // Never download implicitly — error with a hint if nothing is present.
+    // Pick live model: the one model this build downloads if present, else any
+    // downloaded. Never download implicitly — error with a hint if none present.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
-    let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
-        .key
-        .to_string();
+    let recommended = transcription::best_model_for_this_build().key.to_string();
     let live_key: String = {
         let m = models_arc.clone();
         let rec = recommended.clone();
@@ -169,7 +167,6 @@ pub async fn start_transcription(
         AudioSourceInfo {
             source: audio_source.clone(),
             label,
-            app_id: None,
         },
         audio_wav.clone(),
     );
@@ -385,17 +382,13 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: `large-v3` if downloaded, otherwise
-/// the first downloaded Whisper model in the catalogue (the live model is
-/// guaranteed present at this point). `None` if somehow nothing is downloaded.
+/// Picks the model for the offline pass: this build's model if downloaded, else
+/// the first downloaded Whisper model (the live one is guaranteed present here).
+/// `None` if somehow nothing is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
-    // The catalogue's FinalQuality model if present, else any downloaded one.
-    if let Some(best) =
-        transcription::model_for_recommendation(transcription::ModelRecommendation::FinalQuality)
-    {
-        if models.whisper_is_present_by_key(best.key) {
-            return Some(best.key.to_string());
-        }
+    let best = transcription::best_model_for_this_build().key;
+    if models.whisper_is_present_by_key(best) {
+        return Some(best.to_string());
     }
     models
         .whisper_status()
@@ -646,7 +639,6 @@ mod tests {
             AudioSourceInfo {
                 source: speedwave_runtime::transcription::AudioSource::SystemWide,
                 label: "Test".to_string(),
-                app_id: None,
             },
             PathBuf::from("/tmp/a.wav"),
         );

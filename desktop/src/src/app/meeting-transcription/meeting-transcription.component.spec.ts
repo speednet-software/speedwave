@@ -32,6 +32,11 @@ describe('MeetingTranscriptionComponent', () => {
     accel_label: 'CPU',
   });
 
+  const models = (downloaded: boolean) => ({
+    whisper: [{ key: 'large-v3', downloaded, size_bytes: 3_100_000_000, path: null }],
+    total_bytes_used: downloaded ? 3_100_000_000 : 0,
+  });
+
   beforeEach(async () => {
     activeSig.set(null);
     svc = {
@@ -48,7 +53,8 @@ describe('MeetingTranscriptionComponent', () => {
         backends: ['cpu'],
       })),
       listAudioSources: vi.fn(async () => []),
-      listModels: vi.fn(async () => ({ whisper: [], total_bytes_used: 0 })),
+      // Gate predicate matches recording-controls hasModel — any downloaded model lifts it.
+      listModels: vi.fn(async () => models(true)),
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
@@ -77,7 +83,7 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('shows the model-required gate (and hides the panes) when no model is downloaded', async () => {
-    svc.recommendedModel.mockResolvedValueOnce(recommended(false));
+    svc.listModels.mockResolvedValue(models(false));
     await component.ngOnInit();
     fixture.detectChanges();
     const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
@@ -94,12 +100,38 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('fails open (shows the panes) if the model check errors', async () => {
-    svc.recommendedModel.mockRejectedValueOnce(new Error('boom'));
+    svc.listModels.mockRejectedValue(new Error('boom'));
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.modelReady()).toBe(true);
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('app-recording-controls')).not.toBeNull();
+  });
+
+  it('clears the gate when the window regains focus after a Settings download', async () => {
+    // Start with no model → gate up.
+    svc.listModels.mockResolvedValue(models(false));
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.modelReady()).toBe(false);
+    // The user downloads the model in Settings, then returns → focus re-checks.
+    svc.listModels.mockResolvedValue(models(true));
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(component.modelReady()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+  });
+
+  it('removes the focus/visibility listeners on destroy', async () => {
+    await component.ngOnInit();
+    await component.ngOnDestroy();
+    svc.listModels.mockClear();
+    // A focus event after destroy must not trigger another model check.
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+    expect(svc.listModels).not.toHaveBeenCalled();
   });
 
   it('shows the "audio local, send uses network" banner text', () => {
