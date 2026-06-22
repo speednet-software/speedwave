@@ -24,6 +24,26 @@ pub(crate) fn apply_llm_config_in(
             }
             log::info!("llm: custom headers configured — using the direct (non-proxy) path");
         }
+    } else if let Some(entry) = llm.active_provider() {
+        // Kill-switch (legacy direct path) only supports anthropic + local.
+        // Erroring beats silently billing the Anthropic subscription for an
+        // OpenRouter/Compat session via the flat anthropic masquerade.
+        if matches!(
+            entry.kind,
+            LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat
+        ) {
+            anyhow::bail!(
+                "Provider '{}' requires the LLM proxy. Re-enable it (unset proxy_enabled=false) \
+                 to use OpenRouter / OpenAI-compatible providers.",
+                entry.id
+            );
+        }
+    } else if llm.active.is_some() {
+        // Kill-switch + dangling active (points at no entry): legacy path falls
+        // back to the Anthropic account default. Heal normally repairs this.
+        log::warn!(
+            "llm: kill-switch with a dangling active selection — using the direct default path"
+        );
     }
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
@@ -34,12 +54,8 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
     let entry = llm
         .active_provider()
         .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
-    let model = llm
-        .active
-        .as_ref()
-        .and_then(|a| a.model.as_deref())
-        .map(str::trim)
-        .unwrap_or("");
+    // Provenance: routing model comes from the active provider entry (ADR-073).
+    let model = llm.effective_active_model().unwrap_or_default();
 
     let mut extra_env = std::collections::HashMap::new();
     match entry.kind {
@@ -49,8 +65,15 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::LITELLM_ANTHROPIC_PASSTHROUGH_URL.to_string(),
             );
-            if !model.is_empty() {
-                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
+            // Defense-in-depth after heal/quarantine: drop a foreign id from a
+            // not-yet-healed config → account default, not 404.
+            if crate::config::is_foreign_anthropic_model(&model) {
+                log::warn!(
+                    "llm: ignoring foreign model '{model}' under anthropic provider '{}' — using account default",
+                    entry.id
+                );
+            } else if !model.is_empty() {
+                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.clone());
             }
         }
         LlmProviderKind::Local | LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
@@ -63,30 +86,32 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
             }
             // `<id>/<model>` matches the per-provider wildcard route in the litellm config.
             let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
-                model.to_string()
+                model.clone()
             } else {
                 format!("{}/{}", entry.id, model)
             };
-            extra_env.extend(std::collections::HashMap::from([
-                (
-                    "ANTHROPIC_BASE_URL".to_string(),
-                    super::LITELLM_BASE_URL.to_string(),
-                ),
-                // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
-                (
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    "sk-no-key-required".to_string(),
-                ),
-                ("ANTHROPIC_MODEL".to_string(), routed_model.clone()),
-                // Pin the subagent/background haiku alias to the same model.
-                (
-                    "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
-                    routed_model.clone(),
-                ),
-                (
-                    "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
-                    routed_model.clone(),
-                ),
+            extra_env.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                super::LITELLM_BASE_URL.to_string(),
+            );
+            // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
+            extra_env.insert(
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "sk-no-key-required".to_string(),
+            );
+            // Remap every built-in alias to the routed id (ADR-073) so
+            // `/model opus` etc. hit the wildcard route, not a bare claude-*.
+            for key in [
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            ] {
+                extra_env.insert(key.to_string(), routed_model.clone());
+            }
+            extra_env.extend([
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".to_string(),
                     format!("{model} ({})", entry.id),
@@ -99,7 +124,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
                     "1".to_string(),
                 ),
-            ]));
+            ]);
         }
     }
     extra_env.insert(
@@ -129,7 +154,13 @@ fn apply_llm_config_legacy_in(
             // Pins each ANTHROPIC_DEFAULT_*_MODEL alias to the SSOT-latest id with `[1m]` where supported.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
-            if !model.is_empty() {
+            // Provenance guard (mirrors the proxy path): a foreign id falls
+            // back to account default rather than 404 the API.
+            if crate::config::is_foreign_anthropic_model(model) {
+                log::warn!(
+                    "llm: ignoring foreign model '{model}' on direct anthropic path — using account default"
+                );
+            } else if !model.is_empty() {
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
             inject_claude_env(yaml, &extra_env)
