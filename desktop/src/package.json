@@ -56,14 +56,14 @@
     "axe-core": "^4.12.1",
     "eslint": "^10",
     "eslint-config-prettier": "^10",
-    "eslint-plugin-jsdoc": "^63.0.6",
+    "eslint-plugin-jsdoc": "^63.0.7",
     "eslint-plugin-prettier": "^5",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.14",
     "prettier": "^3",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.9.0",
-    "typescript-eslint": "^8.61.1",
+    "typescript-eslint": "^8.62.0",
     "vitest": "^4.1.5"
   }
 }
