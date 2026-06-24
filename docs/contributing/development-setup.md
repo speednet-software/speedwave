@@ -52,6 +52,12 @@ The `desktop/src-tauri/cli/` directory is in `.gitignore` — it is populated at
 
 `make dev` automatically builds the CLI first and copies it to `desktop/src-tauri/cli/` before starting Tauri dev mode. This ensures the "Open Terminal" feature works during development.
 
+> **Note:** `desktop/src/angular.json` sets `"cli": {"analytics": false}` intentionally. Without it,
+> Angular CLI shows an interactive telemetry prompt on the first `ng serve` / `ng test` / `ng build`
+> run on a fresh machine and waits for stdin indefinitely — hanging `make dev` and the Angular test
+> suite. The value must be the boolean `false` (not the string `"false"`) because Angular CLI uses a
+> strict `=== false` check; a string would be treated as a user-id and would enable analytics.
+
 ## Windows dev setup
 
 `make dev` works on Windows-native through Git Bash, but the toolchain has several quirks that need addressing. Once configured, the same `make` targets work as on macOS.
