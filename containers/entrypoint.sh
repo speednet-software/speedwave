@@ -176,17 +176,25 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Add template keys absent from the current file; existing keys are kept.
-        # Atomic write: crash mid-write leaves .tmp, not a truncated destination.
+        # Merge template keys; drop a stale /model that disagrees with the
+        # injected ANTHROPIC_MODEL, or (on the account-default path, env unset)
+        # a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
         node -e "
 const fs = require('fs');
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
+const envModel = process.env.ANTHROPIC_MODEL;
+const foreign = typeof merged.model === 'string' && merged.model.includes('/');
+const stale = envModel ? merged.model && merged.model !== envModel : foreign;
+if (stale) {
+  console.error('entrypoint: dropping stale settings.json model ' + merged.model);
+  delete merged.model;
+}
 const tmp = '${_dest}' + '.tmp';
 fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n');
 fs.renameSync(tmp, '${_dest}');
-" 2>/dev/null || true
+" || echo 'entrypoint: settings.json merge skipped' >&2
     fi
     unset _tmpl _dest
 fi

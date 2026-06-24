@@ -107,7 +107,8 @@ type DiscoveryState =
       <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
       <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
         One active provider per project — every session routes through the local proxy.
-        <code>/model</code> switches between the configured providers' models in-session.
+        <code>/model</code> switches models of the active provider in-session; on non-Anthropic
+        providers the built-in aliases map to that provider's model.
       </p>
 
       @if (legacyMigrationProvider) {
@@ -259,16 +260,10 @@ type DiscoveryState =
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
-                <!-- Empty value = no ANTHROPIC_MODEL injected; the label
-                     resolves the Opus family from the SSOT (three-state:
-                     in-flight keeps the option blank-but-valid). -->
-                @if (defaultAnthropicLabel() === undefined) {
-                  <option value=""></option>
-                } @else if (defaultAnthropicLabel(); as label) {
-                  <option value="">Default — {{ label }} (switchable via /model)</option>
-                } @else {
-                  <option value="">(default — let Claude Code choose)</option>
-                }
+                <!-- Empty value = no ANTHROPIC_MODEL injected. The real default
+                     depends on the account plan (Pro→Sonnet, Max→Opus), which
+                     Speedwave can't see — so the label stays plan-neutral. -->
+                <option value="">Default — depends on your plan (switchable via /model)</option>
                 @if (latestAnthropicModels().length > 0) {
                   <optgroup label="Latest">
                     @for (m of latestAnthropicModels(); track m.id) {
@@ -776,23 +771,10 @@ export class LlmProviderComponent implements OnInit {
     this.anthropicCatalog().filter((m) => !m.latest)
   );
 
-  /**
-   * Family label of the Opus model that the dropdown's `(default)` option
-   * resolves to at runtime. Sourced from `get_default_anthropic_model_label`
-   * (backend SSOT). Three-state to avoid the on-init placeholder flash:
-   *   - `undefined` → fetch still in flight; template hides the option
-   *     until we know what to render.
-   *   - `null` → fetch resolved with no label (older backend, dev mode
-   *     without Tauri) — template renders the generic placeholder.
-   *   - `string` → render the dynamic "Default — <family>" hint.
-   */
-  protected readonly defaultAnthropicLabel = signal<string | null | undefined>(undefined);
-
   /** Loads the LLM configuration + the SSOT model catalog from the backend on init. */
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
-    void this.loadDefaultAnthropicLabel();
   }
 
   /**
@@ -891,29 +873,6 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Fetches the SSOT family label of the Opus model that anchors the
-   * `(default)` dropdown option. Failure is silent — the template falls
-   * back to the generic placeholder when the signal stays null (e.g. dev
-   * mode without Tauri, or a backend that pre-dates this command).
-   */
-  private async loadDefaultAnthropicLabel(): Promise<void> {
-    try {
-      const label = await this.tauri.invoke<string | null>('get_default_anthropic_model_label');
-      // Backend may return null when the catalog has no `latest=true` Opus.
-      // Treat both cases (resolved-as-null, resolved-as-string) as "fetched";
-      // collapse `undefined` from older invokeHandlers to `null` so the
-      // template's loading branch only triggers while genuinely in flight.
-      this.defaultAnthropicLabel.set(label ?? null);
-      this.cdr.markForCheck();
-    } catch {
-      // Mark as resolved-with-no-label so the template falls back to the
-      // generic placeholder instead of staying invisible.
-      this.defaultAnthropicLabel.set(null);
-      this.cdr.markForCheck();
-    }
-  }
-
-  /**
    * Click handler for provider cards. Routes through the existing
    * `onProviderChange` so URL caching, default fetching, and discovery probe
    * gating all stay intact — the cards are just a different control surface.
@@ -947,6 +906,11 @@ export class LlmProviderComponent implements OnInit {
    * @param entry - The selected row.
    */
   selectExtraProvider(entry: ExtraProviderEdit): void {
+    // Snapshot a freshly-edited anthropic-card model before leaving the card,
+    // so a later Save doesn't fall back to a stale snapshot (F2/a1).
+    if (this.effectiveTarget() === 'anthropic' && this.model && !this.isForeignModel(this.model)) {
+      this.loadedAnthropicModel = this.model;
+    }
     this.selectedTarget = entry.id;
     this.expandedExtraId = entry.id;
     this.maybeDiscover(entry);
@@ -1191,11 +1155,9 @@ export class LlmProviderComponent implements OnInit {
       // never observes length === 0.
       this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
       this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
-      // Auto-select the first discovered model when the current value is
-      // blank or not on the list — otherwise the <select> renders with no
-      // active <option> and Save would persist an empty model name.
-      const ids = result.models.map((m) => m.id);
-      if (!this.model || !ids.includes(this.model)) {
+      // Auto-select only when blank (a3): a restored-but-unlisted model is a
+      // deliberate choice — keep it (the template offers a "not on server" option).
+      if (!this.model && result.models[0]?.id) {
         this.model = result.models[0].id;
       }
     } catch (e: unknown) {
@@ -1381,6 +1343,16 @@ export class LlmProviderComponent implements OnInit {
     );
   }
 
+  /**
+   * A `provider/model`-shaped id is foreign to Anthropic (ADR-073). Mirror of
+   * the Rust `is_foreign_anthropic_model` SSOT — frontend can't call Rust.
+   * @param model - Candidate model id.
+   * @returns True when the id must not be treated as an Anthropic model.
+   */
+  private isForeignModel(model: string): boolean {
+    return model.includes('/');
+  }
+
   /** The active selection Save will persist, derived from the radio state. */
   private buildActive(): LlmActive {
     const target = this.effectiveTarget();
@@ -1392,6 +1364,25 @@ export class LlmProviderComponent implements OnInit {
       provider_id: target,
       model: this.model || null,
     };
+  }
+
+  /**
+   * Restart-discriminator over claude-env inputs (provider, model, kind,
+   * custom-headers); excludes proxy-path base_url + proxy_enabled (ADR-073 R6).
+   * @param providerId - Active provider id.
+   * @param model - Active model id (or null/undefined).
+   * @param providers - Provider list used to look up the active entry's kind.
+   * @returns A stable key; a change forces a full restart vs. a proxy reload.
+   */
+  private computeActiveKey(
+    providerId: string,
+    model: string | null | undefined,
+    providers: LlmProviderEntry[]
+  ): string {
+    const entry = providers.find((p) => p.id === providerId);
+    const kind = entry?.kind ?? '';
+    const customHeaders = entry?.has_custom_headers ? '1' : '0';
+    return `${providerId}|${model ?? ''}|${kind}|${customHeaders}`;
   }
 
   /** Persists the LLM provider configuration to the backend. */
@@ -1483,8 +1474,9 @@ export class LlmProviderComponent implements OnInit {
       // Push context tokens so the chat footer updates immediately.
       void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(this.provider);
-      // Provider/model change needs full restart; other changes = proxy reload (ADR-073).
-      const activeKey = `${active.provider_id}|${active.model ?? ''}`;
+      // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
+      // need a full restart; proxy-path-only changes (base_url) = proxy reload.
+      const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
       if (activeKey === this.loadedActiveKey && project) {
         try {
           await this.tauri.invoke('restart_llm_proxy', { project });
@@ -1564,14 +1556,17 @@ export class LlmProviderComponent implements OnInit {
       if (this.loadedLocalEntry?.base_url && !this.baseUrlByProvider['local']) {
         this.baseUrlByProvider['local'] = this.loadedLocalEntry.base_url;
       }
-      // Anthropic model snapshot: prefer v2 entry / active, fall back to the flat field.
+      // Anthropic model snapshot from entry/active/flat; a foreign (`/`-shaped)
+      // id is dropped to account default (F1, ADR-073 provenance).
       const anthropicEntry = (config.providers ?? []).find((p) => p.id === 'anthropic');
-      this.loadedAnthropicModel =
+      const candidate =
         anthropicEntry?.model ??
         (config.active?.provider_id === 'anthropic' ? (config.active?.model ?? null) : null) ??
+        // Legacy/v1 response with no providers[]: fall back to the flat model.
         (this.provider === 'anthropic' ? this.model || null : null);
-      if (this.provider === 'anthropic' && this.loadedAnthropicModel) {
-        this.model = this.loadedAnthropicModel;
+      this.loadedAnthropicModel = candidate && !this.isForeignModel(candidate) ? candidate : null;
+      if (this.provider === 'anthropic') {
+        this.model = this.loadedAnthropicModel ?? '';
       }
       // Overlay persisted entries onto the two permanent rows (id first,
       // then kind so entries saved under older generated ids still land).
@@ -1595,16 +1590,21 @@ export class LlmProviderComponent implements OnInit {
       if (activeRow) {
         this.selectedTarget = activeRow.id;
         this.expandedExtraId = activeRow.id;
-        activeRow.model = config.active?.model ?? activeRow.model;
+        // Entry wins (mirror Rust effective_active_model): the row already
+        // carries the entry model; use active.model only as a fallback.
+        activeRow.model = activeRow.model || config.active?.model || '';
         if (activeRow.kind === 'open_router') {
           void this.discoverExtraModels(activeRow);
         }
       } else {
         this.selectedTarget = this.provider === 'anthropic' ? 'anthropic' : 'local';
       }
-      this.loadedActiveKey = `${config.active?.provider_id ?? this.selectedTarget}|${
-        config.active?.model ?? config.model ?? ''
-      }`;
+      const loadedProviderId = config.active?.provider_id ?? this.selectedTarget;
+      this.loadedActiveKey = this.computeActiveKey(
+        loadedProviderId,
+        config.active?.model ?? config.model ?? null,
+        config.providers ?? []
+      );
       this.providerChange.emit(this.provider);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

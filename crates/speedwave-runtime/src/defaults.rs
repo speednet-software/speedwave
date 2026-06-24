@@ -127,15 +127,6 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     },
 ];
 
-/// Display label of the latest Opus entry the `(default)` dropdown option
-/// resolves to. `None` if the catalog has no `latest = true` Opus entry.
-pub fn default_anthropic_family_label() -> Option<&'static str> {
-    ANTHROPIC_MODELS
-        .iter()
-        .find(|m| m.id.starts_with("claude-opus-") && m.latest)
-        .map(|m| m.family)
-}
-
 /// Default Claude Code CLI flags applied to every session.
 pub const DEFAULT_FLAGS: &[&str] = &[
     "--dangerously-skip-permissions",
@@ -166,9 +157,9 @@ pub fn base_env() -> HashMap<String, String> {
     env
 }
 
-/// Generates `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars from the
-/// `ANTHROPIC_MODELS` SSOT, suffixing `[1m]` for 1M-context models. Families
-/// with no `latest: true` entry are skipped (Fable gets no alias).
+/// Anthropic-branch alias pins: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
+/// from the `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable is omitted
+/// — its `fable` alias resolves natively on the passthrough, no pin needed.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
@@ -363,12 +354,14 @@ mod tests {
     }
 
     #[test]
-    fn fable_family_emits_no_default_alias() {
-        // Claude Code has no ANTHROPIC_DEFAULT_FABLE_MODEL.
+    fn anthropic_default_models_env_omits_fable_alias() {
+        // The anthropic-branch pins skip Fable (its `fable` alias resolves
+        // natively on the passthrough). Non-anthropic remapping injects FABLE
+        // separately — see compose/llm.rs, asserted there.
         let env = anthropic_default_models_env();
         assert!(
             !env.keys().any(|k| k.contains("FABLE")),
-            "no ANTHROPIC_DEFAULT_*_MODEL var may be emitted for the Fable family"
+            "anthropic_default_models_env must not emit a FABLE alias"
         );
     }
 
@@ -517,11 +510,5 @@ mod tests {
                 m.context_tokens
             );
         }
-    }
-
-    #[test]
-    fn default_anthropic_family_label_returns_latest_opus_family() {
-        // Update this label alongside the SSOT when a new Opus snapshot lands.
-        assert_eq!(default_anthropic_family_label(), Some("Opus 4.8"));
     }
 }

@@ -817,6 +817,11 @@ fn main() {
             ) {
                 log::warn!("config migration: {e:#}");
             }
+            // v3 LLM provenance self-heal: clear foreign models stuck under
+            // anthropic entries on disk (ADR-073). Best-effort, idempotent.
+            if let Err(e) = speedwave_runtime::config::heal_llm_config_on_disk() {
+                log::warn!("llm config heal: {e:#}");
+            }
 
             clipboard_bridge::spawn(app.handle().clone());
 
@@ -1112,7 +1117,6 @@ fn main() {
             containers_cmd::get_llm_config,
             containers_cmd::get_default_base_url,
             containers_cmd::list_anthropic_models,
-            containers_cmd::get_default_anthropic_model_label,
             containers_cmd::update_llm_config,
             containers_cmd::set_llm_provider_key,
             containers_cmd::restart_llm_proxy,

@@ -946,18 +946,6 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
-/// Returns the display label of the Opus model that the dropdown's
-/// `(default)` option resolves to at runtime — used by the Settings UI to
-/// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
-/// instead of the previous vague *"let Claude Code choose"* placeholder.
-///
-/// `None` when the SSOT has no `latest = true` Opus family — frontend then
-/// falls back to the generic placeholder.
-#[tauri::command]
-pub fn get_default_anthropic_model_label() -> Option<&'static str> {
-    speedwave_runtime::defaults::default_anthropic_family_label()
-}
-
 /// Applies LLM config to the active project in-memory. Enforces the
 /// cross-field invariant (a local provider must have a model) for all
 /// callers, including those bypassing `update_llm_config`.
@@ -968,10 +956,9 @@ fn apply_llm_config(
     if config::is_local_provider(update.provider.as_deref())
         && update.model.as_deref().is_none_or(str::is_empty)
     {
-        return Err(anyhow::anyhow!(
-            "Provider '{}' requires a model name",
+        return Err(anyhow::anyhow!(model_required_error(
             update.provider.as_deref().unwrap_or("")
-        ));
+        )));
     }
     if matches!(update.context_tokens, Some(0)) {
         return Err(anyhow::anyhow!("context_tokens must be greater than 0"));
@@ -1015,9 +1002,8 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         && update.model.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
-            "Provider '{}' requires a model name. \
-             Configure it in Settings → LLM Provider → Model.",
-            update.provider.as_deref().unwrap_or("")
+            "{} — configure it in Settings → LLM Provider → Model.",
+            model_required_error(update.provider.as_deref().unwrap_or(""))
         ));
     }
     if let Some(ref m) = update.model {
@@ -1046,22 +1032,7 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
     if let Some(ref providers) = update.providers {
         validate_provider_entries(providers)?;
         if let Some(ref active) = update.active {
-            if !providers.iter().any(|p| p.id == active.provider_id) {
-                return Err(format!(
-                    "active provider '{}' is not in the provider list",
-                    active.provider_id
-                ));
-            }
-            // active.model is the routing SSOT (injected as ANTHROPIC_MODEL /
-            // ANTHROPIC_SMALL_FAST_MODEL) — apply the same flag-collision guard
-            // as the flat field and per-entry models.
-            if let Some(model) = active.model.as_deref() {
-                if model.starts_with('-') {
-                    return Err(
-                        "active model must not start with '-' (CLI flag collision)".to_string()
-                    );
-                }
-            }
+            validate_active_selection(providers, active)?;
         }
     }
 
@@ -1138,6 +1109,59 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Single message for the model-required error (one wording everywhere).
+fn model_required_error(provider_id: &str) -> String {
+    format!("provider '{provider_id}' requires a model name")
+}
+
+/// Validates the active selection against the provider list before save (R5):
+/// active must exist, no flag-collision, and a cross-field invariant on the
+/// ACTIVE entry only (anthropic → no foreign model; non-anthropic → has model).
+fn validate_active_selection(
+    providers: &[speedwave_runtime::config::LlmProviderEntry],
+    active: &speedwave_runtime::config::LlmActive,
+) -> Result<(), String> {
+    use speedwave_runtime::config::is_foreign_anthropic_model;
+    let Some(active_entry) = providers.iter().find(|p| p.id == active.provider_id) else {
+        return Err(format!(
+            "active provider '{}' is not in the provider list",
+            active.provider_id
+        ));
+    };
+    if let Some(model) = active.model.as_deref() {
+        if model.starts_with('-') {
+            return Err("active model must not start with '-' (CLI flag collision)".to_string());
+        }
+    }
+    if active_entry.kind.is_anthropic() {
+        // Reject if EITHER pointer or entry model is foreign — render derives
+        // from the entry, so checking only `active.model` would miss it.
+        let foreign = [active.model.as_deref(), active_entry.model.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|m| is_foreign_anthropic_model(m));
+        if let Some(m) = foreign {
+            return Err(format!(
+                "model '{m}' is not an Anthropic model — \
+                 pick an Anthropic model or leave it on the account default"
+            ));
+        }
+    } else {
+        // Render uses effective_active_model (entry wins), so the entry must
+        // carry a model — an active.model-only value would be ignored at render.
+        let entry_has = active_entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|m| !m.is_empty());
+        if !entry_has {
+            return Err(model_required_error(&active.provider_id));
+        }
+    }
+    Ok(())
+}
+
 /// Validates a v2 provider list before save (ADR-073): slug ids, no
 /// duplicates, SSRF-clean base URLs where the kind requires one.
 fn validate_provider_entries(
@@ -1175,6 +1199,16 @@ fn validate_provider_entries(
             if model.starts_with('-') {
                 return Err(format!(
                     "provider '{}': model must not start with '-' (CLI flag collision)",
+                    entry.id
+                ));
+            }
+            // Provenance: no foreign model under ANY anthropic entry, not just
+            // the active one (the active-only check lives in validate_active_selection).
+            if entry.kind.is_anthropic()
+                && speedwave_runtime::config::is_foreign_anthropic_model(model.trim())
+            {
+                return Err(format!(
+                    "provider '{}': '{model}' is not an Anthropic model",
                     entry.id
                 ));
             }
@@ -1834,6 +1868,76 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("UPPER"), "got: {err}");
+    }
+
+    fn active(id: &str, model: Option<&str>) -> speedwave_runtime::config::LlmActive {
+        speedwave_runtime::config::LlmActive {
+            provider_id: id.to_string(),
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn validate_active_selection_rejects_foreign_model_under_anthropic() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("anthropic", K::AnthropicOauth, None)];
+        let err =
+            validate_active_selection(&providers, &active("anthropic", Some("nex-agi/x:free")))
+                .unwrap_err();
+        assert!(err.contains("not an Anthropic model"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_rejects_active_openrouter_without_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
+        let err = validate_active_selection(&providers, &active("openrouter", None)).unwrap_err();
+        assert!(err.contains("requires a model name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_nonanthropic_requires_entry_model_not_active_only() {
+        // CR#6: render uses effective_active_model (entry wins). active.model set
+        // but entry.model empty would be ignored at render → reject at save.
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
+        let err =
+            validate_active_selection(&providers, &active("openrouter", Some("z-ai/glm-5.2")))
+                .unwrap_err();
+        assert!(err.contains("requires a model name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_inactive_partial_rows_not_forced() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Active anthropic (no model = account default, ok); the INACTIVE OR row
+        // with no model must NOT trip the model-required check.
+        let providers = vec![
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+        ];
+        assert!(validate_active_selection(&providers, &active("anthropic", None)).is_ok());
+    }
+
+    #[test]
+    fn validate_active_selection_accepts_valid_anthropic_and_openrouter() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("anthropic", K::AnthropicOauth, None), {
+            let mut e = v2_entry("openrouter", K::OpenRouter, None);
+            e.model = Some("z-ai/glm-5.2".to_string());
+            e
+        }];
+        assert!(validate_active_selection(
+            &providers,
+            &active("anthropic", Some("claude-opus-4-8"))
+        )
+        .is_ok());
+        assert!(
+            validate_active_selection(&providers, &active("openrouter", Some("z-ai/glm-5.2")))
+                .is_ok()
+        );
+        // Dangling active id.
+        assert!(validate_active_selection(&providers, &active("ghost", None)).is_err());
     }
 
     #[test]

@@ -373,7 +373,9 @@ pub(crate) fn lookup_project_provider<'a>(
 }
 
 /// True when the project's sessions need the in-container Anthropic OAuth
-/// check: v2 (ADR-073) only for `AnthropicOauth`; legacy for anything non-local.
+/// check: v2 (ADR-073) only for `AnthropicOauth`. An UNCONFIGURED project (no
+/// llm config, or a dangling active selection) does NOT force OAuth (R7/f1,f4)
+/// — the user is routed to provider configuration instead of an auth wall.
 pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -388,13 +390,21 @@ pub(crate) fn project_needs_anthropic_auth(
             return match llm.active_provider().map(|e| e.kind) {
                 Some(LlmProviderKind::AnthropicOauth) => true,
                 Some(_) => false,
-                // active points nowhere — be conservative, check auth.
-                None => true,
+                // Dangling active (points at no entry) → unconfigured, not OAuth.
+                None => false,
             };
         }
+        // v2-shaped but no providers configured → unconfigured.
+        if llm.schema_version.is_some() {
+            return false;
+        }
     }
-    // Legacy v1 shape.
-    !speedwave_runtime::config::is_local_provider(lookup_project_provider(user_config, project))
+    // Legacy v1 shape: an explicit non-local provider needs OAuth; an
+    // unset provider (fresh project) does not.
+    match lookup_project_provider(user_config, project) {
+        Some(provider) => !speedwave_runtime::config::is_local_provider(Some(provider)),
+        None => false,
+    }
 }
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
@@ -1128,15 +1138,15 @@ mod tests {
         }
     }
 
-    /// Legacy v1 configs keep the old rule: local skips, anthropic checks,
-    /// and a missing project defaults to checking.
+    /// Legacy v1: local skips, explicit anthropic checks; an UNSET provider
+    /// (fresh project) and a missing project are unconfigured → no OAuth (R7).
     #[test]
     fn needs_anthropic_auth_legacy_fallback() {
         for (provider, expected) in [
             (Some("ollama"), false),
             (Some("local"), false),
             (Some("anthropic"), true),
-            (None, true),
+            (None, false),
         ] {
             let cfg = SpeedwaveUserConfig {
                 projects: vec![project_with_provider("proj", provider)],
@@ -1148,16 +1158,16 @@ mod tests {
                 "legacy provider {provider:?}"
             );
         }
-        assert!(project_needs_anthropic_auth(
+        assert!(!project_needs_anthropic_auth(
             &SpeedwaveUserConfig::default(),
             "missing"
         ));
     }
 
-    /// A v2 config whose active id points at no entry is conservative:
-    /// the auth check runs.
+    /// R7/f4: a v2 config whose active id points at no entry is unconfigured —
+    /// it must NOT force the Anthropic OAuth wall (user goes to config).
     #[test]
-    fn needs_anthropic_auth_dangling_active_checks() {
+    fn needs_anthropic_auth_dangling_active_does_not_force_oauth() {
         use speedwave_runtime::config::LlmActive;
         let mut entry = project_with_v2_kind(
             "proj",
@@ -1175,7 +1185,25 @@ mod tests {
             projects: vec![entry],
             ..Default::default()
         };
-        assert!(project_needs_anthropic_auth(&cfg, "proj"));
+        assert!(!project_needs_anthropic_auth(&cfg, "proj"));
+    }
+
+    /// R7/f1: a fresh project (no claude overrides) must NOT force the Anthropic
+    /// OAuth wall — the user can configure OpenRouter/local first.
+    #[test]
+    fn needs_anthropic_auth_fresh_project_does_not_force_oauth() {
+        let entry = ProjectUserEntry {
+            name: "fresh".to_string(),
+            dir: String::new(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+        };
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![entry],
+            ..Default::default()
+        };
+        assert!(!project_needs_anthropic_auth(&cfg, "fresh"));
     }
 
     /// Validates that a path component does not contain traversal or unsafe characters.

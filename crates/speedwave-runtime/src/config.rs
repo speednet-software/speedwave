@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Current LLM config schema version. Version 2 introduces the provider
-/// list + active selection (ADR-073); absent/`None` means the legacy flat
-/// v1 shape, auto-migrated on resolve by [`migrate_llm_to_v2`].
-pub const LLM_SCHEMA_VERSION: u32 = 2;
+/// Current LLM config schema version. v2: provider list + active selection
+/// (ADR-073). v3: provenance quarantine — a foreign model under an Anthropic
+/// entry is cleared (see [`quarantine_foreign_anthropic_models`]).
+pub const LLM_SCHEMA_VERSION: u32 = 3;
 
 /// What class of backend a configured provider entry is (ADR-073).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +29,21 @@ pub enum LlmProviderKind {
     OpenAiCompat,
 }
 
+impl LlmProviderKind {
+    /// True for the two Anthropic kinds (OAuth + raw API key).
+    pub fn is_anthropic(self) -> bool {
+        matches!(self, Self::AnthropicOauth | Self::AnthropicApiKey)
+    }
+}
+
+/// SSOT predicate (ADR-073): a `provider/model`-shaped id is foreign to
+/// Anthropic — never inject it as `ANTHROPIC_MODEL`. Shape check, not catalog
+/// membership, so a retired-but-valid `claude-*` (no `/`) is kept.
+pub fn is_foreign_anthropic_model(model: &str) -> bool {
+    // Mirrored in llm-provider.component.ts::isForeignModel (frontend can't call Rust).
+    model.contains('/')
+}
+
 /// One configured LLM provider (ADR-073). Key VALUES never live here —
 /// they sit in `tokens/<project>/llm/<id>_api_key`; only presence flags do.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -42,8 +57,9 @@ pub struct LlmProviderEntry {
     /// Base URL for `Local`/`OpenAiCompat` kinds (user-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Last model used with this provider — restored on re-activation;
-    /// `active.model` stays the routing source of truth.
+    /// Model this provider routes (per-provider SSOT). The routing model is
+    /// derived from THIS field via [`LlmConfig::effective_active_model`];
+    /// `active.model` is only a pointer that must agree with the active entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// True when `tokens/<project>/llm/<id>_api_key` exists.
@@ -63,14 +79,16 @@ pub struct LlmProviderEntry {
 pub struct LlmActive {
     /// `LlmProviderEntry::id` of the selected provider.
     pub provider_id: String,
-    /// Model id, or `None` for the provider/account default.
+    /// Pointer to the active provider's model. Must agree with the active
+    /// entry's `model`; the routing model is derived via
+    /// [`LlmConfig::effective_active_model`], not read raw from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
 
 /// LLM provider selection and model settings (ADR-073 migration).
 /// v1 (legacy, flat): `provider`/`model`/`base_url`/`context_tokens`/`has_api_key`/`has_custom_headers`.
-/// v2: `providers` list + `active` selection + `schema_version=2`.
+/// v2: `providers` list + `active` selection. v3: + foreign-model quarantine.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
     /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
@@ -112,18 +130,45 @@ impl LlmConfig {
         let active = self.active.as_ref()?;
         self.providers.iter().find(|p| p.id == active.provider_id)
     }
+
+    /// Routing model for the active provider, enforcing provenance (ADR-073):
+    /// the entry's `model` wins over a disagreeing `active.model`.
+    pub fn effective_active_model(&self) -> Option<String> {
+        let entry = self.active_provider()?;
+        let entry_model = entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let active_model = self
+            .active
+            .as_ref()
+            .and_then(|a| a.model.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (active_model, entry_model) {
+            (Some(a), Some(e)) if a == e => Some(a.to_string()),
+            // Disagreement or active-only: trust the provider entry (provenance).
+            (_, Some(e)) => {
+                if active_model.is_some_and(|a| a != e) {
+                    log::debug!(
+                        "llm: active.model disagrees with entry — using entry (provenance)"
+                    );
+                }
+                Some(e.to_string())
+            }
+            // Entry has no model: active-only is unattributable → drop it.
+            (_, None) => None,
+        }
+    }
 }
 
-/// Lifts a legacy (v1) flat `LlmConfig` into the v2 provider-list shape.
-/// Idempotent: a config already at v2 is only re-validated, never rebuilt.
-///
-/// `has_anthropic_secret` tells the migration whether
-/// `secrets/<project>/anthropic_api_key` exists — that distinguishes
-/// `AnthropicApiKey` from `AnthropicOauth` for legacy `provider=anthropic`.
-///
-/// Invalid provider ids (non-slug) are dropped with a warning; if the active
-/// selection pointed at a dropped entry it falls back to the first valid one.
-pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
+/// Migrates an `LlmConfig` to the current schema ([`LLM_SCHEMA_VERSION`]):
+/// lifts legacy v1 flat shape, drops invalid ids, and quarantines foreign
+/// Anthropic models (v3). Idempotent. Returns `true` if anything changed.
+/// `has_anthropic_secret` distinguishes `AnthropicApiKey` from `AnthropicOauth`.
+pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
+    let snapshot_before = serde_json::to_string(&*llm).ok();
     if llm.schema_version.is_none() && llm.providers.is_empty() {
         let legacy_provider = llm.provider.as_deref();
         if is_local_provider(legacy_provider) {
@@ -164,12 +209,24 @@ pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
     }
     llm.schema_version = Some(LLM_SCHEMA_VERSION);
 
-    // Lift model suggestion into active selection when user has not pinned.
-    if let Some(active) = &mut llm.active {
-        if active.model.is_none() && llm.model.is_some() {
-            active.model.clone_from(&llm.model);
+    // Lift the flat model into active only when it belongs to the active
+    // provider entry — a foreign flat model lifted here is cleared by the
+    // quarantine step below, so the transient is never persisted.
+    let flat = llm.model.as_deref().map(str::trim);
+    let flat_belongs_to_active = llm
+        .active_provider()
+        .map(|e| e.model.as_deref().map(str::trim) == flat)
+        .unwrap_or(false);
+    if flat_belongs_to_active {
+        if let Some(active) = &mut llm.active {
+            if active.model.is_none() && llm.model.is_some() {
+                active.model.clone_from(&llm.model);
+            }
         }
     }
+
+    // v3: clear any foreign model left under an Anthropic entry (provenance).
+    quarantine_foreign_anthropic_models(llm);
 
     // Validate ids — they reach token file paths and env names.
     let before = llm.providers.len();
@@ -192,6 +249,38 @@ pub fn migrate_llm_to_v2(llm: &mut LlmConfig, has_anthropic_secret: bool) {
     }
 
     sync_llm_legacy_fields(llm);
+
+    // Serialization failure → can't tell, assume unchanged (avoid spurious heal writes).
+    snapshot_before
+        .and_then(|b| serde_json::to_string(&*llm).ok().map(|after| b != after))
+        .unwrap_or(false)
+}
+
+/// v3 self-heal: clear a `provider/model`-shaped (foreign) model stored under
+/// an Anthropic entry, and reconcile `active.model` to it. Idempotent.
+fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
+    for entry in &mut llm.providers {
+        let foreign = entry
+            .model
+            .as_deref()
+            .is_some_and(is_foreign_anthropic_model);
+        if entry.kind.is_anthropic() && foreign {
+            log::warn!(
+                "llm config: quarantining foreign model '{}' under anthropic entry '{}' (account default)",
+                entry.model.as_deref().unwrap_or(""),
+                entry.id
+            );
+            entry.model = None;
+        }
+    }
+    // Reconcile the active pointer to the entry's model (the routing SSOT), so
+    // a disagreeing active.model never persists — not just the cleared case.
+    let routed = llm.effective_active_model();
+    if let Some(active) = &mut llm.active {
+        if active.model != routed {
+            active.model = routed;
+        }
+    }
 }
 
 /// Downgrade story (one release): derive the legacy flat fields from the
@@ -209,22 +298,27 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.base_url.clone_from(&entry.base_url);
             llm.has_api_key = entry.has_api_key;
             llm.has_custom_headers = entry.has_custom_headers;
+            // Local model belongs to the provider — flat pair stays consistent.
+            llm.model.clone_from(&entry.model);
         }
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
             llm.has_api_key = false;
             llm.has_custom_headers = false;
+            llm.model.clone_from(&entry.model);
         }
-        // No v1 equivalent — legacy fields set to anthropic; v2 fields keep the real selection.
+        // No v1 equivalent — flat masquerades as anthropic, so its model must
+        // NOT carry the OR/compat id (would 404 a downgrade reader). v2 fields
+        // keep the real selection.
         LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
             llm.has_api_key = false;
             llm.has_custom_headers = false;
+            llm.model = None;
         }
     }
-    llm.model.clone_from(&active.model);
     llm.context_tokens = entry.context_tokens;
 }
 
@@ -573,8 +667,8 @@ pub fn resolve_project_config(
         }
     }
 
-    // Lift merged result into v2 shape (ADR-073).
-    migrate_llm_to_v2(&mut llm, anthropic_secret_exists(project_name));
+    // Migrate to the current LLM schema (ADR-073).
+    migrate_llm(&mut llm, anthropic_secret_exists(project_name));
 
     // Local LLMs get the full default Claude Code system prompt.
     let flags: Vec<String> = defaults::DEFAULT_FLAGS
@@ -588,9 +682,14 @@ pub fn resolve_project_config(
 
 /// True when `secrets/<project>/anthropic_api_key` exists in the production
 /// data dir. Used by the v1→v2 LLM migration to classify legacy `anthropic`
-/// configs; tests call [`migrate_llm_to_v2`] directly with an explicit bool.
+/// configs; tests call [`migrate_llm`] directly with an explicit bool.
 fn anthropic_secret_exists(project_name: &str) -> bool {
-    crate::consts::data_dir()
+    anthropic_secret_exists_in(crate::consts::data_dir(), project_name)
+}
+
+/// Testable variant of [`anthropic_secret_exists`] with an explicit data dir.
+fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
+    data_dir
         .join("secrets")
         .join(project_name)
         .join("anthropic_api_key")
@@ -744,6 +843,35 @@ where
     F: FnOnce() -> anyhow::Result<T>,
 {
     with_config_lock_in(crate::consts::data_dir(), f)
+}
+
+/// One-shot self-heal: migrate every project's LLM config to the current
+/// schema and persist atomically if anything changed. Idempotent — a no-op
+/// once all projects are at [`LLM_SCHEMA_VERSION`]. Held under the config lock.
+pub fn heal_llm_config_on_disk() -> anyhow::Result<()> {
+    heal_llm_config_in(crate::consts::data_dir())
+}
+
+/// Testable variant of [`heal_llm_config_on_disk`] with an explicit data dir.
+pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
+    with_config_lock_in(data_dir, || {
+        let config_path = data_dir.join("config.json");
+        let mut config = load_user_config_from(&config_path)?;
+        let mut changed = false;
+        for project in &mut config.projects {
+            if let Some(claude) = &mut project.claude {
+                if let Some(llm) = &mut claude.llm {
+                    let has_secret = anthropic_secret_exists_in(data_dir, &project.name);
+                    changed |= migrate_llm(llm, has_secret);
+                }
+            }
+        }
+        if changed {
+            save_user_config_to(&config, &config_path)?;
+            log::info!("llm config: healed on-disk config to schema v{LLM_SCHEMA_VERSION}");
+        }
+        Ok(())
+    })
 }
 
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
@@ -1276,17 +1404,17 @@ mod tests {
         );
     }
 
-    /// v1→v2 migration unit coverage: every legacy shape lands in the right
-    /// kind, the lift is idempotent, and the downgrade fields round-trip.
+    /// Migration unit coverage: every legacy shape lands in the right kind,
+    /// the lift is idempotent, and the downgrade fields round-trip.
     #[test]
-    fn test_migrate_llm_to_v2_variants() {
+    fn test_migrate_llm_variants() {
         // anthropic + secret → AnthropicApiKey
         let mut llm = LlmConfig {
             provider: Some("anthropic".into()),
             model: Some("claude-opus-4-8".into()),
             ..Default::default()
         };
-        migrate_llm_to_v2(&mut llm, true);
+        migrate_llm(&mut llm, true);
         assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
         let entry = llm.active_provider().expect("entry");
         assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
@@ -1301,7 +1429,7 @@ mod tests {
             provider: Some("anthropic".into()),
             ..Default::default()
         };
-        migrate_llm_to_v2(&mut llm, false);
+        migrate_llm(&mut llm, false);
         assert_eq!(
             llm.active_provider().unwrap().kind,
             LlmProviderKind::AnthropicOauth
@@ -1309,7 +1437,7 @@ mod tests {
 
         // unset provider → AnthropicOauth default
         let mut llm = LlmConfig::default();
-        migrate_llm_to_v2(&mut llm, false);
+        migrate_llm(&mut llm, false);
         assert_eq!(
             llm.active_provider().unwrap().kind,
             LlmProviderKind::AnthropicOauth
@@ -1328,7 +1456,7 @@ mod tests {
                 has_custom_headers: true,
                 ..Default::default()
             };
-            migrate_llm_to_v2(&mut llm, false);
+            migrate_llm(&mut llm, false);
             let entry = llm
                 .active_provider()
                 .unwrap_or_else(|| panic!("alias '{alias}' must migrate to an active entry"));
@@ -1350,10 +1478,396 @@ mod tests {
             base_url: Some("http://host.docker.internal:8080".into()),
             ..Default::default()
         };
-        migrate_llm_to_v2(&mut llm, false);
+        migrate_llm(&mut llm, false);
         let first = serde_json::to_string(&llm).unwrap();
-        migrate_llm_to_v2(&mut llm, true); // even with secret flag flipped
+        migrate_llm(&mut llm, true); // even with secret flag flipped
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
+    }
+
+    #[test]
+    fn test_is_anthropic_and_foreign_model_predicates() {
+        assert!(LlmProviderKind::AnthropicOauth.is_anthropic());
+        assert!(LlmProviderKind::AnthropicApiKey.is_anthropic());
+        assert!(!LlmProviderKind::Local.is_anthropic());
+        assert!(!LlmProviderKind::OpenRouter.is_anthropic());
+        assert!(!LlmProviderKind::OpenAiCompat.is_anthropic());
+        // Foreign = provider/model shape, NOT catalog membership.
+        assert!(is_foreign_anthropic_model("nex-agi/nex-n2-pro:free"));
+        assert!(is_foreign_anthropic_model("openrouter/z-ai/glm-5.2"));
+        assert!(!is_foreign_anthropic_model("claude-opus-4-8"));
+        assert!(!is_foreign_anthropic_model("claude-opus-4-1")); // retired but kept
+        assert!(!is_foreign_anthropic_model(""));
+    }
+
+    /// `effective_active_model` enforces provenance: a foreign `active.model`
+    /// under an Anthropic entry must never be returned as the routing model.
+    #[test]
+    fn test_effective_active_model_enforces_provenance() {
+        let entry = |id: &str, kind, model: Option<&str>| LlmProviderEntry {
+            id: id.into(),
+            kind,
+            base_url: None,
+            model: model.map(str::to_string),
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+
+        // Real corrupted shape: anthropic entry + active both hold an OR id.
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth, None)],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model(),
+            None,
+            "foreign active.model under anthropic entry with no entry model → account default"
+        );
+
+        // Agreement: active.model == entry.model → used.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "anthropic",
+                LlmProviderKind::AnthropicOauth,
+                Some("claude-opus-4-8"),
+            )],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-opus-4-8".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-8")
+        );
+
+        // Disagreement: entry wins (provenance), not the stale active pointer.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "openrouter",
+                LlmProviderKind::OpenRouter,
+                Some("z-ai/glm-5.2"),
+            )],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("stale/old-model".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("z-ai/glm-5.2")
+        );
+
+        // Empty/whitespace entry model → None.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "anthropic",
+                LlmProviderKind::AnthropicOauth,
+                Some("  "),
+            )],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_active_model(), None);
+
+        // No active → None.
+        assert_eq!(LlmConfig::default().effective_active_model(), None);
+    }
+
+    /// `sync_llm_legacy_fields` must never stamp an OR/compat model under the
+    /// masqueraded flat `provider="anthropic"` (would 404 a downgrade reader).
+    #[test]
+    fn test_sync_legacy_fields_no_foreign_model_under_flat_anthropic() {
+        for kind in [LlmProviderKind::OpenRouter, LlmProviderKind::OpenAiCompat] {
+            let mut llm = LlmConfig {
+                schema_version: Some(LLM_SCHEMA_VERSION),
+                providers: vec![LlmProviderEntry {
+                    id: "openrouter".into(),
+                    kind,
+                    base_url: None,
+                    model: Some("nex-agi/nex-n2-pro:free".into()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(LlmActive {
+                    provider_id: "openrouter".into(),
+                    model: Some("nex-agi/nex-n2-pro:free".into()),
+                }),
+                ..Default::default()
+            };
+            sync_llm_legacy_fields(&mut llm);
+            assert_eq!(llm.provider.as_deref(), Some("anthropic"));
+            assert_eq!(
+                llm.model, None,
+                "{kind:?}: flat model must be None, not the OR/compat id"
+            );
+        }
+
+        // Local/anthropic keep their own model in the flat field (consistent).
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                model: Some("qwen3".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen3".into()),
+            }),
+            ..Default::default()
+        };
+        sync_llm_legacy_fields(&mut llm);
+        assert_eq!(llm.provider.as_deref(), Some("local"));
+        assert_eq!(llm.model.as_deref(), Some("qwen3"));
+    }
+
+    /// v3 self-heal: an already-v2 config with a foreign model under the
+    /// anthropic entry (the real reported config) is quarantined on migrate.
+    #[test]
+    fn test_migrate_quarantines_foreign_anthropic_model() {
+        let mut llm = LlmConfig {
+            schema_version: Some(2),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "anthropic".into(),
+                    kind: LlmProviderKind::AnthropicOauth,
+                    base_url: None,
+                    model: Some("nex-agi/nex-n2-pro:free".into()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "openrouter".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("z-ai/glm-5.2".into()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, false);
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        let anthropic = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(anthropic.model, None, "foreign anthropic model cleared");
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "active reconciled"
+        );
+        // The openrouter entry keeps its own (legitimate) model untouched.
+        let or = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
+        assert_eq!(or.model.as_deref(), Some("z-ai/glm-5.2"));
+        assert_eq!(llm.effective_active_model(), None);
+
+        // Idempotent: a second pass is a no-op (byte-identical).
+        let first = serde_json::to_string(&llm).unwrap();
+        migrate_llm(&mut llm, false);
+        assert_eq!(first, serde_json::to_string(&llm).unwrap());
+    }
+
+    /// Heal-and-save: a corrupted config on disk is rewritten with the foreign
+    /// model cleared, and a second heal is a no-op.
+    #[test]
+    fn test_heal_llm_config_on_disk_clears_foreign_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "speedwave".into(),
+                dir: "/x".into(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(LlmConfig {
+                        schema_version: Some(2),
+                        providers: vec![LlmProviderEntry {
+                            id: "anthropic".into(),
+                            kind: LlmProviderKind::AnthropicOauth,
+                            base_url: None,
+                            model: Some("nex-agi/nex-n2-pro:free".into()),
+                            has_api_key: false,
+                            context_tokens: None,
+                            has_custom_headers: false,
+                        }],
+                        active: Some(LlmActive {
+                            provider_id: "anthropic".into(),
+                            model: Some("nex-agi/nex-n2-pro:free".into()),
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+        let healed = load_user_config_from(&config_path).unwrap();
+        let llm = healed.projects[0]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+
+        // Idempotent: a second heal leaves the file byte-identical.
+        let after_first = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// I2: heal skips projects with no claude/llm config, leaves a clean config
+    /// untouched (no churn), and heals only the corrupt project in a multi set.
+    #[test]
+    fn test_heal_llm_config_in_skips_and_preserves() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let clean_llm = |id: &str, model: Option<&str>| LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: id.into(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: model.map(str::to_string),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: id.into(),
+                model: model.map(str::to_string),
+            }),
+            ..Default::default()
+        };
+        let proj = |name: &str, llm: Option<LlmConfig>| ProjectUserEntry {
+            name: name.into(),
+            dir: "/x".into(),
+            claude: llm.map(|l| ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(l),
+            }),
+            integrations: None,
+            plugin_settings: None,
+        };
+        let config = SpeedwaveUserConfig {
+            projects: vec![
+                proj("no-claude", None),
+                proj("clean", Some(clean_llm("openrouter", Some("z-ai/glm-5.2")))),
+            ],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+
+        // First heal reaches the synced steady state (and must not panic on the
+        // no-claude project). The SECOND heal must be a no-op — no startup churn.
+        heal_llm_config_in(dir.path()).unwrap();
+        let steady = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(
+            steady,
+            std::fs::read_to_string(&config_path).unwrap(),
+            "a settled config must not be rewritten on subsequent heals"
+        );
+        // The clean openrouter model survived; no-claude project untouched.
+        let healed = load_user_config_from(&config_path).unwrap();
+        let or = healed.projects[1]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(or.providers[0].model.as_deref(), Some("z-ai/glm-5.2"));
+        assert!(healed.projects[0].claude.is_none());
+    }
+
+    /// End-to-end regression for the original bug (F-5): active OpenRouter with
+    /// its model, then switch active to anthropic — the anthropic entry must
+    /// never inherit the OpenRouter model across migrate/sync round-trips.
+    #[test]
+    fn test_roundtrip_openrouter_then_anthropic_does_not_poison_entry() {
+        let or = LlmProviderEntry {
+            id: "openrouter".into(),
+            kind: LlmProviderKind::OpenRouter,
+            base_url: None,
+            model: Some("nex-agi/nex-n2-pro:free".into()),
+            has_api_key: true,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        let anthropic = LlmProviderEntry {
+            id: "anthropic".into(),
+            kind: LlmProviderKind::AnthropicOauth,
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        // Stage 1: OpenRouter active + saved (migrate runs on resolve/save).
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic, or],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, false);
+        // Flat masquerade must not carry the OR id (downgrade-safe).
+        assert_eq!(llm.model, None);
+
+        // Stage 2: user switches active to anthropic (no model = default).
+        llm.active = Some(LlmActive {
+            provider_id: "anthropic".into(),
+            model: None,
+        });
+        migrate_llm(&mut llm, false);
+
+        let anthropic_entry = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(
+            anthropic_entry.model, None,
+            "anthropic entry must stay clean"
+        );
+        assert_eq!(
+            llm.effective_active_model(),
+            None,
+            "no foreign model routed"
+        );
+        // OpenRouter keeps its own model untouched.
+        let or_entry = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
+        assert_eq!(or_entry.model.as_deref(), Some("nex-agi/nex-n2-pro:free"));
     }
 
     /// Invalid provider ids are dropped and the active selection falls back.
@@ -1387,7 +1901,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        migrate_llm_to_v2(&mut llm, false);
+        migrate_llm(&mut llm, false);
         assert_eq!(llm.providers.len(), 1);
         assert_eq!(llm.providers[0].id, "good-id");
         assert_eq!(
@@ -1416,7 +1930,7 @@ mod tests {
             base_url: Some("http://host.docker.internal:9000".into()),
             ..Default::default()
         };
-        migrate_llm_to_v2(&mut llm, false);
+        migrate_llm(&mut llm, false);
         let json = serde_json::to_string(&llm).unwrap();
         let v1: LlmConfigV1 = serde_json::from_str(&json).expect("v1 must parse v2 output");
         assert_eq!(v1.provider.as_deref(), Some("local"));
