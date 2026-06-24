@@ -163,6 +163,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER bypass branch protection or CI** — no `--admin`, no disabling checks. Fix CI.
 - **NEVER leave TODO/FIXME/HACK/XXX markers** — fix now or report to user
 - **NEVER leave @deprecated comments** — rewrite the code
+- **Keep comments short** — inline comments 1-2 lines max; doc comments (`//!`, `///`, JSDoc) 3 lines max, no paragraphs. Non-trivial rationale belongs in an ADR, not a comment.
 - **NEVER use `#[allow(dead_code)]`** — dead code must be removed, not silenced. If a field/method is only used in tests, gate it behind `#[cfg(test)]`. If a struct field is required by serde but not read, prefix it with `_` and add `#[serde(rename = "original_name")]`.
 - **NEVER use `#[allow(...)]` to suppress lint warnings** — fix the underlying issue instead. No `#[allow(missing_docs)]`, no `#[allow(clippy::unwrap_used)]`, no blanket `#![allow(...)]` at crate level. The only exception is `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests` blocks, where panicking on test failure is intentional.
 - **Every code change must include tests** in the same commit — covering happy paths, edge cases, error paths, and state transitions (see `.claude/rules/git-workflow.md` for details)

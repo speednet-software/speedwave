@@ -599,6 +599,51 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# E1 (ADR-073): a stale /model in settings.json that disagrees with the
+# injected ANTHROPIC_MODEL is dropped, so the routed model wins on next start.
+@test "drops a stale settings.json model that disagrees with ANTHROPIC_MODEL" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low","model":"opus"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="openrouter/z-ai/glm-5.2" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # The stale "model" key is removed (Claude Code then uses the env).
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
+    # Unrelated user keys are preserved.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps settings.json model when ANTHROPIC_MODEL is unset (account default)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
+    # No ANTHROPIC_MODEL exported → user's /model preference must survive.
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps settings.json model when it matches ANTHROPIC_MODEL" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="claude-opus-4-8" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "drops a FOREIGN settings.json model when ANTHROPIC_MODEL is unset (CR#1)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # Account-default path (no ANTHROPIC_MODEL) but a leaked provider/model id —
+    # must be dropped, else Claude Code sends it on the /anthropic passthrough → 404.
+    printf '{"model":"openrouter/z-ai/glm-5.2"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
+}
+
 # ---------------------------------------------------------------------------
 # SPEEDWAVE_PLUGINS: symlink plugin resources
 # ---------------------------------------------------------------------------

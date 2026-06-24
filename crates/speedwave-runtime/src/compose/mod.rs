@@ -3379,7 +3379,7 @@ services:
             base_url: base_url.map(str::to_string),
             ..Default::default()
         };
-        crate::config::migrate_llm_to_v2(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, false);
         llm
     }
 
@@ -3460,20 +3460,27 @@ services:
             env.iter().any(|e| e == "ANTHROPIC_MODEL=local/qwen3"),
             "model must be provider-id-prefixed: {env:?}"
         );
+        for alias in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        ] {
+            assert!(
+                env.iter().any(|e| e == &format!("{alias}=local/qwen3")),
+                "built-in alias {alias} must remap to the routable id: {env:?}"
+            );
+        }
+        // Deprecated var must be gone (replaced by ANTHROPIC_DEFAULT_HAIKU_MODEL).
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_SMALL_FAST_MODEL=local/qwen3"),
-            "subagent model must be pinned: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_SMALL_FAST_MODEL=")),
+            "deprecated ANTHROPIC_SMALL_FAST_MODEL must not be injected: {env:?}"
         );
         assert!(
             env.iter()
                 .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
             "dummy bearer expected: {env:?}"
-        );
-        assert!(
-            !env.iter()
-                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
-            "alias remap is forbidden for non-Anthropic providers: {env:?}"
         );
         // The rendered litellm config must carry the matching route.
         let litellm_cfg = std::fs::read_to_string(
@@ -3529,6 +3536,126 @@ services:
         );
     }
 
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_kill_switch_anthropic_foreign_model_not_injected_on_direct_path() {
+        // Kill-switch + a corrupted anthropic entry holding a foreign id: the
+        // legacy direct path must NOT send it to api.anthropic.com (F-4/d8/b3).
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            proxy_enabled: Some(false),
+            provider: Some("anthropic".to_string()),
+            model: Some("nex-agi/nex-n2-pro:free".to_string()),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("nex-agi/nex-n2-pro:free".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("nex-agi/nex-n2-pro:free".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "foreign model must not be injected on the direct anthropic path: {env:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_kill_switch_openrouter_errors_instead_of_billing_anthropic() {
+        // CR#3: proxy_enabled=false + active OpenRouter must error, not silently
+        // route to api.anthropic.com via the flat anthropic masquerade.
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            proxy_enabled: Some(false),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "openrouter".to_string(),
+                kind: crate::config::LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("z-ai/glm-5.2".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: Some("z-ai/glm-5.2".to_string()),
+            }),
+            ..Default::default()
+        };
+        crate::config::sync_llm_legacy_fields(&mut llm);
+        let err = apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("requires the LLM proxy"),
+            "kill-switch + OR must error clearly, got: {err}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_kill_switch_dangling_active_falls_through_without_error() {
+        // CR review #5: proxy_enabled=false + active points at no entry → legacy
+        // path (account default), not an error (heal repairs it in production).
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            proxy_enabled: Some(false),
+            providers: vec![],
+            active: Some(crate::config::LlmActive {
+                provider_id: "ghost".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("dangling active on kill-switch must not error");
+        let env = get_claude_env(&yaml);
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "dangling active → account default, no model injected: {env:?}"
+        );
+    }
+
     /// Local providers with custom headers stay on the direct path — the
     /// proxy would consume headers addressed to the LLM server.
     #[test]
@@ -3544,7 +3671,7 @@ services:
             has_custom_headers: true,
             ..Default::default()
         };
-        crate::config::migrate_llm_to_v2(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, false);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -4507,6 +4634,72 @@ services:
         assert!(
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
             "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_foreign_model_falls_back_to_account_default() {
+        // Corrupted v2 config: anthropic entry + active both hold an OR id.
+        // The render-guard must drop it (no ANTHROPIC_MODEL) instead of 404ing.
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("nex-agi/nex-n2-pro:free".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("nex-agi/nex-n2-pro:free".to_string()),
+            }),
+            ..Default::default()
+        };
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "foreign model under anthropic must NOT set ANTHROPIC_MODEL, got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000/anthropic"),
+            "anthropic still routes through the passthrough: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_valid_catalog_model_injected_verbatim() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-opus-4-8[1m]".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("claude-opus-4-8[1m]".to_string()),
+            }),
+            ..Default::default()
+        };
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_MODEL=claude-opus-4-8[1m]"),
+            "valid claude model must inject verbatim: {env:?}"
         );
     }
 

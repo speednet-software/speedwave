@@ -58,11 +58,17 @@ mandatory reading before touching any code under the `paths:` above.
 - **`ANTHROPIC_MODEL` is primary**, `ANTHROPIC_CUSTOM_MODEL_OPTION` is
   supplementary. For non-Anthropic kinds the model is `<provider_id>/<model>`
   — it must match the wildcard route in the rendered litellm config.
-- **`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is forbidden for
-  non-Anthropic kinds** (silent alias remapping). The Anthropic branches pin
-  each alias to its own model with the `[1m]` suffix (ADR-040 rule, upheld).
-  `ANTHROPIC_SMALL_FAST_MODEL` (subagent traffic) is pinned to the active
-  model for non-Anthropic kinds instead.
+- **Non-Anthropic kinds remap built-in aliases (ADR-073).**
+  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` are all set to the routed
+  `<provider_id>/<model>` so `/model opus|sonnet|haiku|fable` hits the wildcard
+  route instead of a bare `claude-*` (404). `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+  (subagent/background traffic) replaces the deprecated `ANTHROPIC_SMALL_FAST_MODEL`.
+  The Anthropic branches keep pinning each alias to its own catalog model with
+  the `[1m]` suffix via `anthropic_default_models_env()`.
+- **Provenance (ADR-073 v3):** the routing model comes from the active provider
+  entry (`LlmConfig::effective_active_model`), never a foreign `active.model`. A
+  `provider/model`-shaped id under an Anthropic entry is dropped to the account
+  default, not injected as `ANTHROPIC_MODEL`.
 - A `local` provider with custom headers falls back to the direct path —
   the proxy would consume headers addressed to the LLM server.
 
@@ -85,9 +91,11 @@ SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
 `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only
 an active `anthropic_oauth` provider runs the in-container OAuth check; all
-other kinds (api key, local, openrouter, openai-compat) skip it.
-Legacy v1 configs keep the `LOCAL_PROVIDERS` rule. Any new Anthropic-auth
-checkpoint must use the same predicate.
+other kinds (api key, local, openrouter, openai-compat) skip it. An
+unconfigured project (no providers, dangling active, or fresh/missing) also
+skips it (R7) — the user is routed to provider configuration, not an OAuth
+wall. Legacy v1 keeps the `LOCAL_PROVIDERS` rule; an unset provider is
+unconfigured. Any new Anthropic-auth checkpoint must use the same predicate.
 
 ## When designing or fixing any feature, ask:
 

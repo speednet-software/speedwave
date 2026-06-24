@@ -86,8 +86,6 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
         return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
       case 'list_anthropic_models':
         return TEST_ANTHROPIC_MODELS;
-      case 'get_default_anthropic_model_label':
-        return 'Opus 4.8';
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
@@ -350,8 +348,13 @@ describe('LlmProviderComponent', () => {
 
     component.provider = 'anthropic';
     component.model = '';
-    // Make the active selection unchanged so the hot-reload branch fires.
-    component['loadedActiveKey'] = 'anthropic|';
+    // Make the active selection unchanged so the hot-reload branch fires —
+    // derive the key the same way saveConfig will (R6: kind/headers-aware).
+    component['loadedActiveKey'] = component['computeActiveKey'](
+      'anthropic',
+      null,
+      component['buildProviderSet'](false)
+    );
 
     await component.saveConfig();
 
@@ -607,8 +610,6 @@ describe('LlmProviderComponent', () => {
           return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
-        case 'get_default_anthropic_model_label':
-          return 'Opus 4.8';
         default:
           return undefined;
       }
@@ -629,8 +630,9 @@ describe('LlmProviderComponent', () => {
     expect(stray?.textContent).toContain('not in catalog');
   });
 
-  it('renders dynamic Default — <family> label when backend returns a label', async () => {
-    // Backend SSOT returns the Opus family label that `(default)` resolves to.
+  it('renders a plan-neutral Default label (F3 — Speedwave cannot see the plan)', async () => {
+    // The real default depends on the account plan (Pro→Sonnet, Max→Opus),
+    // so the label must not promise a specific model.
     component.ngOnInit();
     await fixture.whenStable();
     await flushMicrotasks();
@@ -643,43 +645,7 @@ describe('LlmProviderComponent', () => {
     const defaultLabel = (
       modelEl.querySelector('option[value=""]') as HTMLOptionElement
     )?.textContent?.trim();
-    expect(defaultLabel).toBe('Default — Opus 4.8 (switchable via /model)');
-  });
-
-  it('falls back to the generic placeholder when backend returns null', async () => {
-    // When the backend returns null, the generic placeholder wording is kept.
-    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-      switch (cmd) {
-        case 'get_llm_config':
-          return {
-            provider: 'anthropic',
-            model: null,
-            base_url: null,
-            default_base_url: null,
-          };
-        case 'get_default_base_url':
-          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
-        case 'list_anthropic_models':
-          return TEST_ANTHROPIC_MODELS;
-        case 'get_default_anthropic_model_label':
-          return null;
-        default:
-          return undefined;
-      }
-    };
-    component.ngOnInit();
-    await fixture.whenStable();
-    await flushMicrotasks();
-    fixture.changeDetectorRef.markForCheck();
-    fixture.detectChanges();
-
-    const modelEl = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-model"]'
-    ) as HTMLSelectElement;
-    const defaultLabel = (
-      modelEl.querySelector('option[value=""]') as HTMLOptionElement
-    )?.textContent?.trim();
-    expect(defaultLabel).toBe('(default — let Claude Code choose)');
+    expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
   });
 
   it('shows model and base URL fields for ollama provider', async () => {
@@ -883,6 +849,23 @@ describe('LlmProviderComponent', () => {
     await component.discoverModels(true);
     await component.discoverModels(true);
     expect(discoverCalls.length).toBe(before + 2);
+  });
+
+  it('discovery does not overwrite a restored model absent from the list (a3)', async () => {
+    setupDiscoveryMock(mockTauri, {
+      provider: 'ollama',
+      discover: async () => ['m1', 'm2'],
+    });
+    await component.ngOnInit();
+    await fixture.whenStable();
+    // A restored model the server no longer lists must survive discovery.
+    component.model = 'restored-not-on-server';
+    await component.discoverModels(true);
+    expect(component.model).toBe('restored-not-on-server');
+    // But a blank model still auto-selects the first discovered one.
+    component.model = '';
+    await component.discoverModels(true);
+    expect(component.model).toBe('m1');
   });
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
@@ -1565,6 +1548,118 @@ describe('LlmProviderComponent', () => {
     expect(emitted).toContain('requires a model name');
   });
 
+  it('loadConfig never adopts a foreign model under the anthropic card (F1)', async () => {
+    // Corrupted config: anthropic active + flat model both carry an OR id.
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'anthropic',
+            model: 'nex-agi/nex-n2-pro:free',
+            base_url: null,
+            default_base_url: null,
+            providers: [
+              { id: 'anthropic', kind: 'anthropic_oauth', model: 'nex-agi/nex-n2-pro:free' },
+            ],
+            active: { provider_id: 'anthropic', model: 'nex-agi/nex-n2-pro:free' },
+          };
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        case 'get_default_base_url':
+          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+        default:
+          return undefined;
+      }
+    };
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    expect(component['loadedAnthropicModel']).toBeNull();
+    expect(component.model).toBe('');
+  });
+
+  it('selectExtraProvider snapshots a freshly-edited anthropic model (F2/a1)', () => {
+    component.provider = 'anthropic';
+    component.selectedTarget = 'anthropic';
+    component.model = 'claude-opus-4-8';
+    component.selectExtraProvider(component.extraProviders[0]);
+    // The fresh card model is captured so a later Save won't lose it.
+    expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
+  });
+
+  it('reload after OpenRouter-active save does not poison the anthropic card (F-5/b2)', async () => {
+    // Config the backend persisted while OpenRouter was active (flat masquerade
+    // = anthropic, but providers[] anthropic entry stays clean). On reload the
+    // anthropic card must NOT pick up the OpenRouter model.
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'anthropic',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [
+              { id: 'anthropic', kind: 'anthropic_oauth', model: null },
+              { id: 'openrouter', kind: 'open_router', model: 'z-ai/glm-5.2', has_api_key: true },
+            ],
+            active: { provider_id: 'openrouter', model: 'z-ai/glm-5.2' },
+          };
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        case 'get_default_base_url':
+          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+        default:
+          return undefined;
+      }
+    };
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    expect(component['loadedAnthropicModel']).toBeNull();
+    // Switching to anthropic + building the provider set keeps the entry clean.
+    component.provider = 'anthropic';
+    component.selectedTarget = 'anthropic';
+    const built = component['buildProviderSet'](false);
+    const anthropic = built.find((p) => p.id === 'anthropic');
+    expect(anthropic?.model ?? null).toBeNull();
+  });
+
+  it('loadConfig: entry model wins over a disagreeing active.model (CR#2)', async () => {
+    // On-disk disagreement: openrouter entry='z-ai/glm-5.2' but active points
+    // at a stale id. Entry must win (mirror Rust effective_active_model).
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'openrouter',
+            model: 'z-ai/glm-5.2',
+            base_url: null,
+            default_base_url: null,
+            providers: [
+              { id: 'anthropic', kind: 'anthropic_oauth', model: null },
+              { id: 'openrouter', kind: 'open_router', model: 'z-ai/glm-5.2', has_api_key: true },
+            ],
+            active: { provider_id: 'openrouter', model: 'stale/old-model' },
+          };
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        case 'get_default_base_url':
+          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+        default:
+          return undefined;
+      }
+    };
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    expect(row?.model).toBe('z-ai/glm-5.2');
+  });
+
   it('save hot-reloads the proxy when the active selection is unchanged', async () => {
     const calls: string[] = [];
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -1580,7 +1675,11 @@ describe('LlmProviderComponent', () => {
     // Anthropic card active, default model — same as the loaded snapshot.
     component.provider = 'anthropic';
     component.selectedTarget = 'anthropic';
-    component['loadedActiveKey'] = 'anthropic|';
+    component['loadedActiveKey'] = component['computeActiveKey'](
+      'anthropic',
+      null,
+      component['buildProviderSet'](false)
+    );
     await component.saveConfig();
 
     expect(calls).toContain('restart_llm_proxy');
@@ -1592,6 +1691,37 @@ describe('LlmProviderComponent', () => {
     await component.saveConfig();
     expect(calls).not.toContain('restart_llm_proxy');
     expect(restartSpy).toHaveBeenCalled();
+  });
+
+  it('computeActiveKey distinguishes kind and custom-headers (R6)', () => {
+    const base = [
+      { id: 'local', kind: 'local' as const, model: 'qwen3', has_custom_headers: false },
+    ];
+    const withHeaders = [
+      { id: 'local', kind: 'local' as const, model: 'qwen3', has_custom_headers: true },
+    ];
+    const k1 = component['computeActiveKey']('local', 'qwen3', base);
+    const k2 = component['computeActiveKey']('local', 'qwen3', withHeaders);
+    expect(k1).not.toBe(k2);
+    // Same inputs → same key (stable).
+    expect(component['computeActiveKey']('local', 'qwen3', base)).toBe(k1);
+    // Kind change (anthropic_oauth → anthropic_api_key) flips the key.
+    const oauth = [{ id: 'anthropic', kind: 'anthropic_oauth' as const }];
+    const apikey = [{ id: 'anthropic', kind: 'anthropic_api_key' as const }];
+    expect(component['computeActiveKey']('anthropic', null, oauth)).not.toBe(
+      component['computeActiveKey']('anthropic', null, apikey)
+    );
+    // I1: base_url is EXCLUDED — a base_url-only change keeps the SAME key
+    // (proxy reload, not full restart).
+    const url1 = [
+      { id: 'local', kind: 'local' as const, model: 'qwen3', base_url: 'http://a:9000' },
+    ];
+    const url2 = [
+      { id: 'local', kind: 'local' as const, model: 'qwen3', base_url: 'http://b:9000' },
+    ];
+    expect(component['computeActiveKey']('local', 'qwen3', url1)).toBe(
+      component['computeActiveKey']('local', 'qwen3', url2)
+    );
   });
 
   // ── Anthropic auth, absorbed from the former Authentication section ─────
