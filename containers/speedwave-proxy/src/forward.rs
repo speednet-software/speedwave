@@ -31,9 +31,13 @@ pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
 /// Build the outbound `HeaderMap` for a forwarded request.
 ///
 /// Passthrough: copy auth and Anthropic headers verbatim; inject nothing.
-/// Swap: drop inbound auth, inject provider key from environment.
+/// Swap: drop inbound auth, inject the provider key from the environment — but
+/// only when the `SPW_KEY_<ID>` name reverses to a valid provider slug, so a
+/// tampered name resolves to no key (ADR-073 contract).
 pub fn outbound_headers(auth: &Auth, inbound: &HeaderMap) -> HeaderMap {
-    outbound_headers_with(auth, inbound, |name| std::env::var(name).ok())
+    outbound_headers_with(auth, inbound, |name| {
+        crate::keys::provider_id_from_env_name(name).and_then(|_| std::env::var(name).ok())
+    })
 }
 
 /// Testable variant — `lookup` provides the provider key for swap legs.

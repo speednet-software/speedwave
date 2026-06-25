@@ -8,6 +8,7 @@ use axum::{
 mod config;
 mod count_tokens;
 mod forward;
+mod keys;
 mod router;
 pub(crate) mod usage;
 
