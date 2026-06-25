@@ -41,11 +41,12 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// Speedwave proxy (ADR-073): 512 MiB, 1 core, 64 MiB /tmp.
+/// Speedwave proxy (rust forwarder, ADR-073): 128 MiB, 0.5 core, 32 MiB /tmp.
+/// Measured ~3-4 MiB idle / ~37 MiB peak under concurrent 64k streams.
 pub const SPEEDWAVE_PROXY_RESOURCES: ContainerResources = ContainerResources {
-    mem_mib: 512,
-    cpus: 1.0,
-    tmpfs_mib: 64,
+    mem_mib: 128,
+    cpus: 0.5,
+    tmpfs_mib: 32,
     shm_mib: None,
 };
 
@@ -269,6 +270,15 @@ mod tests {
         // Independent of host size — the whole point of the fixed cap.
         assert_eq!(CLAUDE_MEMORY_GIB, 6);
         assert_eq!(CLAUDE_RESOURCES.mem_mib, 6 * 1024);
+    }
+
+    #[test]
+    fn speedwave_proxy_resources_match_measured_envelope() {
+        // ~3.5x the measured ~37 MiB peak; the forwarder writes nothing to /tmp.
+        assert_eq!(SPEEDWAVE_PROXY_RESOURCES.mem_mib, 128);
+        assert_eq!(SPEEDWAVE_PROXY_RESOURCES.cpus, 0.5);
+        assert_eq!(SPEEDWAVE_PROXY_RESOURCES.tmpfs_mib, 32);
+        assert_eq!(SPEEDWAVE_PROXY_RESOURCES.shm_mib, None);
     }
 
     #[test]
