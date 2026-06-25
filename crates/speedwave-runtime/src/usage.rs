@@ -91,7 +91,7 @@ pub fn usage_file_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
         .join("usage")
         .join(project)
-        .join("litellm")
+        .join("speedwave-proxy")
         .join("usage.jsonl")
 }
 

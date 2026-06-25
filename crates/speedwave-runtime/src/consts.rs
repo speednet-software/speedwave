@@ -1022,7 +1022,7 @@ pub fn mcp_os_log_path() -> std::path::PathBuf {
 /// Used by security checks and image build lists.
 pub const BUILT_IN_SERVICES: &[&str] = &[
     "claude",
-    "litellm",
+    "speedwave-proxy",
     "mcp-hub",
     "mcp-slack",
     "mcp-sharepoint",

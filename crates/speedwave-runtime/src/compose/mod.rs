@@ -26,8 +26,8 @@ mod workers;
 // LiteLLM proxy config rendering + key management (ADR-073).
 pub use litellm::{
     litellm_config_path_in, remove_llm_provider_key_in, render_litellm_config, spw_key_env_name,
-    write_litellm_config_in, write_llm_provider_key_in, LITELLM_ANTHROPIC_PASSTHROUGH_URL,
-    LITELLM_BASE_URL, LITELLM_PORT,
+    write_litellm_config_in, write_llm_provider_key_in, LITELLM_PORT,
+    SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL, SPEEDWAVE_PROXY_BASE_URL,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
@@ -110,7 +110,7 @@ const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.temp
 /// `build::IMAGES` and the template is pinned by `image_placeholders_align_*`.
 const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
     ("${IMAGE_CLAUDE}", build::IMAGE_CLAUDE),
-    ("${IMAGE_LITELLM}", build::IMAGE_LITELLM),
+    ("${IMAGE_SPEEDWAVE_PROXY}", build::IMAGE_SPEEDWAVE_PROXY),
     ("${IMAGE_MCP_HUB}", build::IMAGE_MCP_HUB),
     ("${IMAGE_MCP_SLACK}", build::IMAGE_MCP_SLACK),
     ("${IMAGE_MCP_SHAREPOINT}", build::IMAGE_MCP_SHAREPOINT),
@@ -304,25 +304,31 @@ pub fn render_compose_in(
     }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
-    // LiteLLM proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
+    // Speedwave proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
     litellm::write_litellm_config_in(data_dir, project_name, &resolved_config.llm)?;
     let litellm_config_dir = data_dir.join("litellm").join(project_name);
     std::fs::create_dir_all(&litellm_config_dir)?;
-    let litellm_usage_dir = data_dir.join("usage").join(project_name).join("litellm");
-    std::fs::create_dir_all(&litellm_usage_dir)?;
+    let proxy_usage_dir = data_dir
+        .join("usage")
+        .join(project_name)
+        .join("speedwave-proxy");
+    std::fs::create_dir_all(&proxy_usage_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&litellm_config_dir, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&litellm_usage_dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&proxy_usage_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace(
-        "${LITELLM_CONFIG_DIR}",
+        "${SPEEDWAVE_PROXY_CONFIG_DIR}",
         &to_engine_path(&litellm_config_dir)?,
     );
-    yaml = yaml.replace("${LITELLM_USAGE_DIR}", &to_engine_path(&litellm_usage_dir)?);
     yaml = yaml.replace(
-        "${LITELLM_CONFIG_DIGEST}",
+        "${SPEEDWAVE_PROXY_USAGE_DIR}",
+        &to_engine_path(&proxy_usage_dir)?,
+    );
+    yaml = yaml.replace(
+        "${SPEEDWAVE_PROXY_CONFIG_DIGEST}",
         &litellm::litellm_state_digest_in(data_dir, project_name),
     );
 
@@ -408,7 +414,7 @@ fn format_cpus(cpus: f32) -> String {
 /// (`Nm`), CPU as one-decimal (`2.0`); the resource-drift test pins the placeholders.
 fn apply_container_resources(yaml: &str) -> String {
     use crate::resources::{
-        ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, LITELLM_RESOURCES,
+        ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, SPEEDWAVE_PROXY_RESOURCES,
     };
 
     // Substitute the ${PREFIX_*} placeholders for one container into `out`.
@@ -427,7 +433,7 @@ fn apply_container_resources(yaml: &str) -> String {
     out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
     apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
-    apply(&mut out, "LITELLM", &LITELLM_RESOURCES);
+    apply(&mut out, "SPEEDWAVE_PROXY", &SPEEDWAVE_PROXY_RESOURCES);
 
     for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
         // compose_name "mcp-slack" → placeholder prefix "MCP_SLACK".
@@ -2522,8 +2528,8 @@ services:
         let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
         for (name_value, svc) in services {
             let name = name_value.as_str().unwrap_or("");
-            // Only workers define PORT; claude and litellm do not (litellm uses a fixed entrypoint port, ADR-073).
-            if name == "claude" || name == "mcp-hub" || name == "litellm" {
+            // Only workers define PORT; claude and speedwave-proxy do not (proxy uses a fixed entrypoint port, ADR-073).
+            if name == "claude" || name == "mcp-hub" || name == "speedwave-proxy" {
                 continue;
             }
             let env = svc
@@ -3345,12 +3351,14 @@ services:
             "Default anthropic provider should not add llm-proxy"
         );
         assert!(
-            !get_claude_env(&yaml).iter().any(|e| e.contains("litellm")),
-            "Default anthropic (direct path) must not point claude env at litellm"
+            !get_claude_env(&yaml)
+                .iter()
+                .any(|e| e.contains("speedwave-proxy")),
+            "Default anthropic (direct path) must not point claude env at the proxy"
         );
         assert!(
             !yaml.contains("ghcr.io/berriai"),
-            "litellm image must be the locally built one, never pulled from ghcr"
+            "proxy image must be the locally built one, never pulled from ghcr"
         );
         // Should not contain base_url override (unless explicitly configured)
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3408,7 +3416,7 @@ services:
         let env = get_claude_env(&yaml);
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000/anthropic"),
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000/anthropic"),
             "oauth sessions must use the passthrough route, got: {env:?}"
         );
         assert!(
@@ -3453,7 +3461,7 @@ services:
         let env = get_claude_env(&yaml);
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000"),
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000"),
             "local sessions use the unified root: {env:?}"
         );
         assert!(
@@ -3531,8 +3539,8 @@ services:
             "kill-switch must restore direct injection: {env:?}"
         );
         assert!(
-            !env.iter().any(|e| e.contains("litellm")),
-            "no litellm reference on the direct path: {env:?}"
+            !env.iter().any(|e| e.contains("speedwave-proxy")),
+            "no proxy reference on the direct path: {env:?}"
         );
     }
 
@@ -3712,7 +3720,7 @@ services:
             .collect()
     }
 
-    /// ADR-073: litellm renders in every compose with the local image, hardened mounts
+    /// ADR-073: speedwave-proxy renders in every compose with the local image, hardened mounts
     /// (config ro, tokens ro, usage rw), no host ports, the per-project network, and
     /// renderer-created mount dirs.
     #[test]
@@ -3738,27 +3746,27 @@ services:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let svc = doc
             .get("services")
-            .and_then(|s| s.get("litellm"))
-            .expect("litellm service must render");
+            .and_then(|s| s.get("speedwave-proxy"))
+            .expect("speedwave-proxy service must render");
 
         let image = svc.get("image").and_then(|i| i.as_str()).unwrap();
         assert!(
-            image.starts_with(build::IMAGE_LITELLM),
-            "litellm must use the locally built image, got {image}"
+            image.starts_with(build::IMAGE_SPEEDWAVE_PROXY),
+            "speedwave-proxy must use the locally built image, got {image}"
         );
         assert_eq!(
             svc.get("pull_policy").and_then(|p| p.as_str()),
             Some("never"),
-            "litellm image must never be pulled"
+            "speedwave-proxy image must never be pulled"
         );
         assert!(
             svc.get("ports").is_none(),
-            "litellm must not expose host ports"
+            "speedwave-proxy must not expose host ports"
         );
         assert_eq!(
             svc.get("read_only").and_then(|r| r.as_bool()),
             Some(true),
-            "litellm must be read_only"
+            "speedwave-proxy must be read_only"
         );
         let env: Vec<&str> = svc
             .get("environment")
@@ -3773,7 +3781,7 @@ services:
         let digest_env = env
             .iter()
             .find(|e| e.starts_with("SPW_CONFIG_DIGEST="))
-            .expect("litellm must carry the config digest env");
+            .expect("speedwave-proxy must carry the config digest env");
         let digest = digest_env.trim_start_matches("SPW_CONFIG_DIGEST=");
         assert_eq!(digest.len(), 64, "substituted sha256 hex, got {digest}");
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
@@ -3814,7 +3822,7 @@ services:
                 .path()
                 .join("usage")
                 .join("test-project")
-                .join("litellm")
+                .join("speedwave-proxy")
                 .is_dir(),
             "usage dir must be created"
         );
@@ -3900,8 +3908,8 @@ services:
         );
         assert!(!yaml.contains("llm-proxy"), "Ollama must not add llm-proxy");
         assert!(
-            !env.iter().any(|e| e.contains("litellm")),
-            "Ollama (direct path) must not point claude env at litellm"
+            !env.iter().any(|e| e.contains("speedwave-proxy")),
+            "Ollama (direct path) must not point claude env at the proxy"
         );
     }
 
@@ -4292,7 +4300,11 @@ services:
         // Every container's resources come from the SSOT.
         assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
         assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
-        assert_resources_from_ssot(&doc, "litellm", &crate::resources::LITELLM_RESOURCES);
+        assert_resources_from_ssot(
+            &doc,
+            "speedwave-proxy",
+            &crate::resources::SPEEDWAVE_PROXY_RESOURCES,
+        );
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
         }
@@ -4340,9 +4352,9 @@ services:
             "${MCP_HUB_MEM}",
             "${MCP_HUB_CPUS}",
             "${MCP_HUB_TMPFS}",
-            "${LITELLM_MEM}",
-            "${LITELLM_CPUS}",
-            "${LITELLM_TMPFS}",
+            "${SPEEDWAVE_PROXY_MEM}",
+            "${SPEEDWAVE_PROXY_CPUS}",
+            "${SPEEDWAVE_PROXY_TMPFS}",
         ] {
             assert!(
                 COMPOSE_TEMPLATE.contains(placeholder),
@@ -4668,7 +4680,7 @@ services:
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://litellm:4000/anthropic"),
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000/anthropic"),
             "anthropic still routes through the passthrough: {env:?}"
         );
     }
@@ -7141,14 +7153,14 @@ services:
         SecurityExpectedPaths::from_raw("/test/project", "/test/.speedwave/tokens/test")
     }
 
-    /// Litellm service YAML with parameterised volumes (ADR-073 tests).
+    /// Speedwave proxy service YAML with parameterised volumes (ADR-073 tests).
     fn litellm_yaml(volumes: &str, extra: &str) -> String {
         format!(
             r#"
 version: "3"
 services:
-  litellm:
-    image: speedwave-litellm:1.0.0
+  speedwave-proxy:
+    image: speedwave-proxy:1.0.0
     user: "{user}"
     read_only: true
     cap_drop:
@@ -7171,7 +7183,7 @@ services:
         let yaml = litellm_yaml(
             "      - /test/.speedwave/litellm/test:/config:ro\n      \
              - /test/.speedwave/tokens/test/llm:/tokens:ro\n      \
-             - /test/.speedwave/usage/test/litellm:/usage:rw",
+             - /test/.speedwave/usage/test/speedwave-proxy:/usage:rw",
             "",
         );
         let violations = SecurityCheck::run_with_data_dir(
@@ -7196,7 +7208,7 @@ services:
         let yaml = litellm_yaml(
             "      - /test/.speedwave/litellm/test:/config:ro\n      \
              - /test/.speedwave/tokens/test/llm:/tokens:rw\n      \
-             - /test/.speedwave/usage/test/litellm:/usage:rw\n      \
+             - /test/.speedwave/usage/test/speedwave-proxy:/usage:rw\n      \
              - /test/project:/workspace:rw",
             "",
         );
@@ -7229,7 +7241,7 @@ services:
         let yaml = litellm_yaml(
             "      - /test/.speedwave/litellm/test:/config:ro\n      \
              - /test/.speedwave/tokens/test:/tokens:ro\n      \
-             - /test/.speedwave/usage/test/litellm:/usage:rw",
+             - /test/.speedwave/usage/test/speedwave-proxy:/usage:rw",
             "    network_mode: host",
         );
         let violations = SecurityCheck::run_with_data_dir(
@@ -7250,6 +7262,54 @@ services:
         assert!(
             litellm.iter().any(|v| v.message.contains("network_mode")),
             "host network must be flagged: {litellm:?}"
+        );
+    }
+
+    /// YAML with the renamed `speedwave-proxy` service name and a writable
+    /// tokens mount (the forbidden case the gate must catch).
+    fn speedwave_proxy_yaml_with_writable_tokens() -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  speedwave-proxy:
+    image: speedwave-proxy:1.0.0
+    user: "{user}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/litellm/test:/config:ro
+      - /test/.speedwave/tokens/test/llm:/tokens:rw
+      - /test/.speedwave/usage/test/speedwave-proxy:/usage:rw
+"#,
+            user = container_user(),
+        )
+    }
+
+    /// Regression guard: the mount-hardening gate must find the proxy service
+    /// by its renamed name. If security_check.rs still keys on `"litellm"` after
+    /// the rename, the early-return silently disables the check.
+    #[test]
+    fn security_gate_fires_on_renamed_proxy_service() {
+        let yaml = speedwave_proxy_yaml_with_writable_tokens();
+        let data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::LitellmVolumes),
+            "renamed proxy service must still trip the mount-hardening gate, got {violations:?}"
         );
     }
 
@@ -7286,13 +7346,13 @@ services:
             &expected,
             data_dir.path(),
         );
-        let litellm: Vec<_> = violations
+        let proxy: Vec<_> = violations
             .iter()
-            .filter(|v| v.container == "litellm" || v.rule == SecurityRule::LitellmVolumes)
+            .filter(|v| v.container == "speedwave-proxy" || v.rule == SecurityRule::LitellmVolumes)
             .collect();
         assert!(
-            litellm.is_empty(),
-            "rendered litellm service must pass all checks: {litellm:?}"
+            proxy.is_empty(),
+            "rendered speedwave-proxy service must pass all checks: {proxy:?}"
         );
     }
 

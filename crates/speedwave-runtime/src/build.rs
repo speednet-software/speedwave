@@ -29,8 +29,8 @@ const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults:
 
 /// Claude Code container image name.
 pub const IMAGE_CLAUDE: &str = "speedwave-claude";
-/// LiteLLM proxy image name (ADR-073).
-pub const IMAGE_LITELLM: &str = "speedwave-litellm";
+/// Speedwave proxy image name (ADR-073).
+pub const IMAGE_SPEEDWAVE_PROXY: &str = "speedwave-proxy";
 /// MCP hub image name.
 pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
 /// Slack MCP worker image name.
@@ -68,7 +68,7 @@ pub const IMAGES: &[ImageDef] = &[
         ],
     },
     ImageDef {
-        name: IMAGE_LITELLM,
+        name: IMAGE_SPEEDWAVE_PROXY,
         context_dir: "containers",
         containerfile: "containers/Containerfile.litellm",
         build_args: &[],
@@ -1804,7 +1804,10 @@ mod tests {
             .iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_LITELLM, IMAGE_MCP_HUB]);
+        assert_eq!(
+            names,
+            vec![IMAGE_CLAUDE, IMAGE_SPEEDWAVE_PROXY, IMAGE_MCP_HUB]
+        );
     }
 
     #[test]
@@ -1819,7 +1822,7 @@ mod tests {
             names,
             vec![
                 IMAGE_CLAUDE,
-                IMAGE_LITELLM,
+                IMAGE_SPEEDWAVE_PROXY,
                 IMAGE_MCP_HUB,
                 IMAGE_MCP_SLACK,
                 IMAGE_MCP_PLAYWRIGHT
@@ -1832,7 +1835,10 @@ mod tests {
         let mut cfg = ResolvedIntegrationsConfig::default();
         cfg.plugins.insert("example-plugin".to_string(), true);
         let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
-        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_LITELLM, IMAGE_MCP_HUB]);
+        assert_eq!(
+            names,
+            vec![IMAGE_CLAUDE, IMAGE_SPEEDWAVE_PROXY, IMAGE_MCP_HUB]
+        );
     }
 
     #[test]
@@ -1841,8 +1847,8 @@ mod tests {
         for img in IMAGES {
             let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
                 assert!(
-                    img.name == IMAGE_CLAUDE || img.name == IMAGE_LITELLM,
-                    "only speedwave-claude and speedwave-litellm lack the prefix, got '{}'",
+                    img.name == IMAGE_CLAUDE || img.name == IMAGE_SPEEDWAVE_PROXY,
+                    "only speedwave-claude and speedwave-proxy lack the prefix, got '{}'",
                     img.name
                 );
                 continue;
@@ -2177,9 +2183,9 @@ mod tests {
             built,
             vec![
                 image_ref(IMAGE_CLAUDE, "b1"),
-                image_ref(IMAGE_LITELLM, "b1"),
                 image_ref(IMAGE_MCP_GITHUB, "b1"),
                 image_ref(IMAGE_MCP_HUB, "b1"),
+                image_ref(IMAGE_SPEEDWAVE_PROXY, "b1"),
             ]
         );
     }

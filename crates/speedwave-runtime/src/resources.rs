@@ -41,8 +41,8 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// LiteLLM proxy (ADR-073): 512 MiB, 1 core, 64 MiB /tmp.
-pub const LITELLM_RESOURCES: ContainerResources = ContainerResources {
+/// Speedwave proxy (ADR-073): 512 MiB, 1 core, 64 MiB /tmp.
+pub const SPEEDWAVE_PROXY_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 512,
     cpus: 1.0,
     tmpfs_mib: 64,

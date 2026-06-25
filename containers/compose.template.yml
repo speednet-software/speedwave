@@ -38,17 +38,17 @@ services:
           cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
-  # LiteLLM proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
-  litellm:
-    image: ${IMAGE_LITELLM}
+  # Speedwave proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
+  speedwave-proxy:
+    image: ${IMAGE_SPEEDWAVE_PROXY}
     pull_policy: never
-    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_litellm
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_speedwave_proxy
     environment:
       # Use OpenAI-compatible /v1/chat/completions for local LLM backends (ADR-073).
       - LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
-      # Not read by litellm — forces container recreation on config-up
+      # Not read by the proxy — forces container recreation on config-up
       # when the rendered config or a provider key changed.
-      - SPW_CONFIG_DIGEST=${LITELLM_CONFIG_DIGEST}
+      - SPW_CONFIG_DIGEST=${SPEEDWAVE_PROXY_CONFIG_DIGEST}
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:
@@ -58,18 +58,18 @@ services:
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     tmpfs:
-      - /tmp:noexec,nosuid,size=${LITELLM_TMPFS}
+      - /tmp:noexec,nosuid,size=${SPEEDWAVE_PROXY_TMPFS}
     volumes:
-      - ${LITELLM_CONFIG_DIR}:/config:ro
+      - ${SPEEDWAVE_PROXY_CONFIG_DIR}:/config:ro
       - ${TOKENS_DIR}/llm:/tokens:ro
-      - ${LITELLM_USAGE_DIR}:/usage:rw
+      - ${SPEEDWAVE_PROXY_USAGE_DIR}:/usage:rw
     networks:
       - ${NETWORK_NAME}
     deploy:
       resources:
         limits:
-          cpus: '${LITELLM_CPUS}'
-          memory: ${LITELLM_MEM}
+          cpus: '${SPEEDWAVE_PROXY_CPUS}'
+          memory: ${SPEEDWAVE_PROXY_MEM}
 
   mcp-hub:
     image: ${IMAGE_MCP_HUB}

@@ -909,7 +909,7 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
 // ---------------------------------------------------------------------------
 
 /// Aggregated LLM usage for the project's dashboard. The single source is
-/// the litellm callback JSONL (see `speedwave_runtime::usage`); chat-stream
+/// the proxy callback JSONL (see `speedwave_runtime::usage`); chat-stream
 /// session stats are deliberately NOT mixed in (double counting).
 #[tauri::command]
 pub async fn get_llm_usage(

@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 pub const LITELLM_PORT: u16 = 4000;
 
 /// In-network base URL of the proxy as the claude container sees it.
-pub const LITELLM_BASE_URL: &str = "http://litellm:4000";
+pub const SPEEDWAVE_PROXY_BASE_URL: &str = "http://speedwave-proxy:4000";
 
 /// Subscription sessions use the passthrough route — OAuth `Authorization`
 /// forwarded verbatim to api.anthropic.com.
-pub const LITELLM_ANTHROPIC_PASSTHROUGH_URL: &str = "http://litellm:4000/anthropic";
+pub const SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL: &str = "http://speedwave-proxy:4000/anthropic";
 
 /// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
 /// uppercased — same normalisation as `plugin::derive_worker_env`).

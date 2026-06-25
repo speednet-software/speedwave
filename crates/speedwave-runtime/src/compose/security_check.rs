@@ -478,7 +478,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let read_only_required = ["claude", "mcp-hub", "litellm"];
+        let read_only_required = ["claude", "mcp-hub", "speedwave-proxy"];
         for required in &read_only_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let is_read_only = service
@@ -507,7 +507,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let tmpfs_required = ["claude", "mcp-hub", "litellm"];
+        let tmpfs_required = ["claude", "mcp-hub", "speedwave-proxy"];
         for required in &tmpfs_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let has_tmpfs_noexec = service
@@ -938,7 +938,9 @@ impl SecurityCheck {
             Some(s) => s,
             None => return violations,
         };
-        let (name, service) = match services.iter().find(|(n, _)| n == "litellm") {
+        // SecurityViolation::LitellmVolumes enum variant is intentionally kept
+        // under its old name until Task 6 renames it alongside its strum string.
+        let (name, service) = match services.iter().find(|(n, _)| n == "speedwave-proxy") {
             Some(pair) => pair,
             None => return violations, // not rendered (legacy path) — nothing to check
         };
