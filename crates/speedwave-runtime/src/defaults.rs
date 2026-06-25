@@ -154,8 +154,19 @@ pub fn base_env() -> HashMap<String, String> {
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
     // Non-empty WAYLAND_DISPLAY routes Claude Code copies through the osc52-copy.sh shim (ADR-052).
     env.insert("WAYLAND_DISPLAY".into(), "speedwave-clipboard".into());
+    // Raise Claude Code's 300s remote-MCP idle abort (CC ≥2.1.187) above the longest
+    // hub→worker op; the CC↔hub HTTP connection is silent until the op finishes.
+    env.insert(
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
+        MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
+    );
     env
 }
+
+/// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the
+/// longest worker timeout in `mcp-servers/shared/src/timeouts.ts`
+/// (`STALE_CHUNK_TIMEOUT_MS`); enforced by `mcp_tool_idle_timeout_covers_worker_max`.
+pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
 /// Anthropic-branch alias pins: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
 /// from the `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable is omitted
@@ -263,6 +274,47 @@ mod tests {
              the flag keeps the behaviour future-proof against any change to the user \
              mapping. Other layers (cap_drop ALL, read-only FS, no tokens, per-project \
              network) make this safe."
+        );
+    }
+
+    #[test]
+    fn base_env_sets_mcp_tool_idle_timeout() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+                .map(|s| s.as_str()),
+            Some(MCP_TOOL_IDLE_TIMEOUT_MS.to_string().as_str()),
+            "Claude Code ≥2.1.187 aborts a remote-MCP tool call idle for 300s. The hub \
+             holds the CC↔hub connection silent until a worker op finishes, so long ops \
+             (SharePoint download, plugin long-class) would be killed without this override."
+        );
+    }
+
+    #[test]
+    fn mcp_tool_idle_timeout_covers_worker_max() {
+        // SSOT-alignment: idle ceiling must stay >= the largest static worker timeout
+        // (STALE_CHUNK_TIMEOUT_MS) in timeouts.ts. Env-raised BASE_MS/SHAREPOINT_SYNC_MS
+        // are invisible to this static check — raising them needs a manual bump.
+        let src = include_str!("../../../mcp-servers/shared/src/timeouts.ts");
+        let re = regex::Regex::new(r"STALE_CHUNK_TIMEOUT_MS:\s*([0-9*\s]+?),").unwrap();
+        let expr = re
+            .captures(src)
+            .expect("timeouts.ts must declare STALE_CHUNK_TIMEOUT_MS as a `*`-product literal")
+            .get(1)
+            .unwrap()
+            .as_str();
+        let worker_max: u64 = expr
+            .split('*')
+            .map(|p| {
+                p.trim()
+                    .parse::<u64>()
+                    .expect("STALE_CHUNK factors must be integers")
+            })
+            .product();
+        assert!(
+            MCP_TOOL_IDLE_TIMEOUT_MS >= worker_max,
+            "MCP_TOOL_IDLE_TIMEOUT_MS ({MCP_TOOL_IDLE_TIMEOUT_MS}) must be >= the longest \
+             worker timeout STALE_CHUNK_TIMEOUT_MS ({worker_max}) from timeouts.ts — bump it"
         );
     }
 
