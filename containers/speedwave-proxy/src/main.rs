@@ -9,6 +9,7 @@ mod config;
 mod count_tokens;
 mod forward;
 mod router;
+pub(crate) mod usage;
 
 use config::Config;
 

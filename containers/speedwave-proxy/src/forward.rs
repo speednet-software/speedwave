@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{extract::State, http::HeaderMap, http::StatusCode};
 
 use crate::router::{resolve, Auth, Config, Scheme};
+use crate::usage::{append_usage, sniff, UsageAcc};
 
 /// Build the outbound `HeaderMap` for a forwarded request.
 ///
@@ -65,11 +66,17 @@ pub fn outbound_headers_with(
 
 /// Stub — full streaming forward implemented in Task 6.
 pub async fn messages(State(cfg): State<Arc<Config>>) -> StatusCode {
-    // Route resolution and auth-header injection are wired in Task 6.
+    // Route resolution, auth-header injection, and usage sniffing are wired in Task 6.
     if let Some(route) = resolve(&cfg, "") {
         let _url = &route.base_url;
-        // Reachability anchor so outbound_headers is exercised from the binary path; Task 6 wires the real forward.
+        // Reachability anchor so outbound_headers/sniff/append_usage are on the
+        // binary's reachable path; Task 6 replaces this stub with real forwarding.
         let _headers = outbound_headers(&route.auth, &HeaderMap::new());
+        let mut _acc = UsageAcc::default();
+        sniff(&serde_json::Value::Null, &mut _acc);
+        if let Some(line) = _acc.finish("") {
+            append_usage(std::path::Path::new(""), &line);
+        }
     }
     StatusCode::NOT_IMPLEMENTED
 }
