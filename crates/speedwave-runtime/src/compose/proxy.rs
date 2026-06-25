@@ -52,12 +52,18 @@ pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
     let mut routes = Vec::new();
 
+    // OAuth vs API key render the same passthrough route; the kind is learned
+    // host-side from the active provider (ADR-073) — never sniffed in the proxy.
+    let anthropic_kind = match llm.active_provider().map(|p| p.kind) {
+        Some(LlmProviderKind::AnthropicApiKey) => "anthropic_apikey",
+        _ => "anthropic_oauth",
+    };
+
     // Anthropic passthrough is always first — bare model names (no prefix)
     // resolve here. It forwards the caller's Authorization header unchanged.
-    routes.push(
-        r#"{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough"}"#
-            .to_string(),
-    );
+    routes.push(format!(
+        r#"{{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough","provider_kind":"{anthropic_kind}","provider_id":"anthropic"}}"#
+    ));
 
     for entry in &llm.providers {
         // Re-check: ids are embedded bare in JSON below.
@@ -72,8 +78,9 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
             LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
                 let env = spw_key_env_name(&entry.id);
+                let id = &entry.id;
                 routes.push(format!(
-                    r#"{{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{{"swap_env":"{env}","scheme":"bearer"}}}}"#
+                    r#"{{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{{"swap_env":"{env}","scheme":"bearer"}},"provider_kind":"openrouter","provider_id":"{id}"}}"#
                 ));
             }
             LlmProviderKind::Local | LlmProviderKind::OpenAiCompat => {
@@ -96,15 +103,19 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                 // (common in Ollama/LiteLLM base URLs) so it isn't doubled.
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 let id = &entry.id;
+                let kind = match entry.kind {
+                    LlmProviderKind::OpenAiCompat => "openai_compat",
+                    _ => "local",
+                };
                 // Two distinct route shapes: object-auth (key swap) vs string-auth (none).
                 if entry.has_api_key {
                     let env = spw_key_env_name(id);
                     routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"bearer"}}}}"#
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"bearer"}},"provider_kind":"{kind}","provider_id":"{id}"}}"#
                     ));
                 } else {
                     routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"none"}}"#
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"none","provider_kind":"{kind}","provider_id":"{id}"}}"#
                     ));
                 }
             }
@@ -309,8 +320,31 @@ mod tests {
     #[test]
     fn render_full_provider_mix_golden() {
         let llm = full_provider_mix();
-        let expected = r#"{"routes":[{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough"},{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none"},{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"}}]}"#;
+        let expected = r#"{"routes":[{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough","provider_kind":"anthropic_oauth","provider_id":"anthropic"},{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none","provider_kind":"local","provider_id":"local"},{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"},"provider_kind":"openrouter","provider_id":"openrouter"}]}"#;
         assert_eq!(render_proxy_config(&llm), expected);
+    }
+
+    /// The anthropic passthrough route's kind reflects the active provider:
+    /// `anthropic_apikey` when the active entry is an API key, else oauth.
+    #[test]
+    fn anthropic_route_kind_reflects_active_provider() {
+        let mut cfg = full_provider_mix();
+        cfg.active = Some(LlmActive {
+            provider_id: "anthropic-key".into(),
+            model: None,
+        });
+        let out = render_proxy_config(&cfg);
+        assert!(out.contains(r#""prefix":"anthropic""#));
+        assert!(out.contains(r#""provider_kind":"anthropic_apikey""#));
+    }
+
+    /// A local route carries its `provider_kind`/`provider_id`.
+    #[test]
+    fn local_route_carries_kind_and_id() {
+        let out = render_proxy_config(&full_provider_mix());
+        assert!(out.contains(
+            r#"{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none","provider_kind":"local","provider_id":"local"}"#
+        ));
     }
 
     #[test]
