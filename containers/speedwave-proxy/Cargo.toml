@@ -1,0 +1,42 @@
+[package]
+name = "speedwave-proxy"
+version = "0.1.0"
+edition = "2021"
+
+# Not a workspace member — built inside the container image (see ADR-073).
+# The empty [workspace] table below opts this crate out of the root workspace.
+[workspace]
+
+[[bin]]
+name = "speedwave-proxy"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
