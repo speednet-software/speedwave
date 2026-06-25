@@ -42,10 +42,9 @@ services:
   speedwave-proxy:
     image: ${IMAGE_SPEEDWAVE_PROXY}
     pull_policy: never
+    restart: unless-stopped
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_speedwave_proxy
     environment:
-      # Use OpenAI-compatible /v1/chat/completions for local LLM backends (ADR-073).
-      - LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
       # Not read by the proxy — forces container recreation on config-up
       # when the rendered config or a provider key changed.
       - SPW_CONFIG_DIGEST=${SPEEDWAVE_PROXY_CONFIG_DIGEST}

@@ -1,19 +1,17 @@
-//! Renders the per-project `litellm-config.yaml` (ADR-073).
+//! Renders the per-project `proxy.json` routing config (ADR-073).
 //!
-//! The file lands at `<data_dir>/litellm/<project>/config.yaml` (0600,
-//! atomic) and is mounted `:ro` at `/config` in the `litellm` container.
-//! It carries NO secrets: every key is referenced as
-//! `os.environ/SPW_KEY_<PROVIDER_ID>`, resolved inside the container by
-//! the entrypoint from the `/tokens` mount.
+//! The file lands at `<data_dir>/litellm/<project>/proxy.json` (0600,
+//! atomic) and is mounted `:ro` at `/config` in the `speedwave-proxy` container.
+//! It carries NO secrets: non-Anthropic keys are referenced by env name only
+//! (`SPW_KEY_<PROVIDER_ID>`), resolved inside the container from `/tokens`.
 //!
-//! INVARIANT: the rendered config and container env must never define
-//! Anthropic credentials under `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
-//! (canonical names override the `/anthropic` passthrough route).
+//! INVARIANT: the rendered config must never contain a key value or a canonical
+//! Anthropic credential name (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`).
 
 use crate::config::{LlmConfig, LlmProviderKind};
 use std::path::{Path, PathBuf};
 
-/// Port the litellm container listens on (fixed in its entrypoint).
+/// Port the proxy container listens on (fixed in its entrypoint).
 pub const LITELLM_PORT: u16 = 4000;
 
 /// In-network base URL of the proxy as the claude container sees it.
@@ -32,123 +30,102 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
     )
 }
 
-/// Path of the rendered config: `<data_dir>/litellm/<project>/config.yaml`.
-pub fn litellm_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("litellm").join(project).join("config.yaml")
+/// Path of the rendered config: `<data_dir>/litellm/<project>/proxy.json`.
+pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("litellm").join(project).join("proxy.json")
 }
 
-/// Renders the litellm config for the project's provider set. Pure —
-/// no filesystem access; `write_litellm_config_in` persists the result.
-pub fn render_litellm_config(llm: &LlmConfig) -> String {
-    let mut model_list = String::new();
+/// Renders the proxy routing config for the project's provider set.
+///
+/// Emits a JSON object with a `routes` array consumed by the Rust forwarder
+/// (see `containers/speedwave-proxy/src/router.rs`). Pure — no filesystem
+/// access; `write_proxy_config_in` persists the result.
+pub fn render_proxy_config(llm: &LlmConfig) -> String {
+    let mut routes = Vec::new();
+
+    // Anthropic passthrough is always first — bare model names (no prefix)
+    // resolve here. It forwards the caller's Authorization header unchanged.
+    routes.push(
+        r#"{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough"}"#
+            .to_string(),
+    );
 
     for entry in &llm.providers {
-        // Re-check: ids are embedded bare in the YAML below.
+        // Re-check: ids are embedded bare in JSON below.
         if !crate::plugin::is_valid_slug(&entry.id) {
-            log::warn!("litellm config: skipping provider with invalid id");
+            log::warn!("proxy config: skipping provider with invalid id");
             continue;
         }
-        let key_ref = format!("os.environ/{}", spw_key_env_name(&entry.id));
         match entry.kind {
-            // Subscription rides the /anthropic passthrough, never model_list.
+            // Subscription rides the /anthropic passthrough; no extra route.
             LlmProviderKind::AnthropicOauth => {}
-            LlmProviderKind::AnthropicApiKey => {
-                model_list.push_str(&format!(
-                    "  - model_name: \"anthropic/*\"\n    litellm_params:\n      model: \"anthropic/*\"\n      api_key: {key_ref}\n",
-                ));
-            }
+            // API-key Anthropic: still passthrough — key is in /tokens, not here.
+            LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
-                model_list.push_str(&format!(
-                    "  - model_name: \"openrouter/*\"\n    litellm_params:\n      model: \"openrouter/*\"\n      api_key: {key_ref}\n",
+                let env = spw_key_env_name(&entry.id);
+                routes.push(format!(
+                    r#"{{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{{"swap_env":"{env}","scheme":"bearer"}}}}"#
                 ));
             }
             LlmProviderKind::Local | LlmProviderKind::OpenAiCompat => {
                 let Some(base_url) = entry.base_url.as_deref() else {
                     log::warn!(
-                        "litellm config: provider '{}' has no base_url — skipped",
+                        "proxy config: provider '{}' has no base_url — skipped",
                         entry.id
                     );
                     continue;
                 };
-                // Re-validate before embedding bare in YAML.
+                // Re-validate before embedding bare in JSON.
                 if let Err(e) = super::llm::validate_base_url(base_url) {
                     log::warn!(
-                        "litellm config: provider '{}' has invalid base_url — skipped: {e}",
+                        "proxy config: provider '{}' has invalid base_url — skipped: {e}",
                         entry.id
                     );
                     continue;
                 }
-                // Container-side URL: base_url already uses host.docker.internal (ADR-062).
-                let api_base = ensure_v1_suffix(base_url);
-                let api_key = if entry.has_api_key {
-                    key_ref.clone()
+                let id = &entry.id;
+                let scheme = if entry.has_api_key { "bearer" } else { "none" };
+                if entry.has_api_key {
+                    let env = spw_key_env_name(id);
+                    routes.push(format!(
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"{scheme}"}}}}"#
+                    ));
                 } else {
-                    // litellm's OpenAI client requires a key even when ignored.
-                    "\"dummy\"".to_string()
-                };
-                model_list.push_str(&format!(
-                    "  - model_name: \"{id}/*\"\n    litellm_params:\n      model: \"openai/*\"\n      api_base: \"{api_base}\"\n      api_key: {api_key}\n",
-                    id = entry.id,
-                ));
+                    routes.push(format!(
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"{scheme}"}}"#
+                    ));
+                }
             }
         }
     }
 
-    format!(
-        "# GENERATED by speedwave-runtime (ADR-073) — do not edit.\n\
-         # Secrets are env references resolved by the container entrypoint;\n\
-         # this file must never contain a key value.\n\
-         model_list:\n{model_list}\n\
-         litellm_settings:\n  \
-           drop_params: true\n  \
-           callbacks: litellm_callback.speedwave_usage_logger\n\n\
-         general_settings: {{}}\n"
-    )
+    let routes_json = routes.join(",");
+    format!(r#"{{"routes":[{routes_json}]}}"#)
 }
 
-/// Appends `/v1` to an OpenAI-compatible base URL when absent — litellm's
-/// `openai/` provider expects the versioned root.
-fn ensure_v1_suffix(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/v1")
-    }
-}
-
-/// Usage-callback source, embedded at compile time. LiteLLM resolves the
-/// callbacks module relative to the config dir, so it must sit next to config.yaml.
-const LITELLM_CALLBACK_SRC: &str =
-    include_str!("../../../../containers/litellm/litellm_callback.py");
-
-/// Renders and atomically persists the config (0600 + fsync) plus the
-/// usage-callback module under `<data_dir>/litellm/<project>/`. Also lifts a
-/// legacy `local-llm/api_key` into the llm token namespace (ADR-073 migration).
-pub fn write_litellm_config_in(
+/// Renders and atomically persists the proxy routing config (0600 + fsync) under
+/// `<data_dir>/litellm/<project>/`. Also lifts a legacy `local-llm/api_key`
+/// into the llm token namespace (ADR-073 migration).
+pub fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,
     llm: &LlmConfig,
 ) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
-    let path = litellm_config_path_in(data_dir, project);
+    let path = proxy_config_path_in(data_dir, project);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         crate::fs_perms::ensure_owner_only_dir(parent)?;
-        crate::fs_perms::write_restricted_file_atomic(
-            &parent.join("litellm_callback.py"),
-            LITELLM_CALLBACK_SRC,
-        )?;
     }
     migrate_legacy_local_key_in(data_dir, project, llm);
-    let content = render_litellm_config(llm);
+    let content = render_proxy_config(llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
 
 /// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
 /// every key file's name + content hash (key values folded in as their own
-/// sha256, never raw). Changing it forces a litellm container recreate.
+/// sha256, never raw). Changing it forces a speedwave-proxy container recreate.
 pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -275,16 +252,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spw_key_env_name_normalises_like_worker_env() {
-        assert_eq!(spw_key_env_name("openrouter"), "SPW_KEY_OPENROUTER");
-        assert_eq!(spw_key_env_name("my-anthropic"), "SPW_KEY_MY_ANTHROPIC");
-    }
-
-    /// Golden file: the full provider mix renders exactly this YAML.
-    #[test]
-    fn render_full_provider_mix_golden() {
-        let llm = LlmConfig {
+    fn full_provider_mix() -> LlmConfig {
+        LlmConfig {
             providers: vec![
                 entry("anthropic", LlmProviderKind::AnthropicOauth),
                 LlmProviderEntry {
@@ -305,34 +274,31 @@ mod tests {
                 model: Some("qwen3".into()),
             }),
             ..Default::default()
-        };
+        }
+    }
 
-        let expected = "\
-# GENERATED by speedwave-runtime (ADR-073) — do not edit.
-# Secrets are env references resolved by the container entrypoint;
-# this file must never contain a key value.
-model_list:
-  - model_name: \"anthropic/*\"
-    litellm_params:
-      model: \"anthropic/*\"
-      api_key: os.environ/SPW_KEY_ANTHROPIC_KEY
-  - model_name: \"local/*\"
-    litellm_params:
-      model: \"openai/*\"
-      api_base: \"http://host.docker.internal:9000/v1\"
-      api_key: \"dummy\"
-  - model_name: \"openrouter/*\"
-    litellm_params:
-      model: \"openrouter/*\"
-      api_key: os.environ/SPW_KEY_OPENROUTER
+    #[test]
+    fn render_proxy_config_has_no_key_values_or_canonical_names() {
+        let cfg = full_provider_mix();
+        let out = render_proxy_config(&cfg);
+        assert!(!out.contains("sk-"));
+        assert!(!out.contains("ANTHROPIC_API_KEY") && !out.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(out.contains("SPW_KEY_OPENROUTER")); // env NAME only
+        assert!(!out.contains("callbacks")); // litellm callback machinery gone
+    }
 
-litellm_settings:
-  drop_params: true
-  callbacks: litellm_callback.speedwave_usage_logger
+    #[test]
+    fn spw_key_env_name_normalises_like_worker_env() {
+        assert_eq!(spw_key_env_name("openrouter"), "SPW_KEY_OPENROUTER");
+        assert_eq!(spw_key_env_name("my-anthropic"), "SPW_KEY_MY_ANTHROPIC");
+    }
 
-general_settings: {}
-";
-        assert_eq!(render_litellm_config(&llm), expected);
+    /// Golden file: the full provider mix renders the expected JSON routing config.
+    #[test]
+    fn render_full_provider_mix_golden() {
+        let llm = full_provider_mix();
+        let expected = r#"{"routes":[{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough"},{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none"},{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"}}]}"#;
+        assert_eq!(render_proxy_config(&llm), expected);
     }
 
     #[test]
@@ -350,23 +316,34 @@ general_settings: {}
             ],
             ..Default::default()
         };
-        let yaml = render_litellm_config(&llm);
-        assert!(!yaml.contains("ANTHROPIC_API_KEY"));
-        assert!(!yaml.contains("ANTHROPIC_AUTH_TOKEN"));
-        assert!(!yaml.contains("sk-"));
-        assert!(yaml.contains("os.environ/SPW_KEY_OPENROUTER"));
+        let json = render_proxy_config(&llm);
+        assert!(!json.contains("ANTHROPIC_API_KEY"));
+        assert!(!json.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!json.contains("sk-"));
+        assert!(json.contains("SPW_KEY_OPENROUTER"));
     }
 
     #[test]
-    fn render_oauth_only_has_empty_model_list() {
+    fn render_oauth_only_has_anthropic_passthrough_only() {
         let llm = LlmConfig {
             providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
             ..Default::default()
         };
-        let yaml = render_litellm_config(&llm);
+        let json = render_proxy_config(&llm);
+        // Only the built-in anthropic passthrough route.
         assert!(
-            yaml.contains("model_list:\n\nlitellm_settings"),
-            "oauth-only config must not add model_list entries: {yaml}"
+            json.contains(r#""prefix":"anthropic""#),
+            "anthropic passthrough must be present: {json}"
+        );
+        assert!(
+            json.contains(r#""auth":"passthrough""#),
+            "must be passthrough: {json}"
+        );
+        // No other routes for OAuth-only config.
+        let route_count = json.matches(r#""prefix":"#).count();
+        assert_eq!(
+            route_count, 1,
+            "oauth-only must have exactly one route: {json}"
         );
     }
 
@@ -378,14 +355,16 @@ general_settings: {}
             providers: vec![entry("local", LlmProviderKind::Local), bad_id],
             ..Default::default()
         };
-        let yaml = render_litellm_config(&llm);
-        assert!(!yaml.contains("local/*"), "no base_url → skipped: {yaml}");
-        assert!(!yaml.contains("Bad.Id"), "invalid id → skipped: {yaml}");
+        let json = render_proxy_config(&llm);
+        assert!(
+            !json.contains(r#""prefix":"local""#),
+            "no base_url → skipped: {json}"
+        );
+        assert!(!json.contains("Bad.Id"), "invalid id → skipped: {json}");
     }
 
     #[test]
     fn render_skips_provider_with_invalid_base_url() {
-        // A corrupted base_url is re-validated at render time and dropped.
         for bad in [
             "http://user:pass@host.docker.internal:9000",
             "file:///etc/passwd",
@@ -398,20 +377,12 @@ general_settings: {}
                 }],
                 ..Default::default()
             };
-            let yaml = render_litellm_config(&llm);
+            let json = render_proxy_config(&llm);
             assert!(
-                !yaml.contains("local/*"),
-                "invalid base_url '{bad}' must be skipped, got: {yaml}"
+                !json.contains(r#""prefix":"local""#),
+                "invalid base_url '{bad}' must be skipped, got: {json}"
             );
         }
-    }
-
-    #[test]
-    fn ensure_v1_suffix_variants() {
-        assert_eq!(ensure_v1_suffix("http://h:9000"), "http://h:9000/v1");
-        assert_eq!(ensure_v1_suffix("http://h:9000/"), "http://h:9000/v1");
-        assert_eq!(ensure_v1_suffix("http://h:9000/v1"), "http://h:9000/v1");
-        assert_eq!(ensure_v1_suffix("http://h:9000/v1/"), "http://h:9000/v1");
     }
 
     #[test]
@@ -421,25 +392,20 @@ general_settings: {}
             providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
             ..Default::default()
         };
-        let path = write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        let path = write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         assert!(path.is_file());
-        assert!(path.ends_with("litellm/proj/config.yaml"));
+        assert!(path.ends_with("litellm/proj/proxy.json"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config must be owner-only");
         }
-        // The callback module must land next to config.yaml.
+        // No callback file should be written.
         let callback = path.parent().unwrap().join("litellm_callback.py");
         assert!(
-            callback.is_file(),
-            "callback module must sit next to config"
-        );
-        let src = std::fs::read_to_string(&callback).unwrap();
-        assert!(
-            src.contains("speedwave_usage_logger"),
-            "embedded callback must export the instance the config references"
+            !callback.exists(),
+            "callback module must NOT be written by the forwarder config writer"
         );
     }
 
@@ -462,7 +428,7 @@ general_settings: {}
             }],
             ..Default::default()
         };
-        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
 
         let target =
             super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
@@ -474,12 +440,12 @@ general_settings: {}
 
         // Idempotent + non-clobbering: a newer key in the llm namespace wins.
         std::fs::write(&target, "sk-new-token").unwrap();
-        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
 
         // No legacy file + no target → non-fatal (dummy-key behaviour).
         let dir2 = tempfile::tempdir().unwrap();
-        write_litellm_config_in(dir2.path(), "proj", &llm).unwrap();
+        write_proxy_config_in(dir2.path(), "proj", &llm).unwrap();
     }
 
     #[test]
@@ -514,7 +480,7 @@ general_settings: {}
             providers: vec![entry("local", LlmProviderKind::Local)],
             ..Default::default()
         };
-        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
 
         let d1 = litellm_state_digest_in(dir.path(), "proj");
         assert_eq!(d1.len(), 64);
@@ -541,25 +507,23 @@ general_settings: {}
             }],
             ..Default::default()
         };
-        write_litellm_config_in(dir.path(), "proj", &llm2).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &llm2).unwrap();
         assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
     }
 
     #[test]
-    fn state_digest_covers_every_rendered_config_file() {
+    fn state_digest_covers_proxy_json() {
         let dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             providers: vec![entry("local", LlmProviderKind::Local)],
             ..Default::default()
         };
-        write_litellm_config_in(dir.path(), "proj", &llm).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let d1 = litellm_state_digest_in(dir.path(), "proj");
 
-        let callback = litellm_config_path_in(dir.path(), "proj")
-            .parent()
-            .unwrap()
-            .join("litellm_callback.py");
-        std::fs::write(&callback, "# patched in a newer binary\n").unwrap();
+        // Patching proxy.json must change the digest.
+        let proxy_json = proxy_config_path_in(dir.path(), "proj");
+        std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
         assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
     }
 

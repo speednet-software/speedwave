@@ -23,10 +23,10 @@ mod security_check;
 mod tokens;
 mod workers;
 
-// LiteLLM proxy config rendering + key management (ADR-073).
+// Speedwave proxy config rendering + key management (ADR-073).
 pub use litellm::{
-    litellm_config_path_in, remove_llm_provider_key_in, render_litellm_config, spw_key_env_name,
-    write_litellm_config_in, write_llm_provider_key_in, LITELLM_PORT,
+    proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
+    write_llm_provider_key_in, write_proxy_config_in, LITELLM_PORT,
     SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL, SPEEDWAVE_PROXY_BASE_URL,
 };
 
@@ -305,7 +305,7 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
     // Speedwave proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
-    litellm::write_litellm_config_in(data_dir, project_name, &resolved_config.llm)?;
+    litellm::write_proxy_config_in(data_dir, project_name, &resolved_config.llm)?;
     let litellm_config_dir = data_dir.join("litellm").join(project_name);
     std::fs::create_dir_all(&litellm_config_dir)?;
     let proxy_usage_dir = data_dir
@@ -3490,18 +3490,18 @@ services:
                 .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
             "dummy bearer expected: {env:?}"
         );
-        // The rendered litellm config must carry the matching route.
-        let litellm_cfg = std::fs::read_to_string(
+        // The rendered proxy config must carry the matching route.
+        let proxy_cfg = std::fs::read_to_string(
             data_dir
                 .path()
                 .join("litellm")
                 .join("test-project")
-                .join("config.yaml"),
+                .join("proxy.json"),
         )
         .unwrap();
         assert!(
-            litellm_cfg.contains("model_name: \"local/*\""),
-            "wildcard route must exist for the provider: {litellm_cfg}"
+            proxy_cfg.contains(r#""prefix":"llamacpp""#),
+            "route must exist for the provider: {proxy_cfg}"
         );
     }
 
@@ -3768,16 +3768,16 @@ services:
             Some(true),
             "speedwave-proxy must be read_only"
         );
+        assert_eq!(
+            svc.get("restart").and_then(|r| r.as_str()),
+            Some("unless-stopped"),
+            "speedwave-proxy must restart unless-stopped"
+        );
         let env: Vec<&str> = svc
             .get("environment")
             .and_then(|e| e.as_sequence())
             .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        assert!(
-            env.contains(&"LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true"),
-            "chat-completions forcing env must be present (prompt-cache + \
-             chat-template-kwargs depend on it — see template comment), got {env:?}"
-        );
         let digest_env = env
             .iter()
             .find(|e| e.starts_with("SPW_CONFIG_DIGEST="))

@@ -70,10 +70,13 @@ pub const IMAGES: &[ImageDef] = &[
     ImageDef {
         name: IMAGE_SPEEDWAVE_PROXY,
         context_dir: "containers",
-        containerfile: "containers/Containerfile.litellm",
+        containerfile: "containers/Containerfile.speedwave-proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/litellm.
-        hash_inputs: &["containers/Containerfile.litellm", "containers/litellm"],
+        // Everything the Containerfile COPYies lives under containers/speedwave-proxy.
+        hash_inputs: &[
+            "containers/Containerfile.speedwave-proxy",
+            "containers/speedwave-proxy",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
