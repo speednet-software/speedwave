@@ -11,8 +11,8 @@
 use crate::config::{LlmConfig, LlmProviderKind};
 use std::path::{Path, PathBuf};
 
-/// Port the proxy container listens on (fixed in its entrypoint).
-pub const LITELLM_PORT: u16 = 4000;
+/// Port the proxy container listens on (fixed in the forwarder binary).
+pub const SPEEDWAVE_PROXY_PORT: u16 = 4000;
 
 /// In-network base URL of the proxy as the claude container sees it.
 pub const SPEEDWAVE_PROXY_BASE_URL: &str = "http://speedwave-proxy:4000";
@@ -23,6 +23,11 @@ pub const SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL: &str = "http://speedwave-pr
 
 /// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
 /// uppercased — same normalisation as `plugin::derive_worker_env`).
+///
+/// SSOT-alignment: the in-container inverse is
+/// `containers/speedwave-proxy/src/keys.rs::provider_id_from_env_name`. The
+/// `spw_key_env_name_round_trips_with_proxy_reverse` test below pins
+/// `reverse(forward(id)) == id`; changing this normalisation must update both.
 pub fn spw_key_env_name(provider_id: &str) -> String {
     format!(
         "SPW_KEY_{}",
@@ -30,9 +35,15 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
     )
 }
 
+/// Per-project proxy config dir: `<data_dir>/litellm/<project>`. The on-disk
+/// `litellm` segment is retained (documented path; renaming needs migration).
+pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("litellm").join(project)
+}
+
 /// Path of the rendered config: `<data_dir>/litellm/<project>/proxy.json`.
 pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("litellm").join(project).join("proxy.json")
+    proxy_config_dir_in(data_dir, project).join("proxy.json")
 }
 
 /// Renders the proxy routing config for the project's provider set.
@@ -83,16 +94,19 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 }
+                // The forwarder appends `/v1/messages`; strip a trailing `/v1`
+                // (common in Ollama/LiteLLM base URLs) so it isn't doubled.
+                let base_url = super::llm::strip_trailing_v1(base_url);
                 let id = &entry.id;
-                let scheme = if entry.has_api_key { "bearer" } else { "none" };
+                // Two distinct route shapes: object-auth (key swap) vs string-auth (none).
                 if entry.has_api_key {
                     let env = spw_key_env_name(id);
                     routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"{scheme}"}}}}"#
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"bearer"}}}}"#
                     ));
                 } else {
                     routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"{scheme}"}}"#
+                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"none"}}"#
                     ));
                 }
             }
@@ -126,7 +140,7 @@ pub fn write_proxy_config_in(
 /// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
 /// every key file's name + content hash (key values folded in as their own
 /// sha256, never raw). Changing it forces a speedwave-proxy container recreate.
-pub(crate) fn litellm_state_digest_in(data_dir: &Path, project: &str) -> String {
+pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let config_dir = data_dir.join("litellm").join(project);
@@ -183,7 +197,7 @@ fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) 
         return;
     }
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
-        log::warn!("litellm: local entry flags has_api_key but no legacy key file to migrate");
+        log::warn!("local entry flags has_api_key but no legacy key file to migrate");
         return;
     };
     if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
@@ -299,6 +313,27 @@ mod tests {
         let llm = full_provider_mix();
         let expected = r#"{"routes":[{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough"},{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none"},{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"}}]}"#;
         assert_eq!(render_proxy_config(&llm), expected);
+    }
+
+    #[test]
+    fn render_strips_trailing_v1_so_forwarder_does_not_double_it() {
+        // The forwarder appends `/v1/messages`; a stored base_url ending in `/v1`
+        // (common in Ollama/LiteLLM docs) must NOT survive into proxy.json, or
+        // the upstream URL becomes `…/v1/v1/messages` → 404. (A trailing slash
+        // is rejected by validate_base_url, so `/v1/` never reaches here.)
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                base_url: Some("http://host.docker.internal:9000/v1".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+        let out = render_proxy_config(&llm);
+        assert!(
+            out.contains(r#""prefix":"local","base_url":"http://host.docker.internal:9000""#),
+            "trailing /v1 must be stripped, got: {out}"
+        );
+        assert!(!out.contains("/v1\""), "no /v1 should remain: {out}");
     }
 
     #[test]
@@ -482,23 +517,23 @@ mod tests {
         };
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
 
-        let d1 = litellm_state_digest_in(dir.path(), "proj");
+        let d1 = proxy_state_digest_in(dir.path(), "proj");
         assert_eq!(d1.len(), 64);
         assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(d1, litellm_state_digest_in(dir.path(), "proj"));
+        assert_eq!(d1, proxy_state_digest_in(dir.path(), "proj"));
 
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-abc").unwrap();
-        let d2 = litellm_state_digest_in(dir.path(), "proj");
+        let d2 = proxy_state_digest_in(dir.path(), "proj");
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
         // Same-length rotation must flip the digest: it hashes content, not size/mtime.
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
-        let d3 = litellm_state_digest_in(dir.path(), "proj");
+        let d3 = proxy_state_digest_in(dir.path(), "proj");
         assert_ne!(d2, d3, "same-length key rotation must change the digest");
 
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
-        assert_ne!(d3, litellm_state_digest_in(dir.path(), "proj"));
+        assert_ne!(d3, proxy_state_digest_in(dir.path(), "proj"));
 
         let llm2 = LlmConfig {
             providers: vec![LlmProviderEntry {
@@ -508,7 +543,7 @@ mod tests {
             ..Default::default()
         };
         write_proxy_config_in(dir.path(), "proj", &llm2).unwrap();
-        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+        assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
     }
 
     #[test]
@@ -519,19 +554,19 @@ mod tests {
             ..Default::default()
         };
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
-        let d1 = litellm_state_digest_in(dir.path(), "proj");
+        let d1 = proxy_state_digest_in(dir.path(), "proj");
 
         // Patching proxy.json must change the digest.
         let proxy_json = proxy_config_path_in(dir.path(), "proj");
         std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
-        assert_ne!(d1, litellm_state_digest_in(dir.path(), "proj"));
+        assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
     }
 
     #[test]
     fn state_digest_handles_missing_config_and_tokens() {
         let dir = tempfile::tempdir().unwrap();
-        let d = litellm_state_digest_in(dir.path(), "proj");
+        let d = proxy_state_digest_in(dir.path(), "proj");
         assert_eq!(d.len(), 64);
-        assert_eq!(d, litellm_state_digest_in(dir.path(), "proj"));
+        assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
     }
 }

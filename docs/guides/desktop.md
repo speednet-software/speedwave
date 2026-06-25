@@ -186,9 +186,9 @@ A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates ev
 - **Weekday × hour heatmap** — request volume by local hour, so you can see when the project is busiest.
 - **Per-(day, model) table** — the breakdown the cards roll up.
 
-**Source of truth.** This dashboard reads **only** the proxy's usage log — the `litellm_callback.py` JSONL at `~/.speedwave/usage/<project>/litellm/usage.jsonl`, aggregated host-side by `speedwave_runtime::usage` and surfaced through the `get_llm_usage` command. It is deliberately **separate** from the chat footer's [Session stats bar](#session-stats-bar): the footer reflects the live Claude Code result stream for the current session, while this dashboard is the cross-session record. The two are never summed — the same request would otherwise be counted twice (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
+**Source of truth.** This dashboard reads **only** the proxy's usage log — the forwarder's per-request JSONL line at `~/.speedwave/usage/<project>/speedwave-proxy/usage.jsonl`, aggregated host-side by `speedwave_runtime::usage` and surfaced through the `get_llm_usage` command. It is deliberately **separate** from the chat footer's [Session stats bar](#session-stats-bar): the footer reflects the live Claude Code result stream for the current session, while this dashboard is the cross-session record. The two are never summed — the same request would otherwise be counted twice (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
 
-Numbers reflect what the proxy could measure: cost is shown only where LiteLLM had pricing (local models read `$0`), and a record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
+Numbers reflect what the proxy could measure: cost currently reads `$0` across the board — the MVP forwarder records tokens only, and cost enrichment is a separate follow-up (ADR-073 §usage). A record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
 
 ## Appearance
 

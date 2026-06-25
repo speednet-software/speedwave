@@ -15,19 +15,19 @@ use std::path::{Path, PathBuf};
 // Self-contained concerns split out of this module. Each is re-exported below
 // so the public path `compose::*` is preserved for external callers.
 mod addressing;
-mod litellm;
 mod llm;
 mod plugins;
+mod proxy;
 mod quoting;
 mod security_check;
 mod tokens;
 mod workers;
 
 // Speedwave proxy config rendering + key management (ADR-073).
-pub use litellm::{
-    proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
-    write_llm_provider_key_in, write_proxy_config_in, LITELLM_PORT,
-    SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL, SPEEDWAVE_PROXY_BASE_URL,
+pub use proxy::{
+    proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
+    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in,
+    SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL, SPEEDWAVE_PROXY_BASE_URL, SPEEDWAVE_PROXY_PORT,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
@@ -305,9 +305,9 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
     // Speedwave proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
-    litellm::write_proxy_config_in(data_dir, project_name, &resolved_config.llm)?;
-    let litellm_config_dir = data_dir.join("litellm").join(project_name);
-    std::fs::create_dir_all(&litellm_config_dir)?;
+    proxy::write_proxy_config_in(data_dir, project_name, &resolved_config.llm)?;
+    let proxy_config_dir = proxy::proxy_config_dir_in(data_dir, project_name);
+    std::fs::create_dir_all(&proxy_config_dir)?;
     let proxy_usage_dir = data_dir
         .join("usage")
         .join(project_name)
@@ -316,12 +316,12 @@ pub fn render_compose_in(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&litellm_config_dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&proxy_config_dir, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&proxy_usage_dir, std::fs::Permissions::from_mode(0o700))?;
     }
     yaml = yaml.replace(
         "${SPEEDWAVE_PROXY_CONFIG_DIR}",
-        &to_engine_path(&litellm_config_dir)?,
+        &to_engine_path(&proxy_config_dir)?,
     );
     yaml = yaml.replace(
         "${SPEEDWAVE_PROXY_USAGE_DIR}",
@@ -329,7 +329,7 @@ pub fn render_compose_in(
     );
     yaml = yaml.replace(
         "${SPEEDWAVE_PROXY_CONFIG_DIGEST}",
-        &litellm::litellm_state_digest_in(data_dir, project_name),
+        &proxy::proxy_state_digest_in(data_dir, project_name),
     );
 
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
@@ -3345,7 +3345,7 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Default anthropic: litellm service always exists (ADR-073) but claude env is not redirected until proxy injection active.
+        // Default anthropic: speedwave-proxy service always exists (ADR-073) but claude env is not redirected until proxy injection active.
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
@@ -3391,8 +3391,8 @@ services:
         llm
     }
 
-    /// ADR-073: subscription (oauth) sessions route through the litellm
-    /// /anthropic passthrough and must NOT carry any Bearer/API key env —
+    /// ADR-073: subscription (oauth) sessions route through the proxy's
+    /// anthropic passthrough and must NOT carry any Bearer/API key env —
     /// either would disable Claude Code's OAuth.
     #[test]
     #[serial_test::serial(host_addressing)]
@@ -3433,8 +3433,8 @@ services:
         );
     }
 
-    /// ADR-073: local sessions route through the litellm root with an
-    /// id-prefixed model matching the rendered wildcard route.
+    /// ADR-073: local sessions route through the proxy with an
+    /// id-prefixed model matching the rendered route prefix.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_proxy_injection_local_provider() {
@@ -3499,8 +3499,10 @@ services:
                 .join("proxy.json"),
         )
         .unwrap();
+        // migrate_llm normalises the `llamacpp` alias to the canonical `local`
+        // id (LOCAL_PROVIDERS), matching the `local/qwen3` model asserted above.
         assert!(
-            proxy_cfg.contains(r#""prefix":"llamacpp""#),
+            proxy_cfg.contains(r#""prefix":"local""#),
             "route must exist for the provider: {proxy_cfg}"
         );
     }

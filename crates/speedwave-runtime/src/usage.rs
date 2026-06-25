@@ -1,5 +1,5 @@
-//! LLM usage aggregation (ADR-073): reads the litellm callback JSONL
-//! (`<data_dir>/usage/<project>/litellm/usage.jsonl`) for the Desktop
+//! LLM usage aggregation (ADR-073): reads the speedwave-proxy usage JSONL
+//! (`<data_dir>/usage/<project>/speedwave-proxy/usage.jsonl`) for the Desktop
 //! dashboard. Records are deduplicated by `response_id`, first-seen wins.
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub struct UsageRecord {
     /// Provider response id (dedup key when present).
     #[serde(default)]
     pub response_id: Option<String>,
-    /// Cost in USD when litellm could price the call (None for local).
+    /// Cost in USD when the call could be priced (None — omitted in the MVP forwarder).
     #[serde(default)]
     pub cost_usd: Option<f64>,
     /// Wall-clock latency of the request, milliseconds.
@@ -61,7 +61,7 @@ pub struct UsageBucket {
     pub cache_read: u64,
     /// Summed prompt-cache write tokens.
     pub cache_write: u64,
-    /// Summed cost in USD (0.0 where litellm had no pricing — local models).
+    /// Summed cost in USD (0.0 in the MVP forwarder — cost enrichment is a follow-up).
     pub cost_usd: f64,
     /// Throughput numerator: completion tokens from success records that also
     /// carried a latency. Paired with `throughput_latency_ms_sum`.

@@ -86,4 +86,36 @@ mod tests {
         assert!(provider_id_from_env_name("OPENROUTER").is_none());
         assert!(provider_id_from_env_name("ANTHROPIC_API_KEY").is_none());
     }
+
+    /// Mirror of the host-side `spw_key_env_name` (compose/proxy.rs). Kept here
+    /// because this crate cannot depend on speedwave-runtime; the round-trip
+    /// test below pins that the two halves stay inverse.
+    fn spw_key_env_name(provider_id: &str) -> String {
+        format!(
+            "SPW_KEY_{}",
+            provider_id.to_ascii_uppercase().replace('-', "_")
+        )
+    }
+
+    #[test]
+    fn round_trips_with_host_forward_normalisation() {
+        // For every valid slug, reverse(forward(id)) == id. If the host changes
+        // its normalisation, this test (and the SSOT-alignment note on
+        // spw_key_env_name) flags the divergence.
+        for id in [
+            "openrouter",
+            "local",
+            "my-anthropic",
+            "a-b-c-1-2",
+            "x",
+            &"a".repeat(64),
+        ] {
+            let env = spw_key_env_name(id);
+            assert_eq!(
+                provider_id_from_env_name(&env).as_deref(),
+                Some(id),
+                "round-trip failed for slug {id:?} via env {env:?}"
+            );
+        }
+    }
 }

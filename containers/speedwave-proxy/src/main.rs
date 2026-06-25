@@ -27,6 +27,8 @@ fn build_router(cfg: Arc<Config>) -> Router {
 
 #[tokio::main]
 async fn main() {
+    // Default to `info` so swap-leg warnings surface; `RUST_LOG` overrides.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cfg = Arc::new(Config::default());
     let app = build_router(cfg);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4000")

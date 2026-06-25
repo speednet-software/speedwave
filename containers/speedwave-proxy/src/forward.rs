@@ -72,17 +72,20 @@ pub fn outbound_headers_with(
                 }
             }
             // Inject real provider key according to scheme.
-            if let Some(key) = lookup(env) {
-                match scheme {
-                    Scheme::Bearer => {
-                        let value = format!("Bearer {key}");
-                        if let Ok(v) = value.parse() {
-                            out.insert(axum::http::header::AUTHORIZATION, v);
-                        }
+            match (scheme, lookup(env)) {
+                (Scheme::Bearer, Some(key)) => {
+                    let value = format!("Bearer {key}");
+                    if let Ok(v) = value.parse() {
+                        out.insert(axum::http::header::AUTHORIZATION, v);
                     }
-                    Scheme::None => {
-                        // Local servers accept any/none — no auth header.
-                    }
+                }
+                (Scheme::Bearer, None) => {
+                    // Key absent or env name tampered — forward with NO auth (the
+                    // provider answers 401). Surface it; env name only, never a value.
+                    log::warn!("swap leg: no provider key for {env}; forwarding without auth");
+                }
+                (Scheme::None, _) => {
+                    // Local servers accept any/none — no auth header expected.
                 }
             }
         }
@@ -251,6 +254,28 @@ mod tests {
     fn passthrough_never_injects_a_stored_key() {
         let out = outbound_headers(&Auth::Passthrough, &HeaderMap::new());
         assert!(out.get("authorization").is_none() && out.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn swap_bearer_with_no_key_drops_dummy_and_injects_nothing() {
+        // Missing/tampered key: dummy auth dropped, no real key available → the
+        // request forwards with NO authorization header (provider answers 401).
+        let mut h = HeaderMap::new();
+        h.insert(
+            "authorization",
+            "Bearer sk-no-key-required".parse().unwrap(),
+        );
+        h.insert("x-api-key", "sk-no-key-required".parse().unwrap());
+        let auth = Auth::Swap {
+            env: "SPW_KEY_OPENROUTER".into(),
+            scheme: Scheme::Bearer,
+        };
+        let out = outbound_headers_with(&auth, &h, |_| None);
+        assert!(
+            out.get("authorization").is_none(),
+            "no key → no Bearer header (dummy must not leak through)"
+        );
+        assert!(out.get("x-api-key").is_none());
     }
 
     #[test]
