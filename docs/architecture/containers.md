@@ -9,9 +9,9 @@ Each project runs an isolated set of containers on a dedicated network:
 ```
 speedwave_<project>_network
 ├── speedwave_<project>_claude      # Claude Code — no tokens, no container socket
-├── speedwave_<project>_litellm     # LLM proxy (port 4000, ADR-073) — routes every session
-│   ├── /anthropic passthrough      # Subscription OAuth / API key → api.anthropic.com
-│   └── /v1/messages (unified)      # Local / OpenRouter / OpenAI-compatible backends
+├── speedwave_<project>_speedwave_proxy  # Rust forwarder (port 4000, ADR-073) — routes every session
+│   ├── anthropic passthrough       # Subscription OAuth / API key → api.anthropic.com (verbatim headers)
+│   └── /v1/messages (prefix route) # Local / OpenRouter backends — native Anthropic, SSE relayed, no translation
 ├── speedwave_<project>_mcp_hub     # MCP Hub (port 4000) — ONLY MCP server Claude sees
 │   ├── search_tools                # Discovers OS tools alongside Slack, GitLab, etc.
 │   ├── execute_code                # os.listReminders(), os.createEvent(), etc.
@@ -19,10 +19,10 @@ speedwave_<project>_network
 └── speedwave_<project>_mcp_<service>  # Per-service workers (own tokens only)
 ```
 
-- The Claude container has **no tokens** and **no container socket** — it talks to the LiteLLM proxy (LLM traffic) and the MCP Hub (tools)
+- The Claude container has **no tokens** and **no container socket** — it talks to the speedwave-proxy forwarder (LLM traffic) and the MCP Hub (tools)
 - Each MCP worker mounts only its own service credentials at `/tokens` (read-only)
 - The Hub has **zero tokens** and acts as a router
-- The LiteLLM proxy is a worker-class token holder: per-provider LLM keys mount `:ro` at `/tokens` (`tokens/<project>/llm/`), the rendered config mounts `:ro` at `/config`, and the usage JSONL sink is its only writable mount (`/usage`). No host port, no database, no admin UI (ADR-073)
+- The speedwave-proxy is a worker-class token holder: per-provider LLM keys mount `:ro` at `/tokens` (`tokens/<project>/llm/`), the rendered routing config mounts `:ro` at `/config`, and the usage JSONL sink is its only writable mount (`/usage`). No host port, no database, no admin UI; it holds no Anthropic credential and relays native Anthropic streams without translation (ADR-073)
 
 ## Compose Template
 
@@ -39,7 +39,7 @@ carries only placeholders the renderer fills — see ADR-068):
 
 - **Claude container:** fixed **6 GiB** cap on every platform/host size. Claude Code needs 4 GB+ officially and its process is light (heavy compute is server-side), so a fixed cap is generous and immune to drift when workers are added. (`resources.rs::CLAUDE_MEMORY_GIB`)
 - **MCP Hub:** 512 MiB, `cpus: 1.0` (on the path of every request, does real CPU work)
-- **LiteLLM proxy:** 512 MiB, `cpus: 1.0` (`resources.rs::LITELLM_RESOURCES`) — I/O-bound forwarding/translation on every inference request (ADR-073)
+- **Speedwave proxy:** 128 MiB, `cpus: 0.5` (`resources.rs::SPEEDWAVE_PROXY_RESOURCES`) — a tiny Rust forwarder that relays the SSE byte stream (no translation); measured ~3-4 MiB idle / ~37 MiB peak, so 128 MiB is ≈3.5× headroom (ADR-073)
 - **MCP workers:** 128 MiB / `cpus: 0.5` each (`resources::STANDARD_WORKER_RESOURCES`), except:
   - `mcp-github` — 256 MiB (Octokit + throttling/retry plugins + `octokit.paginate` buffering full result sets OOM-kills a 128 MiB cap on a busy repo)
   - `mcp-office` — 1 GiB / `cpus: 1.0`; LibreOffice headless needs the headroom. Internal-only network (no egress) — see ADR-055

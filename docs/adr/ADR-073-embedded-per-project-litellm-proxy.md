@@ -1,97 +1,116 @@
-# ADR-073: Embedded Per-Project LiteLLM Proxy
+# ADR-073: Embedded Per-Project Speedwave Proxy
 
-> **Status:** Accepted — supersedes ADR-040 in part (the "no proxy" decision; the credential-handling and SSRF rules of ADR-040 are upheld and extended)
-> **Context:** New product requirements — multi-provider choice (Anthropic subscription, Anthropic API key, local servers, OpenRouter, any OpenAI-compatible endpoint), per-project usage accounting, and in-session model switching — cannot be met by direct env injection alone.
+> **Status:** Accepted — supersedes ADR-040 in part (the "no proxy" decision; the credential-handling and SSRF rules of ADR-040 are upheld and extended). An earlier draft of this ADR proposed a Python LiteLLM proxy; that approach never shipped in a release and is replaced wholesale by the first-party Rust forwarder described here.
+> **Context:** New product requirements — multi-provider choice (Anthropic subscription, Anthropic API key, local servers, OpenRouter, any backend that speaks the Anthropic Messages API), per-project usage accounting, and in-session model switching — cannot be met by direct env injection alone. They also do not require protocol translation: every backend Speedwave targets now speaks the native Anthropic Messages API.
 
 ## Decision
 
-Ship a LiteLLM proxy as a per-project compose service (`litellm`). Claude Code's `ANTHROPIC_BASE_URL` points at it for every provider class; the proxy routes to the configured backend. The pre-proxy direct-injection path remains behind the `llm.proxy_enabled` kill-switch (default on) for one release and is removed in N+2.
+Ship `speedwave-proxy` — a tiny first-party Rust Anthropic-passthrough forwarder — as a per-project compose service. Claude Code's `ANTHROPIC_BASE_URL` points at it for every provider class. The forwarder receives `POST /v1/messages` (+ `count_tokens`), routes by the model prefix in the request body to the configured backend, relays the SSE stream byte-for-byte with **no translation**, sniffs usage frames, and appends one usage line per request. The pre-proxy direct-injection path remains behind the `llm.proxy_enabled` kill-switch (default on) for one release and is removed in N+2.
 
 ```
-claude ──ANTHROPIC_BASE_URL──► litellm:4000 ──┬─ /anthropic (passthrough) ─► api.anthropic.com
-        (per-project network)                 ├─ openrouter/* ─────────────► openrouter.ai
-                                              └─ <id>/* (openai translation)► local / openai-compat server
+claude ──ANTHROPIC_BASE_URL──► speedwave-proxy:4000 ──┬─ anthropic prefix (passthrough) ─► api.anthropic.com
+        (per-project network)                         ├─ openrouter/* (key swap) ────────► openrouter.ai
+                                                       └─ <id>/* (key swap) ──────────────► local server
+                                                          (every leg: native Anthropic /v1/messages, SSE relayed verbatim)
 ```
 
-## Why this does not resurrect the ADR-040 attack surface
+The forwarder is ~6 source files (`main.rs`, `router.rs`, `forward.rs`, `usage.rs`, `count_tokens.rs`, `config.rs`) built on axum + tokio + reqwest/rustls + serde, shipped as a static binary in a distroless/scratch image.
 
-ADR-040 removed a **shared, `:latest`-pulled, translation-mandatory** LiteLLM after a poisoned-dependency incident. This ADR re-introduces LiteLLM under a different threat model:
+## Why a Rust forwarder instead of LiteLLM
 
-- **Exact pin + hash verification.** `containers/litellm/requirements.in` pins `litellm[proxy]==1.88.1`; `requirements.txt` is `uv pip compile --generate-hashes` output and the image installs with `pip install --require-hashes`[^1]. A poisoned re-upload of any dependency fails the build instead of shipping.
-- **Built locally, never pulled.** `speedwave-litellm` is in `build.rs::IMAGES` with `pull_policy: never`, like every Speedwave image.
-- **No Admin UI, no database, no virtual keys, no host port.** The proxy is reachable only inside `speedwave_<project>_network`. The entire LiteLLM management plane (the part with the richest CVE history) is never enabled.
-- **Worker-class hardening.** `read_only`, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, resource caps from `resources.rs::LITELLM_RESOURCES`, and a dedicated `LITELLM_VOLUMES` security rule asserting the mount profile (config `:ro`, tokens `:ro`, usage as the only `:rw`) plus a host-network ban.
-- **Version bumps are audited.** Bumping the pin = editing `requirements.in`, regenerating hashes, and reviewing the upstream changelog (procedure documented in the file header).
+The earlier draft of this ADR re-introduced LiteLLM (the upstream removed in ADR-040) under a tightened threat model: an exact pin, `pip install --require-hashes`[^1], no admin UI/database/host port, and worker-class hardening. That eliminated the _runtime_ attack surface but kept the _supply-chain_ one — a large Python dependency tree whose only defense was the `--require-hashes` machinery, which had to be regenerated and changelog-audited on every version bump.
+
+Two facts made the proxy's whole reason for existing — protocol translation — unnecessary:
+
+- **Every supported backend now speaks the native Anthropic Messages API.** Anthropic itself (passthrough), OpenRouter[^2], llama.cpp[^3], vLLM[^4], LM Studio[^5], and Ollama[^6] all expose `POST /v1/messages` with streaming. A backend that _only_ speaks OpenAI Chat Completions is out of scope (documented minimum-version requirement + fail-fast), because the forwarder never translates Anthropic↔OpenAI.
+- **The only behaviors Speedwave actually needs are routing, a verbatim/swap header decision, an SSE byte relay, and a usage sniff** — a few hundred lines of Rust, not a translation engine.
+
+The supply-chain win: the forwarder has **no Python dependencies**. It retires the `requirements.in` / `requirements.txt --generate-hashes` / `--require-hashes` machinery[^1] that was ADR-040's central concern entirely — the image is a multi-stage Rust build over a single `Cargo.lock` (built `--locked`), and every external `FROM` is digest-pinned (`@sha256:`, enforced by `build.rs::every_base_image_is_digest_pinned`). Built locally, never pulled (`pull_policy: never`).
 
 ## Topology: per project, not shared
 
-One `litellm` container per project, inside that project's compose network. A shared instance would require a host port (local exposure of all keys without auth, or virtual keys + Postgres with them), would hold every project's keys in one process, and a settings change in one project would restart streams in all others. Per-project instances exist only while the project runs; the cost is ~512 MiB cap per active project (counted in adaptive VM sizing, ADR-068).
+One `speedwave-proxy` container per project, inside that project's compose network. A shared instance would require a host port (local exposure of all keys without auth), would hold every project's keys in one process, and a settings change in one project would restart streams in all others. Per-project instances exist only while the project runs.
+
+The forwarder is dramatically lighter than the LiteLLM container it replaces: measured **~3-4 MiB idle and ~37 MiB peak** under 15 concurrent 64k streams on the dev Lima VM. The resource cap is **128 MiB** (≈3.5× the measured peak — `resources.rs::SPEEDWAVE_PROXY_RESOURCES`), down from the 512 MiB LiteLLM cap, counted in adaptive VM sizing (ADR-068).
 
 ## Provider model (config schema v3)
 
-`LlmConfig` gains `providers: Vec<LlmProviderEntry>` + `active: {provider_id, model}` + `schema_version`. Entry kinds: `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`, `open_ai_compat`. Provider ids are plugin-grade slugs (`^[a-z][a-z0-9-]{0,63}$`) because they become token file names and `SPW_KEY_<ID>` env names.
+`LlmConfig` carries `providers: Vec<LlmProviderEntry>` + `active: {provider_id, model}` + `schema_version`. Entry kinds: `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`, `open_ai_compat`. Provider ids are plugin-grade slugs (`^[a-z][a-z0-9-]{0,63}$`) because they become token file names and `SPW_KEY_<ID>` env names.
 
 - **Provenance invariant (v3):** the routing model belongs to its provider. `LlmProviderEntry.model` is the per-provider source of truth; `active.model` is a pointer that must agree with the active entry. The render derives the model via `LlmConfig::effective_active_model` — a foreign `active.model` (e.g. an OpenRouter id left under an Anthropic entry) is never injected as `ANTHROPIC_MODEL`. An anthropic provider with a `provider/model`-shaped (foreign) id falls back to the account default.
-- **v3 self-heal:** `migrate_llm_to_v2` quarantines a foreign model under an anthropic entry (clears it + reconciles `active.model`); `heal_llm_config_on_disk` (run once at Desktop startup, under the config lock) persists the healed config so an already-corrupted on-disk config repairs itself. Idempotent.
+- **v3 self-heal:** `migrate_llm_to_v2` quarantines a foreign model under an anthropic entry (clears it + reconciles `active.model`); `heal_llm_config_on_disk` (run once at Desktop startup, under the config lock) persists the healed config. Idempotent.
 - **Migration:** v1 flat configs lift on resolve (`migrate_llm_to_v2`): legacy `anthropic` classifies as `anthropic_api_key` iff `secrets/<project>/anthropic_api_key` exists, else `anthropic_oauth`; local aliases normalise to one `local` entry. Idempotent.
 - **Downgrade story:** every save also writes derived v1 fields (`sync_llm_legacy_fields`) for one release. For OR/OpenAiCompat (no v1 equivalent) the flat `model` is left `None` so the masqueraded `provider=anthropic` pair never carries a foreign model.
 - **SSRF rule kept:** repo `.speedwave.json` can still set `model` only — never providers, base URLs, the active selection, or the kill-switch.
 
-## Authentication per provider kind
+## Routing and authentication per provider kind
 
-| Kind                       | Route                                   | Auth                                                                         | Notes                                                                                                                                                                                                                                            |
-| -------------------------- | --------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `anthropic_oauth`          | `litellm:4000/anthropic` (passthrough)  | Claude Code's own OAuth `Authorization` header, forwarded verbatim           | **No auth env may be injected** — any of `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` disables Claude Code OAuth. Login flow unchanged (ADR-052): OAuth endpoints are hardcoded to api.anthropic.com in Claude Code[^2] and never touch the proxy. |
-| `anthropic_api_key`        | same passthrough                        | `ANTHROPIC_API_KEY` env on `claude` (as today), forwarded as `x-api-key`     | Deliberate deviation from "all keys into litellm tokens": keeping the key client-side preserves `/model` alias + `[1m]` semantics and avoids prefix-routing the Anthropic catalogue. ADR-040's env-visibility residual risk applies unchanged.   |
-| `local` / `open_ai_compat` | `litellm:4000` (unified `/v1/messages`) | dummy Bearer (`sk-no-key-required`); backend key (if any) via `SPW_KEY_<ID>` | Model is sent as `<provider_id>/<model>` matching the rendered wildcard route; LiteLLM translates Anthropic⇄OpenAI. `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` all remap to the routed id so built-in `/model` aliases hit the wildcard route instead of a bare `claude-*` (404). `ANTHROPIC_DEFAULT_HAIKU_MODEL` (replacing the deprecated `ANTHROPIC_SMALL_FAST_MODEL`) pins subagent traffic to the same model. |
-| `open_router`              | `litellm:4000`                          | dummy Bearer; OpenRouter key via `SPW_KEY_OPENROUTER`                        | `openrouter/*` wildcard route.                                                                                                                                                                                                                   |
+`resolve(cfg, model)` splits the request-body `model` on the first `/`; the prefix selects a route. A bare model with no slash (e.g. `claude-opus-4-8`) routes to the `anthropic` passthrough. Routes are read from `/config/proxy.json`, rendered per project (`compose::render_proxy_config`); the config carries no secrets — non-Anthropic keys are referenced by env name only (`SPW_KEY_<ID>`), never by value, and never under a canonical Anthropic name.
 
-**The passthrough invariant (validated in the Phase 0 spike):** LiteLLM's `/anthropic` route forwards client headers untouched **only while the proxy itself holds no Anthropic credential** — `get_auth_header` would otherwise override the client's header[^3]. Therefore the litellm container must never see `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` env names; provider keys are exported exclusively as `SPW_KEY_<ID>` by the entrypoint (enforced by a BATS test and the renderer's no-canonical-names test).
+| Kind                       | Route prefix → backend                          | Auth                                                                   | Notes                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anthropic_oauth`          | `anthropic` → `api.anthropic.com` (passthrough) | Claude Code's own OAuth `Authorization`, forwarded **verbatim**        | **No auth env may be injected** — any of `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` disables Claude Code OAuth. Login flow unchanged (ADR-052): OAuth endpoints are hardcoded to api.anthropic.com in Claude Code[^7] and never touch the proxy.                                                                                                                     |
+| `anthropic_api_key`        | same passthrough                                | `ANTHROPIC_API_KEY` env on `claude`, forwarded as `x-api-key`          | Deliberate deviation from "all keys into proxy tokens": keeping the key client-side preserves `/model` alias + `[1m]` semantics and avoids prefix-routing the Anthropic catalogue. ADR-040's env-visibility residual risk applies unchanged.                                                                                                                         |
+| `local` / `open_ai_compat` | `<provider_id>` → local / remote server         | dummy Bearer dropped; backend key (if any) via `SPW_KEY_<ID>`          | Model is sent as `<provider_id>/<model>` matching the rendered route. `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` all remap to the routed id so built-in `/model` aliases hit the route instead of a bare `claude-*` (404). `ANTHROPIC_DEFAULT_HAIKU_MODEL` (replacing the deprecated `ANTHROPIC_SMALL_FAST_MODEL`) pins subagent traffic to the same model. |
+| `open_router`              | `openrouter` → `openrouter.ai`                  | dummy Bearer dropped; OpenRouter key via `SPW_KEY_OPENROUTER` (Bearer) | OpenRouter exposes the Anthropic Messages API natively[^2].                                                                                                                                                                                                                                                                                                          |
 
-**Session granularity:** the provider class is fixed per session. Within a session `/model` switches freely across models _of the configured providers_ (wildcard routes); built-in aliases (`opus`/`sonnet`/`haiku`/`fable`) are remapped to the routed id via the `ANTHROPIC_DEFAULT_*_MODEL` env so they do not 404 on a non-anthropic provider. A `/model` choice Claude Code persists to the container `settings.json` that disagrees with the injected `ANTHROPIC_MODEL` is dropped by the entrypoint on next start (only when `ANTHROPIC_MODEL` is set; an empty env = account default leaves the user's choice intact). Mixing the subscription with non-Anthropic providers in one session is impossible because the unified root forwards only `x-*` headers, not `Authorization`[^3]. Content-based dynamic routing is explicitly out of scope (future ADR).
+**The verbatim OAuth passthrough invariant (non-negotiable):** on the Anthropic leg the forwarder copies the client's `authorization`, `x-api-key`, `anthropic-beta`, `anthropic-version`, and `content-type` headers to `api.anthropic.com` untouched and **injects nothing** — it holds no Anthropic credential of its own. On a swap leg it **drops** the inbound dummy auth (`sk-no-key-required` that Claude Code sends on non-Anthropic legs), keeps the non-auth Anthropic headers, and sets the scheme'd header from the `SPW_KEY_<ID>` value. No env name containing `TOKEN`/`KEY`/`SECRET` beyond `SPW_KEY_*` ever reaches the forwarder. This is enforced by `forward.rs` unit tests (`passthrough_forwards_oauth_bearer_verbatim`, `passthrough_never_injects_a_stored_key`, `swap_drops_dummy_and_injects_provider_key`) and the renderer's no-key-values/no-canonical-names test.
+
+**Session granularity:** the provider class is fixed per session. Within a session `/model` switches freely across models of the configured providers; built-in aliases are remapped via `ANTHROPIC_DEFAULT_*_MODEL` so they do not 404 on a non-anthropic provider. Mixing the subscription with non-Anthropic providers in one session is impossible because passthrough forwards the OAuth `Authorization` only to api.anthropic.com. Content-based dynamic routing is explicitly out of scope (future ADR).
 
 **Limitation:** a `local` provider with custom headers falls back to the direct path — headers are addressed to the LLM server and the proxy would consume them.
 
-## Key handling
+## No translation
 
-Values live in `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (0600, atomic, validated: `Bearer ` stripped, CRLF rejected); config carries only `has_api_key`. The directory mounts `:ro` at `/tokens`; the entrypoint exports each file as `SPW_KEY_<ID>` (slug re-validated in-container with `LC_ALL=C`, defense in depth). The rendered `config.yaml` references keys as `os.environ/SPW_KEY_<ID>` and never contains values.
+The forwarder relays the upstream byte stream unbuffered (channel + `ReceiverStream`, no buffering) and never rewrites the body. Because every supported backend speaks native Anthropic `/v1/messages` with streaming[^2][^3][^4][^5][^6], there is no Anthropic↔OpenAI translation step — the source of LiteLLM's pydantic-bridge noise, its streaming-logging gaps, and most of its CPU cost. A pure OpenAI-only backend is therefore unsupported by design; the docs state the minimum versions that added the Anthropic endpoint, and an OpenAI-only server fails fast rather than being silently mistranslated.
 
-## Usage accounting
+## count_tokens shim
 
-A custom callback (`litellm_callback.py`, baked into the image) appends one JSON line per request to `/usage/usage.jsonl` — the per-project bind mount `usage/<project>/litellm/`. Two capture paths are required on litellm 1.88.1: success/failure events (non-streaming + streaming passthrough) and the `async_post_call_streaming_iterator_hook` (streamed unified-route requests emit **no** success events from bridged providers — observed on 1.88.1 and 1.89.0rc2; for those, usage rides the final `message_delta` SSE frame)[^4].
+Claude Code probes `POST /v1/messages/count_tokens` before a turn. Some backends do not implement it: Ollama returns 404 and then cascades into 500s with growing timeouts until the server becomes unresponsive[^6]. The forwarder intercepts the route and returns a synthetic `200 {"input_tokens":0}` without any upstream call, so the probe never reaches a backend that mishandles it. This is harmless for backends that _do_ support count_tokens (llama.cpp implements it[^3]) — Claude Code only uses the value as a soft pre-flight estimate, and the real token counts still come from the streamed `usage` frames.
 
-Host-side, `speedwave_runtime::usage` aggregates per day/model with `response_id` dedup and 10 MiB rotation. **Source-of-truth split:** the JSONL is the only input to the usage dashboard; the Claude Code result stream (`total_cost_usd`/`modelUsage`) remains the per-session chat statistic. They are never summed — that would double count.
+## Usage accounting (per backend)
+
+The relay task sniffs SSE frames as they pass and, on stream end, appends exactly one compact JSON line to `/usage/usage.jsonl` (per-project bind mount `usage/<project>/speedwave-proxy/`). The line uses the exact field names the host aggregator reads (`ts, capture, status, model, response_id, cost_usd, latency_ms, prompt_tokens, completion_tokens, cache_read, cache_write`); the timestamp is RFC3339-millis with a local colon offset (matching `log_ts::log_timestamp`). Anthropic `input_tokens→prompt_tokens`, `output_tokens→completion_tokens`, `cache_read_input_tokens→cache_read`, `cache_creation_input_tokens→cache_write`; `response_id` from `message_start.message.id`.
+
+Per-backend nuances captured directly from the wire (no callback, no translation bridge):
+
+- **`input_tokens` from `message_start` OR the last non-zero `message_delta`** — bridged backends (e.g. vLLM) sometimes report prompt tokens only on the final delta.
+- **No usage frame → no line.** A stream that never carried a `usage` block is skipped rather than logged as `0/0` (prevents zero-only noise).
+- **A legitimate `0/0` is still emitted** (e.g. an OpenRouter cache hit) — the sniffer distinguishes "never seen" from "seen and zero".
+
+Host-side, `speedwave_runtime::usage` aggregates per day/model with `response_id` dedup and 10 MiB rotation. **Source-of-truth split:** the JSONL is the only input to the usage dashboard; the Claude Code result stream (`total_cost_usd`/`modelUsage`) remains the per-session chat statistic. They are never summed. `cost_usd` is omitted for the MVP (token parity only; the reader does `unwrap_or(0.0)`); the cost follow-up (OpenRouter inline/lookup pricing + Anthropic prices from the `ANTHROPIC_MODELS` SSOT) is a separate change.
 
 JSONL over SQLite is deliberate: the file crosses the VM boundary on a bind mount (virtiofs/9p), where SQLite locking is unreliable; append-only text degrades to one truncated line on crash, which the aggregator skips and reports.
 
 ## Hot reload
 
-`ContainerRuntime::compose_up_service(project, "litellm")` recreates only the proxy after an LLM-settings change (config re-render + targeted `up -d --force-recreate litellm`); the claude container restarts only when its own env changed. Service names are validated against `BUILT_IN_SERVICES` before reaching engine argv.
+`ContainerRuntime::compose_up_service(project, "speedwave-proxy")` recreates only the forwarder after an LLM-settings change (config re-render + targeted `up -d --force-recreate`); the claude container restarts only when its own env changed. Service names are validated against `BUILT_IN_SERVICES` before reaching engine argv.
 
-The Settings UI discriminates the two paths with an `activeKey` over `provider_id | model | kind | has_custom_headers` — everything that changes the claude container env. Proxy-path `base_url` is deliberately excluded (it re-renders the litellm config, for which the targeted reload suffices); changing kind, model, or the custom-headers→direct-path toggle flips the key and forces a full restart so the new claude env is injected.
-
-The full-restart path relies on nerdctl's config-hash convergence, which only recreates services whose compose definition changed — and neither the bind-mounted `/config` files nor the `/tokens` key files are part of that definition, while litellm loads its config and the entrypoint exports keys only at container start. The renderer therefore injects `SPW_CONFIG_DIGEST` (sha256 over each rendered file under `litellm/<project>/` — name + full content — plus each key file's name + a sha256 of its content; never raw key values) into the litellm service env, making any config, callback or key change a compose-definition change. Content-hashing the keys (rather than size/mtime) means even a rotated same-length key flips the digest. Image-level changes (Containerfile, requirements, entrypoint, callback source) propagate independently via the per-image build-input hash tags (ADR-072).
-
-## Known noise (pinned version)
-
-litellm 1.88.1 logs a background `pydantic` validation error per streamed translated request (its internal logging bridge; fixed upstream in 1.89.x). Responses and usage capture are unaffected — the iterator hook does not depend on that code path. The pin bump to 1.89.0 stable removes the noise.
+nerdctl's config-hash convergence only recreates services whose compose definition changed — and neither the bind-mounted `/config` files nor the `/tokens` key files are part of that definition, while the forwarder reads its config and resolves keys only at container start. The renderer therefore injects `SPW_CONFIG_DIGEST` (sha256 over each rendered file under the project's config dir — name + full content — plus each key file's name + a sha256 of its content; never raw key values) into the service env, making any config or key change a compose-definition change. Image-level changes (Containerfile, Cargo sources) propagate independently via the per-image build-input hash tags (ADR-072).
 
 ## Where it lives in code
 
-- Image: `containers/Containerfile.litellm`, `containers/litellm/{requirements.in,requirements.txt,litellm_callback.py,entrypoint.sh}`
-- Compose: `containers/compose.template.yml` (`litellm` service), `compose/mod.rs` (mount dirs + substitution), `resources.rs::LITELLM_RESOURCES`
-- Config renderer + keys: `compose/litellm.rs`; token namespace: `compose/tokens.rs` (`llm` service)
+- Forwarder: `containers/speedwave-proxy/src/{main,router,forward,usage,count_tokens,config}.rs` (standalone cargo project, built `--locked`)
+- Image: `containers/Containerfile.speedwave-proxy` (multi-stage Rust → distroless/scratch, digest-pinned)
+- Compose: `containers/compose.template.yml` (`speedwave-proxy` service), `compose/mod.rs` (mount dirs + substitution), `resources.rs::SPEEDWAVE_PROXY_RESOURCES`
+- Config renderer + keys: `compose/litellm.rs` (`render_proxy_config`); token namespace: `compose/tokens.rs` (`llm` service)
 - Schema + migration: `config.rs` (`LlmProviderEntry`, `migrate_llm_to_v2`, `sync_llm_legacy_fields`, `proxy_enabled`)
-- Routing: `compose/llm.rs` (`apply_llm_config_proxy` / `apply_llm_config_legacy_in`)
-- Security: `compose/security_check.rs` (`LITELLM_VOLUMES`), `log_sanitizer.rs` (Google key rule)
+- Routing/env injection: `compose/llm.rs` (`apply_llm_config_proxy` / `apply_llm_config_legacy_in`)
+- Security: `compose/security_check.rs` (proxy-volumes rule), `log_sanitizer.rs` (Google key rule)
 - Usage: `crates/speedwave-runtime/src/usage.rs`, desktop `llm_cmd.rs::get_llm_usage`
 - Auth gating: desktop `setup_wizard.rs::project_needs_anthropic_auth`
 - Per-service recreate: `runtime/mod.rs::compose_up_service` (+ Lima/WSL impls, `LockedRuntime`, mock)
 
-[^1]: pip `--require-hashes` mode: https://pip.pypa.io/en/stable/topics/secure-installs/
+[^1]: pip `--require-hashes` secure-installs mode (the supply-chain machinery this design retires by having no Python deps): https://pip.pypa.io/en/stable/topics/secure-installs/
 
-[^2]: Claude Code OAuth/admin endpoints ignore `ANTHROPIC_BASE_URL`: https://github.com/anthropics/claude-code/issues/48011
+[^2]: OpenRouter exposes the Anthropic Messages API (`POST /v1/messages`, native request/response + streaming): https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-messages
 
-[^3]: LiteLLM passthrough forwards client headers, with proxy-side credentials taking precedence when set; the unified root forwards only `x-*`/`anthropic-beta` headers (`_get_forwardable_headers`): https://docs.litellm.ai/docs/pass_through/anthropic_completion and litellm source `proxy/pass_through_endpoints/llm_passthrough_endpoints.py` (`anthropic_proxy_route`), `proxy/litellm_pre_call_utils.py` (verified against the pinned 1.88.1 wheel in the Phase 0 spike).
+[^3]: llama.cpp `llama-server` added native Anthropic Messages API support (incl. `POST /v1/messages/count_tokens`, tools, vision, streaming with Anthropic SSE events) — PR #17570: https://github.com/ggml-org/llama.cpp/pull/17570
 
-[^4]: Bridged-provider streaming logging gap observed empirically in the Phase 0 spike against litellm 1.88.1 and 1.89.0rc2; related upstream auth-precedence issue: https://github.com/BerriAI/litellm/issues/29190
+[^4]: vLLM Anthropic Messages API endpoints (`/v1/messages` + `/v1/messages/count_tokens`) — feature issue #21313: https://github.com/vllm-project/vllm/issues/21313 ; serving docs: https://docs.vllm.ai/en/latest/serving/online_serving/
+
+[^5]: LM Studio 0.4.1 added an Anthropic-compatible `POST /v1/messages` endpoint with SSE streaming (`message_start`, `content_block_delta`, `message_stop`): https://lmstudio.ai/docs/developer/anthropic-compat/messages
+
+[^6]: Ollama exposes the Anthropic-compatible `/v1/messages` endpoint but does not implement `/v1/messages/count_tokens`; the unhandled probe degrades the server into 500s/timeouts (the cascade the shim prevents) — issue #13949: https://github.com/ollama/ollama/issues/13949 ; Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
+
+[^7]: Claude Code OAuth/admin endpoints ignore `ANTHROPIC_BASE_URL` (hardcoded to api.anthropic.com), so the login flow never traverses the proxy: https://github.com/anthropics/claude-code/issues/48011

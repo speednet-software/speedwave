@@ -179,7 +179,7 @@ See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full desi
 
 ## LLM usage
 
-A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded LiteLLM proxy ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)). It shows:
+A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded speedwave-proxy forwarder ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)). It shows:
 
 - **Totals cards** — requests, prompt/completion tokens, estimated cost, prompt-cache hit rate, throughput (tok/s), and failures (with failure rate). If any lines could not be parsed, a small `(N records skipped)` note appears rather than silently under-counting.
 - **Daily tokens chart** — a stacked bar per day (prompt vs. completion tokens) over the most recent month, built from plain CSS — no chart library.

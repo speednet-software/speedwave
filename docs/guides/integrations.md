@@ -672,7 +672,7 @@ The entrypoint records every link it creates in `~/.claude/.speedwave-managed-li
 
 You can run Claude Code inside Speedwave against a local or third-party LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to configure providers.
 
-Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) every session routes through an **embedded, per-project LiteLLM proxy** (container `litellm`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install LiteLLM yourself; Speedwave builds and starts it. The proxy translates between Anthropic Messages and OpenAI Chat Completions, so an OpenAI-only backend works without you standing up your own translation layer.
+Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `speedwave-proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
 
 Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
 
@@ -740,14 +740,14 @@ For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscript
 
 ### OpenAI-compatible servers (vLLM, TGI, gateways)
 
-Pure OpenAI Chat Completions servers (vLLM stock, TGI, corporate gateways) **work** — the embedded proxy translates Anthropic Messages ⇄ OpenAI for you; you no longer need to stand up your own translation proxy.
+The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). Modern builds of vLLM (`/v1/messages` endpoint), llama.cpp, LM Studio, and Ollama all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
-1. In Settings → LLM Provider, open the **OpenAI-compatible** row.
-2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). The proxy appends `/v1` when needed.
+1. In Settings → LLM Provider, open the **OpenAI-compatible** row (use it for any remote backend that serves the Anthropic Messages API).
+2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). The forwarder appends `/v1` when needed.
 3. Enter an **api_key** if the server requires one, then **Discover models** and pick one.
 4. Set the row active.
 
-> A **local** provider that needs custom headers (see below) is the one case that bypasses the proxy and talks to the server directly — there the server must speak Anthropic Messages on `POST /v1/messages`.
+> A **local** provider that needs custom headers (see below) is the one case that bypasses the forwarder and talks to the server directly — there too the server must speak Anthropic Messages on `POST /v1/messages`.
 
 ## See Also
 
