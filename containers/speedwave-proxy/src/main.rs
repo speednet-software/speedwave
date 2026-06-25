@@ -8,6 +8,7 @@ use axum::{
 mod config;
 mod count_tokens;
 mod forward;
+mod router;
 
 use config::Config;
 

@@ -1,3 +1,2 @@
-/// Forwarder configuration — routing config added in Task 3.
-#[derive(Debug, Default)]
-pub struct Config {}
+/// Routing configuration for the proxy — defined in `router.rs`.
+pub use crate::router::Config;
