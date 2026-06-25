@@ -20,6 +20,7 @@ speedwave_<project>_network
 ```
 
 - The Claude container has **no tokens** and **no container socket** — it talks to the speedwave-proxy forwarder (LLM traffic) and the MCP Hub (tools)
+- It ships two language runtimes — `node` + `npm` and `python3` + `pip` + `venv` (`Containerfile.claude`) — so Claude can run `.js`/`.py` scripts and install libraries into `/workspace`/`$HOME`. It still has no reach to the host toolchain (ADR-054)
 - Each MCP worker mounts only its own service credentials at `/tokens` (read-only)
 - The Hub has **zero tokens** and acts as a router
 - The speedwave-proxy is a worker-class token holder: per-provider LLM keys mount `:ro` at `/tokens` (`tokens/<project>/llm/`), the rendered routing config mounts `:ro` at `/config`, and the usage JSONL sink is its only writable mount (`/usage`). No host port, no database, no admin UI; it holds no Anthropic credential and relays native Anthropic streams without translation (ADR-073)

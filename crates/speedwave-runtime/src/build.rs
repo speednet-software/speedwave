@@ -2838,6 +2838,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_containerfile_claude_installs_python_for_node_parity() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.claude"))
+            .expect("Containerfile.claude should be readable");
+
+        // Python interpreter + pip + venv give Claude parity with the base
+        // image's node + npm: run .py scripts and install libs at runtime.
+        for pkg in ["python3", "python3-pip", "python3-venv"] {
+            assert!(
+                containerfile.contains(pkg),
+                "Containerfile.claude should `apt-get install {pkg}` for node parity"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // is_transient_build_error() tests (Step 2)
     // -----------------------------------------------------------------------
