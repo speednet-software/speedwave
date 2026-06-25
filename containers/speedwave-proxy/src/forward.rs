@@ -131,6 +131,9 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
+    // Owned copies for the spawned relay task (outlives the `cfg` borrow).
+    let provider_kind = route.provider_kind.clone();
+    let provider_id = route.provider_id.clone();
 
     let client = reqwest::Client::builder()
         .use_rustls_tls()
@@ -204,7 +207,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        if let Some(line) = acc.finish(&model_owned, latency_ms) {
+        if let Some(line) = acc.finish(&model_owned, latency_ms, &provider_kind, &provider_id) {
             append_usage(&usage_path, &line);
         }
         // tx is dropped here; ReceiverStream terminates cleanly.

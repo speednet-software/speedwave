@@ -118,6 +118,8 @@ mod tests {
                     env: "SPW_KEY_LOCAL".to_string(),
                     scheme: crate::router::Scheme::None,
                 },
+                provider_kind: "local".to_string(),
+                provider_id: "local".to_string(),
             }],
             usage_path,
         }

@@ -11,6 +11,10 @@ pub struct UsageLine {
     pub status: String,
     pub model: Option<String>,
     pub response_id: Option<String>,
+    pub provider_kind: String,
+    pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gen_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     pub latency_ms: u64,
@@ -28,6 +32,9 @@ pub struct UsageAcc {
     pub cache_read: u64,
     pub cache_write: u64,
     pub response_id: Option<String>,
+    /// OpenRouter generation id (`gen-…`) sniffed from the response, used
+    /// host-side for real cost via `/generation`. `None` for other providers.
+    pub gen_id: Option<String>,
     /// True once any usage frame was observed — distinguishes "0/0 real" from "never seen".
     pub saw_usage: bool,
 }
@@ -35,6 +42,25 @@ pub struct UsageAcc {
 /// Update `acc` from one parsed SSE frame `Value`.
 pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
     let event_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
+
+    // OpenRouter surfaces a `gen-…` generation id; capture it wherever it appears.
+    if acc.gen_id.is_none() {
+        for id in [
+            frame.get("id").and_then(Value::as_str),
+            frame
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if id.starts_with("gen-") {
+                acc.gen_id = Some(id.to_string());
+                break;
+            }
+        }
+    }
 
     match event_type {
         "message_start" => {
@@ -87,9 +113,16 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
 }
 
 impl UsageAcc {
-    /// Convert to a `UsageLine`.  Returns `None` when no usage frame was seen
+    /// Convert to a `UsageLine`, tagging it with the resolved route's
+    /// provider kind/id. Returns `None` when no usage frame was seen
     /// (prevents writing zero-only lines for non-usage SSE streams).
-    pub fn finish(self, model: &str, latency_ms: u64) -> Option<UsageLine> {
+    pub fn finish(
+        self,
+        model: &str,
+        latency_ms: u64,
+        provider_kind: &str,
+        provider_id: &str,
+    ) -> Option<UsageLine> {
         if !self.saw_usage {
             return None;
         }
@@ -100,6 +133,9 @@ impl UsageAcc {
             status: "success".to_string(),
             model: Some(model.to_string()),
             response_id: self.response_id,
+            provider_kind: provider_kind.to_string(),
+            provider_id: provider_id.to_string(),
+            gen_id: self.gen_id,
             cost_usd: None,
             latency_ms,
             prompt_tokens: self.prompt_tokens,
@@ -139,6 +175,9 @@ mod tests {
             status: "success".to_string(),
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc123".to_string()),
+            provider_kind: "anthropic_oauth".to_string(),
+            provider_id: "anthropic".to_string(),
+            gen_id: None,
             cost_usd: None,
             latency_ms: 900,
             prompt_tokens: 100,
@@ -146,6 +185,41 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
         }
+    }
+
+    #[test]
+    fn usage_line_serializes_provider_kind_and_gen_id() {
+        let line = UsageLine {
+            provider_kind: "openrouter".into(),
+            provider_id: "openrouter".into(),
+            gen_id: Some("gen-abc".into()),
+            ..fixture_line()
+        };
+        let s = serde_json::to_string(&line).unwrap();
+        assert!(s.contains(r#""provider_kind":"openrouter""#));
+        assert!(s.contains(r#""gen_id":"gen-abc""#));
+    }
+
+    #[test]
+    fn sniff_captures_openrouter_gen_id_from_top_level_id() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","id":"gen-xyz","message":{"id":"msg_3","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        assert_eq!(a.gen_id.unwrap(), "gen-xyz");
+        // The `msg_…` id is still the response id, not the gen id.
+        assert_eq!(a.response_id.unwrap(), "msg_3");
+    }
+
+    #[test]
+    fn sniff_leaves_gen_id_none_without_gen_prefix() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"msg_4","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        assert!(a.gen_id.is_none());
     }
 
     #[test]
@@ -159,7 +233,7 @@ mod tests {
             &json!({"type":"message_delta","usage":{"input_tokens":1234,"output_tokens":50}}),
             &mut a,
         );
-        let line = a.finish("m", 500).unwrap();
+        let line = a.finish("m", 500, "openrouter", "openrouter").unwrap();
         assert_eq!(line.prompt_tokens, 1234);
         assert_eq!(line.completion_tokens, 50);
     }
@@ -171,7 +245,7 @@ mod tests {
             &json!({"type":"content_block_delta","delta":{"text":"hi"}}),
             &mut a,
         );
-        assert!(a.finish("m", 0).is_none());
+        assert!(a.finish("m", 0, "anthropic_oauth", "anthropic").is_none());
     }
 
     #[test]
@@ -185,7 +259,7 @@ mod tests {
             &json!({"type":"message_delta","usage":{"output_tokens":0}}),
             &mut a,
         );
-        let line = a.finish("m", 0).unwrap();
+        let line = a.finish("m", 0, "openrouter", "openrouter").unwrap();
         assert_eq!(line.cache_read, 0);
     }
 
@@ -220,6 +294,9 @@ mod tests {
             status: "success".to_string(),
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc".to_string()),
+            provider_kind: "anthropic_oauth".to_string(),
+            provider_id: "anthropic".to_string(),
+            gen_id: None,
             cost_usd: None,
             latency_ms: 900,
             prompt_tokens: 50000,
@@ -247,6 +324,10 @@ mod tests {
         assert_eq!(parsed["completion_tokens"], 10);
         assert_eq!(parsed["cache_read"], 0);
         assert_eq!(parsed["cache_write"], 0);
+        assert_eq!(parsed["provider_kind"], "anthropic_oauth");
+        assert_eq!(parsed["provider_id"], "anthropic");
+        // gen_id must be absent for non-OpenRouter (skip_serializing_if None).
+        assert!(parsed.get("gen_id").is_none(), "gen_id must be absent");
         // cost_usd must be absent (skip_serializing_if None).
         assert!(parsed.get("cost_usd").is_none(), "cost_usd must be absent");
         // Ends with a newline (append_usage uses writeln!).
@@ -264,7 +345,7 @@ mod tests {
             }}}),
             &mut a,
         );
-        let line = a.finish("m", 750).unwrap();
+        let line = a.finish("m", 750, "anthropic_oauth", "anthropic").unwrap();
         assert_eq!(line.cache_read, 40);
         assert_eq!(line.cache_write, 20);
         assert_eq!(line.response_id.unwrap(), "msg_2");
@@ -288,6 +369,8 @@ mod tests {
             &json!({"type":"content_block_start","content_block":{"type":"text"}}),
             &mut a,
         );
-        assert!(a.finish("model", 0).is_none());
+        assert!(a
+            .finish("model", 0, "anthropic_oauth", "anthropic")
+            .is_none());
     }
 }

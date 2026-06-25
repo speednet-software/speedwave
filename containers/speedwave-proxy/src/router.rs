@@ -49,6 +49,12 @@ pub struct Route {
     pub prefix: String,
     pub base_url: String,
     pub auth: Auth,
+    /// Provider kind for host-side cost attribution (ADR-073). Never sniffed
+    /// in the proxy — the renderer writes it from the active provider.
+    #[serde(default)]
+    pub provider_kind: String,
+    #[serde(default)]
+    pub provider_id: String,
 }
 
 /// Top-level proxy routing configuration, deserialized from `/config/proxy.json`.
@@ -121,6 +127,8 @@ mod tests {
                     prefix: "anthropic".to_string(),
                     base_url: "https://api.anthropic.com".to_string(),
                     auth: Auth::Bare(BareAuth::Passthrough),
+                    provider_kind: "anthropic_oauth".to_string(),
+                    provider_id: "anthropic".to_string(),
                 },
                 Route {
                     prefix: "openrouter".to_string(),
@@ -129,6 +137,8 @@ mod tests {
                         env: "SPW_KEY_OPENROUTER".to_string(),
                         scheme: Scheme::Bearer,
                     },
+                    provider_kind: "openrouter".to_string(),
+                    provider_id: "openrouter".to_string(),
                 },
                 Route {
                     prefix: "local".to_string(),
@@ -137,6 +147,8 @@ mod tests {
                         env: "SPW_KEY_LOCAL".to_string(),
                         scheme: Scheme::None,
                     },
+                    provider_kind: "local".to_string(),
+                    provider_id: "local".to_string(),
                 },
             ],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
@@ -172,6 +184,14 @@ mod tests {
     #[test]
     fn empty_model_returns_none() {
         assert!(resolve(&fixture_config(), "").is_none());
+    }
+
+    #[test]
+    fn route_deserializes_provider_kind_and_id() {
+        let json = r#"{"routes":[{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"},"provider_kind":"openrouter","provider_id":"openrouter"}],"usage_path":null}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.routes[0].provider_kind, "openrouter");
+        assert_eq!(cfg.routes[0].provider_id, "openrouter");
     }
 
     #[test]
