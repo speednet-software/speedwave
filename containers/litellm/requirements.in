@@ -1,9 +1,0 @@
-# LiteLLM proxy pin — SSOT for the litellm container image.
-# Bump = edit this pin, run:
-#   uv pip compile --generate-hashes --universal --python-version 3.13 \
-#     containers/litellm/requirements.in -o containers/litellm/requirements.txt
-# and audit the changelog (ADR-073 supply-chain policy).
-# 1.88.1: latest stable; known cosmetic pydantic noise in the logging bridge
-# for streamed /v1/messages from bridged providers (fixed in 1.89.x) — does
-# not affect responses or usage capture (iterator-hook path).
-litellm[proxy]==1.88.1
