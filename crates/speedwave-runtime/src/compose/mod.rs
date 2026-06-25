@@ -26,8 +26,8 @@ mod workers;
 // Speedwave proxy config rendering + key management (ADR-073).
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in,
-    SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL, SPEEDWAVE_PROXY_BASE_URL, SPEEDWAVE_PROXY_PORT,
+    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, SPEEDWAVE_PROXY_BASE_URL,
+    SPEEDWAVE_PROXY_PORT,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
@@ -3416,7 +3416,7 @@ services:
         let env = get_claude_env(&yaml);
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000/anthropic"),
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000"),
             "oauth sessions must use the passthrough route, got: {env:?}"
         );
         assert!(
@@ -4682,7 +4682,7 @@ services:
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000/anthropic"),
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://speedwave-proxy:4000"),
             "anthropic still routes through the passthrough: {env:?}"
         );
     }

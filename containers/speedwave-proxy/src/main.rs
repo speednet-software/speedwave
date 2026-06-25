@@ -29,7 +29,18 @@ fn build_router(cfg: Arc<Config>) -> Router {
 async fn main() {
     // Default to `info` so swap-leg warnings surface; `RUST_LOG` overrides.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let cfg = Arc::new(Config::default());
+    let config_path =
+        std::env::var("SPW_CONFIG_PATH").unwrap_or_else(|_| "/config/proxy.json".to_string());
+    let cfg = match Config::load_from(std::path::Path::new(&config_path)) {
+        Ok(c) => {
+            log::info!("loaded {} route(s) from {config_path}", c.routes.len());
+            Arc::new(c)
+        }
+        Err(e) => {
+            log::error!("failed to load proxy config from {config_path}: {e}");
+            std::process::exit(1);
+        }
+    };
     let app = build_router(cfg);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4000")
         .await

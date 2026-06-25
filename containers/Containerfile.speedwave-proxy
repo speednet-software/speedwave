@@ -10,7 +10,11 @@ WORKDIR /build
 
 COPY speedwave-proxy/ /build/
 
-RUN cargo build --release --locked
+# Cache the cargo registry/git so a Cargo.toml change re-fetches only new
+# crates instead of the whole index (parallels the npm cache mounts).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --locked
 
 # Final stage: scratch — zero OS footprint; user 1000:1000 set via compose.
 FROM scratch

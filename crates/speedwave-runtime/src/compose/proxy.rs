@@ -14,12 +14,10 @@ use std::path::{Path, PathBuf};
 /// Port the proxy container listens on (fixed in the forwarder binary).
 pub const SPEEDWAVE_PROXY_PORT: u16 = 4000;
 
-/// In-network base URL of the proxy as the claude container sees it.
+/// In-network base URL of the proxy as the claude container sees it. Every
+/// session (subscription + non-anthropic) points `ANTHROPIC_BASE_URL` here;
+/// routing is by the model prefix in the request body, not the URL path.
 pub const SPEEDWAVE_PROXY_BASE_URL: &str = "http://speedwave-proxy:4000";
-
-/// Subscription sessions use the passthrough route — OAuth `Authorization`
-/// forwarded verbatim to api.anthropic.com.
-pub const SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL: &str = "http://speedwave-proxy:4000/anthropic";
 
 /// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
 /// uppercased — same normalisation as `plugin::derive_worker_env`).

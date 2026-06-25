@@ -30,6 +30,18 @@ pub fn provider_id_from_env_name(name: &str) -> Option<String> {
     validate_slug(&slug).then_some(slug)
 }
 
+/// Resolve a provider key for the `SPW_KEY_<ID>` env name by reading
+/// `/tokens/<id>_api_key` (ADR-073 — keys are file-mounted, not env-injected).
+/// Returns the trimmed key, or `None` on invalid name / absent / empty file.
+pub fn provider_key_for_env_name(name: &str) -> Option<String> {
+    let id = provider_id_from_env_name(name)?;
+    let dir = std::env::var("SPW_TOKENS_DIR").unwrap_or_else(|_| "/tokens".to_string());
+    let path = std::path::Path::new(&dir).join(format!("{id}_api_key"));
+    let raw = std::fs::read_to_string(path).ok()?;
+    let key = raw.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -85,6 +97,25 @@ mod tests {
     fn rejects_name_without_prefix() {
         assert!(provider_id_from_env_name("OPENROUTER").is_none());
         assert!(provider_id_from_env_name("ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
+    fn reads_trimmed_key_from_tokens_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("openrouter_api_key"), "  or-REALKEY\n").unwrap();
+        std::env::set_var("SPW_TOKENS_DIR", dir.path());
+
+        assert_eq!(
+            provider_key_for_env_name("SPW_KEY_OPENROUTER").as_deref(),
+            Some("or-REALKEY"),
+            "key must be read from /tokens/<id>_api_key and trimmed"
+        );
+        // Absent file → None (provider answers 401, surfaced by the swap-leg warn).
+        assert!(provider_key_for_env_name("SPW_KEY_MISSING").is_none());
+        // Tampered/invalid name never touches the filesystem.
+        assert!(provider_key_for_env_name("SPW_KEY_9BAD").is_none());
+
+        std::env::remove_var("SPW_TOKENS_DIR");
     }
 
     /// Mirror of the host-side `spw_key_env_name` (compose/proxy.rs). Kept here

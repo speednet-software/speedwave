@@ -5,9 +5,10 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Auth {
-    /// Forward the caller's key unchanged.
-    #[serde(deserialize_with = "de_passthrough")]
-    Passthrough,
+    /// A bare string: `"passthrough"` (forward the caller's key unchanged) or
+    /// `"none"` (drop inbound auth, inject nothing — local servers).
+    #[serde(deserialize_with = "de_bare_auth")]
+    Bare(BareAuth),
     /// Replace the caller's key with the value of an env var.
     Swap {
         #[serde(rename = "swap_env")]
@@ -16,15 +17,21 @@ pub enum Auth {
     },
 }
 
-fn de_passthrough<'de, D: serde::Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+/// The two string-valued auth modes.
+#[derive(Debug, PartialEq)]
+pub enum BareAuth {
+    Passthrough,
+    None,
+}
+
+fn de_bare_auth<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BareAuth, D::Error> {
     use serde::de::Error;
-    let s = String::deserialize(d)?;
-    if s == "passthrough" {
-        Ok(())
-    } else {
-        Err(D::Error::custom(format!(
-            "expected \"passthrough\", got {s:?}"
-        )))
+    match String::deserialize(d)?.as_str() {
+        "passthrough" => Ok(BareAuth::Passthrough),
+        "none" => Ok(BareAuth::None),
+        other => Err(D::Error::custom(format!(
+            "expected \"passthrough\" or \"none\", got {other:?}"
+        ))),
     }
 }
 
@@ -66,10 +73,31 @@ impl Default for Config {
     }
 }
 
-/// Resolve a model string to its backend route.
-///
-/// Splits `model` on the first `/`. A bare non-empty model (no slash) uses
-/// the prefix `"anthropic"`. Returns `None` for an empty model or an unknown prefix.
+/// Holds only `routes`; `usage_path` is resolved from env, not the file.
+#[derive(Deserialize)]
+struct RoutesFile {
+    routes: Vec<Route>,
+}
+
+impl Config {
+    /// Load the routing table from `path` (`/config/proxy.json`), resolving
+    /// `usage_path` from `SPW_USAGE_PATH`. The rendered file carries only
+    /// `routes`; an unreadable or malformed file is a fatal startup error.
+    pub fn load_from(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let parsed: RoutesFile =
+            serde_json::from_str(&raw).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        Ok(Self {
+            routes: parsed.routes,
+            ..Self::default()
+        })
+    }
+}
+
+/// Resolve a model string to its backend route by its prefix (the part before
+/// the first `/`). A bare model (no slash) uses the `"anthropic"` prefix;
+/// returns `None` for an empty model or an unknown prefix.
 pub fn resolve<'a>(cfg: &'a Config, model: &str) -> Option<&'a Route> {
     if model.is_empty() {
         return None;
@@ -92,7 +120,7 @@ mod tests {
                 Route {
                     prefix: "anthropic".to_string(),
                     base_url: "https://api.anthropic.com".to_string(),
-                    auth: Auth::Passthrough,
+                    auth: Auth::Bare(BareAuth::Passthrough),
                 },
                 Route {
                     prefix: "openrouter".to_string(),
@@ -119,7 +147,7 @@ mod tests {
     fn anthropic_prefix_routes_to_passthrough() {
         let cfg = fixture_config();
         let r = resolve(&cfg, "claude-opus-4-8").unwrap();
-        assert_eq!(r.auth, Auth::Passthrough);
+        assert_eq!(r.auth, Auth::Bare(BareAuth::Passthrough));
     }
 
     #[test]
@@ -157,7 +185,7 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.routes.len(), 3);
-        assert_eq!(cfg.routes[0].auth, Auth::Passthrough);
+        assert_eq!(cfg.routes[0].auth, Auth::Bare(BareAuth::Passthrough));
         assert!(
             matches!(&cfg.routes[1].auth, Auth::Swap { env, scheme } if env == "SPW_KEY_OPENROUTER" && *scheme == Scheme::Bearer)
         );

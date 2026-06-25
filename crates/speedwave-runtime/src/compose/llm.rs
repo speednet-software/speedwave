@@ -61,9 +61,11 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
+            // Bare base URL: claude POSTs /v1/messages with a bare claude-* model,
+            // which the forwarder routes to the anthropic passthrough by prefix.
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
-                super::SPEEDWAVE_PROXY_ANTHROPIC_PASSTHROUGH_URL.to_string(),
+                super::SPEEDWAVE_PROXY_BASE_URL.to_string(),
             );
             // Defense-in-depth after heal/quarantine: drop a foreign id from a
             // not-yet-healed config → account default, not 404.

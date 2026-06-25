@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::router::{resolve, Auth, Config, Scheme};
+use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
 use crate::usage::{append_usage, sniff, UsageAcc};
 
 /// Drain all complete (`\n`-terminated) lines from `buf`, returning them
@@ -28,16 +28,11 @@ pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
     lines
 }
 
-/// Build the outbound `HeaderMap` for a forwarded request.
-///
-/// Passthrough: copy auth and Anthropic headers verbatim; inject nothing.
-/// Swap: drop inbound auth, inject the provider key from the environment — but
-/// only when the `SPW_KEY_<ID>` name reverses to a valid provider slug, so a
-/// tampered name resolves to no key (ADR-073 contract).
+/// Build the outbound `HeaderMap`: passthrough copies auth verbatim; swap drops
+/// inbound auth and injects the provider key (read from `/tokens` only when the
+/// `SPW_KEY_<ID>` name reverses to a valid slug — ADR-073 contract).
 pub fn outbound_headers(auth: &Auth, inbound: &HeaderMap) -> HeaderMap {
-    outbound_headers_with(auth, inbound, |name| {
-        crate::keys::provider_id_from_env_name(name).and_then(|_| std::env::var(name).ok())
-    })
+    outbound_headers_with(auth, inbound, crate::keys::provider_key_for_env_name)
 }
 
 /// Testable variant — `lookup` provides the provider key for swap legs.
@@ -49,7 +44,7 @@ pub fn outbound_headers_with(
     let mut out = HeaderMap::new();
 
     match auth {
-        Auth::Passthrough => {
+        Auth::Bare(BareAuth::Passthrough) => {
             // Copy auth and Anthropic headers verbatim — inject nothing.
             for name in &[
                 "authorization",
@@ -58,6 +53,15 @@ pub fn outbound_headers_with(
                 "anthropic-version",
                 "content-type",
             ] {
+                if let Some(v) = inbound.get(*name) {
+                    out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
+                }
+            }
+        }
+        Auth::Bare(BareAuth::None) => {
+            // Local server, no key: drop inbound auth, keep non-auth headers,
+            // inject nothing.
+            for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
                     out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
                 }
@@ -226,7 +230,7 @@ mod tests {
     fn passthrough_forwards_oauth_bearer_verbatim() {
         let mut h = HeaderMap::new();
         h.insert("authorization", "Bearer sk-ant-oat-REAL".parse().unwrap());
-        let out = outbound_headers(&Auth::Passthrough, &h);
+        let out = outbound_headers(&Auth::Bare(BareAuth::Passthrough), &h);
         assert_eq!(out.get("authorization").unwrap(), "Bearer sk-ant-oat-REAL");
     }
 
@@ -252,7 +256,7 @@ mod tests {
 
     #[test]
     fn passthrough_never_injects_a_stored_key() {
-        let out = outbound_headers(&Auth::Passthrough, &HeaderMap::new());
+        let out = outbound_headers(&Auth::Bare(BareAuth::Passthrough), &HeaderMap::new());
         assert!(out.get("authorization").is_none() && out.get("x-api-key").is_none());
     }
 
@@ -306,7 +310,7 @@ mod tests {
         h.insert("anthropic-beta", "messages-2023-12-15".parse().unwrap());
         h.insert("anthropic-version", "2023-06-01".parse().unwrap());
         h.insert("content-type", "application/json".parse().unwrap());
-        let out = outbound_headers(&Auth::Passthrough, &h);
+        let out = outbound_headers(&Auth::Bare(BareAuth::Passthrough), &h);
         assert_eq!(out.get("authorization").unwrap(), "Bearer sk-ant-oat-REAL");
         assert_eq!(out.get("x-api-key").unwrap(), "sk-ant-key");
         assert_eq!(out.get("anthropic-beta").unwrap(), "messages-2023-12-15");
