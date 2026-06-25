@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// How authentication is applied when forwarding to a backend.
 #[derive(Debug, Deserialize, PartialEq)]
@@ -44,9 +45,25 @@ pub struct Route {
 }
 
 /// Top-level proxy routing configuration, deserialized from `/config/proxy.json`.
-#[derive(Debug, Default, Deserialize)]
+/// `usage_path` is resolved once at startup from `SPW_USAGE_PATH` (default
+/// `/usage/usage.jsonl`) so request handlers need not touch the environment.
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
+    #[serde(skip)]
+    pub usage_path: PathBuf,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            usage_path: PathBuf::from(
+                std::env::var("SPW_USAGE_PATH")
+                    .unwrap_or_else(|_| "/usage/usage.jsonl".to_string()),
+            ),
+        }
+    }
 }
 
 /// Resolve a model string to its backend route.
@@ -94,6 +111,7 @@ mod tests {
                     },
                 },
             ],
+            usage_path: PathBuf::from("/usage/usage.jsonl"),
         }
     }
 

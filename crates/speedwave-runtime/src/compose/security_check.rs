@@ -401,8 +401,8 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
-            // LiteLLM proxy mount profile (ADR-073)
-            Self::check_litellm_volumes(&doc, expected_paths),
+            // speedwave-proxy mount profile (ADR-073)
+            Self::check_speedwave_proxy_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -927,11 +927,11 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: the litellm proxy is a worker-class token holder. Its mounts
+    /// ADR-073: the speedwave-proxy is a worker-class token holder. Its mounts
     /// must be exactly: `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw` —
     /// nothing else (no workspace, no claude-home, no sockets) — and it must
     /// not use host networking.
-    fn check_litellm_volumes(
+    fn check_speedwave_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
     ) -> Vec<SecurityViolation> {
@@ -949,8 +949,9 @@ impl SecurityCheck {
             violations.push(SecurityViolation {
                 container: name.clone(),
                 rule: SecurityRule::SpeedwaveProxyVolumes,
-                message: "litellm must not set network_mode".into(),
-                remediation: "Remove 'network_mode' — litellm joins only the per-project network.",
+                message: "speedwave-proxy must not set network_mode".into(),
+                remediation:
+                    "Remove 'network_mode' — speedwave-proxy joins only the per-project network.",
             });
         }
 
@@ -973,7 +974,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("litellm /config mount must be ro: {vol}"),
+                        message: format!("speedwave-proxy /config mount must be ro: {vol}"),
                         remediation: "Mount the rendered config directory ':ro'.",
                     });
                 }
@@ -983,7 +984,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("litellm /tokens mount must be ro: {vol}"),
+                        message: format!("speedwave-proxy /tokens mount must be ro: {vol}"),
                         remediation: "Mount the llm token directory ':ro'.",
                     });
                 }
@@ -992,7 +993,7 @@ impl SecurityCheck {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
-                            "litellm /tokens host path must be the llm namespace \
+                            "speedwave-proxy /tokens host path must be the llm namespace \
                              ('{expected_tokens}'), got: {vol}"
                         ),
                         remediation: "Mount '<data_dir>/tokens/<project>/llm' at /tokens.",
@@ -1004,7 +1005,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("litellm /usage mount must be rw: {vol}"),
+                        message: format!("speedwave-proxy /usage mount must be rw: {vol}"),
                         remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
                     });
                 }
@@ -1013,8 +1014,9 @@ impl SecurityCheck {
                 violations.push(SecurityViolation {
                     container: name.clone(),
                     rule: SecurityRule::SpeedwaveProxyVolumes,
-                    message: format!("litellm has an unexpected volume: {vol}"),
-                    remediation: "litellm mounts exactly /config:ro, /tokens:ro and /usage:rw.",
+                    message: format!("speedwave-proxy has an unexpected volume: {vol}"),
+                    remediation:
+                        "speedwave-proxy mounts exactly /config:ro, /tokens:ro and /usage:rw.",
                 });
             }
         }
@@ -1023,7 +1025,7 @@ impl SecurityCheck {
                 container: name.clone(),
                 rule: SecurityRule::SpeedwaveProxyVolumes,
                 message: format!(
-                    "litellm must mount exactly /config, /tokens and /usage (found {matched})"
+                    "speedwave-proxy must mount exactly /config, /tokens and /usage (found {matched})"
                 ),
                 remediation: "Restore the three canonical mounts in compose.template.yml.",
             });

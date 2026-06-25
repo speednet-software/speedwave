@@ -15,6 +15,19 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::router::{resolve, Auth, Config, Scheme};
 use crate::usage::{append_usage, sniff, UsageAcc};
 
+/// Drain all complete (`\n`-terminated) lines from `buf`, returning them
+/// without their newlines (CRLF-stripped).  Any remaining incomplete line
+/// stays in `buf`.
+pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(pos) = buf.find('\n') {
+        let line = buf[..pos].trim_end_matches('\r').to_string();
+        *buf = buf[pos + 1..].to_string();
+        lines.push(line);
+    }
+    lines
+}
+
 /// Build the outbound `HeaderMap` for a forwarded request.
 ///
 /// Passthrough: copy auth and Anthropic headers verbatim; inject nothing.
@@ -132,10 +145,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let status = upstream.status();
     let response_headers = upstream.headers().clone();
 
-    // Resolve usage path from env; default matches the container mount point.
-    let usage_path =
-        std::env::var("SPW_USAGE_PATH").unwrap_or_else(|_| "/usage/usage.jsonl".to_string());
-    let usage_path = std::path::PathBuf::from(usage_path);
+    // Usage path resolved once at startup and stored in Config — no env read per request.
+    let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
 
     let start = std::time::Instant::now();
@@ -157,10 +168,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                     // Sniff SSE frames from the chunk before forwarding.
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         line_buf.push_str(text);
-                        // Process all complete lines in the buffer.
-                        while let Some(pos) = line_buf.find('\n') {
-                            let line = line_buf[..pos].trim_end_matches('\r').to_string();
-                            line_buf = line_buf[pos + 1..].to_string();
+                        for line in drain_complete_lines(&mut line_buf) {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 if data != "[DONE]" {
                                     if let Ok(frame) =
@@ -294,5 +302,46 @@ mod tests {
         assert_eq!(out.get("anthropic-version").unwrap(), "2023-06-01");
         assert_eq!(out.get("content-type").unwrap(), "application/json");
         assert_eq!(out.get("authorization").unwrap(), "Bearer or-REALKEY");
+    }
+
+    /// A `data: {...}` SSE line split across two chunks must be parsed
+    /// exactly once — no partial sniff on the first chunk, full parse on
+    /// the second when `\n` arrives.
+    #[test]
+    fn split_sse_frame_across_chunks_parses_once() {
+        let full_line = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n";
+        // Split arbitrarily in the middle of the JSON payload.
+        let split_at = full_line.find("\"output_to").unwrap();
+        let chunk1 = &full_line[..split_at];
+        let chunk2 = &full_line[split_at..];
+
+        let mut buf = String::new();
+        let mut acc = UsageAcc::default();
+
+        // First chunk — no complete line yet.
+        buf.push_str(chunk1);
+        for line in drain_complete_lines(&mut buf) {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(data) {
+                    sniff(&frame, &mut acc);
+                }
+            }
+        }
+        assert_eq!(acc.completion_tokens, 0, "must not sniff before full line");
+
+        // Second chunk — completes the line.
+        buf.push_str(chunk2);
+        for line in drain_complete_lines(&mut buf) {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(data) {
+                    sniff(&frame, &mut acc);
+                }
+            }
+        }
+        assert_eq!(acc.completion_tokens, 42, "must parse full frame once");
+        assert!(
+            buf.is_empty(),
+            "buffer must be empty after complete line consumed"
+        );
     }
 }

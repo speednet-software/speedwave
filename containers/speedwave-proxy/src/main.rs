@@ -94,7 +94,7 @@ mod tests {
         addr
     }
 
-    fn config_pointing_at(addr: &std::net::SocketAddr) -> Config {
+    fn config_pointing_at(addr: &std::net::SocketAddr, usage_path: std::path::PathBuf) -> Config {
         use crate::router::{Auth, Route};
         Config {
             routes: vec![Route {
@@ -105,6 +105,7 @@ mod tests {
                     scheme: crate::router::Scheme::None,
                 },
             }],
+            usage_path,
         }
     }
 
@@ -112,14 +113,12 @@ mod tests {
     async fn relays_stream_and_appends_one_usage_line() {
         let usage_dir = tempfile::tempdir().unwrap();
         let usage_path = usage_dir.path().join("usage.jsonl");
-        // SPW_USAGE_PATH tells the handler where to write usage lines.
-        std::env::set_var("SPW_USAGE_PATH", &usage_path);
 
         let addr = spawn_mock_sse_backend().await;
         // Give the listener a moment to be ready.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        let cfg = Arc::new(config_pointing_at(&addr));
+        let cfg = Arc::new(config_pointing_at(&addr, usage_path.clone()));
         let app = build_router(cfg);
 
         let resp = app
