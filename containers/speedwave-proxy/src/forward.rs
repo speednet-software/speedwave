@@ -1,6 +1,16 @@
 use std::sync::Arc;
 
-use axum::{extract::State, http::HeaderMap, http::StatusCode};
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use bytes::Bytes;
+use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::router::{resolve, Auth, Config, Scheme};
 use crate::usage::{append_usage, sniff, UsageAcc};
@@ -64,21 +74,132 @@ pub fn outbound_headers_with(
     out
 }
 
-/// Stub — full streaming forward implemented in Task 6.
-pub async fn messages(State(cfg): State<Arc<Config>>) -> StatusCode {
-    // Route resolution, auth-header injection, and usage sniffing are wired in Task 6.
-    if let Some(route) = resolve(&cfg, "") {
-        let _url = &route.base_url;
-        // Reachability anchor so outbound_headers/sniff/append_usage are on the
-        // binary's reachable path; Task 6 replaces this stub with real forwarding.
-        let _headers = outbound_headers(&route.auth, &HeaderMap::new());
-        let mut _acc = UsageAcc::default();
-        sniff(&serde_json::Value::Null, &mut _acc);
-        if let Some(line) = _acc.finish("", 0) {
-            append_usage(std::path::Path::new(""), &line);
+/// Resolve the upstream route from the request body, forward the request with
+/// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
+/// sniffing usage frames, and append one usage line on stream end.
+pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
+    // Parse model from the request body to select the backend route.
+    let model = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(v) => v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"request body is not valid JSON"})),
+            )
+                .into_response();
         }
+    };
+
+    let route = match resolve(&cfg, &model) {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("no route for model: {model}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let out_headers = outbound_headers(&route.auth, &headers);
+    let upstream_url = format!("{}/v1/messages", route.base_url);
+
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .unwrap_or_default();
+
+    let mut req = client.post(&upstream_url).body(body.to_vec());
+    for (name, value) in &out_headers {
+        req = req.header(name, value);
     }
-    StatusCode::NOT_IMPLEMENTED
+
+    let upstream = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("upstream error: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let status = upstream.status();
+    let response_headers = upstream.headers().clone();
+
+    // Resolve usage path from env; default matches the container mount point.
+    let usage_path =
+        std::env::var("SPW_USAGE_PATH").unwrap_or_else(|_| "/usage/usage.jsonl".to_string());
+    let usage_path = std::path::PathBuf::from(usage_path);
+    let model_owned = model.clone();
+
+    let start = std::time::Instant::now();
+
+    // Channel-based unbuffered relay: each upstream chunk is forwarded immediately.
+    // The spawned task sniffs SSE frames while forwarding — RAM stays flat.
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+
+    tokio::spawn(async move {
+        let mut byte_stream = upstream.bytes_stream();
+        let mut acc = UsageAcc::default();
+        // Buffer for incomplete SSE lines across chunks.
+        let mut line_buf = String::new();
+
+        use futures_util::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    // Sniff SSE frames from the chunk before forwarding.
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        line_buf.push_str(text);
+                        // Process all complete lines in the buffer.
+                        while let Some(pos) = line_buf.find('\n') {
+                            let line = line_buf[..pos].trim_end_matches('\r').to_string();
+                            line_buf = line_buf[pos + 1..].to_string();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data != "[DONE]" {
+                                    if let Ok(frame) =
+                                        serde_json::from_str::<serde_json::Value>(data)
+                                    {
+                                        sniff(&frame, &mut acc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Forward chunk immediately — no buffering.
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        break; // Client disconnected.
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+            }
+        }
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        if let Some(line) = acc.finish(&model_owned, latency_ms) {
+            append_usage(&usage_path, &line);
+        }
+        // tx is dropped here; ReceiverStream terminates cleanly.
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let mut builder = Response::builder().status(status);
+    // Forward upstream headers (content-type, etc.) to the client.
+    for (name, value) in &response_headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 #[cfg(test)]

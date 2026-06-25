@@ -64,4 +64,120 @@ mod tests {
         let body: Bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], br#"{"status":"ok"}"#);
     }
+
+    /// Spawn a minimal mock SSE backend that emits the three Anthropic stream events
+    /// needed to exercise the usage sniffer: message_start (input tokens) +
+    /// content delta + message_delta (output tokens).
+    async fn spawn_mock_sse_backend() -> std::net::SocketAddr {
+        use axum::response::IntoResponse;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/messages",
+                axum::routing::post(|| async {
+                    let sse = concat!(
+                        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":10}}}\n\n",
+                        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+                        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        sse,
+                    )
+                        .into_response()
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    fn config_pointing_at(addr: &std::net::SocketAddr) -> Config {
+        use crate::router::{Auth, Route};
+        Config {
+            routes: vec![Route {
+                prefix: "local".to_string(),
+                base_url: format!("http://{addr}"),
+                auth: Auth::Swap {
+                    env: "SPW_KEY_LOCAL".to_string(),
+                    scheme: crate::router::Scheme::None,
+                },
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn relays_stream_and_appends_one_usage_line() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let usage_path = usage_dir.path().join("usage.jsonl");
+        // SPW_USAGE_PATH tells the handler where to write usage lines.
+        std::env::set_var("SPW_USAGE_PATH", &usage_path);
+
+        let addr = spawn_mock_sse_backend().await;
+        // Give the listener a moment to be ready.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let cfg = Arc::new(config_pointing_at(&addr));
+        let app = build_router(cfg);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        // Drain the body to let the relay complete.
+        let _ = resp.into_body().collect().await.unwrap();
+
+        // Give the usage writer a tick to finish.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let contents = std::fs::read_to_string(&usage_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one usage line, got: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("\"completion_tokens\":"),
+            "usage line must contain completion_tokens: {}",
+            lines[0]
+        );
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert!(
+            parsed["completion_tokens"].as_u64().unwrap_or(0) > 0,
+            "completion_tokens must be non-zero: {}",
+            lines[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_shim_returns_200_with_zero_input_tokens() {
+        let app = build_router(test_config());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"claude-opus-4-8","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["input_tokens"], 0);
+    }
 }

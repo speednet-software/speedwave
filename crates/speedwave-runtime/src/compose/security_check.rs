@@ -242,11 +242,13 @@ pub enum SecurityRule {
     #[strum(props(description = "Slack has /workspace mount"))]
     SlackMissingWorkspaceMount,
 
-    /// LiteLLM proxy mounts exactly config:ro + tokens:ro + usage:rw and no
+    /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
     /// host network (ADR-073 — it is a worker-class token holder).
-    #[strum(to_string = "LITELLM_VOLUMES")]
-    #[strum(props(description = "LiteLLM mounts are config:ro, tokens:ro, usage:rw only"))]
-    LitellmVolumes,
+    #[strum(to_string = "SPEEDWAVE_PROXY_VOLUMES")]
+    #[strum(props(
+        description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw only"
+    ))]
+    SpeedwaveProxyVolumes,
 
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
@@ -938,8 +940,6 @@ impl SecurityCheck {
             Some(s) => s,
             None => return violations,
         };
-        // SecurityViolation::LitellmVolumes enum variant is intentionally kept
-        // under its old name until Task 6 renames it alongside its strum string.
         let (name, service) = match services.iter().find(|(n, _)| n == "speedwave-proxy") {
             Some(pair) => pair,
             None => return violations, // not rendered (legacy path) — nothing to check
@@ -948,7 +948,7 @@ impl SecurityCheck {
         if service.get("network_mode").is_some() {
             violations.push(SecurityViolation {
                 container: name.clone(),
-                rule: SecurityRule::LitellmVolumes,
+                rule: SecurityRule::SpeedwaveProxyVolumes,
                 message: "litellm must not set network_mode".into(),
                 remediation: "Remove 'network_mode' — litellm joins only the per-project network.",
             });
@@ -972,7 +972,7 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("litellm /config mount must be ro: {vol}"),
                         remediation: "Mount the rendered config directory ':ro'.",
                     });
@@ -982,7 +982,7 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("litellm /tokens mount must be ro: {vol}"),
                         remediation: "Mount the llm token directory ':ro'.",
                     });
@@ -990,7 +990,7 @@ impl SecurityCheck {
                 if host != expected_tokens {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
                             "litellm /tokens host path must be the llm namespace \
                              ('{expected_tokens}'), got: {vol}"
@@ -1003,7 +1003,7 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("rw") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("litellm /usage mount must be rw: {vol}"),
                         remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
                     });
@@ -1012,7 +1012,7 @@ impl SecurityCheck {
             } else {
                 violations.push(SecurityViolation {
                     container: name.clone(),
-                    rule: SecurityRule::LitellmVolumes,
+                    rule: SecurityRule::SpeedwaveProxyVolumes,
                     message: format!("litellm has an unexpected volume: {vol}"),
                     remediation: "litellm mounts exactly /config:ro, /tokens:ro and /usage:rw.",
                 });
@@ -1021,7 +1021,7 @@ impl SecurityCheck {
         if matched != 3 {
             violations.push(SecurityViolation {
                 container: name.clone(),
-                rule: SecurityRule::LitellmVolumes,
+                rule: SecurityRule::SpeedwaveProxyVolumes,
                 message: format!(
                     "litellm must mount exactly /config, /tokens and /usage (found {matched})"
                 ),
@@ -1519,4 +1519,18 @@ pub(crate) fn get_services(
             .filter_map(|(key, value)| key.as_str().map(|name| (name.to_string(), value)))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn proxy_volumes_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::SpeedwaveProxyVolumes.to_string(),
+            "SPEEDWAVE_PROXY_VOLUMES",
+        );
+    }
 }

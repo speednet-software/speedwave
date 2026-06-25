@@ -7196,7 +7196,7 @@ services:
         assert!(
             !violations
                 .iter()
-                .any(|v| v.rule == SecurityRule::LitellmVolumes),
+                .any(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes),
             "canonical litellm mounts must pass, got: {violations:?}"
         );
     }
@@ -7221,7 +7221,7 @@ services:
         );
         let litellm: Vec<_> = violations
             .iter()
-            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .filter(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes)
             .collect();
         assert!(
             litellm.iter().any(|v| v.message.contains("/tokens")),
@@ -7253,7 +7253,7 @@ services:
         );
         let litellm: Vec<_> = violations
             .iter()
-            .filter(|v| v.rule == SecurityRule::LitellmVolumes)
+            .filter(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes)
             .collect();
         assert!(
             litellm.iter().any(|v| v.message.contains("llm namespace")),
@@ -7308,7 +7308,7 @@ services:
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == SecurityRule::LitellmVolumes),
+                .any(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes),
             "renamed proxy service must still trip the mount-hardening gate, got {violations:?}"
         );
     }
@@ -7348,7 +7348,9 @@ services:
         );
         let proxy: Vec<_> = violations
             .iter()
-            .filter(|v| v.container == "speedwave-proxy" || v.rule == SecurityRule::LitellmVolumes)
+            .filter(|v| {
+                v.container == "speedwave-proxy" || v.rule == SecurityRule::SpeedwaveProxyVolumes
+            })
             .collect();
         assert!(
             proxy.is_empty(),
