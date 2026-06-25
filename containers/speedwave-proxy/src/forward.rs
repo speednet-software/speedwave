@@ -68,6 +68,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>) -> StatusCode {
     // Route resolution and auth-header injection are wired in Task 6.
     if let Some(route) = resolve(&cfg, "") {
         let _url = &route.base_url;
+        // Reachability anchor so outbound_headers is exercised from the binary path; Task 6 wires the real forward.
         let _headers = outbound_headers(&route.auth, &HeaderMap::new());
     }
     StatusCode::NOT_IMPLEMENTED
@@ -93,12 +94,17 @@ mod tests {
             "authorization",
             "Bearer sk-no-key-required".parse().unwrap(),
         );
+        h.insert("x-api-key", "sk-no-key-required".parse().unwrap());
         let auth = Auth::Swap {
             env: "SPW_KEY_OPENROUTER".into(),
             scheme: Scheme::Bearer,
         };
         let out = outbound_headers_with(&auth, &h, |_| Some("or-REALKEY".into()));
         assert_eq!(out.get("authorization").unwrap(), "Bearer or-REALKEY");
+        assert!(
+            out.get("x-api-key").is_none(),
+            "x-api-key must not be forwarded on a Swap leg"
+        );
     }
 
     #[test]
@@ -114,12 +120,17 @@ mod tests {
             "authorization",
             "Bearer sk-no-key-required".parse().unwrap(),
         );
+        h.insert("x-api-key", "sk-no-key-required".parse().unwrap());
         let auth = Auth::Swap {
             env: "SPW_KEY_LOCAL".into(),
             scheme: Scheme::None,
         };
         let out = outbound_headers_with(&auth, &h, |_| Some("local-key".into()));
         assert!(out.get("authorization").is_none());
+        assert!(
+            out.get("x-api-key").is_none(),
+            "x-api-key must not be forwarded on a Swap/None leg"
+        );
     }
 
     #[test]
