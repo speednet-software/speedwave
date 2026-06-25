@@ -1,0 +1,36 @@
+# OCI Containerfile for the Speedwave Rust proxy (ADR-073)
+# Base: rust:1-alpine (Alpine Linux, musl libc — produces a static binary)
+# Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
+#
+# Build strategy: the rust:alpine toolchain targets musl natively, so
+# `cargo build --release --locked` yields a fully static binary with no
+# external libc dependency.  The final stage is scratch — no OS layer at all.
+#
+# tzdata: COPY'd from the builder so the TZ env var (injected by the host via
+# tz.rs::detect_host_timezone) resolves a named zone, not a numeric offset.
+# CLAUDE.md tz SSOT alignment requirement.
+FROM rust:1-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS builder
+
+# tzdata is needed only to populate /usr/share/zoneinfo for the final stage.
+# musl-dev is required for ring's C assembly (ring uses cc-rs to compile ASM).
+RUN apk add --no-cache tzdata musl-dev
+
+WORKDIR /build
+
+COPY speedwave-proxy/ /build/
+
+RUN cargo build --release --locked
+
+# ── Final image ───────────────────────────────────────────────────────────────
+# scratch: zero OS footprint; no shell, no libc, no attack surface.
+# Container user is set to "1000:1000" via compose `user:` field (same
+# pattern as every other Speedwave container — see Containerfile.claude).
+FROM scratch
+
+# TZ zone database — required so log timestamps carry the host offset, not
+# a bare numeric offset. Injected as TZ env by tz.rs::detect_host_timezone.
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
+COPY --from=builder /build/target/release/speedwave-proxy /speedwave-proxy
+
+ENTRYPOINT ["/speedwave-proxy"]
