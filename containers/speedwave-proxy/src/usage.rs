@@ -13,6 +13,7 @@ pub struct UsageLine {
     pub response_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    pub latency_ms: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read: u64,
@@ -88,7 +89,7 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
 impl UsageAcc {
     /// Convert to a `UsageLine`.  Returns `None` when no usage frame was seen
     /// (prevents writing zero-only lines for non-usage SSE streams).
-    pub fn finish(self, model: &str) -> Option<UsageLine> {
+    pub fn finish(self, model: &str, latency_ms: u64) -> Option<UsageLine> {
         if !self.saw_usage {
             return None;
         }
@@ -100,6 +101,7 @@ impl UsageAcc {
             model: Some(model.to_string()),
             response_id: self.response_id,
             cost_usd: None,
+            latency_ms,
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             cache_read: self.cache_read,
@@ -138,6 +140,7 @@ mod tests {
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc123".to_string()),
             cost_usd: None,
+            latency_ms: 900,
             prompt_tokens: 100,
             completion_tokens: 50,
             cache_read: 0,
@@ -156,7 +159,7 @@ mod tests {
             &json!({"type":"message_delta","usage":{"input_tokens":1234,"output_tokens":50}}),
             &mut a,
         );
-        let line = a.finish("m").unwrap();
+        let line = a.finish("m", 500).unwrap();
         assert_eq!(line.prompt_tokens, 1234);
         assert_eq!(line.completion_tokens, 50);
     }
@@ -168,7 +171,7 @@ mod tests {
             &json!({"type":"content_block_delta","delta":{"text":"hi"}}),
             &mut a,
         );
-        assert!(a.finish("m").is_none());
+        assert!(a.finish("m", 0).is_none());
     }
 
     #[test]
@@ -182,7 +185,7 @@ mod tests {
             &json!({"type":"message_delta","usage":{"output_tokens":0}}),
             &mut a,
         );
-        let line = a.finish("m").unwrap();
+        let line = a.finish("m", 0).unwrap();
         assert_eq!(line.cache_read, 0);
     }
 
@@ -218,6 +221,7 @@ mod tests {
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc".to_string()),
             cost_usd: None,
+            latency_ms: 900,
             prompt_tokens: 50000,
             completion_tokens: 10,
             cache_read: 0,
@@ -235,6 +239,10 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["model"], "claude-haiku-4-5");
         assert_eq!(parsed["response_id"], "msg_abc");
+        assert_eq!(
+            parsed["latency_ms"], 900,
+            "latency_ms must be emitted for throughput parity"
+        );
         assert_eq!(parsed["prompt_tokens"], 50000);
         assert_eq!(parsed["completion_tokens"], 10);
         assert_eq!(parsed["cache_read"], 0);
@@ -256,7 +264,7 @@ mod tests {
             }}}),
             &mut a,
         );
-        let line = a.finish("m").unwrap();
+        let line = a.finish("m", 750).unwrap();
         assert_eq!(line.cache_read, 40);
         assert_eq!(line.cache_write, 20);
         assert_eq!(line.response_id.unwrap(), "msg_2");
@@ -280,6 +288,6 @@ mod tests {
             &json!({"type":"content_block_start","content_block":{"type":"text"}}),
             &mut a,
         );
-        assert!(a.finish("model").is_none());
+        assert!(a.finish("model", 0).is_none());
     }
 }

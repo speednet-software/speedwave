@@ -74,7 +74,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>) -> StatusCode {
         let _headers = outbound_headers(&route.auth, &HeaderMap::new());
         let mut _acc = UsageAcc::default();
         sniff(&serde_json::Value::Null, &mut _acc);
-        if let Some(line) = _acc.finish("") {
+        if let Some(line) = _acc.finish("", 0) {
             append_usage(std::path::Path::new(""), &line);
         }
     }
