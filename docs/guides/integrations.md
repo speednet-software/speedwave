@@ -686,6 +686,20 @@ Settings holds a **provider list** rather than a single choice — configure sev
 
 Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
 
+#### Supported local / self-hosted servers
+
+The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streaming) and does **not** translate — the server must expose that endpoint. Supported servers and minimum versions:
+
+| Server         | Minimum version           | Notes                                                                          |
+| -------------- | ------------------------- | ------------------------------------------------------------------------------ |
+| **llama.cpp**  | Jan 2026 build (#17570)   | `llama-server` native Anthropic Messages support (incl. `count_tokens`, tools) |
+| **Ollama**     | 0.14.0                    | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
+| **LM Studio**  | 0.4.1                     | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
+| **vLLM**       | build with `/v1/messages` | Use the **OpenAI-compatible** row for a remote vLLM                            |
+| **OpenRouter** | —                         | Remote; exposes the Anthropic Messages API natively                            |
+
+A stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
+
 ### Ollama (requires 0.14.0+)
 
 1. Install Ollama and pull a model:
