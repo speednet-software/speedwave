@@ -5,8 +5,10 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  Injector,
   TemplateRef,
   ViewContainerRef,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -143,6 +145,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                       ? 'border-[var(--accent)] bg-[var(--bg-2)]'
                       : 'border-transparent hover-bg'
                   "
+                  [attr.data-active]="active ? 'true' : null"
                   data-testid="conversations-sidebar-row"
                 >
                   @if (pendingDelete) {
@@ -268,14 +271,31 @@ export class ConversationsSidebarComponent {
     });
   });
 
+  private readonly injector = inject(Injector);
+
   /** Sync the `open` input with the CDK overlay lifecycle (open/close panel). */
   constructor() {
     effect(() => {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
+    // Scroll the active row into view on open, active-session change, or when
+    // the async-loaded rows arrive (groups()).
+    effect(() => {
+      this.open();
+      this.currentSessionId();
+      this.groups();
+      this.scheduleActiveRowScroll();
+    });
     // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
+  }
+
+  /** After the next render, scroll the active row into view within the overlay. */
+  private scheduleActiveRowScroll(): void {
+    const root = this.overlayRef?.overlayElement;
+    if (!root) return;
+    afterNextRender(() => scrollActiveRowIntoView(root), { injector: this.injector });
   }
 
   /**
@@ -329,6 +349,17 @@ export class ConversationsSidebarComponent {
     this.overlayRef.dispose();
     this.overlayRef = null;
   }
+}
+
+/**
+ * Scrolls the active conversation row to the TOP of the list within `root`
+ * (the overlay panel) so the user always sees it. No-op when no row is active.
+ * Exported for unit testing.
+ * @param root - Element containing the rendered rows.
+ */
+export function scrollActiveRowIntoView(root: ParentNode): void {
+  const active = root.querySelector<HTMLElement>('[data-active="true"]');
+  active?.scrollIntoView({ block: 'start' });
 }
 
 const PREVIEW_TAG_RE =

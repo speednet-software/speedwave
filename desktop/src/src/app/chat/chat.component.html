@@ -37,22 +37,23 @@
         [messages]="chat.messagesFromState()"
         [currentBlocks]="chat.currentBlocksFromState()"
         [isStreaming]="chat.isStreamingFromState()"
+        [loadingTranscript]="chat.loadingTranscriptFromState()"
         [lastAssistantIndex]="lastAssistantIndex()"
         (questionAnswered)="onQuestionAnswered($event)"
       />
-      <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pt-3 md:px-6">
+      <div class="shrink-0 border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pb-3 pt-3 md:px-6">
         <div class="relative mx-auto max-w-3xl">
           <app-composer
             #composer
             [streaming]="chat.isStreamingFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
-            [model]="chat.sessionStats?.model ?? ''"
+            [model]="chat.sessionStatsFromState()?.model ?? ''"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"
             (stopRequested)="onStopClicked()"
           />
-          <app-session-stats [stats]="chat.sessionStats" [branch]="gitBranch()" />
+          <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
         </div>
       </div>
     </div>

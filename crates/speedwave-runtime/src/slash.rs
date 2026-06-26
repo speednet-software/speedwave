@@ -148,6 +148,13 @@ pub fn invalidate_all_caches() {
     }
 }
 
+/// True when `text` trimmed is exactly `/` — the slash-menu trigger, not a
+/// message. SSOT for the "lone slash" rule shared by the chat stdin guard and
+/// the history junk-session filter (mirrored in TS composer `canSubmit`).
+pub fn is_bare_slash(text: &str) -> bool {
+    text.trim() == "/"
+}
+
 /// Logs a poisoned-mutex condition at `warn!`; the cache update is skipped.
 fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
@@ -642,6 +649,29 @@ fn claude_container_name(project: &str) -> String {
 mod tests {
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
+
+    #[test]
+    fn is_bare_slash_matches_lone_slash_with_surrounding_whitespace() {
+        assert!(is_bare_slash("/"));
+        assert!(is_bare_slash("  /  "));
+        assert!(is_bare_slash("\n/\t"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_real_commands_and_text() {
+        // A real slash command and ordinary text are messages, not the trigger.
+        assert!(!is_bare_slash("/code-review"));
+        assert!(!is_bare_slash("/clear"));
+        assert!(!is_bare_slash("what is 2/3?"));
+        assert!(!is_bare_slash("hej"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_empty() {
+        // Empty is blank, not the slash trigger — callers handle blank separately.
+        assert!(!is_bare_slash(""));
+        assert!(!is_bare_slash("   "));
+    }
 
     fn sample_init_json() -> String {
         serde_json::json!({

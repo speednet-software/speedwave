@@ -1101,6 +1101,16 @@ pub fn text_only(text: impl Into<String>) -> Vec<WireContentBlock> {
     vec![WireContentBlock::Text { text: text.into() }]
 }
 
+/// True when the blocks carry nothing but whitespace or a lone `/` (the
+/// slash-menu trigger, not a message — sending it spawns a junk session).
+pub fn is_blank_or_slash_only(blocks: &[WireContentBlock]) -> bool {
+    let joined: String = blocks
+        .iter()
+        .map(|WireContentBlock::Text { text }| text.as_str())
+        .collect();
+    joined.trim().is_empty() || speedwave_runtime::slash::is_bare_slash(&joined)
+}
+
 /// Stream-json user envelope: `{"type":"user","message":{"role":"user","content":[...]}}`.
 pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     serde_json::json!({
@@ -1186,14 +1196,17 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
 }
 
 /// Build the argument list for Claude Code's stream-json mode.
-/// `resume_session_id` adds `--resume <id>`; `resume_at_uuid` adds
-/// `--resume-session-at <uuid>` (ADR-046 retry anchor).
+/// `instance_id` is stamped as `env SPW_SESSION_INSTANCE_ID=<id>` so a leaked
+/// in-container process can be reaped surgically. `resume_session_id` adds
+/// `--resume <id>`; `resume_at_uuid` adds `--resume-session-at <uuid>` (ADR-046).
 pub fn build_claude_args(
+    instance_id: &str,
     resume_session_id: Option<&str>,
     resume_at_uuid: Option<&str>,
     flags: &[String],
 ) -> Vec<String> {
-    let mut args = vec![
+    let mut args = speedwave_runtime::session::instance_env_argv(instance_id);
+    args.extend([
         consts::CLAUDE_BINARY.to_string(),
         "-p".to_string(),
         "--output-format".to_string(),
@@ -1204,7 +1217,7 @@ pub fn build_claude_args(
         "--include-partial-messages".to_string(),
         "--permission-prompt-tool".to_string(),
         "stdio".to_string(),
-    ];
+    ]);
 
     if let Some(id) = resume_session_id {
         args.push("--resume".to_string());
@@ -1232,6 +1245,16 @@ pub fn claude_container_name(project: &str) -> String {
 /// `OnceLock`, which resolves the process-global `data_dir()` basename.
 fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
     format!("{prefix}_{project}_claude")
+}
+
+/// The container + argv a reap exec issues: the project's claude container and
+/// the marker-scoped kill command. Pure, so the targeting is testable without a
+/// runtime; [`ChatSession::reap_instance`] runs it.
+fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
+    (
+        claude_container_name(project),
+        speedwave_runtime::session::kill_by_instance_command(id),
+    )
 }
 
 /// Build the stream-json `control_request` payload for an interrupt.
@@ -1270,6 +1293,12 @@ pub struct ChatSession {
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     /// Set to `Some` only after a successful spawn — guards `stop()` log entry.
     session_log_path: Option<std::path::PathBuf>,
+    /// Env marker of the spawned in-container process; lets `stop()` reap
+    /// exactly this one, not other CLI/UI sessions sharing the container.
+    instance_id: Option<String>,
+    /// Set by `stop()` so the reader thread stays silent on a deliberate EOF
+    /// instead of reporting a crash. Reset on each fresh spawn.
+    stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatSession {
@@ -1282,6 +1311,8 @@ impl ChatSession {
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             drain_handles: Vec::new(),
             session_log_path: None,
+            instance_id: None,
+            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1298,6 +1329,7 @@ impl ChatSession {
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
+        instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
     ) -> anyhow::Result<(Vec<String>, String)> {
@@ -1312,7 +1344,12 @@ impl ChatSession {
 
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
-        let args = build_claude_args(resume_session_id, resume_at_uuid, &resolved.flags);
+        let args = build_claude_args(
+            instance_id,
+            resume_session_id,
+            resume_at_uuid,
+            &resolved.flags,
+        );
         let container = claude_container_name(project_name);
 
         Ok((args, container))
@@ -1341,9 +1378,14 @@ impl ChatSession {
         let rt = runtime::detect_runtime();
         let user_config = config::load_user_config()?;
 
+        // Reap a prior leaked process for this session before spawning a new one.
+        self.reap_instance();
+
+        let instance_id = uuid::Uuid::new_v4().to_string();
         let (args, container) = Self::prepare_args(
             &self.project_name,
             &user_config,
+            &instance_id,
             resume_session_id,
             resume_at_uuid,
         )?;
@@ -1358,6 +1400,13 @@ impl ChatSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+
+        // Record the marker only after a confirmed spawn, so a failed launch
+        // never leaves an id for a process that doesn't exist. Fresh spawn:
+        // this reader must report real EOFs.
+        self.instance_id = Some(instance_id);
+        self.stopping
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         let stdout = child
             .stdout
@@ -1416,6 +1465,7 @@ impl ChatSession {
         let pending_requests = self.pending_requests.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
+        let stopping_for_reader = self.stopping.clone();
 
         // On resume: seed cumulative session state from the transcript so the
         // first turn reports a real delta. Non-fatal — log and use a zero baseline.
@@ -1628,8 +1678,10 @@ impl ChatSession {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
 
-            // stdout closed without a result/error: emit an error so the UI doesn't hang.
-            if !got_result {
+            // EOF without a result: surface a crash — but not when `stop()` tore
+            // this session down deliberately (that EOF is ours, not a crash).
+            let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
+            if !got_result && !stopping {
                 log::warn!("stdout reader: stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
@@ -1648,6 +1700,11 @@ impl ChatSession {
     /// Send a user message to Claude (write JSON to stdin) in stream-json input
     /// format. Errors if the subprocess has exited (broken pipe).
     pub fn send_message(&mut self, blocks: &[WireContentBlock]) -> anyhow::Result<()> {
+        // Drop a bare `/` or blank before stdin — never reaches Claude.
+        if is_blank_or_slash_only(blocks) {
+            anyhow::bail!("empty message");
+        }
+
         let child = self
             .child
             .as_mut()
@@ -1846,10 +1903,35 @@ impl ChatSession {
         Ok(())
     }
 
+    /// Kill the orphaned in-container process for `self.instance_id` (host kill
+    /// doesn't propagate into the container). Best-effort; no-op without an id —
+    /// the runtime is only detected when there is actually something to reap.
+    fn reap_instance(&mut self) {
+        let Some(id) = self.instance_id.take() else {
+            return;
+        };
+        let (container, argv) = reap_exec_plan(&self.project_name, &id);
+        let rt = runtime::detect_runtime();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match rt.container_exec_piped(&container, &argv_refs) {
+            Ok(mut cmd) => {
+                if let Err(e) = cmd.status() {
+                    log::warn!("reap_instance: kill exec failed: {e}");
+                }
+            }
+            Err(e) => log::warn!("reap_instance: could not build kill exec: {e}"),
+        }
+    }
+
     /// Stop the Claude subprocess entirely (session end, not turn cancel).
     pub fn stop(&mut self) -> anyhow::Result<()> {
+        // Mark deliberate teardown before EOF so the reader stays silent.
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // Drop stdin first to signal EOF to the child
         self.shared_stdin = None;
+        // Reap the orphaned in-container process; self-disarms (no-op) without an id.
+        self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
             // Wait up to 5 s for exit, then abandon it (OS reaps).
@@ -2090,6 +2172,34 @@ mod tests {
     }
 
     #[test]
+    fn send_message_rejects_bare_slash_before_session_check() {
+        // The bare-slash guard runs before the active-session check, so even
+        // with no child the error is "empty message" — proving it's dropped
+        // and never reaches Claude's stdin.
+        let mut s = ChatSession::new("test-project");
+        let err = s
+            .send_message(&text_only("/"))
+            .expect_err("bare slash must be rejected");
+        assert!(
+            err.to_string().contains("empty message"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn send_message_allows_real_text_through_to_session_check() {
+        // Real text passes the guard and hits the no-active-session error.
+        let mut s = ChatSession::new("test-project");
+        let err = s
+            .send_message(&text_only("hej"))
+            .expect_err("no active session expected");
+        assert!(
+            err.to_string().contains("no active session"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn build_interrupt_payload_matches_sdk_protocol() {
         // Wire format per SDKControlInterruptRequest in claude-agent-sdk-python.
         let v = build_interrupt_payload("req_interrupt_42");
@@ -2142,6 +2252,46 @@ mod tests {
         let payload = build_interrupt_payload("req_interrupt_err");
         let err = write_interrupt(&mut FailWriter, &payload).expect_err("expected error");
         assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    // -- reap_instance targeting --
+
+    #[test]
+    fn reap_exec_plan_targets_project_container_with_marker() {
+        let (container, argv) = reap_exec_plan("acme", "inst-123");
+        assert!(
+            container.ends_with("_acme_claude"),
+            "must target the project's claude container, got: {container}"
+        );
+        // The kill command carries the exact instance marker so only this
+        // session's in-container process is reaped.
+        let joined = argv.join(" ");
+        assert!(joined.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
+        assert!(joined.contains("kill"));
+    }
+
+    #[test]
+    fn reap_instance_is_noop_without_an_id() {
+        // No spawn happened → no marker → reap takes nothing and never touches a
+        // runtime (would otherwise panic in a unit-test environment).
+        let mut s = ChatSession::new("test-project");
+        assert!(s.instance_id.is_none());
+        s.reap_instance();
+        assert!(s.instance_id.is_none());
+    }
+
+    // -- EOF-error gating (cross-session error-emission race) --
+
+    #[test]
+    fn stop_sets_stopping_flag() {
+        use std::sync::atomic::Ordering;
+        let mut s = ChatSession::new("test-project");
+        assert!(!s.stopping.load(Ordering::SeqCst));
+        s.stop().unwrap();
+        assert!(
+            s.stopping.load(Ordering::SeqCst),
+            "stop() must mark deliberate teardown so the reader stays silent"
+        );
     }
 
     // -- ChatSession::stop() tests --
@@ -2401,6 +2551,39 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    // ── blank / bare-slash guard ─────────────────────────────────────
+
+    #[test]
+    fn is_blank_or_slash_only_rejects_lone_slash() {
+        assert!(is_blank_or_slash_only(&text_only("/")));
+    }
+
+    #[test]
+    fn is_blank_or_slash_only_rejects_slash_with_surrounding_whitespace() {
+        assert!(is_blank_or_slash_only(&text_only("  /  ")));
+        assert!(is_blank_or_slash_only(&text_only("\n/\t")));
+    }
+
+    #[test]
+    fn is_blank_or_slash_only_rejects_blank_and_empty() {
+        assert!(is_blank_or_slash_only(&text_only("")));
+        assert!(is_blank_or_slash_only(&text_only("   \n\t ")));
+        assert!(is_blank_or_slash_only(&[]));
+    }
+
+    #[test]
+    fn is_blank_or_slash_only_accepts_real_slash_command() {
+        // A real slash command (slash + name) must still be sendable.
+        assert!(!is_blank_or_slash_only(&text_only("/code-review")));
+        assert!(!is_blank_or_slash_only(&text_only("/clear")));
+    }
+
+    #[test]
+    fn is_blank_or_slash_only_accepts_normal_text() {
+        assert!(!is_blank_or_slash_only(&text_only("hej")));
+        assert!(!is_blank_or_slash_only(&text_only("what is 2/3?")));
     }
 
     // ── send_message JSON format ─────────────────────────────────────
@@ -3403,7 +3586,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_without_resume() {
-        let args = build_claude_args(None, None, &[]);
+        let args = build_claude_args("inst", None, None, &[]);
         assert!(args.contains(&consts::CLAUDE_BINARY.to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
@@ -3414,7 +3597,7 @@ mod tests {
     #[test]
     fn build_claude_args_with_resume() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let args = build_claude_args(Some(id), None, &[]);
+        let args = build_claude_args("inst", Some(id), None, &[]);
         let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[resume_pos + 1], id);
         assert!(!args.contains(&"--resume-session-at".to_string()));
@@ -3425,7 +3608,7 @@ mod tests {
         // ADR-046: retry uses `--resume <session>` + `--resume-session-at <uuid>`.
         let session = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_anchor";
-        let args = build_claude_args(Some(session), Some(uuid), &[]);
+        let args = build_claude_args("inst", Some(session), Some(uuid), &[]);
         let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[resume_pos + 1], session);
         let at_pos = args
@@ -3437,8 +3620,24 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_flags() {
-        let args = build_claude_args(None, None, &["--dangerously-skip-permissions".to_string()]);
+        let args = build_claude_args(
+            "inst",
+            None,
+            None,
+            &["--dangerously-skip-permissions".to_string()],
+        );
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn build_claude_args_prepends_instance_env_marker() {
+        // The instance marker is injected via `env VAR=id` BEFORE the claude
+        // binary so it lands in the container process's environ.
+        let args = build_claude_args("my-instance-42", None, None, &[]);
+        assert_eq!(args[0], "env");
+        assert_eq!(args[1], "SPW_SESSION_INSTANCE_ID=my-instance-42");
+        // claude binary follows the env prefix.
+        assert_eq!(args[2], consts::CLAUDE_BINARY);
     }
 
     // ── Multi-event fixture test ─────────────────────────────────────
@@ -4159,7 +4358,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_permission_prompt_tool() {
-        let args = build_claude_args(None, None, &[]);
+        let args = build_claude_args("inst", None, None, &[]);
         let pos = args
             .iter()
             .position(|a| a == "--permission-prompt-tool")
@@ -4179,7 +4378,7 @@ mod tests {
             selected_ide: None,
             ui: None,
         };
-        let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
+        let result = ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -4202,8 +4401,13 @@ mod tests {
             selected_ide: None,
             ui: None,
         };
-        let result =
-            ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
+        let result = ChatSession::prepare_args(
+            "test",
+            &user_config,
+            "inst",
+            Some("../../../etc/passwd"),
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -4224,6 +4428,7 @@ mod tests {
         let result = ChatSession::prepare_args(
             "test",
             &user_config,
+            "inst",
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
         );
@@ -4244,7 +4449,7 @@ mod tests {
             selected_ide: None,
             ui: None,
         };
-        let result = ChatSession::prepare_args("myproject", &user_config, None, None);
+        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
         assert!(result.is_ok());
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
@@ -4266,9 +4471,15 @@ mod tests {
             ui: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
+        let result =
+            ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
         assert!(result.is_ok());
         let (args, _container) = result.unwrap();
+        // The instance marker is stamped ahead of the claude binary.
+        assert!(args.contains(&format!(
+            "{}=my-inst",
+            speedwave_runtime::session::SESSION_INSTANCE_ENV
+        )));
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&session_id.to_string()));
         assert!(!args.contains(&"--resume-session-at".to_string()));
@@ -4290,7 +4501,8 @@ mod tests {
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
-        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), Some(uuid));
+        let result =
+            ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
         assert!(result.is_ok());
         let (args, _) = result.unwrap();
         assert!(args.contains(&"--resume-session-at".to_string()));

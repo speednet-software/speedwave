@@ -36,7 +36,7 @@ Run Claude Code headless (`claude -p`) with `--output-format=stream-json --input
 
 The Desktop exposes Tauri commands backed by `desktop/src-tauri/src/history.rs` (wired in `desktop/src-tauri/src/main.rs`) that read Claude Code's native JSONL session files at `~/.speedwave/claude-home/<project>/.claude/projects/-workspace/*.jsonl` (resolved by `sessions_dir_impl`, with auto-discovery fallback when the `-workspace` dir name differs):
 
-- `list_conversations(project)` — lists sessions newest-first with a preview.
+- `list_conversations(project)` — lists sessions by last activity, newest-first, with a preview (junk `/`-only sessions filtered out).
 - `get_conversation(project, session_id)` — reads one session into rich `MessageBlock[]`.
 - `get_project_memory(project)` — reads the project's `MEMORY.md` (empty string if absent).
 - `resume_conversation(project, session_id)` — stops the current session and starts a new subprocess with `--resume <id>`.
