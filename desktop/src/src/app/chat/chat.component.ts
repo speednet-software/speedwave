@@ -88,6 +88,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private log = inject(LoggerService);
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
+  private unsubRestart: (() => void) | null = null;
 
   /** Read-only aliases over the UI-state signals; the template binds these. */
   get showHistory(): boolean {
@@ -145,6 +146,14 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (this.projectState.status === 'auth_required') {
         this.router.navigate(['/settings']);
       }
+    });
+
+    // A container restart (e.g. a model switch) recreates the claude container
+    // and kills the live session. Resume it so the conversation keeps context
+    // instead of the next message starting a fresh, history-less session.
+    this.unsubRestart = this.projectState.onRestartComplete(() => {
+      const sessionId = this.chat.sessionStats?.session_id;
+      if (sessionId) void this.resumeConversation(sessionId);
     });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -471,6 +480,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.unsubAuthWatch) {
       this.unsubAuthWatch();
       this.unsubAuthWatch = null;
+    }
+    if (this.unsubRestart) {
+      this.unsubRestart();
+      this.unsubRestart = null;
     }
   }
 }

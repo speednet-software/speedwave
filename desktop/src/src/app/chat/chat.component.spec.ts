@@ -423,6 +423,57 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── restart auto-resume ─────────────────────────────────────────────────────
+
+  describe('auto-resume after a container restart', () => {
+    it('resumes the active session (not a fresh start_chat) when a restart completes', async () => {
+      projectState.activeProject = 'test';
+      // An active session exists (a model switch will restart the container).
+      chatState._setState({
+        messages: [],
+        currentBlocks: [],
+        sessionStats: {
+          session_id: 'live-session-1',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      await component.ngOnInit();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'live-session-1', messages: [] };
+        return undefined;
+      };
+
+      // Container restart finished (model switch path).
+      projectState.notifyRestartComplete();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(invokeCalls).not.toContain('start_chat');
+    });
+
+    it('does nothing on restart when there is no active session', async () => {
+      projectState.activeProject = 'test';
+      chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
+      await component.ngOnInit();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        return undefined;
+      };
+
+      projectState.notifyRestartComplete();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeCalls).not.toContain('resume_conversation');
+    });
+  });
+
   // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
