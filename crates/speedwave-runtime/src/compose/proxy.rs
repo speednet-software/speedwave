@@ -142,7 +142,9 @@ pub fn write_proxy_config_in(
     migrate_legacy_local_key_in(data_dir, project, llm);
     // `has_api_key` is the on-disk key file's existence (config.rs), not the
     // persisted flag — a stale `false` would render `auth:none` and drop the
-    // provider key, 401-ing a backend that requires it.
+    // provider key, 401-ing a backend that requires it. Deliberate trade-off:
+    // we re-derive at render time rather than drop the persisted serde flag,
+    // which would ripple through config.rs + the Desktop frontend.
     let llm = sync_has_api_key_from_disk(data_dir, project, llm);
     let content = render_proxy_config(&llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;

@@ -98,16 +98,15 @@ pub fn outbound_headers_with(
     out
 }
 
-/// Rewrites the request body's `model` to drop the route prefix (`local/foo`
-/// → `foo`), so the backend sees its own model name. Returns the body
-/// unchanged when the model has no prefix or the body can't be reparsed.
-fn strip_model_prefix(body: &[u8], model: &str) -> Vec<u8> {
+/// Rewrites the already-parsed body's `model` to drop the route prefix
+/// (`local/foo` → `foo`), so the backend sees its own model name. Returns the
+/// original bytes unchanged when the model has no prefix or re-serialisation
+/// fails — `body` and `parsed` must be the same request.
+fn strip_model_prefix(body: &[u8], parsed: &serde_json::Value, model: &str) -> Vec<u8> {
     let Some((_, bare)) = model.split_once('/') else {
         return body.to_vec();
     };
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return body.to_vec();
-    };
+    let mut v = parsed.clone();
     if let Some(m) = v.get_mut("model") {
         *m = serde_json::Value::String(bare.to_string());
     }
@@ -118,13 +117,10 @@ fn strip_model_prefix(body: &[u8], model: &str) -> Vec<u8> {
 /// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
 /// sniffing usage frames, and append one usage line on stream end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
-    // Parse model from the request body to select the backend route.
-    let model = match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(v) => v
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string(),
+    // Parse the body once: the model selects the backend route, the same
+    // parsed value is reused to strip the route prefix before forwarding.
+    let parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(v) => v,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -133,6 +129,11 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
+    let model = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let route = match resolve(&cfg, &model) {
         Some(r) => r,
@@ -150,7 +151,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     // Strip the route prefix from the model before forwarding: the backend
     // only knows `unsloth/Qwen3.6` (its own name), not Speedwave's `local/…`
     // routing prefix. Anthropic passthrough has no prefix and is untouched.
-    let outbound_body = strip_model_prefix(&body, &model);
+    let outbound_body = strip_model_prefix(&body, &parsed, &model);
     // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
@@ -263,7 +264,8 @@ mod tests {
     #[test]
     fn strip_model_prefix_removes_route_prefix() {
         let body = br#"{"model":"local/unsloth/Qwen3.6","max_tokens":16}"#;
-        let out = strip_model_prefix(body, "local/unsloth/Qwen3.6");
+        let parsed = serde_json::from_slice(body).unwrap();
+        let out = strip_model_prefix(body, &parsed, "local/unsloth/Qwen3.6");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["model"], "unsloth/Qwen3.6");
         // Other fields survive the rewrite.
@@ -274,7 +276,8 @@ mod tests {
     fn strip_model_prefix_leaves_anthropic_untouched() {
         // No prefix (anthropic passthrough) → body byte-identical.
         let body = br#"{"model":"claude-opus-4-8","max_tokens":16}"#;
-        let out = strip_model_prefix(body, "claude-opus-4-8");
+        let parsed = serde_json::from_slice(body).unwrap();
+        let out = strip_model_prefix(body, &parsed, "claude-opus-4-8");
         assert_eq!(out, body.to_vec());
     }
 
@@ -282,7 +285,8 @@ mod tests {
     fn strip_model_prefix_only_drops_first_segment() {
         // openrouter/anthropic/claude-3.5 → anthropic/claude-3.5 (one level).
         let body = br#"{"model":"openrouter/anthropic/claude-3.5"}"#;
-        let out = strip_model_prefix(body, "openrouter/anthropic/claude-3.5");
+        let parsed = serde_json::from_slice(body).unwrap();
+        let out = strip_model_prefix(body, &parsed, "openrouter/anthropic/claude-3.5");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["model"], "anthropic/claude-3.5");
     }
