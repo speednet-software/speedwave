@@ -9,7 +9,7 @@ Each project runs an isolated set of containers on a dedicated network:
 ```
 speedwave_<project>_network
 ├── speedwave_<project>_claude      # Claude Code — no tokens, no container socket
-├── speedwave_<project>_speedwave_proxy  # Rust forwarder (port 4000, ADR-073) — routes every session
+├── speedwave_<project>_proxy  # Rust forwarder (port 4000, ADR-073) — routes every session
 │   ├── anthropic passthrough       # Subscription OAuth / API key → api.anthropic.com (verbatim headers)
 │   └── /v1/messages (prefix route) # Local / OpenRouter backends — native Anthropic, SSE relayed, no translation
 ├── speedwave_<project>_mcp_hub     # MCP Hub (port 4000) — ONLY MCP server Claude sees
