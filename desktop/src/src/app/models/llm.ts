@@ -117,7 +117,12 @@ export interface UsageBucket {
   completion_tokens: number;
   cache_read: number;
   cache_write: number;
-  cost_usd: number;
+  /** Summed cost over priced requests; `null` when none priced (never 0). */
+  cost_usd: number | null;
+  /** Requests with a known cost (catalog/actual/free). */
+  priced_requests: number;
+  /** Requests with no known cost (subscription/unknown) — shown as "—". */
+  unpriced_requests: number;
   /** Throughput numerator: completion tokens from successful timed records. */
   throughput_completion_tokens: number;
   /** Throughput denominator: latency of the same successful timed records. */

@@ -21,6 +21,8 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     cache_read: 0,
     cache_write: 0,
     cost_usd: 0,
+    priced_requests: 0,
+    unpriced_requests: 0,
     throughput_completion_tokens: 0,
     throughput_latency_ms_sum: 0,
     ...overrides,
@@ -95,7 +97,13 @@ describe('LlmUsageComponent', () => {
             'local/qwen3': bucket({ requests: 1, prompt_tokens: 14, completion_tokens: 2 }),
           },
           '2026-06-13': {
-            'local/qwen3': bucket({ requests: 1, prompt_tokens: 5, completion_tokens: 10 }),
+            'claude-opus-4-8': bucket({
+              requests: 1,
+              prompt_tokens: 5,
+              completion_tokens: 10,
+              cost_usd: null,
+              unpriced_requests: 1,
+            }),
           },
         },
       })
@@ -115,8 +123,29 @@ describe('LlmUsageComponent', () => {
     expect(rows.length).toBe(3);
     // Newest day first.
     expect(rows[0].textContent).toContain('2026-06-13');
-    // Local models with no pricing render a dash, not $0.
+    // Unpriced (null cost, e.g. subscription) renders a dash, not $0.
     expect(rows[0].textContent).toContain('—');
+  });
+
+  it('renders $0 for a priced-zero (local) bucket, dash only for null', async () => {
+    const { fixture } = await setup(
+      summary({
+        totals: bucket({ requests: 1, cost_usd: 0, priced_requests: 1 }),
+        days: {
+          '2026-06-12': {
+            'local/qwen3': bucket({ requests: 1, cost_usd: 0, priced_requests: 1 }),
+          },
+        },
+      })
+    );
+    const el: HTMLElement = fixture.nativeElement;
+    // A genuine zero (free local) is priced — shows $0, never a dash.
+    expect(el.querySelector('[data-testid="llm-usage-card-cost"]')?.textContent).toContain('$0');
+    // The cost column (last cell) shows $0, not a dash.
+    const rows = el.querySelectorAll('[data-testid="llm-usage-table"] tbody tr');
+    const costCell = rows[0].querySelector('td:last-child');
+    expect(costCell?.textContent).toContain('$0');
+    expect(costCell?.textContent).not.toContain('—');
   });
 
   it('renders the daily chart, provider bar and heatmap when data exists', async () => {

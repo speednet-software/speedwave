@@ -126,7 +126,7 @@ export const DAILY_CHART_DAYS = 30;
             <div class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2">
               <div class="text-[10px] uppercase tracking-widest">cost</div>
               <div class="mt-1 text-[15px] text-[var(--ink)]" data-testid="llm-usage-card-cost">
-                {{ s.totals.cost_usd > 0 ? usd(s.totals.cost_usd) : '—' }}
+                {{ s.totals.cost_usd !== null ? usd(s.totals.cost_usd) : '—' }}
               </div>
             </div>
           </div>
@@ -282,7 +282,7 @@ export const DAILY_CHART_DAYS = 30;
                     }
                   </td>
                   <td class="py-1 text-right">
-                    {{ row.bucket.cost_usd > 0 ? usd(row.bucket.cost_usd) : '—' }}
+                    {{ row.bucket.cost_usd !== null ? usd(row.bucket.cost_usd) : '—' }}
                   </td>
                 </tr>
               }

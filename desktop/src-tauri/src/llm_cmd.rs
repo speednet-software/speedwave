@@ -722,6 +722,36 @@ async fn discover_openrouter(
     parse_openrouter_models(&resp.body)
 }
 
+/// OpenRouter generation-cost endpoint — fixed host, never user input.
+const OPENROUTER_GENERATION_URL: &str = "https://openrouter.ai/api/v1/generation";
+
+/// Real cost (`data.total_cost`, USD) for an OpenRouter generation id, fetched
+/// host-side (ADR-041). `None` on a non-`gen-` id, missing key, or any error.
+async fn fetch_openrouter_gen_cost(
+    data_dir: &std::path::Path,
+    project: &str,
+    gen_id: &str,
+) -> Option<f64> {
+    if !gen_id.starts_with("gen-") {
+        return None;
+    }
+    let key_path =
+        speedwave_runtime::compose::llm_provider_key_path_in(data_dir, project, "openrouter")
+            .ok()?;
+    let key = strip_bearer_prefix(&std::fs::read_to_string(key_path).ok()?)?;
+    let client = build_llm_probe_client_with_auth(Some(&key), None).ok()?;
+    let url = format!("{OPENROUTER_GENERATION_URL}?id={gen_id}");
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = read_body_limited(resp, "openrouter generation")
+        .await
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    v.get("data")?.get("total_cost")?.as_f64()
+}
+
 /// Strips a leading `Bearer ` (case-insensitive) and trims whitespace.
 /// Returns `None` when the result is empty.
 pub(crate) fn strip_bearer_prefix(s: &str) -> Option<String> {
@@ -917,10 +947,56 @@ pub async fn get_llm_usage(
 ) -> Result<speedwave_runtime::usage::UsageSummary, String> {
     let data_dir = speedwave_runtime::consts::data_dir();
     speedwave_runtime::usage::rotate_usage_if_large_in(data_dir.as_path(), &project);
+    // Pre-fetch OpenRouter costs (async), then enrich the sidecar with a sync
+    // closure reading the resolved map — keeps runtime free of HTTP/async.
+    let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
+    let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
+        data_dir.as_path(),
+        &project,
+        &|gen_id| gen_costs.get(gen_id).copied(),
+    );
     Ok(speedwave_runtime::usage::read_usage_summary_in(
         data_dir.as_path(),
         &project,
     ))
+}
+
+/// Resolves real OpenRouter cost for every not-yet-priced `gen_id` in the
+/// project's usage JSONL, into a `gen_id` → USD map (host-side `/generation`).
+async fn openrouter_costs_for_project(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    let priced = speedwave_runtime::usage_cost::read_cost_cache_in(data_dir, project);
+    let live = speedwave_runtime::usage::usage_file_in(data_dir, project);
+    let rotated = live.with_extension("jsonl.1");
+    let mut seen = std::collections::HashSet::new();
+    for path in [rotated, live] {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let Ok(rec) =
+                serde_json::from_str::<speedwave_runtime::usage::UsageRecord>(line.trim())
+            else {
+                continue;
+            };
+            if rec.provider_kind != "openrouter" {
+                continue;
+            }
+            let (Some(id), Some(gen)) = (rec.response_id.as_deref(), rec.gen_id.as_deref()) else {
+                continue;
+            };
+            if priced.contains_key(id) || !seen.insert(gen.to_string()) {
+                continue;
+            }
+            if let Some(cost) = fetch_openrouter_gen_cost(data_dir, project, gen).await {
+                out.insert(gen.to_string(), cost);
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2047,5 +2123,34 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "empty");
+    }
+
+    #[tokio::test]
+    async fn gen_cost_rejects_non_gen_id_without_http() {
+        let dir = tempfile::tempdir().unwrap();
+        // A non-`gen-` id never touches the network or the key file.
+        let c = super::fetch_openrouter_gen_cost(dir.path(), "proj", "msg_1").await;
+        assert!(c.is_none());
+    }
+
+    #[tokio::test]
+    async fn gen_cost_missing_key_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = super::fetch_openrouter_gen_cost(dir.path(), "proj", "gen-abc").await;
+        assert!(c.is_none(), "no openrouter key on disk → None, not a panic");
+    }
+
+    #[tokio::test]
+    async fn openrouter_costs_empty_when_no_openrouter_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::usage::usage_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/qwen3","response_id":"m1","provider_kind":"local"}"#,
+        )
+        .unwrap();
+        let map = super::openrouter_costs_for_project(dir.path(), "proj").await;
+        assert!(map.is_empty());
     }
 }
