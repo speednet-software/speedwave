@@ -62,7 +62,7 @@ The forwarder is dramatically lighter than the LiteLLM container it replaces: me
 
 ## No translation
 
-The forwarder relays the upstream byte stream unbuffered (channel + `ReceiverStream`, no buffering) and never rewrites the body. Because every supported backend speaks native Anthropic `/v1/messages` with streaming[^2][^3][^4][^5][^6], there is no Anthropic↔OpenAI translation step — the source of LiteLLM's pydantic-bridge noise, its streaming-logging gaps, and most of its CPU cost. A pure OpenAI-only backend is therefore unsupported by design; the docs state the minimum versions that added the Anthropic endpoint, and an OpenAI-only server fails fast rather than being silently mistranslated.
+The forwarder relays the upstream byte stream unbuffered (channel + `ReceiverStream`, no buffering) and never rewrites the response — the SSE stream is relayed verbatim. The request body is touched only minimally: on a swap leg `forward.rs::strip_model_prefix` rewrites the single `model` field to drop the route prefix (`local/foo` → `foo`), because the backend only knows its own model name, not Speedwave's routing prefix; the Anthropic passthrough leg (no prefix) leaves the body untouched. Because every supported backend speaks native Anthropic `/v1/messages` with streaming[^2][^3][^4][^5][^6], there is no Anthropic↔OpenAI translation step — the source of LiteLLM's pydantic-bridge noise, its streaming-logging gaps, and most of its CPU cost. A pure OpenAI-only backend is therefore unsupported by design; the docs state the minimum versions that added the Anthropic endpoint, and an OpenAI-only server fails fast rather than being silently mistranslated.
 
 ## count_tokens shim
 
@@ -95,7 +95,7 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 - Forwarder: `containers/proxy/src/{main,router,forward,usage,count_tokens,config}.rs` (standalone cargo project, built `--locked`)
 - Image: `containers/Containerfile.proxy` (multi-stage Rust → distroless/scratch, digest-pinned)
 - Compose: `containers/compose.template.yml` (`proxy` service), `compose/mod.rs` (mount dirs + substitution), `resources.rs::PROXY_RESOURCES`
-- Config renderer + keys: `compose/litellm.rs` (`render_proxy_config`); token namespace: `compose/tokens.rs` (`llm` service)
+- Config renderer + keys: `compose/proxy.rs` (`render_proxy_config`); token namespace: `compose/tokens.rs` (`llm` service)
 - Schema + migration: `config.rs` (`LlmProviderEntry`, `migrate_llm_to_v2`, `sync_llm_legacy_fields`, `proxy_enabled`)
 - Routing/env injection: `compose/llm.rs` (`apply_llm_config_proxy` / `apply_llm_config_legacy_in`)
 - Security: `compose/security_check.rs` (proxy-volumes rule), `log_sanitizer.rs` (Google key rule)
