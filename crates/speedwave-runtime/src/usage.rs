@@ -25,6 +25,15 @@ pub struct UsageRecord {
     /// Provider response id (dedup key when present).
     #[serde(default)]
     pub response_id: Option<String>,
+    /// Active route kind: `anthropic_apikey` | `anthropic_oauth` | `openrouter` | `local` | `openai_compat`.
+    #[serde(default)]
+    pub provider_kind: String,
+    /// Active provider id (route prefix); empty on pre-enrichment lines.
+    #[serde(default)]
+    pub provider_id: String,
+    /// OpenRouter generation id (`gen-…`), used to fetch real cost.
+    #[serde(default)]
+    pub gen_id: Option<String>,
     /// Cost in USD when the call could be priced (None — omitted in the MVP forwarder).
     #[serde(default)]
     pub cost_usd: Option<f64>,

@@ -1,0 +1,355 @@
+//! Host-side cost enrichment for the speedwave-proxy usage JSONL (ADR-073).
+//! The proxy writes token lines with `cost_usd: null`; cost is computed here,
+//! per provider, into an append-only sidecar keyed by `response_id` — the usage
+//! JSONL is never mutated (it races the proxy's append + rotation).
+
+use crate::usage::{usage_file_in, UsageRecord};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// One sidecar line: the priced result for a single `response_id`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CostEntry {
+    /// Joins back to the usage line.
+    pub response_id: String,
+    /// USD cost; `None` for subscription/unknown/error (never collapsed to 0.0).
+    pub cost_usd: Option<f64>,
+    /// Provenance: `catalog` | `subscription` | `free` | `actual` | `unknown` | `deferred`.
+    pub cost_source: String,
+}
+
+/// Sidecar cost cache, alongside the proxy usage JSONL.
+pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir
+        .join("usage")
+        .join(project)
+        .join("speedwave-proxy")
+        .join("cost-cache.jsonl")
+}
+
+/// Computes the cost for one usage record by its `provider_kind`. OpenRouter is
+/// handled host-side in a follow-up (returns `deferred` here, never priced).
+pub fn compute_cost(r: &UsageRecord) -> CostEntry {
+    let id = r.response_id.clone().unwrap_or_default();
+    let (cost_usd, cost_source) = match r.provider_kind.as_str() {
+        "anthropic_apikey" => match anthropic_catalog_cost(r) {
+            Some(c) => (Some(c), "catalog"),
+            None => (None, "unknown"),
+        },
+        "anthropic_oauth" => (None, "subscription"),
+        "local" | "openai_compat" => (Some(0.0), "free"),
+        "openrouter" => (None, "deferred"),
+        _ => (None, "unknown"),
+    };
+    CostEntry {
+        response_id: id,
+        cost_usd,
+        cost_source: cost_source.to_string(),
+    }
+}
+
+/// Anthropic-API-key cost from the in-repo catalog (USD per 1M tokens). `None`
+/// when the model id is absent from the catalog (caller maps to `unknown`).
+fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
+    let model = r.model.as_deref()?;
+    // `[1m]` suffix selects the 1M-context price variant when present.
+    let is_1m = model.ends_with("[1m]");
+    let base = model.trim_end_matches("[1m]");
+    let info = crate::defaults::ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.id == base)?;
+    let p = if is_1m {
+        info.pricing_1m.as_ref().unwrap_or(&info.pricing)
+    } else {
+        &info.pricing
+    };
+    let cost = (r.prompt_tokens.unwrap_or(0) as f64 * p.input
+        + r.completion_tokens.unwrap_or(0) as f64 * p.output
+        + r.cache_read.unwrap_or(0) as f64 * p.cached_input
+        + r.cache_write.unwrap_or(0) as f64 * p.cache_write)
+        / 1_000_000.0;
+    Some(cost)
+}
+
+/// Reads every usage line for the project and appends a `CostEntry` to the
+/// sidecar for each `response_id` not already priced. Idempotent: a second call
+/// adds nothing. The usage JSONL is read only — never rewritten.
+pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
+    if crate::validation::validate_project_name(project).is_err() {
+        return Ok(());
+    }
+    let already = read_cost_cache_in(data_dir, project);
+    let live = usage_file_in(data_dir, project);
+    let rotated = live.with_extension("jsonl.1");
+
+    let mut to_append: Vec<CostEntry> = Vec::new();
+    let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in [rotated, live] {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<UsageRecord>(trimmed) else {
+                continue;
+            };
+            let Some(id) = record.response_id.clone().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if already.contains_key(&id) || !queued.insert(id) {
+                continue;
+            }
+            to_append.push(compute_cost(&record));
+        }
+    }
+    if to_append.is_empty() {
+        return Ok(());
+    }
+    let cache = cost_cache_file_in(data_dir, project);
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&cache)?;
+    for entry in &to_append {
+        let line = serde_json::to_string(entry).unwrap_or_default();
+        writeln!(f, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Reads the sidecar into a `response_id` → `CostEntry` map; last write wins.
+pub fn read_cost_cache_in(data_dir: &Path, project: &str) -> HashMap<String, CostEntry> {
+    let mut out = HashMap::new();
+    if crate::validation::validate_project_name(project).is_err() {
+        return out;
+    }
+    let Ok(content) = std::fs::read_to_string(cost_cache_file_in(data_dir, project)) else {
+        return out;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<CostEntry>(trimmed) {
+            out.insert(entry.response_id.clone(), entry);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn record(
+        kind: &str,
+        model: &str,
+        prompt: u64,
+        completion: u64,
+        cr: u64,
+        cw: u64,
+    ) -> UsageRecord {
+        record_with_id("msg_1", kind, model, prompt, completion, cr, cw)
+    }
+
+    fn record_with_id(
+        id: &str,
+        kind: &str,
+        model: &str,
+        prompt: u64,
+        completion: u64,
+        cr: u64,
+        cw: u64,
+    ) -> UsageRecord {
+        serde_json::from_value(serde_json::json!({
+            "ts": "2026-06-26T10:00:00+0200",
+            "model": model,
+            "response_id": id,
+            "provider_kind": kind,
+            "provider_id": kind,
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_read": cr,
+            "cache_write": cw,
+        }))
+        .unwrap()
+    }
+
+    fn write_usage_line(dir: &Path, project: &str, id: &str, kind: &str, model: &str) {
+        let path = usage_file_in(dir, project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": "2026-06-26T10:00:00+0200",
+            "status": "success",
+            "model": model,
+            "response_id": id,
+            "provider_kind": kind,
+            "provider_id": kind,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+        }))
+        .unwrap();
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    #[test]
+    fn anthropic_apikey_cost_from_catalog() {
+        // 1M input tokens of opus (input 5.0/MTok) = $5.00 exactly.
+        let e = compute_cost(&record(
+            "anthropic_apikey",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        ));
+        assert!(
+            (e.cost_usd.unwrap() - 5.0).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+        assert_eq!(e.cost_source, "catalog");
+    }
+
+    #[test]
+    fn oauth_cost_is_null_subscription() {
+        let e = compute_cost(&record(
+            "anthropic_oauth",
+            "claude-opus-4-8",
+            100,
+            100,
+            0,
+            0,
+        ));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "subscription");
+    }
+
+    #[test]
+    fn local_cost_is_zero_free() {
+        let e = compute_cost(&record("local", "qwen3", 100, 100, 0, 0));
+        assert_eq!(e.cost_usd, Some(0.0));
+        assert_eq!(e.cost_source, "free");
+    }
+
+    #[test]
+    fn openrouter_is_deferred_to_followup() {
+        let e = compute_cost(&record(
+            "openrouter",
+            "anthropic/claude-3.5-haiku",
+            100,
+            50,
+            0,
+            0,
+        ));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "deferred");
+    }
+
+    #[test]
+    fn catalog_miss_is_null_unknown() {
+        let e = compute_cost(&record("anthropic_apikey", "made-up-model", 100, 0, 0, 0));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "unknown");
+    }
+
+    #[test]
+    fn unknown_provider_kind_is_unknown() {
+        let e = compute_cost(&record("", "whatever", 100, 0, 0, 0));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "unknown");
+    }
+
+    #[test]
+    fn sidecar_never_touches_usage_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage_line(
+            dir.path(),
+            "proj",
+            "msg_1",
+            "anthropic_apikey",
+            "claude-opus-4-8",
+        );
+        let usage = usage_file_in(dir.path(), "proj");
+        let before = std::fs::read(&usage).unwrap();
+        enrich_cost_in(dir.path(), "proj").unwrap();
+        let after = std::fs::read(&usage).unwrap();
+        assert_eq!(before, after, "usage JSONL must be byte-identical");
+        let cache = read_cost_cache_in(dir.path(), "proj");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("msg_1").unwrap().cost_usd.is_some());
+    }
+
+    #[test]
+    fn enrich_is_idempotent_per_response_id() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage_line(dir.path(), "proj", "msg_1", "local", "qwen3");
+        enrich_cost_in(dir.path(), "proj").unwrap();
+        enrich_cost_in(dir.path(), "proj").unwrap();
+        assert_eq!(read_cost_cache_in(dir.path(), "proj").len(), 1);
+    }
+
+    #[test]
+    fn read_cost_cache_last_write_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cost_cache_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let l1 = serde_json::to_string(&CostEntry {
+            response_id: "msg_1".into(),
+            cost_usd: Some(1.0),
+            cost_source: "catalog".into(),
+        })
+        .unwrap();
+        let l2 = serde_json::to_string(&CostEntry {
+            response_id: "msg_1".into(),
+            cost_usd: Some(2.0),
+            cost_source: "actual".into(),
+        })
+        .unwrap();
+        std::fs::write(&cache, format!("{l1}\n{l2}\n")).unwrap();
+        let map = read_cost_cache_in(dir.path(), "proj");
+        assert_eq!(map.get("msg_1").unwrap().cost_usd, Some(2.0));
+        assert_eq!(map.get("msg_1").unwrap().cost_source, "actual");
+    }
+
+    #[test]
+    fn enrich_missing_usage_file_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        enrich_cost_in(dir.path(), "proj").unwrap();
+        assert!(read_cost_cache_in(dir.path(), "proj").is_empty());
+    }
+
+    #[test]
+    fn cache_1m_variant_uses_1m_pricing() {
+        // sonnet 1M output (22.5/MTok) differs from base (15.0/MTok).
+        let e = compute_cost(&record(
+            "anthropic_apikey",
+            "claude-sonnet-4-6[1m]",
+            0,
+            1_000_000,
+            0,
+            0,
+        ));
+        assert!(
+            (e.cost_usd.unwrap() - 22.5).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+    }
+}
