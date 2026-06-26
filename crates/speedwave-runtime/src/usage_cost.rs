@@ -9,6 +9,47 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Cost provenance for one priced `response_id`. Wire/disk format is the
+/// snake_case string (statusline + front-end read it); never reorder/rename.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CostSource {
+    /// Priced from the in-repo Anthropic catalog (API key).
+    Catalog,
+    /// Anthropic OAuth — billed on the subscription, no per-call USD.
+    Subscription,
+    /// Local / OpenAI-compatible — no charge ($0.00).
+    Free,
+    /// Real cost fetched from OpenRouter `/generation`.
+    Actual,
+    /// No source available; terminal, never re-priced.
+    Unknown,
+    /// OpenRouter `/generation` not yet resolved; retryable.
+    Deferred,
+}
+
+impl CostSource {
+    /// A source that won't change on re-enrichment. Only `Deferred` (an
+    /// OpenRouter line whose `/generation` fetch has not yet succeeded) is
+    /// non-terminal and re-priced on a later pass; `Unknown` is permanent.
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, CostSource::Deferred)
+    }
+
+    /// The snake_case wire string (same as the serde representation), for DTOs
+    /// that carry the provenance as a plain string to the front-end.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            CostSource::Catalog => "catalog",
+            CostSource::Subscription => "subscription",
+            CostSource::Free => "free",
+            CostSource::Actual => "actual",
+            CostSource::Unknown => "unknown",
+            CostSource::Deferred => "deferred",
+        }
+    }
+}
+
 /// One sidecar line: the priced result for a single `response_id`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CostEntry {
@@ -16,8 +57,8 @@ pub struct CostEntry {
     pub response_id: String,
     /// USD cost; `None` for subscription/unknown/error (never collapsed to 0.0).
     pub cost_usd: Option<f64>,
-    /// Provenance: `catalog` | `subscription` | `free` | `actual` | `unknown` | `deferred`.
-    pub cost_source: String,
+    /// Provenance of `cost_usd`.
+    pub cost_source: CostSource,
 }
 
 /// Sidecar cost cache, alongside the proxy usage JSONL.
@@ -41,26 +82,26 @@ pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> Co
     let id = r.response_id.clone().unwrap_or_default();
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
         "anthropic_apikey" => match anthropic_catalog_cost(r) {
-            Some(c) => (Some(c), "catalog"),
-            None => (None, "unknown"),
+            Some(c) => (Some(c), CostSource::Catalog),
+            None => (None, CostSource::Unknown),
         },
-        "anthropic_oauth" => (None, "subscription"),
-        "local" | "openai_compat" => (Some(0.0), "free"),
+        "anthropic_oauth" => (None, CostSource::Subscription),
+        "local" | "openai_compat" => (Some(0.0), CostSource::Free),
         // With a gen_id the cost is still fetchable later → `deferred` (retryable);
         // without one no source exists → `unknown` (terminal).
         "openrouter" => match r.gen_id.as_deref().filter(|g| !g.is_empty()) {
             Some(gen) => match fetch_gen_cost(gen) {
-                Some(c) => (Some(c), "actual"),
-                None => (None, "deferred"),
+                Some(c) => (Some(c), CostSource::Actual),
+                None => (None, CostSource::Deferred),
             },
-            None => (None, "unknown"),
+            None => (None, CostSource::Unknown),
         },
-        _ => (None, "unknown"),
+        _ => (None, CostSource::Unknown),
     };
     CostEntry {
         response_id: id,
         cost_usd,
-        cost_source: cost_source.to_string(),
+        cost_source,
     }
 }
 
@@ -87,13 +128,6 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     Some(cost)
 }
 
-/// A cost_source that won't change on re-enrichment. Only `deferred` (an
-/// OpenRouter line whose `/generation` fetch has not yet succeeded) is
-/// non-terminal and re-priced on a later pass; `unknown` is permanent.
-pub fn is_terminal_cost(source: &str) -> bool {
-    source != "deferred"
-}
-
 /// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
 /// JSONL read-only. `openrouter` lines are priced via the injected
 /// `fetch_gen_cost` (real `GET /generation`, host-side).
@@ -115,7 +149,7 @@ pub fn enrich_cost_with_in(
         let prior = already.get(&id);
         // Skip ids already resolved to a terminal cost; re-price non-terminal
         // ones (`deferred`) so a lagging OpenRouter `/generation` can recover.
-        if prior.is_some_and(|e| is_terminal_cost(&e.cost_source)) || !queued.insert(id) {
+        if prior.is_some_and(|e| e.cost_source.is_terminal()) || !queued.insert(id) {
             return;
         }
         let entry = compute_cost_with(&record, fetch_gen_cost);
@@ -264,7 +298,7 @@ mod tests {
             "got {:?}",
             e.cost_usd
         );
-        assert_eq!(e.cost_source, "catalog");
+        assert_eq!(e.cost_source, CostSource::Catalog);
     }
 
     #[test]
@@ -274,14 +308,14 @@ mod tests {
             &|_| None,
         );
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "subscription");
+        assert_eq!(e.cost_source, CostSource::Subscription);
     }
 
     #[test]
     fn local_cost_is_zero_free() {
         let e = compute_cost_with(&record("local", "qwen3", 100, 100, 0, 0), &|_| None);
         assert_eq!(e.cost_usd, Some(0.0));
-        assert_eq!(e.cost_source, "free");
+        assert_eq!(e.cost_source, CostSource::Free);
     }
 
     #[test]
@@ -292,7 +326,7 @@ mod tests {
             &|_| None,
         );
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "unknown");
+        assert_eq!(e.cost_source, CostSource::Unknown);
     }
 
     #[test]
@@ -304,7 +338,7 @@ mod tests {
             Some(0.0123)
         });
         assert_eq!(e.cost_usd, Some(0.0123));
-        assert_eq!(e.cost_source, "actual");
+        assert_eq!(e.cost_source, CostSource::Actual);
     }
 
     #[test]
@@ -313,7 +347,7 @@ mod tests {
         assert!(r.gen_id.is_none());
         let e = compute_cost_with(&r, &|_| Some(9.9));
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "unknown");
+        assert_eq!(e.cost_source, CostSource::Unknown);
     }
 
     #[test]
@@ -323,14 +357,43 @@ mod tests {
         r.gen_id = Some("gen-abc".into());
         let e = compute_cost_with(&r, &|_| None);
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "deferred");
+        assert_eq!(e.cost_source, CostSource::Deferred);
     }
 
     #[test]
     fn is_terminal_cost_only_deferred_is_non_terminal() {
-        assert!(!is_terminal_cost("deferred"));
-        for s in ["catalog", "actual", "free", "subscription", "unknown", ""] {
-            assert!(is_terminal_cost(s), "{s} should be terminal");
+        assert!(!CostSource::Deferred.is_terminal());
+        for s in [
+            CostSource::Catalog,
+            CostSource::Actual,
+            CostSource::Free,
+            CostSource::Subscription,
+            CostSource::Unknown,
+        ] {
+            assert!(s.is_terminal(), "{s:?} should be terminal");
+        }
+    }
+
+    #[test]
+    fn cost_source_wire_format_is_snake_case() {
+        // The sidecar/statusline/front-end contract: snake_case strings.
+        let cases = [
+            (CostSource::Catalog, "\"catalog\""),
+            (CostSource::Subscription, "\"subscription\""),
+            (CostSource::Free, "\"free\""),
+            (CostSource::Actual, "\"actual\""),
+            (CostSource::Unknown, "\"unknown\""),
+            (CostSource::Deferred, "\"deferred\""),
+        ];
+        for (src, wire) in cases {
+            assert_eq!(serde_json::to_string(&src).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<CostSource>(wire).unwrap(),
+                src,
+                "round-trip {wire}"
+            );
+            // `as_wire_str` must equal the serde string sans the JSON quotes.
+            assert_eq!(format!("\"{}\"", src.as_wire_str()), wire);
         }
     }
 
@@ -341,14 +404,14 @@ mod tests {
             &|_| None,
         );
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "unknown");
+        assert_eq!(e.cost_source, CostSource::Unknown);
     }
 
     #[test]
     fn unknown_provider_kind_is_unknown() {
         let e = compute_cost_with(&record("", "whatever", 100, 0, 0, 0), &|_| None);
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "unknown");
+        assert_eq!(e.cost_source, CostSource::Unknown);
     }
 
     #[test]
@@ -392,7 +455,7 @@ mod tests {
         let cache = read_cost_cache_in(dir.path(), "proj");
         let e = cache.get("msg_or").unwrap();
         assert_eq!(e.cost_usd, Some(0.0042));
-        assert_eq!(e.cost_source, "actual");
+        assert_eq!(e.cost_source, CostSource::Actual);
     }
 
     #[test]
@@ -406,7 +469,7 @@ mod tests {
                 .get("msg_or")
                 .unwrap()
                 .cost_source,
-            "deferred"
+            CostSource::Deferred
         );
         // Second pass: /generation now succeeds → re-priced to actual.
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(0.0042)).unwrap();
@@ -415,7 +478,7 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(e.cost_usd, Some(0.0042));
-        assert_eq!(e.cost_source, "actual");
+        assert_eq!(e.cost_source, CostSource::Actual);
     }
 
     #[test]
@@ -436,7 +499,7 @@ mod tests {
                 .get("msg_or")
                 .unwrap()
                 .cost_source,
-            "unknown"
+            CostSource::Unknown
         );
     }
 
@@ -470,7 +533,7 @@ mod tests {
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(99.0)).unwrap();
         // Exactly one cache line for msg_1 still resolves to the catalog cost.
         let cache = read_cost_cache_in(dir.path(), "proj");
-        assert_eq!(cache.get("msg_1").unwrap().cost_source, "catalog");
+        assert_eq!(cache.get("msg_1").unwrap().cost_source, CostSource::Catalog);
     }
 
     #[test]
@@ -481,19 +544,19 @@ mod tests {
         let l1 = serde_json::to_string(&CostEntry {
             response_id: "msg_1".into(),
             cost_usd: Some(1.0),
-            cost_source: "catalog".into(),
+            cost_source: CostSource::Catalog,
         })
         .unwrap();
         let l2 = serde_json::to_string(&CostEntry {
             response_id: "msg_1".into(),
             cost_usd: Some(2.0),
-            cost_source: "actual".into(),
+            cost_source: CostSource::Actual,
         })
         .unwrap();
         std::fs::write(&cache, format!("{l1}\n{l2}\n")).unwrap();
         let map = read_cost_cache_in(dir.path(), "proj");
         assert_eq!(map.get("msg_1").unwrap().cost_usd, Some(2.0));
-        assert_eq!(map.get("msg_1").unwrap().cost_source, "actual");
+        assert_eq!(map.get("msg_1").unwrap().cost_source, CostSource::Actual);
     }
 
     #[test]

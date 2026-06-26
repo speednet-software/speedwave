@@ -151,8 +151,24 @@ pub fn get_usage_for_response_in(
         cache_read: rec.cache_read.unwrap_or(0),
         cache_write: rec.cache_write.unwrap_or(0),
         cost_usd: joined_cost(&rec, &costs),
-        cost_source: entry.map(|e| e.cost_source.clone()).unwrap_or_default(),
+        cost_source: entry
+            .map(|e| e.cost_source.as_wire_str().to_string())
+            .unwrap_or_default(),
     })
+}
+
+/// Summed session cost (USD) from the cost sidecar — the single aggregator for
+/// a project's total. Reuses the deduped (`response_id`, last-write-wins) cost
+/// cache; `None` when nothing is priced (subscription/unknown), never 0.0.
+pub fn session_cost_in(data_dir: &Path, project: &str) -> Option<f64> {
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let mut total: Option<f64> = None;
+    for entry in costs.values() {
+        if let Some(c) = entry.cost_usd {
+            total = Some(total.unwrap_or(0.0) + c);
+        }
+    }
+    total
 }
 
 /// Rotation threshold: past this size the live file is renamed to `.1`
@@ -542,6 +558,60 @@ mod tests {
         );
         assert!(get_usage_for_response_in(dir.path(), "proj", "nope").is_none());
         assert!(get_usage_for_response_in(dir.path(), "proj", "").is_none());
+    }
+
+    #[test]
+    fn session_cost_sums_priced_sidecar_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"local/qwen3","response_id":"msg_2","provider_kind":"local"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        // opus 1M input = $5.00 + local free $0.00 = $5.00.
+        let total = session_cost_in(dir.path(), "proj").unwrap();
+        assert!((total - 5.0).abs() < 1e-9, "got {total}");
+    }
+
+    #[test]
+    fn session_cost_free_zero_does_not_vanish() {
+        // A purely-free session is priced 0.0, not unpriced None.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/qwen3","response_id":"msg_1","provider_kind":"local"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert_eq!(session_cost_in(dir.path(), "proj"), Some(0.0));
+    }
+
+    #[test]
+    fn session_cost_all_unpriced_is_none() {
+        // Subscription/unknown only → None (never collapsed to 0.0).
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_oauth"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert!(session_cost_in(dir.path(), "proj").is_none());
+    }
+
+    #[test]
+    fn session_cost_missing_sidecar_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(session_cost_in(dir.path(), "proj").is_none());
+        assert!(session_cost_in(dir.path(), "../escape").is_none());
     }
 
     #[test]

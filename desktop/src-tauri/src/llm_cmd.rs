@@ -987,6 +987,16 @@ pub async fn get_usage_for_response(
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
 }
 
+/// Summed session cost (USD) from the proxy cost sidecar — the single
+/// aggregator (invariant 6). `None` when nothing priced, never 0.0. Enriches
+/// pending OpenRouter `/generation` costs first so the total is current.
+#[tauri::command]
+pub async fn get_session_cost(project: String) -> Option<f64> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    enrich_with_openrouter(data_dir.as_path(), &project).await;
+    speedwave_runtime::usage::session_cost_in(data_dir.as_path(), &project)
+}
+
 /// Fetches pending OpenRouter `/generation` costs and writes them into the cost
 /// sidecar. No-op (no HTTP) when nothing is pending — the common case.
 async fn enrich_with_openrouter(data_dir: &std::path::Path, project: &str) {
@@ -1036,9 +1046,7 @@ fn pending_openrouter_gen_ids(data_dir: &std::path::Path, project: &str) -> Vec<
         };
         // Re-fetch when the cached entry is non-terminal (`deferred`) so a
         // lagging /generation can still recover — not only on a missing entry.
-        let priced_terminal = priced
-            .get(id)
-            .is_some_and(|e| speedwave_runtime::usage_cost::is_terminal_cost(&e.cost_source));
+        let priced_terminal = priced.get(id).is_some_and(|e| e.cost_source.is_terminal());
         if priced_terminal || !seen.insert(gen.to_string()) {
             return;
         }
