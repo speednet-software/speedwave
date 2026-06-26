@@ -692,6 +692,90 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.total_cost).toBe(0);
     });
 
+    it('re-reconciles a deferred OpenRouter cost once /generation prices it later', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        // First read: OpenRouter cost not yet computed (deferred, null). Later
+        // reads: priced (actual). Footer aggregator follows the same arc.
+        let priced = false;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return priced
+              ? { cost_usd: 0.0046, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_session_cost') return priced ? 0.0046 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          // model + usage give the entry a `meta` so per-message cost can attach.
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.99,
+            model: 'openrouter/anthropic/claude-haiku-4.5',
+            turn_usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Initial reconcile: still deferred → per-message 0, footer 0.
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0);
+        expect(service.sessionStats?.total_cost).toBe(0);
+
+        // OpenRouter finishes pricing; the retry must pick it up.
+        priced = true;
+        await vi.advanceTimersByTimeAsync(5000);
+
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0046, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops re-reconciling a deferred turn once a newer turn supersedes it', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        let calls = 0;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            calls += 1;
+            return { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_session_cost') return null;
+          return undefined; // send_message etc. resolve
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.1 },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        const callsAfterFirst = calls;
+
+        // A new turn starts (sendMessage bumps `_turnId`) → the stale deferred
+        // retry for msg_1 must abandon instead of firing through its backoff.
+        await service.sendMessage('next question');
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        // No unbounded growth: the superseded retry stopped (allow the in-flight one).
+        expect(calls).toBeLessThanOrEqual(callsAfterFirst + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('Result with empty currentBlocks does not add message', () => {
       service.handleStreamChunk({
         chunk_type: 'Result',

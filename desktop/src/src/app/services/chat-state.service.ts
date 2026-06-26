@@ -953,19 +953,28 @@ export class ChatStateService {
     });
   }
 
+  /** Backoff schedule (ms) for re-reconciling a `deferred` OpenRouter cost. */
+  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000];
+
   /**
    * Reconciles the footer + per-message cost from the proxy SSOT. The per-turn
    * call confirms this turn's line landed (its bounded retry tolerates the proxy
    * append lagging the `result`) and drives the per-message cost; the footer
    * total then comes from `get_session_cost` — the single aggregator (invariant
-   * 6), not a frontend sum. A turn the proxy hasn't recorded yet keeps the live
-   * Claude Code value. Best-effort.
+   * 6), not a frontend sum. When OpenRouter has not priced the turn yet
+   * (`cost_source: 'deferred'`), it retries on a backoff until `/generation`
+   * fills in the real cost — otherwise the footer/per-message would freeze at
+   * the pre-pricing value while the dashboard (which re-enriches on open) moves
+   * on. Best-effort.
    * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
+   * @param attempt - Backoff index for a deferred re-reconcile (0 on the first call).
    */
-  private async reconcileFooterCost(assistantUuid: string | undefined): Promise<void> {
+  private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
     if (!assistantUuid) return;
     const project = this.projectState.activeProject;
     if (!project) return;
+    // A newer turn (or a stop) bumps `_turnId`; abandon a stale deferred retry.
+    const capturedTurn = this._turnId;
     try {
       const u = await this.tauri.invoke<ResponseUsage | null>('get_usage_for_response', {
         project,
@@ -980,6 +989,16 @@ export class ChatStateService {
       const sessionCost = await this.tauri.invoke<number | null>('get_session_cost', { project });
       this._sessionStats.set({ ...cur, total_cost: sessionCost ?? 0 });
       this.notifyChange();
+      // Deferred = OpenRouter has not priced /generation yet; retry on a backoff
+      // until it does, unless a newer turn superseded this one.
+      const backoff = ChatStateService.DEFERRED_RECONCILE_BACKOFF_MS;
+      if (u.cost_source === 'deferred' && attempt < backoff.length) {
+        setTimeout(() => {
+          if (capturedTurn === this._turnId) {
+            void this.reconcileFooterCost(assistantUuid, attempt + 1);
+          }
+        }, backoff[attempt]);
+      }
     } catch {
       // Footer stays on the live value; reconcile is best-effort.
     }
