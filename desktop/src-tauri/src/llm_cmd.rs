@@ -963,11 +963,15 @@ pub async fn get_usage_for_response(
     response_id: String,
 ) -> Option<speedwave_runtime::usage::ResponseUsage> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    // Wait (cheap, no HTTP) for the proxy to append the usage line.
+    // Wait (cheap, no HTTP) for the proxy's async usage append. Backoff grows
+    // 100→1600ms (~3.1s total) to tolerate slow I/O (Windows/WSL2); the proxy
+    // write usually lands on the first attempt.
     let mut found = None;
-    for attempt in 0..5 {
+    let mut delay = std::time::Duration::from_millis(100);
+    for attempt in 0..6 {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(delay).await;
+            delay *= 2;
         }
         found = speedwave_runtime::usage::get_usage_for_response_in(
             data_dir.as_path(),
