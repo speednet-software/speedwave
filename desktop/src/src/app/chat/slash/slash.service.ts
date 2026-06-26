@@ -2,6 +2,15 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 
+/**
+ * True when `text` trimmed is exactly `/` — the slash-menu trigger, not a
+ * message. Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
+ * @param text - Raw composer text to test.
+ */
+export function isBareSlash(text: string): boolean {
+  return text.trim() === '/';
+}
+
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
 

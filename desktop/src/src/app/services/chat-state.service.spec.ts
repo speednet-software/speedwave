@@ -64,6 +64,19 @@ describe('ChatStateService', () => {
     service.isStreaming = false;
   });
 
+  describe('loadingTranscript', () => {
+    it('defaults to false', () => {
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('beginTranscriptLoad sets it true, endTranscriptLoad sets it false', () => {
+      service.beginTranscriptLoad();
+      expect(service.loadingTranscriptFromState()).toBe(true);
+      service.endTranscriptLoad();
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+  });
+
   describe('init', () => {
     it('surfaces a non-auth startChatSession failure to projectState and the logger', async () => {
       const projectState = TestBed.inject(ProjectStateService);
@@ -87,6 +100,38 @@ describe('ChatStateService', () => {
       expect(projectState.error).toContain('chat backend crashed');
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to start chat session: Error: chat backend crashed')
+      );
+    });
+
+    it('ignores a stale start_chat failure once a resume has superseded it', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      let failStartChat: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') {
+          await new Promise<void>((_resolve, reject) => {
+            failStartChat = () => reject(new Error('chat backend crashed'));
+          });
+        }
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      // A resume supersedes the in-flight start, then the stale start_chat fails.
+      service.beginStartingSession();
+      failStartChat!();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // The superseded failure must NOT clobber the resumed session's state.
+      expect(projectState.status).not.toBe('error');
+      expect(mockLogger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Failed to start chat session')
       );
     });
 
@@ -228,6 +273,27 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(0);
     });
 
+    it('ignores a lone slash or whitespace-only text (skill-menu trigger)', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await service.sendMessage('/');
+      await service.sendMessage('  /  ');
+      await service.sendMessage('   ');
+      // Never streamed, never reached the backend.
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
+      expect(calls).not.toContain('send_message');
+    });
+
+    it('still sends a real slash command', async () => {
+      await service.sendMessage('/code-review');
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+    });
+
     it('ignores when already streaming', async () => {
       service.isStreaming = true;
       await service.sendMessage('Hello');
@@ -291,6 +357,34 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Retry me' });
+    });
+
+    it('waits (no competing start_chat) when a resume start is in progress', async () => {
+      // beginStartingSession marks a resume in flight; a racing send that hits
+      // "no active session" must wait for it, NOT fire a competing start_chat
+      // that would tear down the resumed session (cross-session error race).
+      let sendAttempt = 0;
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') {
+          sendAttempt++;
+          if (sendAttempt === 1) throw new Error('no active session');
+          return undefined;
+        }
+        return undefined;
+      };
+
+      const endStartingSession = service.beginStartingSession();
+      // Release the start shortly after, mimicking resume_conversation finishing.
+      setTimeout(() => endStartingSession(), 20);
+
+      await service.sendMessage('Resumed send');
+
+      expect(calls).not.toContain('start_chat');
+      expect(sendAttempt).toBe(2);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
     });
 
     it('auto-retries on "Broken pipe"', async () => {
@@ -760,6 +854,42 @@ describe('ChatStateService', () => {
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('sessionStatsFromState signal (reactive footer)', () => {
+    it('defaults to null and mirrors the getter', () => {
+      expect(service.sessionStatsFromState()).toBeNull();
+      expect(service.sessionStatsFromState()).toBe(service.sessionStats);
+    });
+
+    it('updates reactively on Result without needing another change-detection trigger', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5, usage: { input_tokens: 2, output_tokens: 9 } },
+      });
+      const sig = service.sessionStatsFromState();
+      expect(sig?.session_id).toBe('abc');
+      expect(sig?.total_cost).toBe(0.5);
+      // Signal and getter agree.
+      expect(service.sessionStatsFromState()).toBe(service.sessionStats);
+    });
+
+    it('updates reactively on seedResumedSession', () => {
+      service.seedResumedSession('11111111-1111-1111-1111-111111111111');
+      expect(service.sessionStatsFromState()?.session_id).toBe(
+        '11111111-1111-1111-1111-111111111111'
+      );
+    });
+
+    it('clears reactively on resetForNewConversation', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5 },
+      });
+      expect(service.sessionStatsFromState()).not.toBeNull();
+      service.resetForNewConversation();
+      expect(service.sessionStatsFromState()).toBeNull();
     });
   });
 

@@ -21,11 +21,37 @@ describe('SessionStatsComponent', () => {
 
   // ── null / empty stats ─────────────────────────────────────────────────
   describe('null stats', () => {
-    it('renders nothing when stats is null', () => {
+    it('renders the zero row when stats is null (one always-present row)', () => {
       fixture.componentRef.setInput('stats', null);
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
-      expect(el.querySelector('[data-testid="session-stats"]')).toBeNull();
+      // One row, always present — new chat, resume, and live all share it.
+      expect(el.querySelector('[data-testid="session-stats"]')).not.toBeNull();
+      const txt = rootText();
+      expect(txt).toContain('in:');
+      expect(txt).toContain('out:');
+      expect(txt).toContain('$0.0000');
+      // Window unknown (no stats) → ctx gauge hidden, not fabricated (ADR-041).
+      expect(txt).not.toContain('ctx');
+    });
+
+    it('renders the zero row + ctx 0% for a seeded resume (known window, no usage)', () => {
+      // The exact shape seedResumedSession produces before any Result arrives.
+      fixture.componentRef.setInput('stats', {
+        session_id: '11111111-1111-1111-1111-111111111111',
+        total_cost: 0,
+        total_output_tokens: 0,
+        context_window_size: 200000,
+      });
+      fixture.detectChanges();
+      const txt = rootText();
+      // Must NOT collapse to an empty/invisible row — shows zeros like a new chat.
+      expect(txt).toContain('in:');
+      expect(txt).toContain('out:');
+      expect(txt).toContain('$0.0000');
+      // Known window → ctx shows 0% (not hidden).
+      expect(txt).toContain('ctx');
+      expect(txt).toContain('0%');
     });
   });
 
@@ -44,7 +70,7 @@ describe('SessionStatsComponent', () => {
       expect(rootText()).toContain('3');
     });
 
-    it('renders nothing for in/out when usage is undefined', () => {
+    it('renders in/out as zeros when usage is undefined', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -52,9 +78,10 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      // No usage → no in/out segments rendered.
-      expect(rootText()).not.toContain('in:');
-      expect(rootText()).not.toContain('out:');
+      // No usage → zeros, never an empty/invisible row.
+      const txt = rootText();
+      expect(txt).toContain('in:');
+      expect(txt).toContain('out:');
     });
 
     it('renders ctx bar from per-step usage', () => {
@@ -239,7 +266,9 @@ describe('SessionStatsComponent', () => {
 
   // ── edge cases ─────────────────────────────────────────────────────────
   describe('edge cases', () => {
-    it('hides ctx segment when no usage', () => {
+    // The strip is one fixed shape: every segment shows zeros until live data
+    // replaces them, so a new chat and a resumed one look identical.
+    it('shows ctx at 0% when no usage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -247,21 +276,50 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      expect(rootText()).not.toContain('ctx');
+      const txt = rootText();
+      expect(txt).toContain('ctx');
+      expect(txt).toContain('0%');
     });
 
-    it('hides rate-limit segment when rate_limit is absent', () => {
+    it('shows rate-limit at 0% when rate_limit is absent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
         context_window_size: 200000,
         total_output_tokens: 0,
+      });
+      fixture.detectChanges();
+      expect(rootText()).toContain('limit');
+    });
+
+    it('shows session cost as $0.0000 when total_cost is 0', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0,
+        context_window_size: 200000,
+        total_output_tokens: 0,
+      });
+      fixture.detectChanges();
+      expect(rootText()).toContain('session:');
+      expect(rootText()).toContain('$0.0000');
+    });
+
+    it('hides the limit gauge for a local model (unknown window), like ctx', () => {
+      // Regression: the rate-limit segment must not show a fabricated "limit 0%"
+      // when there is no rate-limit data and the window is unknown (local model).
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0,
+        usage: { input_tokens: 10, output_tokens: 5 },
+        context_window_size: null,
+        total_output_tokens: 5,
       });
       fixture.detectChanges();
       expect(rootText()).not.toContain('limit');
+      expect(rootText()).not.toContain('ctx');
     });
 
-    it('hides session cost label when total_cost is 0', () => {
+    it('shows the limit gauge for a cloud session (known window) even with no rate-limit data', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -269,8 +327,7 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      expect(rootText()).not.toContain('$');
-      expect(rootText()).not.toContain('session:');
+      expect(rootText()).toContain('limit');
     });
 
     it('renders in/out without cr/cw breakdown when cache tokens are absent', () => {

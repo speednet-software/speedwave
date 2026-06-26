@@ -324,6 +324,12 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.resumeInProgress = true;
 
     this.chat.resetForNewConversation();
+    // Show the transcript loader until messages render.
+    this.chat.beginTranscriptLoad();
+    // Mark the start in progress so a racing send waits instead of firing a
+    // competing start_chat that would tear down this resumed session; the
+    // disposer is released in the `finally` below.
+    const endStartingSession = this.chat.beginStartingSession();
     // Stamp session id optimistically so drawer accent follows click without flicker.
     this.optimisticSessionId = sessionId;
     this.ui.closeSidebar();
@@ -349,6 +355,8 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.chat.seedResumedSession(sessionId);
       }
     } catch (err) {
+      // Drop the optimistic accent so a failed resume isn't shown as active.
+      this.optimisticSessionId = null;
       this.log.error(`[chat] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
       if (msg.includes('not authenticated')) {
@@ -369,6 +377,8 @@ export class ChatComponent implements OnInit, OnDestroy {
         ]);
       }
     } finally {
+      this.chat.endTranscriptLoad();
+      endStartingSession();
       this.resumeInProgress = false;
       this.cdr.markForCheck();
     }

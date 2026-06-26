@@ -11,6 +11,7 @@ import {
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 // `track` uses `msg.timestamp` until state-tree (ADR-044) gives `ChatMessage` a stable index.
 const SCROLL_BOTTOM_THRESHOLD_PX = 16;
@@ -18,7 +19,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
   selector: 'app-chat-message-list',
-  imports: [ChatMessageComponent],
+  imports: [ChatMessageComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
@@ -28,9 +29,17 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
       role="log"
       aria-live="polite"
       aria-label="Chat messages"
-      class="h-full overflow-y-auto p-4 md:p-6"
+      class="relative h-full overflow-y-auto p-4 md:p-6"
       (scroll)="onScroll()"
     >
+      @if (showTranscriptLoader()) {
+        <div
+          data-testid="chat-transcript-loading"
+          class="absolute inset-0 flex items-center justify-center"
+        >
+          <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+        </div>
+      }
       <div class="mx-auto max-w-3xl space-y-8">
         @for (msg of messages(); track msg.timestamp; let i = $index) {
           <app-chat-message
@@ -66,6 +75,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly messages = input.required<readonly ChatMessage[]>();
   readonly currentBlocks = input<readonly MessageBlock[]>([]);
   readonly isStreaming = input(false);
+  /** Shows a centered spinner while a resumed transcript is being fetched. */
+  readonly loadingTranscript = input(false);
   /**
    * Index of the most recent assistant entry in `messages`; `-1` when none.
    * Used to gate the per-message Retry button (only the latest assistant
@@ -96,6 +107,11 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
       this.lastMessageCount = count;
       this.pendingScrollSync = true;
     });
+  }
+
+  /** Whether to show the transcript loader: fetching with nothing rendered yet. */
+  showTranscriptLoader(): boolean {
+    return this.loadingTranscript() && this.messages().length === 0;
   }
 
   /** Whether to render the streaming placeholder as the last entry. */

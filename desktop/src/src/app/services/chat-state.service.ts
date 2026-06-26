@@ -7,6 +7,7 @@ import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { calculateCost } from '../chat/pricing';
+import { isBareSlash } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isLocalProvider,
@@ -82,11 +83,14 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
-  private _sessionStats: SessionStats | null = null;
+  /** Session cost/usage stats signal — drives the OnPush footer reactively. */
+  private readonly _sessionStats = signal<SessionStats | null>(null);
   /** Session cost/usage stats from the most recent result. */
   get sessionStats(): SessionStats | null {
-    return this._sessionStats;
+    return this._sessionStats();
   }
+  /** Read-only signal mirror so OnPush components re-render on stats changes. */
+  readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
@@ -112,6 +116,11 @@ export class ChatStateService {
   private listenerReady = false;
   private initialized = false;
   private startingSession = false;
+  /**
+   * Bumped whenever a resume supersedes the session; a stale background
+   * start_chat that finishes later no-ops instead of clobbering the resume.
+   */
+  private _sessionGeneration = 0;
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
@@ -131,6 +140,35 @@ export class ChatStateService {
 
   /** ADR-042 — projection of `state().is_streaming` onto a signal. */
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
+
+  /** True while a resumed conversation's transcript is being fetched. */
+  private readonly _loadingTranscript = signal<boolean>(false);
+  /** Read-only signal: drives the transcript-loading spinner. */
+  readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
+
+  /** Mark the start of a transcript fetch (shows the loader). */
+  beginTranscriptLoad(): void {
+    this._loadingTranscript.set(true);
+  }
+
+  /** Mark the end of a transcript fetch (hides the loader). */
+  endTranscriptLoad(): void {
+    this._loadingTranscript.set(false);
+  }
+
+  /**
+   * Mark a session start in progress so a concurrent `sendMessage` waits for it
+   * instead of firing a competing `start_chat` (used around resume). Bumping the
+   * generation makes any in-flight background `start_chat` no-op. Returns a
+   * disposer that clears the flag — call it in a `finally`.
+   */
+  beginStartingSession(): () => void {
+    this.startingSession = true;
+    this._sessionGeneration += 1;
+    return () => {
+      this.startingSession = false;
+    };
+  }
 
   /** Signal mirror of {@link canRetryLastAssistant}. */
   readonly retryEnabled: Signal<boolean> = computed(() => {
@@ -168,7 +206,7 @@ export class ChatStateService {
   ): void {
     if (state.messages !== undefined) this._messages = state.messages;
     if (state.currentBlocks !== undefined) this._currentBlocks = state.currentBlocks;
-    if (state.sessionStats !== undefined) this._sessionStats = state.sessionStats;
+    if (state.sessionStats !== undefined) this._sessionStats.set(state.sessionStats);
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
   }
 
@@ -185,7 +223,7 @@ export class ChatStateService {
         currentBlocks: this._currentBlocks,
         isStreaming: this.isStreaming,
         pendingQueue: this._pendingQueue,
-        sessionStats: this._sessionStats,
+        sessionStats: this._sessionStats(),
         model: this._model,
       })
     );
@@ -224,11 +262,18 @@ export class ChatStateService {
     const project = this.projectState.activeProject;
     if (project && !this.startingSession) {
       this.startingSession = true;
+      const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
       } catch (err) {
+        // A resume superseded this start while it was in flight — don't surface
+        // its failure as the resumed session's error.
+        if (gen !== this._sessionGeneration) {
+          this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
+          return;
+        }
         const msg = String(err);
         if (msg.includes('not authenticated')) {
           this.projectState.status = 'auth_required';
@@ -258,6 +303,11 @@ export class ChatStateService {
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
     if (!hasContent || this.isStreaming) return;
+    // Drop whitespace-only text or a lone `/` (skill-menu trigger) before
+    // streaming — `hasContent` only rejects empty text, not whitespace — so the
+    // backend "empty message" bail never surfaces as a stray error bubble.
+    const isBlankOrSlash = chatInput.text.trim().length === 0 || isBareSlash(chatInput.text);
+    if (chatInput.attachments.length === 0 && isBlankOrSlash) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
     const displayBlocks: MessageBlock[] = [];
@@ -606,8 +656,9 @@ export class ChatStateService {
             resets_at: chunk.data.resets_at,
           };
           // Update existing sessionStats immediately if present
-          if (this._sessionStats) {
-            this._sessionStats = { ...this._sessionStats, rate_limit: this._rateLimit };
+          const cur = this._sessionStats();
+          if (cur) {
+            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
           }
         }
         break;
@@ -648,7 +699,7 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
-        this._sessionStats = {
+        this._sessionStats.set({
           session_id: chunk.data.session_id,
           total_cost: chunk.data.total_cost ?? 0,
           usage: chunk.data.usage,
@@ -656,7 +707,7 @@ export class ChatStateService {
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
-        };
+        });
         // Reconcile the footer cost from the proxy SSOT (live CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
@@ -718,18 +769,26 @@ export class ChatStateService {
     this.notifyChange();
   }
 
-  /** Clears all chat state to start a fresh conversation. */
-  resetForNewConversation(): void {
-    this.log.debug('[chat-state] resetForNewConversation');
+  /**
+   * Resets the per-conversation stream/usage fields shared by new-conversation
+   * and project-switch clears. Callers add their own extra fields + notify.
+   */
+  private resetCoreStreamState(): void {
     this._messages = [];
     this._currentBlocks = [];
     this.isStreaming = false;
-    this._sessionStats = null;
+    this._sessionStats.set(null);
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._reconciledCosts.clear();
     this._contextWindowSize = null;
+  }
+
+  /** Clears all chat state to start a fresh conversation. */
+  resetForNewConversation(): void {
+    this.log.debug('[chat-state] resetForNewConversation');
+    this.resetCoreStreamState();
     this._pendingQueue = null;
     this.initialized = false;
     this.startingSession = false;
@@ -751,17 +810,18 @@ export class ChatStateService {
    */
   seedResumedSession(sessionId: string): void {
     if (!sessionId) return;
-    if (this._sessionStats?.session_id === sessionId) return;
+    const cur = this._sessionStats();
+    if (cur?.session_id === sessionId) return;
     // The seed is replaced as soon as the next `Result` chunk arrives with
     // an authoritative `context_window_size`.
-    const seeded = this.resolveContextWindow(undefined, this._sessionStats?.model);
-    this._sessionStats = {
+    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    this._sessionStats.set({
       total_cost: 0,
       context_window_size: seeded,
       total_output_tokens: 0,
-      ...this._sessionStats,
+      ...cur,
       session_id: sessionId,
-    };
+    });
     this.notifyChange();
   }
 
@@ -771,7 +831,7 @@ export class ChatStateService {
    * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId || !text) return null;
     try {
       const prior = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
@@ -789,7 +849,7 @@ export class ChatStateService {
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
       // No session yet — clear the local slot anyway.
       this._pendingQueue = null;
@@ -835,7 +895,7 @@ export class ChatStateService {
     userIdx: number;
   } | null {
     if (this.isStreaming) return null;
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) return null;
     const anchor = findRetryAnchorIn(this._messages, 'Committed');
     return anchor === null ? null : { sessionId, ...anchor };
@@ -884,15 +944,8 @@ export class ChatStateService {
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
       if (this.projectState.status === 'switching') {
-        this._messages = [];
-        this._currentBlocks = [];
-        this.isStreaming = false;
-        this._sessionStats = null;
-        this._model = '';
-        this._rateLimit = null;
-        this._totalOutputTokens = 0;
+        this.resetCoreStreamState();
         this._reconciledCosts.clear();
-        this._contextWindowSize = null;
         this._persistedContextTokens = null;
         this._currentProvider = null;
         this.notifyChange();
@@ -921,13 +974,14 @@ export class ChatStateService {
         project,
         responseId: assistantUuid,
       });
-      if (!u || !this._sessionStats) return;
+      const cur = this._sessionStats();
+      if (!u || !cur) return;
       // Proxy recorded this turn: accumulate its cost (unpriced → 0) and show
       // the running total, replacing the live cumulative estimate.
       this._reconciledCosts.set(assistantUuid, u.cost_usd ?? 0);
       let total = 0;
       for (const c of this._reconciledCosts.values()) total += c;
-      this._sessionStats = { ...this._sessionStats, total_cost: total };
+      this._sessionStats.set({ ...cur, total_cost: total });
       this.notifyChange();
     } catch {
       // Footer stays on the live value; reconcile is best-effort.
@@ -958,7 +1012,7 @@ export class ChatStateService {
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
       // With no live stream value, surface the persisted one.
-      if (this._persistedContextTokens && !this._sessionStats?.usage) {
+      if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
       this.notifyChange();
