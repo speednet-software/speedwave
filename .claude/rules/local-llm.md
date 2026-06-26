@@ -50,10 +50,13 @@ mandatory reading before touching any code under the `paths:` above.
 5. **Anthropic model strings have one SSOT** —
    `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`. Frontend
    reads it via `list_anthropic_models`. Do not hard-code model strings.
-6. **Usage has one dashboard source.** The forwarder's per-request JSONL line
-   (the SSE usage sniff in `usage.rs`, aggregated by `speedwave_runtime::usage`)
-   feeds the usage dashboard; the Claude Code result stream feeds per-session
-   chat stats. Never sum the two — the same request appears in both.
+6. **Usage has one source of truth for final values.** The forwarder's per-request
+   JSONL line plus the host-side cost sidecar (`cost-cache.jsonl`, keyed by
+   `response_id`) are the SSOT for final tokens + cost across the dashboard, chat
+   footer, and CLI statusline. The Claude Code result stream is a live preview
+   reconciled to the proxy values, and the source of context/limits the proxy
+   cannot see. Cost enrichment never rewrites the usage JSONL; unpriced
+   (subscription/unknown) stays `null`, never collapsed to `0.0`.
 
 ## Env-var injection (compose/llm.rs)
 

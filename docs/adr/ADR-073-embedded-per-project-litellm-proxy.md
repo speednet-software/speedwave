@@ -78,7 +78,9 @@ Per-backend nuances captured directly from the wire (no callback, no translation
 - **No usage frame → no line.** A stream that never carried a `usage` block is skipped rather than logged as `0/0` (prevents zero-only noise).
 - **A legitimate `0/0` is still emitted** (e.g. an OpenRouter cache hit) — the sniffer distinguishes "never seen" from "seen and zero".
 
-Host-side, `speedwave_runtime::usage` aggregates per day/model with `response_id` dedup and 10 MiB rotation. **Source-of-truth split:** the JSONL is the only input to the usage dashboard; the Claude Code result stream (`total_cost_usd`/`modelUsage`) remains the per-session chat statistic. They are never summed. `cost_usd` is omitted for the MVP (token parity only; the reader does `unwrap_or(0.0)`); the cost follow-up (OpenRouter inline/lookup pricing + Anthropic prices from the `ANTHROPIC_MODELS` SSOT) is a separate change.
+Host-side, `speedwave_runtime::usage` aggregates per day/model with `response_id` dedup and 10 MiB rotation. **The usage JSONL is the SSOT for final usage values** (tokens + cost) across all three surfaces — dashboard, chat footer, CLI statusline. The Claude Code result stream is a live in-progress preview, reconciled to the proxy values once the request is recorded; context-window % and subscription rate-limits stay sourced from Claude Code (the proxy never sees them).
+
+The proxy tags each line with `provider_kind`/`provider_id`/`gen_id` but never writes cost. **Cost is enriched host-side** into an append-only sidecar (`cost-cache.jsonl`) keyed by `response_id` — the usage JSONL is read-only and never rewritten, so enrichment cannot race the proxy's append or rotation. Per provider: Anthropic API key → `ANTHROPIC_MODELS` price catalog (`cost_source: catalog`); Anthropic OAuth → `null` (`subscription`, flat-rate); OpenRouter → real `GET /api/v1/generation` `data.total_cost` (`actual`)[^8], else `unknown`; local → `0.0` (`free`); catalog miss → `null` (`unknown`). Aggregation keeps `cost_usd: Option<f64>` with `priced_requests`/`unpriced_requests`, so a subscription session shows "—", never `$0`.
 
 JSONL over SQLite is deliberate: the file crosses the VM boundary on a bind mount (virtiofs/9p), where SQLite locking is unreliable; append-only text degrades to one truncated line on crash, which the aggregator skips and reports.
 
@@ -114,3 +116,5 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 [^6]: Ollama exposes the Anthropic-compatible `/v1/messages` endpoint but does not implement `/v1/messages/count_tokens`; the unhandled probe degrades the server into 500s/timeouts (the cascade the shim prevents) — issue #13949: https://github.com/ollama/ollama/issues/13949 ; Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
 
 [^7]: Claude Code OAuth/admin endpoints ignore `ANTHROPIC_BASE_URL` (hardcoded to api.anthropic.com), so the login flow never traverses the proxy: https://github.com/anthropics/claude-code/issues/48011
+
+[^8]: OpenRouter exposes per-generation cost (`data.total_cost`, USD) via `GET /api/v1/generation?id=<gen-id>`: https://openrouter.ai/docs/api-reference/get-a-generation

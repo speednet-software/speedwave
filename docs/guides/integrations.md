@@ -686,6 +686,8 @@ Settings holds a **provider list** rather than a single choice — configure sev
 
 Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
 
+**Cost per provider.** The LLM usage dashboard (and the chat footer / CLI statusline) show cost from the proxy usage SSOT, computed per provider: **API key** → real cost from the model price catalog; **OpenRouter** → real cost from its `/generation` endpoint; **local** → `$0`; **subscription (OAuth)** → "—" (flat-rate, per-request cost is not meaningful). An unpriced request shows "—", never `$0`.
+
 #### Supported local / self-hosted servers
 
 The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streaming) and does **not** translate — the server must expose that endpoint. Supported servers and minimum versions:
