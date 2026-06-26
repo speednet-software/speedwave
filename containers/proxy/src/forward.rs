@@ -113,6 +113,47 @@ fn strip_model_prefix(body: &[u8], parsed: &serde_json::Value, model: &str) -> V
     serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
 }
 
+/// Host[:port] of an upstream `base_url` — scheme and path stripped. Never the
+/// full URL (no path/query), so the traffic log carries no key-bearing suffix.
+fn upstream_host(base_url: &str) -> &str {
+    let after_scheme = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    after_scheme.split('/').next().unwrap_or(after_scheme)
+}
+
+/// One-line inbound traffic record: routing metadata only, no auth/body.
+fn format_req_log(
+    model: &str,
+    prefix: &str,
+    provider_kind: &str,
+    provider_id: &str,
+    base_url: &str,
+) -> String {
+    format!(
+        "proxy req: model='{model}' prefix='{prefix}' provider={provider_kind}/{provider_id} → {}",
+        upstream_host(base_url)
+    )
+}
+
+/// One-line outbound traffic record: status, latency, sniffed token counts.
+/// Absent counts render as `-` (count_tokens shim, errors, unpriced).
+fn format_resp_log(
+    model: &str,
+    status: u16,
+    latency_ms: u64,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+) -> String {
+    let fmt = |t: Option<u64>| t.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
+    format!(
+        "proxy resp: model='{model}' status={status} latency={latency_ms}ms in={} out={}",
+        fmt(prompt_tokens),
+        fmt(completion_tokens)
+    )
+}
+
 /// Resolve the upstream route from the request body, forward the request with
 /// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
 /// sniffing usage frames, and append one usage line on stream end.
@@ -145,6 +186,17 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
+
+    log::info!(
+        "{}",
+        format_req_log(
+            &model,
+            &route.prefix,
+            &route.provider_kind,
+            &route.provider_id,
+            &route.base_url
+        )
+    );
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
@@ -194,6 +246,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     // Usage path resolved once at startup and stored in Config — no env read per request.
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
+    let status_code = status.as_u16();
 
     let start = std::time::Instant::now();
 
@@ -239,6 +292,15 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
 
         let latency_ms = start.elapsed().as_millis() as u64;
+        let (in_tok, out_tok) = if acc.saw_usage {
+            (Some(acc.prompt_tokens), Some(acc.completion_tokens))
+        } else {
+            (None, None)
+        };
+        log::info!(
+            "{}",
+            format_resp_log(&model_owned, status_code, latency_ms, in_tok, out_tok)
+        );
         if let Some(line) = acc.finish(&model_owned, latency_ms, &provider_kind, &provider_id) {
             append_usage(&usage_path, &line);
         }
@@ -260,6 +322,64 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn upstream_host_strips_scheme_and_path() {
+        assert_eq!(
+            upstream_host("http://10.155.3.101:4000"),
+            "10.155.3.101:4000"
+        );
+        assert_eq!(
+            upstream_host("https://api.openrouter.ai/api/v1"),
+            "api.openrouter.ai"
+        );
+        assert_eq!(
+            upstream_host("http://host:8080/v1/messages?x=1"),
+            "host:8080"
+        );
+        // No scheme — return as-is up to the first slash.
+        assert_eq!(upstream_host("barehost:9000/x"), "barehost:9000");
+    }
+
+    #[test]
+    fn req_log_has_routing_metadata_and_no_secret() {
+        let line = format_req_log(
+            "openrouter/z-ai/glm-5.2",
+            "openrouter",
+            "open_router",
+            "openrouter",
+            "https://api.openrouter.ai/api/v1",
+        );
+        assert!(line.contains("model='openrouter/z-ai/glm-5.2'"), "{line}");
+        assert!(line.contains("prefix='openrouter'"), "{line}");
+        assert!(line.contains("provider=open_router/openrouter"), "{line}");
+        assert!(line.contains("api.openrouter.ai"), "{line}");
+        // Host only — never the full URL path.
+        assert!(
+            !line.contains("/api/v1"),
+            "req log must not carry the URL path: {line}"
+        );
+    }
+
+    #[test]
+    fn resp_log_carries_status_latency_and_tokens() {
+        let line = format_resp_log("local/qwen3", 200, 1234, Some(50), Some(7));
+        assert!(line.contains("status=200"), "{line}");
+        assert!(line.contains("latency=1234ms"), "{line}");
+        assert!(line.contains("in=50"), "{line}");
+        assert!(line.contains("out=7"), "{line}");
+        assert!(line.contains("model='local/qwen3'"), "{line}");
+    }
+
+    #[test]
+    fn resp_log_renders_absent_tokens_as_dash() {
+        let line = format_resp_log("claude-opus-4-8", 400, 90, None, None);
+        assert!(line.contains("status=400"), "{line}");
+        assert!(
+            line.contains("in=- out=-"),
+            "unpriced/no-usage → dashes: {line}"
+        );
+    }
 
     #[test]
     fn strip_model_prefix_removes_route_prefix() {
