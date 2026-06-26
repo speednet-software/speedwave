@@ -47,6 +47,11 @@ export type ProjectStatus =
 export interface AuthStatusResponse {
   api_key_configured: boolean;
   oauth_authenticated: boolean;
+  /**
+   * Whether the active provider needs Anthropic auth at all (R7); `false` for
+   * non-anthropic providers, so the gate must not block on the credential flags.
+   */
+  needs_anthropic_auth: boolean;
 }
 
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
@@ -83,6 +88,7 @@ export class ProjectStateService {
   private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
+  private restartListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -106,6 +112,24 @@ export class ProjectStateService {
     return () => {
       this.readyListeners = this.readyListeners.filter((l) => l !== cb);
     };
+  }
+
+  /**
+   * Registers a callback invoked when a container restart completes (distinct
+   * from a plain ready). The chat layer uses it to resume the live session so a
+   * model switch keeps the conversation context. Returns unsubscribe.
+   * @param cb - The callback to invoke after a successful restart.
+   */
+  onRestartComplete(cb: () => void): () => void {
+    this.restartListeners.push(cb);
+    return () => {
+      this.restartListeners = this.restartListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Fires the restart-complete listeners (test seam + restart path). */
+  notifyRestartComplete(): void {
+    for (const cb of this.restartListeners) cb();
   }
 
   /**
@@ -224,7 +248,7 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
         this.status = 'ready';
@@ -302,7 +326,7 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         await this.waitForSystemHealthy();
         this.status = 'ready';
         this.notifyChange();
@@ -331,7 +355,7 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
-    if (auth.api_key_configured || auth.oauth_authenticated) {
+    if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
       if (this.status === 'auth_required') {
         this.status = 'ready';
         this.notifyChange();
@@ -430,6 +454,9 @@ export class ProjectStateService {
     if (restartedOk) {
       this.notifyReady();
       this.notifySettled();
+      // Distinct from a plain ready: the chat layer resumes the live session so
+      // a model switch (which recreates the claude container) keeps context.
+      this.notifyRestartComplete();
     }
   }
 

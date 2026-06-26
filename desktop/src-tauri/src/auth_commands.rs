@@ -45,15 +45,22 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        // check_claude_auth → ensure_exec_healthy can call compose_up_recreate;
-        // block on bundle reconcile first.
         crate::containers_cmd::ensure_images_ready()?;
         log::info!("get_auth_status: project={project}");
         let api_key_configured = auth::has_api_key(&project);
-        let oauth_authenticated = setup_wizard::check_claude_auth(&project).unwrap_or(false);
+        // Real OAuth state = credentials file present (provider-independent).
+        let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
+            speedwave_runtime::consts::data_dir().as_path(),
+            &project,
+        );
+        // R7: non-anthropic providers never need Anthropic auth.
+        let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
+        let needs_anthropic_auth =
+            setup_wizard::project_needs_anthropic_auth(&user_config, &project);
         Ok(AuthStatusResponse {
             api_key_configured,
             oauth_authenticated,
+            needs_anthropic_auth,
         })
     })
     .await
@@ -234,12 +241,54 @@ mod tests {
         let ensure_pos = fn_body
             .find("ensure_images_ready")
             .expect("get_auth_status must call ensure_images_ready");
-        let inner_call_pos = fn_body
-            .find("setup_wizard::check_claude_auth")
-            .expect("get_auth_status must delegate to setup_wizard::check_claude_auth");
+        let oauth_pos = fn_body
+            .find("has_anthropic_oauth_credentials")
+            .expect("get_auth_status must read real OAuth state via credentials presence");
         assert!(
-            ensure_pos < inner_call_pos,
-            "ensure_images_ready must come BEFORE setup_wizard::check_claude_auth"
+            ensure_pos < oauth_pos,
+            "ensure_images_ready must come BEFORE the OAuth state read"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_oauth_is_credentials_presence_not_check_claude_auth() {
+        // The badge must reflect real login, not check_claude_auth's Ok(true)
+        // skip for non-anthropic providers.
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source.find("pub async fn get_auth_status(").unwrap();
+        // End at the next item after the command (avoids matching test names
+        // below that mention check_claude_auth by design).
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            !fn_body.contains("check_claude_auth"),
+            "oauth_authenticated must not come from the provider-gated check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_populates_needs_anthropic_auth_from_predicate() {
+        // R7: the gate field must come from project_needs_anthropic_auth, not be
+        // hardcoded — else non-anthropic providers strand on "auth required".
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("project_needs_anthropic_auth"),
+            "get_auth_status must derive needs_anthropic_auth from the predicate"
+        );
+        assert!(
+            fn_body.contains("needs_anthropic_auth,"),
+            "get_auth_status must return the needs_anthropic_auth field"
         );
     }
 
@@ -743,13 +792,15 @@ mod tests {
     // ── AuthStatusResponse wire-format ─────────────────────────────────────
 
     #[test]
-    fn auth_status_response_serializes_two_fields() {
+    fn auth_status_response_serializes_all_fields() {
         let resp = crate::types::AuthStatusResponse {
             api_key_configured: true,
             oauth_authenticated: false,
+            needs_anthropic_auth: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
+        assert_eq!(json["needs_anthropic_auth"], true);
     }
 }

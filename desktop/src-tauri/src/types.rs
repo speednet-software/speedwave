@@ -58,6 +58,9 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
     /// True when `claude auth status` inside the running container succeeds.
     pub(crate) oauth_authenticated: bool,
+    /// Whether the active provider needs Anthropic auth at all (R7); `false`
+    /// for non-anthropic kinds, so the UI gate never blocks on the two flags.
+    pub(crate) needs_anthropic_auth: bool,
 }
 
 /// Update DTO for the LLM settings save path. Mirrors `LlmConfig` plus two

@@ -13,6 +13,15 @@ pub fn claude_home_dir(data_dir: &Path, project: &str) -> PathBuf {
         .join(project)
 }
 
+/// True when `.claude/.credentials.json` exists — a real "logged in to Claude
+/// Code" signal, independent of which provider is active.
+pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
+    claude_home_dir(data_dir, project)
+        .join(".claude")
+        .join(".credentials.json")
+        .exists()
+}
+
 /// Removes Claude Code's credential files (`.claude/.credentials.json` and
 /// `.claude.json`) from the project's claude-home directory. Returns the count
 /// removed; missing files are not an error (idempotent), both are attempted.
@@ -78,6 +87,39 @@ mod tests {
     fn remove_nothing_present_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(remove_claude_credentials(tmp.path(), "p").unwrap(), 0);
+    }
+
+    #[test]
+    fn has_oauth_credentials_true_when_file_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = claude_home_dir(tmp.path(), "p");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
+        assert!(has_anthropic_oauth_credentials(tmp.path(), "p"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_false_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Home exists but no credentials file.
+        std::fs::create_dir_all(claude_home_dir(tmp.path(), "p").join(".claude")).unwrap();
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "p"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_false_when_home_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "nope"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_is_scoped_to_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = claude_home_dir(tmp.path(), "proj-a");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
+        // A different project sees no credentials.
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "proj-b"));
     }
 
     #[test]
