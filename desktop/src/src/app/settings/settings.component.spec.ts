@@ -314,13 +314,13 @@ describe('SettingsComponent', () => {
 
     it('does not toggle theme when the same card is clicked twice (no-op)', () => {
       const theme = TestBed.inject(ThemeService);
-      theme.setTheme('amber');
+      theme.setTheme('ember');
       fixture.detectChanges();
-      const amberBtn = fixture.nativeElement.querySelector(
-        'button[data-theme-btn="amber"]'
+      const emberBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="ember"]'
       ) as HTMLButtonElement;
-      amberBtn.click();
-      expect(theme.theme()).toBe('amber');
+      emberBtn.click();
+      expect(theme.theme()).toBe('ember');
     });
 
     it('renders one MODE button per ThemeMode', () => {

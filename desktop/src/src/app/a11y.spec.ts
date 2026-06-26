@@ -9,8 +9,6 @@
  * the app ships, so contrast regressions cannot land silently. `auto` mode is
  * covered by the ThemeService unit tests; here we only assert the deterministic
  * effective modes.
- *
- * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
@@ -126,12 +124,12 @@ function buildMockTauri(): MockTauriService {
 }
 
 /**
- * Sets `data-theme` to the given accent variant; no-op for the default `crimson`.
+ * Sets `data-theme` to the given accent variant; no-op for the default `ember`.
  * @param id - Accent theme to activate via the `data-theme` attribute.
  */
 function activateTheme(id: ThemeId): void {
   const html = document.documentElement;
-  if (id === 'crimson') {
+  if (id === 'ember') {
     html.removeAttribute('data-theme');
   } else {
     html.setAttribute('data-theme', id);
@@ -253,7 +251,7 @@ describe('A11y sweep — axe-core on every reachable view', () => {
 
   afterEach(() => {
     TestBed.resetTestingModule();
-    activateTheme('crimson');
+    activateTheme('ember');
     activateMode('dark');
   });
 

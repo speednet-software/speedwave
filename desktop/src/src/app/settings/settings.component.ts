@@ -32,9 +32,9 @@ interface ThemeCard {
 
 /** Cards rendered in the Appearance section grid — order matches the mockup. */
 const THEME_CARDS: readonly ThemeCard[] = [
+  { id: 'ember', label: 'ember' },
   { id: 'crimson', label: 'crimson' },
   { id: 'mint', label: 'mint' },
-  { id: 'amber', label: 'amber' },
   { id: 'iris', label: 'iris' },
   { id: 'cyan', label: 'cyan' },
   { id: 'sand', label: 'sand' },

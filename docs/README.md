@@ -27,10 +27,6 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Platform Matrix](architecture/platform-matrix.md) — macOS and Windows specifics
 - [Bundled Resources](architecture/bundled-resources.md) — resources injected into the Claude container
 
-## Accessibility
-
-- [Contrast Report](accessibility/contrast-report.md) — WCAG contrast audit and any recorded waivers
-
 ## Contributing
 
 - [Development Setup](contributing/development-setup.md) — prerequisites, build, test
