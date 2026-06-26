@@ -29,9 +29,22 @@ pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
         .join("cost-cache.jsonl")
 }
 
-/// Computes the cost for one usage record by its `provider_kind`. OpenRouter is
-/// handled host-side in a follow-up (returns `deferred` here, never priced).
+/// Fetches OpenRouter's real cost for a generation id via `GET /generation`
+/// (`data.total_cost`, USD). Injected host-side (Desktop) so the runtime keeps
+/// no HTTP/SSRF surface; `None` on missing id, transport error, or absent field.
+pub type GenCostFetcher<'a> = dyn Fn(&str) -> Option<f64> + 'a;
+
+/// Computes the cost for one usage record by its `provider_kind`, with no
+/// OpenRouter fetcher — the `openrouter` branch resolves to `unknown` (used by
+/// non-HTTP callers and the catalog/local/oauth paths).
 pub fn compute_cost(r: &UsageRecord) -> CostEntry {
+    compute_cost_with(r, &|_| None)
+}
+
+/// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
+/// with the line's `gen_id`; a missing id or a `None` result maps to `unknown`
+/// (no second pricing catalog — real `/generation` cost is the only source).
+pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
     let id = r.response_id.clone().unwrap_or_default();
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
         "anthropic_apikey" => match anthropic_catalog_cost(r) {
@@ -40,7 +53,10 @@ pub fn compute_cost(r: &UsageRecord) -> CostEntry {
         },
         "anthropic_oauth" => (None, "subscription"),
         "local" | "openai_compat" => (Some(0.0), "free"),
-        "openrouter" => (None, "deferred"),
+        "openrouter" => match r.gen_id.as_deref().and_then(fetch_gen_cost) {
+            Some(c) => (Some(c), "actual"),
+            None => (None, "unknown"),
+        },
         _ => (None, "unknown"),
     };
     CostEntry {
@@ -75,8 +91,19 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
 
 /// Reads every usage line for the project and appends a `CostEntry` to the
 /// sidecar for each `response_id` not already priced. Idempotent: a second call
-/// adds nothing. The usage JSONL is read only — never rewritten.
+/// adds nothing. The usage JSONL is read only — never rewritten. No OpenRouter
+/// fetcher — `openrouter` lines resolve to `unknown` (see [`enrich_cost_with_in`]).
 pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
+    enrich_cost_with_in(data_dir, project, &|_| None)
+}
+
+/// Like [`enrich_cost_in`], but `openrouter` lines are priced via the injected
+/// `fetch_gen_cost` (real `GET /generation`, host-side).
+pub fn enrich_cost_with_in(
+    data_dir: &Path,
+    project: &str,
+    fetch_gen_cost: &GenCostFetcher,
+) -> std::io::Result<()> {
     if crate::validation::validate_project_name(project).is_err() {
         return Ok(());
     }
@@ -104,7 +131,7 @@ pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
             if already.contains_key(&id) || !queued.insert(id) {
                 continue;
             }
-            to_append.push(compute_cost(&record));
+            to_append.push(compute_cost_with(&record, fetch_gen_cost));
         }
     }
     if to_append.is_empty() {
@@ -208,6 +235,29 @@ mod tests {
         writeln!(f, "{line}").unwrap();
     }
 
+    fn write_openrouter_line(dir: &Path, project: &str, id: &str, gen_id: &str) {
+        let path = usage_file_in(dir, project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": "2026-06-26T10:00:00+0200",
+            "status": "success",
+            "model": "anthropic/claude-3.5-haiku",
+            "response_id": id,
+            "provider_kind": "openrouter",
+            "provider_id": "openrouter",
+            "gen_id": gen_id,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+        }))
+        .unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
     #[test]
     fn anthropic_apikey_cost_from_catalog() {
         // 1M input tokens of opus (input 5.0/MTok) = $5.00 exactly.
@@ -249,7 +299,8 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_is_deferred_to_followup() {
+    fn openrouter_without_fetcher_is_unknown() {
+        // No injected fetcher (default compute_cost) can't reach /generation.
         let e = compute_cost(&record(
             "openrouter",
             "anthropic/claude-3.5-haiku",
@@ -259,7 +310,37 @@ mod tests {
             0,
         ));
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "deferred");
+        assert_eq!(e.cost_source, "unknown");
+    }
+
+    #[test]
+    fn openrouter_with_gen_id_uses_real_cost() {
+        let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
+        r.gen_id = Some("gen-abc".into());
+        let e = compute_cost_with(&r, &|id| {
+            assert_eq!(id, "gen-abc");
+            Some(0.0123)
+        });
+        assert_eq!(e.cost_usd, Some(0.0123));
+        assert_eq!(e.cost_source, "actual");
+    }
+
+    #[test]
+    fn openrouter_without_gen_id_is_unknown_even_with_fetcher() {
+        let r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
+        assert!(r.gen_id.is_none());
+        let e = compute_cost_with(&r, &|_| Some(9.9));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "unknown");
+    }
+
+    #[test]
+    fn openrouter_fetcher_failure_is_unknown() {
+        let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
+        r.gen_id = Some("gen-abc".into());
+        let e = compute_cost_with(&r, &|_| None);
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, "unknown");
     }
 
     #[test]
@@ -303,6 +384,21 @@ mod tests {
         enrich_cost_in(dir.path(), "proj").unwrap();
         enrich_cost_in(dir.path(), "proj").unwrap();
         assert_eq!(read_cost_cache_in(dir.path(), "proj").len(), 1);
+    }
+
+    #[test]
+    fn enrich_with_fetcher_prices_openrouter_real() {
+        let dir = tempfile::tempdir().unwrap();
+        write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
+        enrich_cost_with_in(dir.path(), "proj", &|id| {
+            assert_eq!(id, "gen-xyz");
+            Some(0.0042)
+        })
+        .unwrap();
+        let cache = read_cost_cache_in(dir.path(), "proj");
+        let e = cache.get("msg_or").unwrap();
+        assert_eq!(e.cost_usd, Some(0.0042));
+        assert_eq!(e.cost_source, "actual");
     }
 
     #[test]
