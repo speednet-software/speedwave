@@ -1006,21 +1006,7 @@ async fn openrouter_costs_for_project(
     data_dir: &std::path::Path,
     project: &str,
 ) -> std::collections::HashMap<String, f64> {
-    let priced = speedwave_runtime::usage_cost::read_cost_cache_in(data_dir, project);
-    let mut seen = std::collections::HashSet::new();
-    let mut gen_ids: Vec<String> = Vec::new();
-    speedwave_runtime::usage::for_each_usage_record(data_dir, project, |rec| {
-        if rec.provider_kind != "openrouter" {
-            return;
-        }
-        let (Some(id), Some(gen)) = (rec.response_id.as_deref(), rec.gen_id.as_deref()) else {
-            return;
-        };
-        if priced.contains_key(id) || !seen.insert(gen.to_string()) {
-            return;
-        }
-        gen_ids.push(gen.to_string());
-    });
+    let gen_ids = pending_openrouter_gen_ids(data_dir, project);
     let fetches = gen_ids.into_iter().map(|gen| async move {
         fetch_openrouter_gen_cost(data_dir, project, &gen)
             .await
@@ -1031,6 +1017,33 @@ async fn openrouter_costs_for_project(
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Deduped `gen_id`s still needing a `/generation` fetch: every openrouter line
+/// whose cached cost is absent or non-terminal (`deferred`). A terminal entry
+/// (`actual`/`unknown`) is skipped — it will never change.
+fn pending_openrouter_gen_ids(data_dir: &std::path::Path, project: &str) -> Vec<String> {
+    let priced = speedwave_runtime::usage_cost::read_cost_cache_in(data_dir, project);
+    let mut seen = std::collections::HashSet::new();
+    let mut gen_ids: Vec<String> = Vec::new();
+    speedwave_runtime::usage::for_each_usage_record(data_dir, project, |rec| {
+        if rec.provider_kind != "openrouter" {
+            return;
+        }
+        let (Some(id), Some(gen)) = (rec.response_id.as_deref(), rec.gen_id.as_deref()) else {
+            return;
+        };
+        // Re-fetch when the cached entry is non-terminal (`deferred`) so a
+        // lagging /generation can still recover — not only on a missing entry.
+        let priced_terminal = priced
+            .get(id)
+            .is_some_and(|e| speedwave_runtime::usage_cost::is_terminal_cost(&e.cost_source));
+        if priced_terminal || !seen.insert(gen.to_string()) {
+            return;
+        }
+        gen_ids.push(gen.to_string());
+    });
+    gen_ids
 }
 
 // ---------------------------------------------------------------------------
@@ -2186,5 +2199,67 @@ mod tests {
         .unwrap();
         let map = super::openrouter_costs_for_project(dir.path(), "proj").await;
         assert!(map.is_empty());
+    }
+
+    fn write_or_usage_line(dir: &std::path::Path, id: &str, gen: &str) {
+        let path = speedwave_runtime::usage::usage_file_in(dir, "proj");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = format!(
+            r#"{{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"anthropic/claude-3.5-haiku","response_id":"{id}","provider_kind":"openrouter","gen_id":"{gen}"}}"#
+        );
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn write_cost_entry(dir: &std::path::Path, id: &str, source: &str) {
+        let cache = speedwave_runtime::usage_cost::cost_cache_file_in(dir, "proj");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let line = format!(r#"{{"response_id":"{id}","cost_usd":null,"cost_source":"{source}"}}"#);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cache)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    #[test]
+    fn pending_gen_ids_includes_missing_and_deferred() {
+        let dir = tempfile::tempdir().unwrap();
+        write_or_usage_line(dir.path(), "m_missing", "gen-1");
+        write_or_usage_line(dir.path(), "m_deferred", "gen-2");
+        // m_missing has no cache entry; m_deferred is cached non-terminal.
+        write_cost_entry(dir.path(), "m_deferred", "deferred");
+        let mut ids = super::pending_openrouter_gen_ids(dir.path(), "proj");
+        ids.sort();
+        assert_eq!(ids, vec!["gen-1".to_string(), "gen-2".to_string()]);
+    }
+
+    #[test]
+    fn pending_gen_ids_skips_terminal_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        write_or_usage_line(dir.path(), "m_actual", "gen-a");
+        write_or_usage_line(dir.path(), "m_unknown", "gen-u");
+        // Both terminal — `actual` already priced, `unknown` permanently so.
+        write_cost_entry(dir.path(), "m_actual", "actual");
+        write_cost_entry(dir.path(), "m_unknown", "unknown");
+        assert!(super::pending_openrouter_gen_ids(dir.path(), "proj").is_empty());
+    }
+
+    #[test]
+    fn pending_gen_ids_dedupes_repeated_gen() {
+        let dir = tempfile::tempdir().unwrap();
+        write_or_usage_line(dir.path(), "m1", "gen-dup");
+        write_or_usage_line(dir.path(), "m2", "gen-dup");
+        assert_eq!(
+            super::pending_openrouter_gen_ids(dir.path(), "proj"),
+            vec!["gen-dup".to_string()]
+        );
     }
 }

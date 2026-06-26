@@ -42,8 +42,8 @@ pub fn compute_cost(r: &UsageRecord) -> CostEntry {
 }
 
 /// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
-/// with the line's `gen_id`; a missing id or a `None` result maps to `unknown`
-/// (no second pricing catalog — real `/generation` cost is the only source).
+/// with the line's `gen_id`: a `None` result with a gen_id is `deferred`
+/// (retryable), a missing gen_id is `unknown` (terminal — no other source).
 pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
     let id = r.response_id.clone().unwrap_or_default();
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
@@ -53,8 +53,13 @@ pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> Co
         },
         "anthropic_oauth" => (None, "subscription"),
         "local" | "openai_compat" => (Some(0.0), "free"),
-        "openrouter" => match r.gen_id.as_deref().and_then(fetch_gen_cost) {
-            Some(c) => (Some(c), "actual"),
+        // With a gen_id the cost is still fetchable later → `deferred` (retryable);
+        // without one no source exists → `unknown` (terminal).
+        "openrouter" => match r.gen_id.as_deref().filter(|g| !g.is_empty()) {
+            Some(gen) => match fetch_gen_cost(gen) {
+                Some(c) => (Some(c), "actual"),
+                None => (None, "deferred"),
+            },
             None => (None, "unknown"),
         },
         _ => (None, "unknown"),
@@ -89,10 +94,11 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     Some(cost)
 }
 
-/// A cost_source that won't change on re-enrichment. `unknown` is non-terminal
-/// (a transient fetch failure) and is re-priced on a later pass.
-fn is_terminal_cost(source: &str) -> bool {
-    matches!(source, "catalog" | "actual" | "free" | "subscription")
+/// A cost_source that won't change on re-enrichment. Only `deferred` (an
+/// OpenRouter line whose `/generation` fetch has not yet succeeded) is
+/// non-terminal and re-priced on a later pass; `unknown` is permanent.
+pub fn is_terminal_cost(source: &str) -> bool {
+    source != "deferred"
 }
 
 /// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
@@ -118,16 +124,20 @@ pub fn enrich_cost_with_in(
         let Some(id) = record.response_id.clone().filter(|s| !s.is_empty()) else {
             return;
         };
+        let prior = already.get(&id);
         // Skip ids already resolved to a terminal cost; re-price non-terminal
-        // ones (`unknown`) so a transient OpenRouter fetch failure can recover.
-        if already
-            .get(&id)
-            .is_some_and(|e| is_terminal_cost(&e.cost_source))
-            || !queued.insert(id)
+        // ones (`deferred`) so a lagging OpenRouter `/generation` can recover.
+        if prior.is_some_and(|e| is_terminal_cost(&e.cost_source)) || !queued.insert(id) {
+            return;
+        }
+        let entry = compute_cost_with(&record, fetch_gen_cost);
+        // Append only when the re-priced result actually changes — a still-
+        // `deferred` line must not grow the sidecar on every pass.
+        if prior.is_some_and(|e| e.cost_source == entry.cost_source && e.cost_usd == entry.cost_usd)
         {
             return;
         }
-        to_append.push(compute_cost_with(&record, fetch_gen_cost));
+        to_append.push(entry);
     });
     if to_append.is_empty() {
         return Ok(());
@@ -331,12 +341,21 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_fetcher_failure_is_unknown() {
+    fn openrouter_fetcher_failure_with_gen_id_is_deferred() {
+        // gen_id present but /generation not yet resolved → retryable `deferred`.
         let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
         r.gen_id = Some("gen-abc".into());
         let e = compute_cost_with(&r, &|_| None);
         assert!(e.cost_usd.is_none());
-        assert_eq!(e.cost_source, "unknown");
+        assert_eq!(e.cost_source, "deferred");
+    }
+
+    #[test]
+    fn is_terminal_cost_only_deferred_is_non_terminal() {
+        assert!(!is_terminal_cost("deferred"));
+        for s in ["catalog", "actual", "free", "subscription", "unknown", ""] {
+            assert!(is_terminal_cost(s), "{s} should be terminal");
+        }
     }
 
     #[test]
@@ -398,17 +417,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_cost_is_repriced_on_later_pass() {
+    fn deferred_cost_is_repriced_on_later_pass() {
         let dir = tempfile::tempdir().unwrap();
         write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
-        // First pass: /generation fails → unknown (transient).
+        // First pass: /generation lags → deferred (retryable).
         enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         assert_eq!(
             read_cost_cache_in(dir.path(), "proj")
                 .get("msg_or")
                 .unwrap()
                 .cost_source,
-            "unknown"
+            "deferred"
         );
         // Second pass: /generation now succeeds → re-priced to actual.
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(0.0042)).unwrap();
@@ -418,6 +437,43 @@ mod tests {
             .clone();
         assert_eq!(e.cost_usd, Some(0.0042));
         assert_eq!(e.cost_source, "actual");
+    }
+
+    #[test]
+    fn terminal_unknown_is_idempotent_no_unbounded_append() {
+        // openrouter line with NO gen_id → terminal `unknown`; repeated enrich
+        // must not append a duplicate (the regression this fix restores).
+        let dir = tempfile::tempdir().unwrap();
+        write_openrouter_line(dir.path(), "proj", "msg_or", "");
+        for _ in 0..3 {
+            enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        }
+        let cache = cost_cache_file_in(dir.path(), "proj");
+        let lines = std::fs::read_to_string(&cache).unwrap();
+        let count = lines.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(count, 1, "terminal unknown must be written exactly once");
+        assert_eq!(
+            read_cost_cache_in(dir.path(), "proj")
+                .get("msg_or")
+                .unwrap()
+                .cost_source,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn still_deferred_does_not_grow_sidecar() {
+        // A line that stays deferred across passes (fetch keeps failing) must
+        // not append an identical line each time — bounded sidecar.
+        let dir = tempfile::tempdir().unwrap();
+        write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
+        for _ in 0..3 {
+            enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        }
+        let cache = cost_cache_file_in(dir.path(), "proj");
+        let lines = std::fs::read_to_string(&cache).unwrap();
+        let count = lines.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(count, 1, "still-deferred must be written exactly once");
     }
 
     #[test]
