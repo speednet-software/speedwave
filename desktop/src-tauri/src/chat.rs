@@ -440,7 +440,8 @@ impl StreamParser {
     pub fn reset(&mut self) {
         self.active_blocks.clear();
         self.tool_input.clear();
-        self.pending_assistant_uuid = None;
+        // pending_assistant_uuid NOT cleared: message_stop can precede the
+        // result that consumes it (local path); parse_result .take()s it.
         // committed_user_uuids is NOT reset: it persists across the session.
     }
 
@@ -448,6 +449,7 @@ impl StreamParser {
     #[cfg(test)]
     pub fn new_session(&mut self) {
         self.reset();
+        self.pending_assistant_uuid = None;
         self.previous_session_usage = TurnUsage::default();
         self.previous_session_cost = None;
         self.last_model = None;
@@ -800,6 +802,10 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
+        // Consume the pending uuid up-front so an error turn (which short-circuits
+        // below) doesn't leak it onto the next turn.
+        let assistant_uuid = self.pending_assistant_uuid.take();
+
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
@@ -904,8 +910,6 @@ impl StreamParser {
             prefix: "RESULT",
             message: "turn complete".to_string(),
         });
-
-        let assistant_uuid = self.pending_assistant_uuid.take();
 
         (
             Some(StreamChunk::Result {
@@ -3190,10 +3194,29 @@ mod tests {
         parse_line_str(&mut parser, assistant);
         let chunk = parse_line_str(&mut parser, error_result).unwrap();
         assert!(matches!(chunk, StreamChunk::Error { .. }));
-        // pending_assistant_uuid survives `parse_result`'s `is_error`
-        // short-circuit; reset() clears it (exercised here).
-        parser.reset();
+        // parse_result `.take()`s the uuid up-front, so an error turn consumes
+        // it — no leak onto the next turn, without relying on reset().
         assert!(parser.pending_assistant_uuid.is_none());
+    }
+
+    #[test]
+    fn assistant_uuid_survives_message_stop_before_result() {
+        // Local-LLM order: assistant → message_stop → result. message_stop's
+        // reset() must NOT drop the uuid the result needs (footer reconcile).
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_local","role":"assistant","content":[]}}"#;
+        let stop = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.04}"#;
+        parse_line_str(&mut parser, assistant);
+        parse_line_str(&mut parser, stop);
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        match chunk {
+            StreamChunk::Result { assistant_uuid, .. } => {
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_local"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 
     #[test]
