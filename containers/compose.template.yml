@@ -23,7 +23,7 @@ services:
       - ${RESOURCES_DIR}:/speedwave/resources:ro
       - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
       # Proxy usage JSONL (read-only): statusline reads cumulative tokens/cost (ADR-073).
-      - ${SPEEDWAVE_PROXY_USAGE_DIR}:/usage:ro
+      - ${PROXY_USAGE_DIR}:/usage:ro
     environment:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
@@ -41,15 +41,15 @@ services:
           memory: ${CLAUDE_MEMORY}
 
   # Speedwave proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
-  speedwave-proxy:
-    image: ${IMAGE_SPEEDWAVE_PROXY}
+  proxy:
+    image: ${IMAGE_PROXY}
     pull_policy: never
     restart: unless-stopped
-    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_speedwave_proxy
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_proxy
     environment:
       # Not read by the proxy — forces container recreation on config-up
       # when the rendered config or a provider key changed.
-      - SPW_CONFIG_DIGEST=${SPEEDWAVE_PROXY_CONFIG_DIGEST}
+      - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:
@@ -59,18 +59,18 @@ services:
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     tmpfs:
-      - /tmp:noexec,nosuid,size=${SPEEDWAVE_PROXY_TMPFS}
+      - /tmp:noexec,nosuid,size=${PROXY_TMPFS}
     volumes:
-      - ${SPEEDWAVE_PROXY_CONFIG_DIR}:/config:ro
+      - ${PROXY_CONFIG_DIR}:/config:ro
       - ${TOKENS_DIR}/llm:/tokens:ro
-      - ${SPEEDWAVE_PROXY_USAGE_DIR}:/usage:rw
+      - ${PROXY_USAGE_DIR}:/usage:rw
     networks:
       - ${NETWORK_NAME}
     deploy:
       resources:
         limits:
-          cpus: '${SPEEDWAVE_PROXY_CPUS}'
-          memory: ${SPEEDWAVE_PROXY_MEM}
+          cpus: '${PROXY_CPUS}'
+          memory: ${PROXY_MEM}
 
   mcp-hub:
     image: ${IMAGE_MCP_HUB}

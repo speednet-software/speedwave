@@ -1,7 +1,7 @@
 //! Renders the per-project `proxy.json` routing config (ADR-073).
 //!
-//! The file lands at `<data_dir>/litellm/<project>/proxy.json` (0600,
-//! atomic) and is mounted `:ro` at `/config` in the `speedwave-proxy` container.
+//! The file lands at `<data_dir>/proxy/<project>/proxy.json` (0600,
+//! atomic) and is mounted `:ro` at `/config` in the `proxy` container.
 //! It carries NO secrets: non-Anthropic keys are referenced by env name only
 //! (`SPW_KEY_<PROVIDER_ID>`), resolved inside the container from `/tokens`.
 //!
@@ -12,18 +12,18 @@ use crate::config::{LlmConfig, LlmProviderKind};
 use std::path::{Path, PathBuf};
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
-pub const SPEEDWAVE_PROXY_PORT: u16 = 4000;
+pub const PROXY_PORT: u16 = 4000;
 
 /// In-network base URL of the proxy as the claude container sees it. Every
 /// session (subscription + non-anthropic) points `ANTHROPIC_BASE_URL` here;
 /// routing is by the model prefix in the request body, not the URL path.
-pub const SPEEDWAVE_PROXY_BASE_URL: &str = "http://speedwave-proxy:4000";
+pub const PROXY_BASE_URL: &str = "http://proxy:4000";
 
 /// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
 /// uppercased — same normalisation as `plugin::derive_worker_env`).
 ///
 /// SSOT-alignment: the in-container inverse is
-/// `containers/speedwave-proxy/src/keys.rs::provider_id_from_env_name`. The
+/// `containers/proxy/src/keys.rs::provider_id_from_env_name`. The
 /// `spw_key_env_name_round_trips_with_proxy_reverse` test below pins
 /// `reverse(forward(id)) == id`; changing this normalisation must update both.
 pub fn spw_key_env_name(provider_id: &str) -> String {
@@ -33,13 +33,12 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
     )
 }
 
-/// Per-project proxy config dir: `<data_dir>/litellm/<project>`. The on-disk
-/// `litellm` segment is retained (documented path; renaming needs migration).
+/// Per-project proxy config dir: `<data_dir>/proxy/<project>/`.
 pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("litellm").join(project)
+    data_dir.join("proxy").join(project)
 }
 
-/// Path of the rendered config: `<data_dir>/litellm/<project>/proxy.json`.
+/// Path of the rendered config: `<data_dir>/proxy/<project>/proxy.json`.
 pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     proxy_config_dir_in(data_dir, project).join("proxy.json")
 }
@@ -47,7 +46,7 @@ pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
 /// Renders the proxy routing config for the project's provider set.
 ///
 /// Emits a JSON object with a `routes` array consumed by the Rust forwarder
-/// (see `containers/speedwave-proxy/src/router.rs`). Pure — no filesystem
+/// (see `containers/proxy/src/router.rs`). Pure — no filesystem
 /// access; `write_proxy_config_in` persists the result.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
     let mut routes = Vec::new();
@@ -127,7 +126,7 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
 }
 
 /// Renders and atomically persists the proxy routing config (0600 + fsync) under
-/// `<data_dir>/litellm/<project>/`. Also lifts a legacy `local-llm/api_key`
+/// `<data_dir>/proxy/<project>/`. Also lifts a legacy `local-llm/api_key`
 /// into the llm token namespace (ADR-073 migration).
 pub fn write_proxy_config_in(
     data_dir: &Path,
@@ -141,18 +140,35 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     migrate_legacy_local_key_in(data_dir, project, llm);
-    let content = render_proxy_config(llm);
+    // `has_api_key` is the on-disk key file's existence (config.rs), not the
+    // persisted flag — a stale `false` would render `auth:none` and drop the
+    // provider key, 401-ing a backend that requires it.
+    let llm = sync_has_api_key_from_disk(data_dir, project, llm);
+    let content = render_proxy_config(&llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
 
+/// Returns a copy of `llm` with each provider's `has_api_key` set to whether
+/// its key file actually exists on disk — the authoritative source.
+fn sync_has_api_key_from_disk(data_dir: &Path, project: &str, llm: &LlmConfig) -> LlmConfig {
+    let mut synced = llm.clone();
+    for entry in &mut synced.providers {
+        if let Ok(key_path) = super::tokens::llm_provider_key_path_in(data_dir, project, &entry.id)
+        {
+            entry.has_api_key = key_path.exists();
+        }
+    }
+    synced
+}
+
 /// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
 /// every key file's name + content hash (key values folded in as their own
-/// sha256, never raw). Changing it forces a speedwave-proxy container recreate.
+/// sha256, never raw). Changing it forces a proxy container recreate.
 pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    let config_dir = data_dir.join("litellm").join(project);
+    let config_dir = proxy_config_dir_in(data_dir, project);
     let mut rendered: Vec<PathBuf> = std::fs::read_dir(&config_dir)
         .map(|dir| {
             dir.filter_map(|e| e.ok())
@@ -461,7 +477,7 @@ mod tests {
         };
         let path = write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         assert!(path.is_file());
-        assert!(path.ends_with("litellm/proj/proxy.json"));
+        assert!(path.ends_with("proxy/proj/proxy.json"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -600,5 +616,30 @@ mod tests {
         let d = proxy_state_digest_in(dir.path(), "proj");
         assert_eq!(d.len(), 64);
         assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn render_uses_key_file_existence_over_stale_has_api_key_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        // Config says local has NO key, but the key file exists on disk.
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                base_url: Some("http://10.0.0.1:4000".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            active: None,
+            ..LlmConfig::default()
+        };
+        assert!(!llm.providers[0].has_api_key, "config flag is stale-false");
+        write_llm_provider_key_in(dir.path(), "proj", "local", "sk-real").unwrap();
+        let path = write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        // File exists → bearer swap, not auth:none — the key reaches the backend.
+        assert!(
+            rendered.contains(r#""swap_env":"SPW_KEY_LOCAL""#),
+            "local route must use bearer when the key file exists: {rendered}"
+        );
+        assert!(!rendered
+            .contains(r#""prefix":"local","base_url":"http://10.0.0.1:4000","auth":"none""#));
     }
 }

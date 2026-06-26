@@ -244,7 +244,7 @@ pub enum SecurityRule {
 
     /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
     /// host network (ADR-073 — it is a worker-class token holder).
-    #[strum(to_string = "SPEEDWAVE_PROXY_VOLUMES")]
+    #[strum(to_string = "PROXY_VOLUMES")]
     #[strum(props(
         description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw only"
     ))]
@@ -401,8 +401,8 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
-            // speedwave-proxy mount profile (ADR-073)
-            Self::check_speedwave_proxy_volumes(&doc, expected_paths),
+            // proxy mount profile (ADR-073)
+            Self::check_proxy_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -480,7 +480,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let read_only_required = ["claude", "mcp-hub", "speedwave-proxy"];
+        let read_only_required = ["claude", "mcp-hub", "proxy"];
         for required in &read_only_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let is_read_only = service
@@ -509,7 +509,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let tmpfs_required = ["claude", "mcp-hub", "speedwave-proxy"];
+        let tmpfs_required = ["claude", "mcp-hub", "proxy"];
         for required in &tmpfs_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let has_tmpfs_noexec = service
@@ -927,11 +927,11 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: the speedwave-proxy is a worker-class token holder. Its mounts
+    /// ADR-073: the proxy is a worker-class token holder. Its mounts
     /// must be exactly: `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw` —
     /// nothing else (no workspace, no claude-home, no sockets) — and it must
     /// not use host networking.
-    fn check_speedwave_proxy_volumes(
+    fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
     ) -> Vec<SecurityViolation> {
@@ -940,7 +940,7 @@ impl SecurityCheck {
             Some(s) => s,
             None => return violations,
         };
-        let (name, service) = match services.iter().find(|(n, _)| n == "speedwave-proxy") {
+        let (name, service) = match services.iter().find(|(n, _)| n == "proxy") {
             Some(pair) => pair,
             None => return violations, // not rendered (legacy path) — nothing to check
         };
@@ -949,9 +949,8 @@ impl SecurityCheck {
             violations.push(SecurityViolation {
                 container: name.clone(),
                 rule: SecurityRule::SpeedwaveProxyVolumes,
-                message: "speedwave-proxy must not set network_mode".into(),
-                remediation:
-                    "Remove 'network_mode' — speedwave-proxy joins only the per-project network.",
+                message: "proxy must not set network_mode".into(),
+                remediation: "Remove 'network_mode' — proxy joins only the per-project network.",
             });
         }
 
@@ -974,7 +973,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("speedwave-proxy /config mount must be ro: {vol}"),
+                        message: format!("proxy /config mount must be ro: {vol}"),
                         remediation: "Mount the rendered config directory ':ro'.",
                     });
                 }
@@ -984,7 +983,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("speedwave-proxy /tokens mount must be ro: {vol}"),
+                        message: format!("proxy /tokens mount must be ro: {vol}"),
                         remediation: "Mount the llm token directory ':ro'.",
                     });
                 }
@@ -993,7 +992,7 @@ impl SecurityCheck {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
-                            "speedwave-proxy /tokens host path must be the llm namespace \
+                            "proxy /tokens host path must be the llm namespace \
                              ('{expected_tokens}'), got: {vol}"
                         ),
                         remediation: "Mount '<data_dir>/tokens/<project>/llm' at /tokens.",
@@ -1005,7 +1004,7 @@ impl SecurityCheck {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
-                        message: format!("speedwave-proxy /usage mount must be rw: {vol}"),
+                        message: format!("proxy /usage mount must be rw: {vol}"),
                         remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
                     });
                 }
@@ -1014,9 +1013,8 @@ impl SecurityCheck {
                 violations.push(SecurityViolation {
                     container: name.clone(),
                     rule: SecurityRule::SpeedwaveProxyVolumes,
-                    message: format!("speedwave-proxy has an unexpected volume: {vol}"),
-                    remediation:
-                        "speedwave-proxy mounts exactly /config:ro, /tokens:ro and /usage:rw.",
+                    message: format!("proxy has an unexpected volume: {vol}"),
+                    remediation: "proxy mounts exactly /config:ro, /tokens:ro and /usage:rw.",
                 });
             }
         }
@@ -1025,7 +1023,7 @@ impl SecurityCheck {
                 container: name.clone(),
                 rule: SecurityRule::SpeedwaveProxyVolumes,
                 message: format!(
-                    "speedwave-proxy must mount exactly /config, /tokens and /usage (found {matched})"
+                    "proxy must mount exactly /config, /tokens and /usage (found {matched})"
                 ),
                 remediation: "Restore the three canonical mounts in compose.template.yml.",
             });
@@ -1532,7 +1530,7 @@ mod tests {
     fn proxy_volumes_variant_renders_expected_code() {
         assert_eq!(
             SecurityRule::SpeedwaveProxyVolumes.to_string(),
-            "SPEEDWAVE_PROXY_VOLUMES",
+            "PROXY_VOLUMES",
         );
     }
 }

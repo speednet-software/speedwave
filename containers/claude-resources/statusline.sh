@@ -175,13 +175,16 @@ USAGE_DIR="${STATUSLINE_USAGE_DIR:-/usage}"
 cost_cache="$USAGE_DIR/cost-cache.jsonl"
 if [[ -r "$cost_cache" ]]; then
     # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
+    # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).
+    # `n` counts priced lines so an all-zero (free local) sidecar still shows $0
+    # rather than falling back to the Claude Code value.
     ssot_cost="$(LC_ALL=C awk '
-        match($0, /"cost_usd"[[:space:]]*:[[:space:]]*[0-9.]+/) {
+        match($0, /"cost_usd"[[:space:]]*:[[:space:]]*-?[0-9.]+([eE][-+]?[0-9]+)?/) {
             seg = substr($0, RSTART, RLENGTH)
             sub(/^.*:[[:space:]]*/, "", seg)
-            sum += seg + 0
+            sum += seg + 0; n++
         }
-        END { if (sum > 0) printf "%.4f", sum }
+        END { if (n > 0) printf "%.4f", sum }
     ' "$cost_cache" 2>/dev/null)"
     if [[ -n "$ssot_cost" ]]; then
         total_cost="$ssot_cost"

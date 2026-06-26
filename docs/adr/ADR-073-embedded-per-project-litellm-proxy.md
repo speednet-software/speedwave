@@ -5,10 +5,10 @@
 
 ## Decision
 
-Ship `speedwave-proxy` — a tiny first-party Rust Anthropic-passthrough forwarder — as a per-project compose service. Claude Code's `ANTHROPIC_BASE_URL` points at it for every provider class. The forwarder receives `POST /v1/messages` (+ `count_tokens`), routes by the model prefix in the request body to the configured backend, relays the SSE stream byte-for-byte with **no translation**, sniffs usage frames, and appends one usage line per request. The pre-proxy direct-injection path remains behind the `llm.proxy_enabled` kill-switch (default on) for one release and is removed in N+2.
+Ship `proxy` — a tiny first-party Rust Anthropic-passthrough forwarder — as a per-project compose service. Claude Code's `ANTHROPIC_BASE_URL` points at it for every provider class. The forwarder receives `POST /v1/messages` (+ `count_tokens`), routes by the model prefix in the request body to the configured backend, relays the SSE stream byte-for-byte with **no translation**, sniffs usage frames, and appends one usage line per request. The pre-proxy direct-injection path remains behind the `llm.proxy_enabled` kill-switch (default on) for one release and is removed in N+2.
 
 ```
-claude ──ANTHROPIC_BASE_URL──► speedwave-proxy:4000 ──┬─ anthropic prefix (passthrough) ─► api.anthropic.com
+claude ──ANTHROPIC_BASE_URL──► proxy:4000 ──┬─ anthropic prefix (passthrough) ─► api.anthropic.com
         (per-project network)                         ├─ openrouter/* (key swap) ────────► openrouter.ai
                                                        └─ <id>/* (key swap) ──────────────► local server
                                                           (every leg: native Anthropic /v1/messages, SSE relayed verbatim)
@@ -29,9 +29,9 @@ The supply-chain win: the forwarder has **no Python dependencies**. It retires t
 
 ## Topology: per project, not shared
 
-One `speedwave-proxy` container per project, inside that project's compose network. A shared instance would require a host port (local exposure of all keys without auth), would hold every project's keys in one process, and a settings change in one project would restart streams in all others. Per-project instances exist only while the project runs.
+One `proxy` container per project, inside that project's compose network. A shared instance would require a host port (local exposure of all keys without auth), would hold every project's keys in one process, and a settings change in one project would restart streams in all others. Per-project instances exist only while the project runs.
 
-The forwarder is dramatically lighter than the LiteLLM container it replaces: measured **~3-4 MiB idle and ~37 MiB peak** under 15 concurrent 64k streams on the dev Lima VM. The resource cap is **128 MiB** (≈3.5× the measured peak — `resources.rs::SPEEDWAVE_PROXY_RESOURCES`), down from the 512 MiB LiteLLM cap, counted in adaptive VM sizing (ADR-068).
+The forwarder is dramatically lighter than the LiteLLM container it replaces: measured **~3-4 MiB idle and ~37 MiB peak** under 15 concurrent 64k streams on the dev Lima VM. The resource cap is **128 MiB** (≈3.5× the measured peak — `resources.rs::PROXY_RESOURCES`), down from the 512 MiB LiteLLM cap, counted in adaptive VM sizing (ADR-068).
 
 ## Provider model (config schema v3)
 
@@ -70,7 +70,7 @@ Claude Code probes `POST /v1/messages/count_tokens` before a turn. Some backends
 
 ## Usage accounting (per backend)
 
-The relay task sniffs SSE frames as they pass and, on stream end, appends exactly one compact JSON line to `/usage/usage.jsonl` (per-project bind mount `usage/<project>/speedwave-proxy/`). The line uses the exact field names the host aggregator reads (`ts, capture, status, model, response_id, cost_usd, latency_ms, prompt_tokens, completion_tokens, cache_read, cache_write`); the timestamp is RFC3339-millis with a local colon offset (matching `log_ts::log_timestamp`). Anthropic `input_tokens→prompt_tokens`, `output_tokens→completion_tokens`, `cache_read_input_tokens→cache_read`, `cache_creation_input_tokens→cache_write`; `response_id` from `message_start.message.id`.
+The relay task sniffs SSE frames as they pass and, on stream end, appends exactly one compact JSON line to `/usage/usage.jsonl` (per-project bind mount `usage/<project>/proxy/`). The line uses the exact field names the host aggregator reads (`ts, capture, status, model, response_id, cost_usd, latency_ms, prompt_tokens, completion_tokens, cache_read, cache_write`); the timestamp is RFC3339-millis with a local colon offset (matching `log_ts::log_timestamp`). Anthropic `input_tokens→prompt_tokens`, `output_tokens→completion_tokens`, `cache_read_input_tokens→cache_read`, `cache_creation_input_tokens→cache_write`; `response_id` from `message_start.message.id`.
 
 Per-backend nuances captured directly from the wire (no callback, no translation bridge):
 
@@ -86,15 +86,15 @@ JSONL over SQLite is deliberate: the file crosses the VM boundary on a bind moun
 
 ## Hot reload
 
-`ContainerRuntime::compose_up_service(project, "speedwave-proxy")` recreates only the forwarder after an LLM-settings change (config re-render + targeted `up -d --force-recreate`); the claude container restarts only when its own env changed. Service names are validated against `BUILT_IN_SERVICES` before reaching engine argv.
+`ContainerRuntime::compose_up_service(project, "proxy")` recreates only the forwarder after an LLM-settings change (config re-render + targeted `up -d --force-recreate`); the claude container restarts only when its own env changed. Service names are validated against `BUILT_IN_SERVICES` before reaching engine argv.
 
 nerdctl's config-hash convergence only recreates services whose compose definition changed — and neither the bind-mounted `/config` files nor the `/tokens` key files are part of that definition, while the forwarder reads its config and resolves keys only at container start. The renderer therefore injects `SPW_CONFIG_DIGEST` (sha256 over each rendered file under the project's config dir — name + full content — plus each key file's name + a sha256 of its content; never raw key values) into the service env, making any config or key change a compose-definition change. Image-level changes (Containerfile, Cargo sources) propagate independently via the per-image build-input hash tags (ADR-072).
 
 ## Where it lives in code
 
-- Forwarder: `containers/speedwave-proxy/src/{main,router,forward,usage,count_tokens,config}.rs` (standalone cargo project, built `--locked`)
-- Image: `containers/Containerfile.speedwave-proxy` (multi-stage Rust → distroless/scratch, digest-pinned)
-- Compose: `containers/compose.template.yml` (`speedwave-proxy` service), `compose/mod.rs` (mount dirs + substitution), `resources.rs::SPEEDWAVE_PROXY_RESOURCES`
+- Forwarder: `containers/proxy/src/{main,router,forward,usage,count_tokens,config}.rs` (standalone cargo project, built `--locked`)
+- Image: `containers/Containerfile.proxy` (multi-stage Rust → distroless/scratch, digest-pinned)
+- Compose: `containers/compose.template.yml` (`proxy` service), `compose/mod.rs` (mount dirs + substitution), `resources.rs::PROXY_RESOURCES`
 - Config renderer + keys: `compose/litellm.rs` (`render_proxy_config`); token namespace: `compose/tokens.rs` (`llm` service)
 - Schema + migration: `config.rs` (`LlmProviderEntry`, `migrate_llm_to_v2`, `sync_llm_legacy_fields`, `proxy_enabled`)
 - Routing/env injection: `compose/llm.rs` (`apply_llm_config_proxy` / `apply_llm_config_legacy_in`)

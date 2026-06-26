@@ -1280,7 +1280,7 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
 }
 
 /// Re-renders the project's compose (which rewrites the proxy config.yaml
-/// in the same transaction) and recreates ONLY the speedwave-proxy service — the
+/// in the same transaction) and recreates ONLY the proxy service — the
 /// ADR-073 hot-reload path. The claude session keeps running; callers use
 /// the full project restart instead when the claude env itself changed
 /// (provider class or active model).
@@ -1289,7 +1289,7 @@ pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
     check_project(&project)?;
     render_and_save_compose(&project)?;
     let rt = speedwave_runtime::runtime::detect_runtime();
-    rt.compose_up_service(&project, "speedwave-proxy")
+    rt.compose_up_service(&project, "proxy")
         .map_err(|e| e.to_string())
 }
 

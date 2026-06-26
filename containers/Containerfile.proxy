@@ -8,7 +8,7 @@ RUN apk add --no-cache tzdata musl-dev
 
 WORKDIR /build
 
-COPY speedwave-proxy/ /build/
+COPY proxy/ /build/
 
 # Cache the cargo registry/git so a Cargo.toml change re-fetches only new
 # crates instead of the whole index (parallels the npm cache mounts).
@@ -23,6 +23,6 @@ FROM scratch
 # a bare numeric offset. Injected as TZ env by tz.rs::detect_host_timezone.
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
-COPY --from=builder /build/target/release/speedwave-proxy /speedwave-proxy
+COPY --from=builder /build/target/release/proxy /proxy
 
-ENTRYPOINT ["/speedwave-proxy"]
+ENTRYPOINT ["/proxy"]

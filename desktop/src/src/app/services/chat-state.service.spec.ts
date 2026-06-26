@@ -508,6 +508,55 @@ describe('ChatStateService', () => {
       });
     });
 
+    it('reconciles footer cost cumulatively across turns from the proxy SSOT', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'get_usage_for_response') {
+          const id = args?.['responseId'];
+          if (id === 'msg_1') return { cost_usd: 0.2, cost_source: 'catalog' };
+          if (id === 'msg_2') return { cost_usd: 0.3, cost_source: 'catalog' };
+        }
+        return undefined;
+      });
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.99 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // First turn: footer = the proxy cost, not CC's 0.99 estimate.
+      expect(service.sessionStats?.total_cost).toBeCloseTo(0.2, 6);
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 1.5 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Second turn accumulates: 0.2 + 0.3 = 0.5 (cumulative, not just the last turn).
+      expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
+    });
+
+    it('subscription (null proxy cost) yields $0 footer, not CC estimate', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response')
+          return { cost_usd: null, cost_source: 'subscription' };
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Subscription is unpriced → 0, replacing CC's $0.42 estimate.
+      expect(service.sessionStats?.total_cost).toBe(0);
+    });
+
     it('Result with empty currentBlocks does not add message', () => {
       service.handleStreamChunk({
         chunk_type: 'Result',

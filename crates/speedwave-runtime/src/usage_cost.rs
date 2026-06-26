@@ -1,9 +1,9 @@
-//! Host-side cost enrichment for the speedwave-proxy usage JSONL (ADR-073).
+//! Host-side cost enrichment for the proxy usage JSONL (ADR-073).
 //! The proxy writes token lines with `cost_usd: null`; cost is computed here,
 //! per provider, into an append-only sidecar keyed by `response_id` — the usage
 //! JSONL is never mutated (it races the proxy's append + rotation).
 
-use crate::usage::{usage_file_in, UsageRecord};
+use crate::usage::UsageRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
@@ -25,7 +25,7 @@ pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
         .join("usage")
         .join(project)
-        .join("speedwave-proxy")
+        .join("proxy")
         .join("cost-cache.jsonl")
 }
 
@@ -89,6 +89,12 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     Some(cost)
 }
 
+/// A cost_source that won't change on re-enrichment. `unknown` is non-terminal
+/// (a transient fetch failure) and is re-priced on a later pass.
+fn is_terminal_cost(source: &str) -> bool {
+    matches!(source, "catalog" | "actual" | "free" | "subscription")
+}
+
 /// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
 /// JSONL read-only. No fetcher — `openrouter` → `unknown` (see [`enrich_cost_with_in`]).
 pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
@@ -106,32 +112,23 @@ pub fn enrich_cost_with_in(
         return Ok(());
     }
     let already = read_cost_cache_in(data_dir, project);
-    let live = usage_file_in(data_dir, project);
-    let rotated = live.with_extension("jsonl.1");
-
     let mut to_append: Vec<CostEntry> = Vec::new();
     let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in [rotated, live] {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    crate::usage::for_each_usage_record(data_dir, project, |record| {
+        let Some(id) = record.response_id.clone().filter(|s| !s.is_empty()) else {
+            return;
         };
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<UsageRecord>(trimmed) else {
-                continue;
-            };
-            let Some(id) = record.response_id.clone().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            if already.contains_key(&id) || !queued.insert(id) {
-                continue;
-            }
-            to_append.push(compute_cost_with(&record, fetch_gen_cost));
+        // Skip ids already resolved to a terminal cost; re-price non-terminal
+        // ones (`unknown`) so a transient OpenRouter fetch failure can recover.
+        if already
+            .get(&id)
+            .is_some_and(|e| is_terminal_cost(&e.cost_source))
+            || !queued.insert(id)
+        {
+            return;
         }
-    }
+        to_append.push(compute_cost_with(&record, fetch_gen_cost));
+    });
     if to_append.is_empty() {
         return Ok(());
     }
@@ -175,6 +172,7 @@ pub fn read_cost_cache_in(data_dir: &Path, project: &str) -> HashMap<String, Cos
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::usage::usage_file_in;
 
     fn record(
         kind: &str,
@@ -397,6 +395,47 @@ mod tests {
         let e = cache.get("msg_or").unwrap();
         assert_eq!(e.cost_usd, Some(0.0042));
         assert_eq!(e.cost_source, "actual");
+    }
+
+    #[test]
+    fn unknown_cost_is_repriced_on_later_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
+        // First pass: /generation fails → unknown (transient).
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert_eq!(
+            read_cost_cache_in(dir.path(), "proj")
+                .get("msg_or")
+                .unwrap()
+                .cost_source,
+            "unknown"
+        );
+        // Second pass: /generation now succeeds → re-priced to actual.
+        enrich_cost_with_in(dir.path(), "proj", &|_| Some(0.0042)).unwrap();
+        let e = read_cost_cache_in(dir.path(), "proj")
+            .get("msg_or")
+            .unwrap()
+            .clone();
+        assert_eq!(e.cost_usd, Some(0.0042));
+        assert_eq!(e.cost_source, "actual");
+    }
+
+    #[test]
+    fn terminal_cost_is_not_repriced() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage_line(
+            dir.path(),
+            "proj",
+            "msg_1",
+            "anthropic_apikey",
+            "claude-opus-4-8",
+        );
+        enrich_cost_in(dir.path(), "proj").unwrap();
+        // A second pass with a fetcher must NOT add a duplicate for a terminal (catalog) id.
+        enrich_cost_with_in(dir.path(), "proj", &|_| Some(99.0)).unwrap();
+        // Exactly one cache line for msg_1 still resolves to the catalog cost.
+        let cache = read_cost_cache_in(dir.path(), "proj");
+        assert_eq!(cache.get("msg_1").unwrap().cost_source, "catalog");
     }
 
     #[test]

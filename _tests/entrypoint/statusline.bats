@@ -75,6 +75,37 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *'$1.23'* ]]
 }
 
+@test "SSOT cost parses serde_json scientific-notation floats" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # serde_json emits small f64 in exponent form; must not truncate at 'e'.
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":2.5e-6,"cost_source":"catalog"}' \
+        '{"response_id":"m2","cost_usd":0.0100,"cost_source":"catalog"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # 0.0000025 + 0.01 = 0.0100 (4dp), NOT 2.5 + 0.01 = 2.51 from a truncated 'e'.
+    [[ "$output" == *'$0.0100'* ]]
+    [[ "$output" != *'2.51'* ]]
+}
+
+@test "SSOT all-zero sidecar shows \$0, not the CC fallback" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # A free-local session: every priced line is 0.0 — must show the SSOT $0.
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":0.0,"cost_source":"free"}' \
+        '{"response_id":"m2","cost_usd":0.0,"cost_source":"free"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Local"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # Priced lines exist and sum to 0 → SSOT wins, CC 1.23 is suppressed.
+    [[ "$output" != *'1.23'* ]]
+}
+
 @test "extracts display_name from JSON" {
     local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"

@@ -3,8 +3,8 @@ paths:
   - 'crates/speedwave-runtime/src/compose/**'
   - 'crates/speedwave-runtime/src/config.rs'
   - 'crates/speedwave-runtime/src/usage.rs'
-  - 'containers/Containerfile.speedwave-proxy'
-  - 'containers/speedwave-proxy/**'
+  - 'containers/Containerfile.proxy'
+  - 'containers/proxy/**'
   - 'desktop/src-tauri/src/llm_cmd.rs'
   - 'desktop/src-tauri/src/containers_cmd.rs'
   - 'desktop/src-tauri/src/http_util.rs'
@@ -17,7 +17,7 @@ paths:
 # LLM Provider Rules
 
 Speedwave is a **local-first** platform. Since ADR-073 every session routes
-through a per-project Rust forwarder, `speedwave-proxy` (port 4000, compose
+through a per-project Rust forwarder, `proxy` (port 4000, compose
 network only), which relays native Anthropic `/v1/messages` with no
 translation; ADR-040's direct-injection path survives behind the
 `llm.proxy_enabled` kill-switch until N+2. ADR-040, ADR-041 and ADR-073 are
@@ -25,7 +25,7 @@ mandatory reading before touching any code under the `paths:` above.
 
 ## Invariants (non-negotiable)
 
-1. **The speedwave-proxy container must never hold a canonical Anthropic credential.**
+1. **The proxy container must never hold a canonical Anthropic credential.**
    No `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` env name may reach it —
    the passthrough leg forwards the client's subscription OAuth header
    verbatim only while the forwarder has no Anthropic credential of its own.
@@ -82,12 +82,12 @@ mandatory reading before touching any code under the `paths:` above.
 Unchanged from ADR-040/ADR-041: discovery probe and save path share
 `validate_llm_base_url` (`llm_cmd.rs`), parameterised by `PrivatePolicy`.
 The block list is fixed; changes require an ADR delta. The proxy URL
-(`http://speedwave-proxy:4000[/anthropic]`) is compose-internal and never
+(`http://proxy:4000[/anthropic]`) is compose-internal and never
 flows through user-facing URL fields.
 
 ## Container-host alias rewrite
 
-`host.docker.internal` resolves inside containers (speedwave-proxy included —
+`host.docker.internal` resolves inside containers (proxy included —
 it carries `extra_hosts` for local backends) but not from the Desktop host
 process. Host-side probes call `http_util::rewrite_container_alias_to_loopback`.
 SSOT: `consts::HOST_GATEWAY_ALIAS`.
@@ -104,15 +104,15 @@ unconfigured. Any new Anthropic-auth checkpoint must use the same predicate.
 
 ## When designing or fixing any feature, ask:
 
-- Does it talk to an LLM? It goes through the claude container → speedwave-proxy
+- Does it talk to an LLM? It goes through the claude container → proxy
   — no host-side LLM calls except the discovery probe under `llm_cmd.rs`.
 - Does it accept a URL? `validate_llm_base_url` (host) or
   `compose::validate_base_url` (render) — never a third validator.
 - Does it add a provider kind or change routing? Update the renderer
-  (`compose/litellm.rs`, `render_proxy_config`), the injection
+  (`compose/proxy.rs`, `render_proxy_config`), the injection
   (`compose/llm.rs`), the forwarder's routing/header logic, the security
   rule expectations, AND ADR-073 in the same change.
-- Does it touch the forwarder's deps? Bump `containers/speedwave-proxy/Cargo.toml`
+- Does it touch the forwarder's deps? Bump `containers/proxy/Cargo.toml`
   and its `Cargo.lock` together and build `--locked`; there are no Python hashes
   to regenerate.
 - Does it surface usage numbers? Decide which source of truth (invariant 6)

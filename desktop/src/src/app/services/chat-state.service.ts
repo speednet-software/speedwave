@@ -91,6 +91,8 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
+  /** Proxy-reconciled cost per `response_id` (turn); summed for the footer total. */
+  private _reconciledCosts = new Map<string, number>();
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -726,6 +728,7 @@ export class ChatStateService {
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
+    this._reconciledCosts.clear();
     this._contextWindowSize = null;
     this._pendingQueue = null;
     this.initialized = false;
@@ -888,6 +891,7 @@ export class ChatStateService {
         this._model = '';
         this._rateLimit = null;
         this._totalOutputTokens = 0;
+        this._reconciledCosts.clear();
         this._contextWindowSize = null;
         this._persistedContextTokens = null;
         this._currentProvider = null;
@@ -901,9 +905,11 @@ export class ChatStateService {
   }
 
   /**
-   * Overwrites the footer's session cost from the proxy SSOT once the proxy has
-   * recorded the response. Best-effort: a missing id or unpriced cost keeps the
-   * live Claude Code value.
+   * Reconciles the footer's cumulative session cost from the proxy SSOT. Each
+   * recorded turn's cost is accumulated by `response_id`; unpriced turns
+   * (subscription/unknown) contribute 0, so a subscription session reads $0
+   * instead of Claude Code's per-API estimate. A turn the proxy hasn't recorded
+   * yet keeps the live Claude Code value. Best-effort.
    * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
    */
   private async reconcileFooterCost(assistantUuid: string | undefined): Promise<void> {
@@ -915,10 +921,14 @@ export class ChatStateService {
         project,
         responseId: assistantUuid,
       });
-      if (u?.cost_usd != null && this._sessionStats) {
-        this._sessionStats = { ...this._sessionStats, total_cost: u.cost_usd };
-        this.notifyChange();
-      }
+      if (!u || !this._sessionStats) return;
+      // Proxy recorded this turn: accumulate its cost (unpriced → 0) and show
+      // the running total, replacing the live cumulative estimate.
+      this._reconciledCosts.set(assistantUuid, u.cost_usd ?? 0);
+      let total = 0;
+      for (const c of this._reconciledCosts.values()) total += c;
+      this._sessionStats = { ...this._sessionStats, total_cost: total };
+      this.notifyChange();
     } catch {
       // Footer stays on the live value; reconcile is best-effort.
     }

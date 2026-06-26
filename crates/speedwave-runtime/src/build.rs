@@ -30,7 +30,7 @@ const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults:
 /// Claude Code container image name.
 pub const IMAGE_CLAUDE: &str = "speedwave-claude";
 /// Speedwave proxy image name (ADR-073).
-pub const IMAGE_SPEEDWAVE_PROXY: &str = "speedwave-proxy";
+pub const IMAGE_PROXY: &str = "proxy";
 /// MCP hub image name.
 pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
 /// Slack MCP worker image name.
@@ -68,15 +68,12 @@ pub const IMAGES: &[ImageDef] = &[
         ],
     },
     ImageDef {
-        name: IMAGE_SPEEDWAVE_PROXY,
+        name: IMAGE_PROXY,
         context_dir: "containers",
-        containerfile: "containers/Containerfile.speedwave-proxy",
+        containerfile: "containers/Containerfile.proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/speedwave-proxy.
-        hash_inputs: &[
-            "containers/Containerfile.speedwave-proxy",
-            "containers/speedwave-proxy",
-        ],
+        // Everything the Containerfile COPYies lives under containers/proxy.
+        hash_inputs: &["containers/Containerfile.proxy", "containers/proxy"],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
@@ -1807,10 +1804,7 @@ mod tests {
             .iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(
-            names,
-            vec![IMAGE_CLAUDE, IMAGE_SPEEDWAVE_PROXY, IMAGE_MCP_HUB]
-        );
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_PROXY, IMAGE_MCP_HUB]);
     }
 
     #[test]
@@ -1825,7 +1819,7 @@ mod tests {
             names,
             vec![
                 IMAGE_CLAUDE,
-                IMAGE_SPEEDWAVE_PROXY,
+                IMAGE_PROXY,
                 IMAGE_MCP_HUB,
                 IMAGE_MCP_SLACK,
                 IMAGE_MCP_PLAYWRIGHT
@@ -1838,10 +1832,7 @@ mod tests {
         let mut cfg = ResolvedIntegrationsConfig::default();
         cfg.plugins.insert("example-plugin".to_string(), true);
         let names: Vec<&str> = enabled_images(&cfg).iter().map(|i| i.name).collect();
-        assert_eq!(
-            names,
-            vec![IMAGE_CLAUDE, IMAGE_SPEEDWAVE_PROXY, IMAGE_MCP_HUB]
-        );
+        assert_eq!(names, vec![IMAGE_CLAUDE, IMAGE_PROXY, IMAGE_MCP_HUB]);
     }
 
     #[test]
@@ -1850,8 +1841,8 @@ mod tests {
         for img in IMAGES {
             let Some(suffix) = img.name.strip_prefix(MCP_IMAGE_PREFIX) else {
                 assert!(
-                    img.name == IMAGE_CLAUDE || img.name == IMAGE_SPEEDWAVE_PROXY,
-                    "only speedwave-claude and speedwave-proxy lack the prefix, got '{}'",
+                    img.name == IMAGE_CLAUDE || img.name == IMAGE_PROXY,
+                    "only speedwave-claude and proxy lack the prefix, got '{}'",
                     img.name
                 );
                 continue;
@@ -2185,10 +2176,11 @@ mod tests {
         assert_eq!(
             built,
             vec![
+                // Sorted: "proxy" precedes the "speedwave-*" names alphabetically.
+                image_ref(IMAGE_PROXY, "b1"),
                 image_ref(IMAGE_CLAUDE, "b1"),
                 image_ref(IMAGE_MCP_GITHUB, "b1"),
                 image_ref(IMAGE_MCP_HUB, "b1"),
-                image_ref(IMAGE_SPEEDWAVE_PROXY, "b1"),
             ]
         );
     }

@@ -98,6 +98,22 @@ pub fn outbound_headers_with(
     out
 }
 
+/// Rewrites the request body's `model` to drop the route prefix (`local/foo`
+/// → `foo`), so the backend sees its own model name. Returns the body
+/// unchanged when the model has no prefix or the body can't be reparsed.
+fn strip_model_prefix(body: &[u8], model: &str) -> Vec<u8> {
+    let Some((_, bare)) = model.split_once('/') else {
+        return body.to_vec();
+    };
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+    if let Some(m) = v.get_mut("model") {
+        *m = serde_json::Value::String(bare.to_string());
+    }
+    serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
+}
+
 /// Resolve the upstream route from the request body, forward the request with
 /// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
 /// sniffing usage frames, and append one usage line on stream end.
@@ -131,6 +147,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
+    // Strip the route prefix from the model before forwarding: the backend
+    // only knows `unsloth/Qwen3.6` (its own name), not Speedwave's `local/…`
+    // routing prefix. Anthropic passthrough has no prefix and is untouched.
+    let outbound_body = strip_model_prefix(&body, &model);
     // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
@@ -140,7 +160,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         .build()
         .unwrap_or_default();
 
-    let mut req = client.post(&upstream_url).body(body.to_vec());
+    let mut req = client.post(&upstream_url).body(outbound_body);
     for (name, value) in &out_headers {
         req = req.header(name, value);
     }
@@ -157,6 +177,17 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     };
 
     let status = upstream.status();
+    // Surface backend rejections at the proxy (model name only, never a key or
+    // body) — otherwise a 401/403/5xx is invisible here and only shows up in
+    // the Claude Code logs.
+    if status.as_u16() >= 400 {
+        log::warn!(
+            "upstream {} for model '{}' via prefix '{}'",
+            status.as_u16(),
+            model,
+            route.prefix
+        );
+    }
     let response_headers = upstream.headers().clone();
 
     // Usage path resolved once at startup and stored in Config — no env read per request.
@@ -228,6 +259,33 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn strip_model_prefix_removes_route_prefix() {
+        let body = br#"{"model":"local/unsloth/Qwen3.6","max_tokens":16}"#;
+        let out = strip_model_prefix(body, "local/unsloth/Qwen3.6");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["model"], "unsloth/Qwen3.6");
+        // Other fields survive the rewrite.
+        assert_eq!(v["max_tokens"], 16);
+    }
+
+    #[test]
+    fn strip_model_prefix_leaves_anthropic_untouched() {
+        // No prefix (anthropic passthrough) → body byte-identical.
+        let body = br#"{"model":"claude-opus-4-8","max_tokens":16}"#;
+        let out = strip_model_prefix(body, "claude-opus-4-8");
+        assert_eq!(out, body.to_vec());
+    }
+
+    #[test]
+    fn strip_model_prefix_only_drops_first_segment() {
+        // openrouter/anthropic/claude-3.5 → anthropic/claude-3.5 (one level).
+        let body = br#"{"model":"openrouter/anthropic/claude-3.5"}"#;
+        let out = strip_model_prefix(body, "openrouter/anthropic/claude-3.5");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["model"], "anthropic/claude-3.5");
+    }
 
     #[test]
     fn passthrough_forwards_oauth_bearer_verbatim() {

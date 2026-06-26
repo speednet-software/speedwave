@@ -1,5 +1,5 @@
-//! LLM usage aggregation (ADR-073): reads the speedwave-proxy usage JSONL
-//! (`<data_dir>/usage/<project>/speedwave-proxy/usage.jsonl`) for the Desktop
+//! LLM usage aggregation (ADR-073): reads the proxy usage JSONL
+//! (`<data_dir>/usage/<project>/proxy/usage.jsonl`) for the Desktop
 //! dashboard. Records are deduplicated by `response_id`, first-seen wins.
 
 use serde::{Deserialize, Serialize};
@@ -104,16 +104,20 @@ pub fn usage_file_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
         .join("usage")
         .join(project)
-        .join("speedwave-proxy")
+        .join("proxy")
         .join("usage.jsonl")
 }
 
 /// Final usage for one response (`response_id`), for the chat-footer reconcile.
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct ResponseUsage {
+    /// Input tokens.
     pub prompt_tokens: u64,
+    /// Output tokens.
     pub completion_tokens: u64,
+    /// Prompt-cache read tokens.
     pub cache_read: u64,
+    /// Prompt-cache write tokens.
     pub cache_write: u64,
     /// `None` when unpriced (subscription/unknown) — never collapsed to 0.0.
     pub cost_usd: Option<f64>,
@@ -132,31 +136,21 @@ pub fn get_usage_for_response_in(
     if response_id.is_empty() {
         return None;
     }
-    let live = usage_file_in(data_dir, project);
-    let rotated = live.with_extension("jsonl.1");
     let mut found: Option<UsageRecord> = None;
-    for path in [rotated, live] {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines() {
-            let Ok(rec) = serde_json::from_str::<UsageRecord>(line.trim()) else {
-                continue;
-            };
-            if rec.response_id.as_deref() == Some(response_id) {
-                found = Some(rec);
-            }
+    for_each_usage_record(data_dir, project, |rec| {
+        if rec.response_id.as_deref() == Some(response_id) {
+            found = Some(rec);
         }
-    }
+    });
     let rec = found?;
-    let cost = crate::usage_cost::read_cost_cache_in(data_dir, project);
-    let entry = cost.get(response_id);
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let entry = costs.get(response_id);
     Some(ResponseUsage {
         prompt_tokens: rec.prompt_tokens.unwrap_or(0),
         completion_tokens: rec.completion_tokens.unwrap_or(0),
         cache_read: rec.cache_read.unwrap_or(0),
         cache_write: rec.cache_write.unwrap_or(0),
-        cost_usd: entry.map_or(rec.cost_usd, |e| e.cost_usd),
+        cost_usd: joined_cost(&rec, &costs),
         cost_source: entry.map(|e| e.cost_source.clone()).unwrap_or_default(),
     })
 }
@@ -182,46 +176,63 @@ pub fn rotate_usage_if_large_in(data_dir: &Path, project: &str) {
     }
 }
 
+/// Walks the project's usage JSONL (rotated file first, then live), parsing
+/// each line and invoking `f` per record. Returns the count of unparseable
+/// lines. Single owner of the rotated/live file layout — all readers use it.
+pub fn for_each_usage_record(
+    data_dir: &Path,
+    project: &str,
+    mut f: impl FnMut(UsageRecord),
+) -> u64 {
+    let live = usage_file_in(data_dir, project);
+    let rotated = live.with_extension("jsonl.1");
+    let mut skipped = 0;
+    for path in [rotated, live] {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<UsageRecord>(trimmed) {
+                Ok(record) => f(record),
+                Err(_) => skipped += 1,
+            }
+        }
+    }
+    skipped
+}
+
+/// Sidecar cost for a record, joined by `response_id`: the sidecar value when
+/// known, else the record's inline cost (a non-null inline cost is never lost).
+fn joined_cost(
+    record: &UsageRecord,
+    costs: &std::collections::HashMap<String, crate::usage_cost::CostEntry>,
+) -> Option<f64> {
+    let sidecar = record
+        .response_id
+        .as_deref()
+        .and_then(|id| costs.get(id))
+        .and_then(|e| e.cost_usd);
+    sidecar.or(record.cost_usd)
+}
+
 /// Reads and aggregates the project's usage (rotated file first, then the
 /// live one). Missing files yield an empty summary — never an error.
 pub fn read_usage_summary_in(data_dir: &Path, project: &str) -> UsageSummary {
-    crate::validation::validate_project_name(project)
-        .map(|()| {
-            let live = usage_file_in(data_dir, project);
-            let rotated = live.with_extension("jsonl.1");
-            let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
-            let mut summary = UsageSummary::default();
-            let mut seen_ids = std::collections::HashSet::new();
-            for path in [rotated, live] {
-                aggregate_file(&path, &mut summary, &mut seen_ids, &costs);
-            }
-            summary
-        })
-        .unwrap_or_default()
-}
-
-fn aggregate_file(
-    path: &Path,
-    summary: &mut UsageSummary,
-    seen_ids: &mut std::collections::HashSet<String>,
-    costs: &std::collections::HashMap<String, crate::usage_cost::CostEntry>,
-) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<UsageRecord>(trimmed) else {
-            summary.skipped_lines += 1;
-            continue;
-        };
+    if crate::validation::validate_project_name(project).is_err() {
+        return UsageSummary::default();
+    }
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let mut summary = UsageSummary::default();
+    let mut seen_ids = std::collections::HashSet::new();
+    summary.skipped_lines = for_each_usage_record(data_dir, project, |record| {
         // Dedup by response_id; first-seen wins.
         if let Some(id) = record.response_id.as_deref() {
             if !id.is_empty() && !seen_ids.insert(id.to_string()) {
-                continue;
+                return;
             }
         }
         let day = record.ts.get(0..10).unwrap_or("unknown").to_string();
@@ -237,12 +248,7 @@ fn aggregate_file(
         {
             summary.hours.entry(day.clone()).or_insert([0; 24])[hour] += 1;
         }
-        // Cost: sidecar entry by response_id, else the record's inline cost.
-        let cost = record
-            .response_id
-            .as_deref()
-            .and_then(|id| costs.get(id))
-            .map_or(record.cost_usd, |e| e.cost_usd);
+        let cost = joined_cost(&record, &costs);
         let bucket = summary
             .days
             .entry(day)
@@ -251,7 +257,8 @@ fn aggregate_file(
             .or_default();
         apply_record(bucket, &record, cost);
         apply_record(&mut summary.totals, &record, cost);
-    }
+    });
+    summary
 }
 
 /// Aggregates one record; `cost` is the sidecar-joined cost (`None` = unpriced).

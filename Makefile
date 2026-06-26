@@ -62,7 +62,7 @@ guard-not-prod-data-dir:
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-speedwave-proxy \
+        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -419,11 +419,11 @@ test-desktop-group-run:
 # shared-path-safe after test-build-phase; the one lane that touches real repo
 # paths is the serial test-desktop-group-run.
 test-run-lanes: test-rust-run test-angular-run test-entrypoint \
-                test-desktop-config test-ci test-desktop-group-run test-speedwave-proxy
+                test-desktop-config test-ci test-desktop-group-run test-proxy
 
-test-speedwave-proxy:
-	cd containers/speedwave-proxy && cargo test --locked
-	@echo "✅ speedwave-proxy tests passed"
+test-proxy:
+	cd containers/proxy && cargo test --locked
+	@echo "✅ proxy tests passed"
 
 test-rust:
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)

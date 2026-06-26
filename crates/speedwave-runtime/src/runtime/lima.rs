@@ -1843,13 +1843,12 @@ mod tests {
     fn test_compose_up_service_targets_one_service() {
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
-        rt.compose_up_service("testproject", "speedwave-proxy")
-            .unwrap();
+        rt.compose_up_service("testproject", "proxy").unwrap();
 
         let commands = recorded.lock().unwrap();
         assert_eq!(commands.len(), 1);
         assert!(
-            commands[0].ends_with("--force-recreate speedwave-proxy"),
+            commands[0].ends_with("--force-recreate proxy"),
             "service must be the last argv token: {}",
             commands[0]
         );

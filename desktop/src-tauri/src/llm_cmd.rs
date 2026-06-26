@@ -970,63 +970,67 @@ pub async fn get_usage_for_response(
     response_id: String,
 ) -> Option<speedwave_runtime::usage::ResponseUsage> {
     let data_dir = speedwave_runtime::consts::data_dir();
+    // Wait (cheap, no HTTP) for the proxy to append the usage line.
+    let mut found = None;
     for attempt in 0..5 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
-        let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
-            data_dir.as_path(),
-            &project,
-            &|gen_id| gen_costs.get(gen_id).copied(),
-        );
-        if let Some(u) = speedwave_runtime::usage::get_usage_for_response_in(
+        found = speedwave_runtime::usage::get_usage_for_response_in(
             data_dir.as_path(),
             &project,
             &response_id,
-        ) {
-            return Some(u);
+        );
+        if found.is_some() {
+            break;
         }
     }
-    None
+    let u = found?;
+    // Line is present; enrich cost once (HTTP + sidecar) only if not yet priced.
+    if u.cost_usd.is_some() {
+        return Some(u);
+    }
+    let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
+    let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
+        data_dir.as_path(),
+        &project,
+        &|gen_id| gen_costs.get(gen_id).copied(),
+    );
+    speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
 }
 
 /// Resolves real OpenRouter cost for every not-yet-priced `gen_id` in the
 /// project's usage JSONL, into a `gen_id` → USD map (host-side `/generation`).
+/// Fetches run concurrently — the generations are independent.
 async fn openrouter_costs_for_project(
     data_dir: &std::path::Path,
     project: &str,
 ) -> std::collections::HashMap<String, f64> {
-    let mut out = std::collections::HashMap::new();
     let priced = speedwave_runtime::usage_cost::read_cost_cache_in(data_dir, project);
-    let live = speedwave_runtime::usage::usage_file_in(data_dir, project);
-    let rotated = live.with_extension("jsonl.1");
     let mut seen = std::collections::HashSet::new();
-    for path in [rotated, live] {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines() {
-            let Ok(rec) =
-                serde_json::from_str::<speedwave_runtime::usage::UsageRecord>(line.trim())
-            else {
-                continue;
-            };
-            if rec.provider_kind != "openrouter" {
-                continue;
-            }
-            let (Some(id), Some(gen)) = (rec.response_id.as_deref(), rec.gen_id.as_deref()) else {
-                continue;
-            };
-            if priced.contains_key(id) || !seen.insert(gen.to_string()) {
-                continue;
-            }
-            if let Some(cost) = fetch_openrouter_gen_cost(data_dir, project, gen).await {
-                out.insert(gen.to_string(), cost);
-            }
+    let mut gen_ids: Vec<String> = Vec::new();
+    speedwave_runtime::usage::for_each_usage_record(data_dir, project, |rec| {
+        if rec.provider_kind != "openrouter" {
+            return;
         }
-    }
-    out
+        let (Some(id), Some(gen)) = (rec.response_id.as_deref(), rec.gen_id.as_deref()) else {
+            return;
+        };
+        if priced.contains_key(id) || !seen.insert(gen.to_string()) {
+            return;
+        }
+        gen_ids.push(gen.to_string());
+    });
+    let fetches = gen_ids.into_iter().map(|gen| async move {
+        fetch_openrouter_gen_cost(data_dir, project, &gen)
+            .await
+            .map(|cost| (gen, cost))
+    });
+    futures_util::future::join_all(fetches)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

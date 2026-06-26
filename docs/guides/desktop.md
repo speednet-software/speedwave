@@ -179,16 +179,16 @@ See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full desi
 
 ## LLM usage
 
-A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded speedwave-proxy forwarder ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)). It shows:
+A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded proxy forwarder ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)). It shows:
 
 - **Totals cards** — requests, prompt/completion tokens, estimated cost, prompt-cache hit rate, throughput (tok/s), and failures (with failure rate). If any lines could not be parsed, a small `(N records skipped)` note appears rather than silently under-counting.
 - **Daily tokens chart** — a stacked bar per day (prompt vs. completion tokens) over the most recent month, built from plain CSS — no chart library.
 - **Weekday × hour heatmap** — request volume by local hour, so you can see when the project is busiest.
 - **Per-(day, model) table** — the breakdown the cards roll up.
 
-**Source of truth.** This dashboard reads the proxy usage SSOT — the forwarder's per-request JSONL line at `~/.speedwave/usage/<project>/speedwave-proxy/usage.jsonl` plus the host-side cost sidecar (`cost-cache.jsonl`), aggregated by `speedwave_runtime::usage` and surfaced through `get_llm_usage`. The same SSOT also feeds the chat footer's [Session stats bar](#session-stats-bar) (reconciled at end of turn) and the CLI statusline cost. The Claude Code result stream is a live preview, not a second total — the two are never summed (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
+**Source of truth.** This dashboard reads the proxy usage SSOT — the forwarder's per-request JSONL line at `~/.speedwave/usage/<project>/proxy/usage.jsonl` plus the host-side cost sidecar (`cost-cache.jsonl`), aggregated by `speedwave_runtime::usage` and surfaced through `get_llm_usage`. The same SSOT also feeds the chat footer's [Session stats bar](#session-stats-bar) (reconciled at end of turn) and the CLI statusline cost. The Claude Code result stream is a live preview, not a second total — the two are never summed (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
 
-Numbers reflect what the proxy could measure: cost currently reads `$0` across the board — the MVP forwarder records tokens only, and cost enrichment is a separate follow-up (ADR-073 §usage). A record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
+Cost is computed per provider (API key → catalog, OpenRouter → real `/generation`, local → `$0`, subscription → "—"); an unpriced request shows "—", never `$0`. A record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
 
 ## Appearance
 

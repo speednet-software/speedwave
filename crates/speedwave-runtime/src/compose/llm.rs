@@ -65,7 +65,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
             // which the forwarder routes to the anthropic passthrough by prefix.
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
-                super::SPEEDWAVE_PROXY_BASE_URL.to_string(),
+                super::PROXY_BASE_URL.to_string(),
             );
             // Defense-in-depth after heal/quarantine: drop a foreign id from a
             // not-yet-healed config → account default, not 404.
@@ -94,7 +94,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
             };
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
-                super::SPEEDWAVE_PROXY_BASE_URL.to_string(),
+                super::PROXY_BASE_URL.to_string(),
             );
             // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
             extra_env.insert(
