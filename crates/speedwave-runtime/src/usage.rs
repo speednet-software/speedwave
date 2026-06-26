@@ -108,6 +108,59 @@ pub fn usage_file_in(data_dir: &Path, project: &str) -> PathBuf {
         .join("usage.jsonl")
 }
 
+/// Final usage for one response (`response_id`), for the chat-footer reconcile.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct ResponseUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// `None` when unpriced (subscription/unknown) — never collapsed to 0.0.
+    pub cost_usd: Option<f64>,
+    /// Provenance from the sidecar; empty when no sidecar entry.
+    pub cost_source: String,
+}
+
+/// Joins the last usage line for `response_id` to its sidecar cost. `None` when
+/// the id is absent (the footer then keeps Claude Code's live values).
+pub fn get_usage_for_response_in(
+    data_dir: &Path,
+    project: &str,
+    response_id: &str,
+) -> Option<ResponseUsage> {
+    crate::validation::validate_project_name(project).ok()?;
+    if response_id.is_empty() {
+        return None;
+    }
+    let live = usage_file_in(data_dir, project);
+    let rotated = live.with_extension("jsonl.1");
+    let mut found: Option<UsageRecord> = None;
+    for path in [rotated, live] {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let Ok(rec) = serde_json::from_str::<UsageRecord>(line.trim()) else {
+                continue;
+            };
+            if rec.response_id.as_deref() == Some(response_id) {
+                found = Some(rec);
+            }
+        }
+    }
+    let rec = found?;
+    let cost = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let entry = cost.get(response_id);
+    Some(ResponseUsage {
+        prompt_tokens: rec.prompt_tokens.unwrap_or(0),
+        completion_tokens: rec.completion_tokens.unwrap_or(0),
+        cache_read: rec.cache_read.unwrap_or(0),
+        cache_write: rec.cache_write.unwrap_or(0),
+        cost_usd: entry.map_or(rec.cost_usd, |e| e.cost_usd),
+        cost_source: entry.map(|e| e.cost_source.clone()).unwrap_or_default(),
+    })
+}
+
 /// Rotation threshold: past this size the live file is renamed to `.1`
 /// (replacing any previous `.1`). The callback's per-write `open(append)`
 /// picks up the fresh file on its next request.
@@ -453,5 +506,49 @@ mod tests {
         std::fs::write(&live, b"small").unwrap();
         rotate_usage_if_large_in(dir.path(), "proj");
         assert!(live.exists());
+    }
+
+    #[test]
+    fn get_usage_for_response_joins_line_and_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_in(dir.path(), "proj").unwrap();
+        let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
+        assert_eq!(u.prompt_tokens, 1_000_000);
+        assert!(u.cost_usd.unwrap() > 0.0);
+        assert_eq!(u.cost_source, "catalog");
+    }
+
+    #[test]
+    fn get_usage_for_response_missing_id_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[r#"{"ts":"2026-06-26T10:00:00+0200","response_id":"msg_1","prompt_tokens":1}"#],
+        );
+        assert!(get_usage_for_response_in(dir.path(), "proj", "nope").is_none());
+        assert!(get_usage_for_response_in(dir.path(), "proj", "").is_none());
+    }
+
+    #[test]
+    fn get_usage_for_response_without_sidecar_uses_inline_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","response_id":"msg_1","cost_usd":0.02,"prompt_tokens":5}"#,
+            ],
+        );
+        let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
+        assert_eq!(u.cost_usd, Some(0.02));
+        assert_eq!(u.cost_source, "");
     }
 }

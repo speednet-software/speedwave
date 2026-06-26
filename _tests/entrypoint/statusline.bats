@@ -53,6 +53,28 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *'$1.23'* ]]
 }
 
+@test "proxy SSOT cost from cost-cache.jsonl overrides the CC value" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":0.0200,"cost_source":"catalog"}' \
+        '{"response_id":"m2","cost_usd":0.0300,"cost_source":"actual"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # 0.02 + 0.03 = 0.05 from the sidecar, not the CC 1.23.
+    [[ "$output" == *'$0.0500'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
+@test "missing /usage keeps the CC cost value" {
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$BATS_TEST_TMPDIR/nope' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$1.23'* ]]
+}
+
 @test "extracts display_name from JSON" {
     local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"

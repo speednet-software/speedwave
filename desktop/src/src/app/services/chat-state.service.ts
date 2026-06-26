@@ -7,7 +7,12 @@ import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { calculateCost } from '../chat/pricing';
-import { DEFAULT_CONTEXT_TOKENS, isLocalProvider, type LlmConfigResponse } from '../models/llm';
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  isLocalProvider,
+  type LlmConfigResponse,
+  type ResponseUsage,
+} from '../models/llm';
 import {
   DEFAULT_STATE_TREE,
   type ConversationEntryState,
@@ -650,6 +655,8 @@ export class ChatStateService {
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         };
+        // Reconcile the footer cost from the proxy SSOT (live CC is a preview).
+        void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
       }
 
@@ -891,6 +898,30 @@ export class ChatStateService {
         void this.refreshLlmConfigCache();
       }
     });
+  }
+
+  /**
+   * Overwrites the footer's session cost from the proxy SSOT once the proxy has
+   * recorded the response. Best-effort: a missing id or unpriced cost keeps the
+   * live Claude Code value.
+   * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
+   */
+  private async reconcileFooterCost(assistantUuid: string | undefined): Promise<void> {
+    if (!assistantUuid) return;
+    const project = this.projectState.activeProject;
+    if (!project) return;
+    try {
+      const u = await this.tauri.invoke<ResponseUsage | null>('get_usage_for_response', {
+        project,
+        responseId: assistantUuid,
+      });
+      if (u?.cost_usd != null && this._sessionStats) {
+        this._sessionStats = { ...this._sessionStats, total_cost: u.cost_usd };
+        this.notifyChange();
+      }
+    } catch {
+      // Footer stays on the live value; reconcile is best-effort.
+    }
   }
 
   /**

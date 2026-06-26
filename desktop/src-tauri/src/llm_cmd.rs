@@ -961,6 +961,36 @@ pub async fn get_llm_usage(
     ))
 }
 
+/// Final usage (tokens + cost) for one response id, for the chat-footer
+/// reconcile. Bounded retry: the proxy append can lag Claude Code's `result`.
+/// `None` on miss (the footer then keeps Claude Code's live values).
+#[tauri::command]
+pub async fn get_usage_for_response(
+    project: String,
+    response_id: String,
+) -> Option<speedwave_runtime::usage::ResponseUsage> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
+        let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
+            data_dir.as_path(),
+            &project,
+            &|gen_id| gen_costs.get(gen_id).copied(),
+        );
+        if let Some(u) = speedwave_runtime::usage::get_usage_for_response_in(
+            data_dir.as_path(),
+            &project,
+            &response_id,
+        ) {
+            return Some(u);
+        }
+    }
+    None
+}
+
 /// Resolves real OpenRouter cost for every not-yet-priced `gen_id` in the
 /// project's usage JSONL, into a `gen_id` → USD map (host-side `/generation`).
 async fn openrouter_costs_for_project(

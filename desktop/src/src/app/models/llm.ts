@@ -141,6 +141,20 @@ export interface UsageSummary {
 }
 
 /**
+ * Final usage for one response from `get_usage_for_response` — the proxy SSOT
+ * used to reconcile the chat footer. Mirror of Rust `usage::ResponseUsage`.
+ */
+export interface ResponseUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** `null` when unpriced (subscription/unknown). */
+  cost_usd: number | null;
+  cost_source: string;
+}
+
+/**
  * Format a context-token count as a short human label (`200k`, `1M`).
  * @param tokens - Token count from `AnthropicModel.context_tokens`.
  */

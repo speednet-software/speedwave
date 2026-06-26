@@ -169,6 +169,25 @@ if [[ -z "$total_cost" ]]; then
     total_cost="$(extract_json_float "$INPUT" "total_cost_usd")"
 fi
 
+# Proxy SSOT (ADR-073): cumulative cost from the sidecar overrides the CC value.
+# STATUSLINE_USAGE_DIR overrides /usage for tests. Missing/unreadable → CC value.
+USAGE_DIR="${STATUSLINE_USAGE_DIR:-/usage}"
+cost_cache="$USAGE_DIR/cost-cache.jsonl"
+if [[ -r "$cost_cache" ]]; then
+    # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
+    ssot_cost="$(LC_ALL=C awk '
+        match($0, /"cost_usd"[[:space:]]*:[[:space:]]*[0-9.]+/) {
+            seg = substr($0, RSTART, RLENGTH)
+            sub(/^.*:[[:space:]]*/, "", seg)
+            sum += seg + 0
+        }
+        END { if (sum > 0) printf "%.4f", sum }
+    ' "$cost_cache" 2>/dev/null)"
+    if [[ -n "$ssot_cost" ]]; then
+        total_cost="$ssot_cost"
+    fi
+fi
+
 # ── Git branch ───────────────────────────────────────────────────────────────
 # No [ -d .git ] check: in git worktrees .git is a file, not a dir.
 # STATUSLINE_WORKSPACE_DIR overrides the workspace path (tests).
