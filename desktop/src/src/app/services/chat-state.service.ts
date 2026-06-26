@@ -95,10 +95,6 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  /** Proxy-reconciled cost per `response_id` (turn); kept to diff on re-record. */
-  private _reconciledCosts = new Map<string, number>();
-  /** Running sum of {@link _reconciledCosts} values; the footer total (O(1) update). */
-  private _reconciledTotal = 0;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -783,8 +779,6 @@ export class ChatStateService {
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
-    this._reconciledCosts.clear();
-    this._reconciledTotal = 0;
     this._contextWindowSize = null;
   }
 
@@ -948,8 +942,6 @@ export class ChatStateService {
     this.unsubProjectChange = this.projectState.onChange(() => {
       if (this.projectState.status === 'switching') {
         this.resetCoreStreamState();
-        this._reconciledCosts.clear();
-        this._reconciledTotal = 0;
         this._persistedContextTokens = null;
         this._currentProvider = null;
         this.notifyChange();
@@ -962,11 +954,12 @@ export class ChatStateService {
   }
 
   /**
-   * Reconciles the footer's cumulative session cost from the proxy SSOT. Each
-   * recorded turn's cost is accumulated by `response_id`; unpriced turns
-   * (subscription/unknown) contribute 0, so a subscription session reads $0
-   * instead of Claude Code's per-API estimate. A turn the proxy hasn't recorded
-   * yet keeps the live Claude Code value. Best-effort.
+   * Reconciles the footer + per-message cost from the proxy SSOT. The per-turn
+   * call confirms this turn's line landed (its bounded retry tolerates the proxy
+   * append lagging the `result`) and drives the per-message cost; the footer
+   * total then comes from `get_session_cost` — the single aggregator (invariant
+   * 6), not a frontend sum. A turn the proxy hasn't recorded yet keeps the live
+   * Claude Code value. Best-effort.
    * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
    */
   private async reconcileFooterCost(assistantUuid: string | undefined): Promise<void> {
@@ -980,15 +973,12 @@ export class ChatStateService {
       });
       const cur = this._sessionStats();
       if (!u || !cur) return;
-      // Proxy recorded this turn: fold its cost (unpriced → 0) into the running
-      // total via a delta, replacing the live cumulative estimate.
-      const cost = u.cost_usd ?? 0;
-      const prev = this._reconciledCosts.get(assistantUuid) ?? 0;
-      this._reconciledTotal += cost - prev;
-      this._reconciledCosts.set(assistantUuid, cost);
-      this._sessionStats.set({ ...cur, total_cost: this._reconciledTotal });
-      // Same SSOT for the per-message cost line: overwrite the entry's meta.cost.
-      this.overwriteEntryCost(assistantUuid, cost);
+      // Line present: per-message cost (unpriced → 0) from this turn's record.
+      this.overwriteEntryCost(assistantUuid, u.cost_usd ?? 0);
+      // Footer total from the single aggregator (sums the deduped sidecar in
+      // Rust); null (nothing priced, e.g. subscription) reads $0 in the footer.
+      const sessionCost = await this.tauri.invoke<number | null>('get_session_cost', { project });
+      this._sessionStats.set({ ...cur, total_cost: sessionCost ?? 0 });
       this.notifyChange();
     } catch {
       // Footer stays on the live value; reconcile is best-effort.

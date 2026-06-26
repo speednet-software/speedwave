@@ -602,15 +602,16 @@ describe('ChatStateService', () => {
       });
     });
 
-    it('reconciles footer cost cumulatively across turns from the proxy SSOT', async () => {
+    it('footer total comes from get_session_cost (single aggregator), not a frontend sum', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
+      // get_session_cost is the SSOT total; the per-turn delta is no longer
+      // summed in the frontend. The aggregator already reflects every recorded
+      // turn, so the footer mirrors whatever it returns.
+      let aggregatorTotal = 0.2;
       const spy = vi.spyOn(mockTauri, 'invoke');
-      spy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-        if (cmd === 'get_usage_for_response') {
-          const id = args?.['responseId'];
-          if (id === 'msg_1') return { cost_usd: 0.2, cost_source: 'catalog' };
-          if (id === 'msg_2') return { cost_usd: 0.3, cost_source: 'catalog' };
-        }
+      spy.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.2, cost_source: 'catalog' };
+        if (cmd === 'get_session_cost') return aggregatorTotal;
         return undefined;
       });
 
@@ -620,17 +621,37 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.99 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // First turn: footer = the proxy cost, not CC's 0.99 estimate.
+      // First turn: footer = the aggregator total, not CC's 0.99 estimate.
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.2, 6);
 
+      aggregatorTotal = 0.5; // proxy recorded a second turn; aggregator now sums both.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 1.5 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Second turn accumulates: 0.2 + 0.3 = 0.5 (cumulative, not just the last turn).
+      // Footer mirrors the aggregator (Rust sums the sidecar), no frontend delta.
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
+    });
+
+    it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_session_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') return null; // proxy hasn't recorded this turn yet
+        if (cmd === 'get_session_cost') return 9.99;
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Line not present yet → footer stays on the live CC value, aggregator not consulted.
+      expect(service.sessionStats?.total_cost).toBe(0.42);
+      expect(spy).not.toHaveBeenCalledWith('get_session_cost', expect.anything());
     });
 
     it('reconcile overwrites the per-message meta.cost from the proxy SSOT', async () => {
@@ -650,12 +671,15 @@ describe('ChatStateService', () => {
       expect(entry?.meta?.cost).toBe(0);
     });
 
-    it('subscription (null proxy cost) yields $0 footer, not CC estimate', async () => {
+    it('subscription (null aggregator total) yields $0 footer, not CC estimate', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
+        // The turn's line is present (unpriced); the session aggregator returns
+        // null (nothing priced) → footer reads $0, not CC's estimate.
         if (cmd === 'get_usage_for_response')
           return { cost_usd: null, cost_source: 'subscription' };
+        if (cmd === 'get_session_cost') return null;
         return undefined;
       });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
