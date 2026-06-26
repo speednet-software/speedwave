@@ -22,6 +22,8 @@ services:
       - ${PROJECT_DIR}:/workspace
       - ${RESOURCES_DIR}:/speedwave/resources:ro
       - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
+      # Proxy usage JSONL (read-only): statusline reads cumulative tokens/cost (ADR-073).
+      - ${SPEEDWAVE_PROXY_USAGE_DIR}:/usage:ro
     environment:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}

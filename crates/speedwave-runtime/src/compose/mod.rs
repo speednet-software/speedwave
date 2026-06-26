@@ -3830,6 +3830,54 @@ services:
         );
     }
 
+    /// The claude container reads the proxy usage JSONL (statusline SSOT) via a
+    /// read-only `/usage` mount pointed at the same dir the proxy writes.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn claude_service_mounts_usage_readonly() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let volumes: Vec<&str> = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            volumes.iter().any(|v| v.ends_with(":/usage:ro")),
+            "claude must mount the usage dir read-only, got {volumes:?}"
+        );
+        // The claude /usage source must be the same dir the proxy writes to.
+        let usage_src = volumes
+            .iter()
+            .find(|v| v.ends_with(":/usage:ro"))
+            .map(|v| v.trim_end_matches(":/usage:ro"))
+            .unwrap();
+        assert!(
+            usage_src.ends_with("speedwave-proxy"),
+            "claude /usage must point at the proxy usage dir, got {usage_src}"
+        );
+    }
+
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
