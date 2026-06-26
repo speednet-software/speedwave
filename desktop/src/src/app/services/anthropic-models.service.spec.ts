@@ -1,12 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { DEFAULT_CONTEXT_TOKENS, type AnthropicModel } from '../models/llm';
-import { calculateCost, _resetPricingToSeedForTest } from '../chat/pricing';
-import type { TurnUsage } from '../models/chat';
 
 const FIXTURE: AnthropicModel[] = [
   {
@@ -98,24 +96,6 @@ describe('AnthropicModelsService', () => {
       expect(c).toEqual(PRICED_FIXTURE);
       // Only one backend invoke despite three concurrent callers.
       expect(invokeCount).toBe(1);
-    });
-
-    it('seeds the cost-meter pricing index from the same payload', async () => {
-      _resetPricingToSeedForTest();
-      await service.list();
-      const usage: TurnUsage = {
-        input_tokens: 1_000_000,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-      };
-      // 1M input @ the off-catalog fixture rate ($9), not the bootstrap seed ($5).
-      expect(calculateCost('claude-opus-4-8', usage)).toBeCloseTo(9, 6);
-    });
-
-    afterEach(() => {
-      // Restore the bootstrap seed so fixture rates don't leak into other specs.
-      _resetPricingToSeedForTest();
     });
 
     it('returns an empty list when the backend rejects (browser dev mode / IPC error)', async () => {

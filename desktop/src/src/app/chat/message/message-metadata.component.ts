@@ -79,14 +79,16 @@ export class MessageMetadataComponent {
     return cache;
   }
 
-  /** Whether meta carries a cost value to render. */
+  /** Whether meta carries a finite cost value to render (hides null/NaN). */
   hasCost(): boolean {
-    return this.entry().meta?.cost !== undefined;
+    const cost = this.entry().meta?.cost;
+    return typeof cost === 'number' && Number.isFinite(cost);
   }
 
-  /** Per-turn cost formatted to exactly 3 decimal places. */
+  /** Per-turn cost formatted to exactly 3 decimal places (guarded by hasCost). */
   costFormatted(): string {
-    return (this.entry().meta?.cost ?? 0).toFixed(3);
+    const cost = this.entry().meta?.cost;
+    return typeof cost === 'number' && Number.isFinite(cost) ? cost.toFixed(3) : '';
   }
 
   /**

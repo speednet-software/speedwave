@@ -6,7 +6,6 @@ import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
-import { calculateCost } from '../chat/pricing';
 import { isBareSlash } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
@@ -697,9 +696,13 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
+        const livePreviewCost =
+          typeof chunk.data.total_cost === 'number' && Number.isFinite(chunk.data.total_cost)
+            ? chunk.data.total_cost
+            : null;
         this._sessionStats.set({
           session_id: chunk.data.session_id,
-          total_cost: chunk.data.total_cost ?? 0,
+          total_cost: livePreviewCost,
           usage: chunk.data.usage,
           model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
@@ -813,7 +816,7 @@ export class ChatStateService {
     // an authoritative `context_window_size`.
     const seeded = this.resolveContextWindow(undefined, cur?.model);
     this._sessionStats.set({
-      total_cost: 0,
+      total_cost: null,
       context_window_size: seeded,
       total_output_tokens: 0,
       ...cur,
@@ -982,12 +985,15 @@ export class ChatStateService {
       });
       const cur = this._sessionStats();
       if (!u || !cur) return;
-      // Line present: per-message cost (unpriced → 0) from this turn's record.
-      this.overwriteEntryCost(assistantUuid, u.cost_usd ?? 0);
-      // Footer total from the single aggregator (sums the deduped sidecar in
-      // Rust); null (nothing priced, e.g. subscription) reads $0 in the footer.
-      const sessionCost = await this.tauri.invoke<number | null>('get_session_cost', { project });
-      this._sessionStats.set({ ...cur, total_cost: sessionCost ?? 0 });
+      // Per-message cost from the SSOT; null (unpriced) hides the segment.
+      this.overwriteEntryCost(assistantUuid, u.cost_usd);
+      // Footer = this conversation's turns only (project total lives in the dashboard).
+      const responseIds = this.conversationResponseIds(assistantUuid);
+      const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
+        project,
+        responseIds,
+      });
+      this._sessionStats.set({ ...cur, total_cost: conversationCost });
       this.notifyChange();
       // Deferred = OpenRouter has not priced /generation yet; retry on a backoff
       // until it does, unless a newer turn superseded this one.
@@ -1005,17 +1011,32 @@ export class ChatStateService {
   }
 
   /**
+   * Response ids of the current conversation's assistant turns, for the footer
+   * cost sum.
+   * @param latestUuid - just-finished turn's assistant uuid (caller guards non-empty).
+   */
+  private conversationResponseIds(latestUuid: string): string[] {
+    const ids = new Set<string>();
+    for (const m of this._messages) {
+      if (m.role === 'assistant' && m.uuid) ids.add(m.uuid);
+    }
+    ids.add(latestUuid);
+    return [...ids];
+  }
+
+  /**
    * Overwrite an assistant entry's per-message cost from the proxy SSOT.
    * @param uuid - assistant_uuid identifying the entry.
-   * @param cost - proxy cost in USD to display.
+   * @param cost - proxy cost in USD, or null/unpriced → hide the segment.
    */
-  private overwriteEntryCost(uuid: string, cost: number): void {
+  private overwriteEntryCost(uuid: string, cost: number | null): void {
     const idx = this._messages.findIndex((m) => m.uuid === uuid && m.meta);
     if (idx < 0) return;
     const m = this._messages[idx];
+    const nextCost = typeof cost === 'number' && Number.isFinite(cost) ? cost : undefined;
     this._messages = [
       ...this._messages.slice(0, idx),
-      { ...m, meta: { ...m.meta, cost } },
+      { ...m, meta: { ...m.meta, cost: nextCost } },
       ...this._messages.slice(idx + 1),
     ];
   }
@@ -1167,14 +1188,10 @@ function buildEntryMeta(
   if (model) meta.model = model;
   if (turn_usage) meta.usage = turn_usage;
 
-  // Cost: prefer backend turn_cost (authoritative); fallback to computed cost
-  // from pricing.ts when usage is available. Leave undefined otherwise so
-  // the renderer hides the segment rather than showing $0.000.
-  if (turn_cost !== undefined) {
+  // Cost preview = backend turn_cost only; reconcileFooterCost replaces it with
+  // the proxy SSOT. No frontend pricing — undefined hides the segment.
+  if (turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
-  } else if (model && turn_usage) {
-    const computed = calculateCost(model, turn_usage);
-    if (computed !== null) meta.cost = computed;
   }
   return meta;
 }

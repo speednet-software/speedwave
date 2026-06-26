@@ -30,7 +30,8 @@ describe('SessionStatsComponent', () => {
       const txt = rootText();
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
-      expect(txt).toContain('$0.0000');
+      // No stats → cost unpriced → "—", never a fabricated $0.0000.
+      expect(txt).toContain('—');
       // Window unknown (no stats) → ctx gauge hidden, not fabricated (ADR-041).
       expect(txt).not.toContain('ctx');
     });
@@ -39,7 +40,7 @@ describe('SessionStatsComponent', () => {
       // The exact shape seedResumedSession produces before any Result arrives.
       fixture.componentRef.setInput('stats', {
         session_id: '11111111-1111-1111-1111-111111111111',
-        total_cost: 0,
+        total_cost: null,
         total_output_tokens: 0,
         context_window_size: 200000,
       });
@@ -48,7 +49,8 @@ describe('SessionStatsComponent', () => {
       // Must NOT collapse to an empty/invisible row — shows zeros like a new chat.
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
-      expect(txt).toContain('$0.0000');
+      // Unpriced seed → "—" (not $0.0000).
+      expect(txt).toContain('—');
       // Known window → ctx shows 0% (not hidden).
       expect(txt).toContain('ctx');
       expect(txt).toContain('0%');
@@ -127,7 +129,7 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('65');
     });
 
-    it('renders cost in dollars to 4 decimal places under the `session:` label', () => {
+    it('renders cost in dollars to 4 decimal places under the `chat:` label', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.018,
@@ -135,7 +137,7 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      expect(rootText()).toContain('session:');
+      expect(rootText()).toContain('chat:');
       expect(rootText()).toContain('$0.0180');
     });
 
@@ -292,7 +294,7 @@ describe('SessionStatsComponent', () => {
       expect(rootText()).toContain('limit');
     });
 
-    it('shows session cost as $0.0000 when total_cost is 0', () => {
+    it('shows chat cost as $0.0000 when total_cost is a real 0 (free/local)', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -300,8 +302,22 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      expect(rootText()).toContain('session:');
+      expect(rootText()).toContain('chat:');
+      // A real 0 (free/local priced) shows $0.0000; only null/unpriced shows "—".
       expect(rootText()).toContain('$0.0000');
+    });
+
+    it('shows "—" (not $0.0000) when total_cost is null (subscription/unpriced)', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: null,
+        context_window_size: 200000,
+        total_output_tokens: 0,
+      });
+      fixture.detectChanges();
+      expect(rootText()).toContain('chat:');
+      expect(rootText()).toContain('—');
+      expect(rootText()).not.toContain('$0.0000');
     });
 
     it('hides the limit gauge for a local model (unknown window), like ctx', () => {

@@ -157,13 +157,47 @@ pub fn get_usage_for_response_in(
     })
 }
 
-/// Summed session cost (USD) from the cost sidecar — the single aggregator for
-/// a project's total. Reuses the deduped (`response_id`, last-write-wins) cost
-/// cache; `None` when nothing is priced (subscription/unknown), never 0.0.
-pub fn session_cost_in(data_dir: &Path, project: &str) -> Option<f64> {
+/// `effective_response_id`s present in the current usage window (live + `.1`).
+fn response_ids_in_window(data_dir: &Path, project: &str) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for_each_usage_record(data_dir, project, |rec| {
+        if let Some(id) = crate::usage_cost::effective_response_id(&rec) {
+            ids.insert(id);
+        }
+    });
+    ids
+}
+
+/// Summed cost (USD) over the given conversation `response_id`s — the chat
+/// footer total. `None` when none are priced (never 0.0).
+pub fn conversation_cost_in(
+    data_dir: &Path,
+    project: &str,
+    response_ids: &[String],
+) -> Option<f64> {
+    if response_ids.is_empty() {
+        return None;
+    }
     let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
     let mut total: Option<f64> = None;
-    for entry in costs.values() {
+    for id in response_ids {
+        if let Some(c) = costs.get(id).and_then(|e| e.cost_usd) {
+            total = Some(total.unwrap_or(0.0) + c);
+        }
+    }
+    total
+}
+
+/// Summed project cost (USD), restricted to the current usage window so it
+/// equals the dashboard total. `None` when nothing in-window is priced.
+pub fn session_cost_in(data_dir: &Path, project: &str) -> Option<f64> {
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let in_window = response_ids_in_window(data_dir, project);
+    let mut total: Option<f64> = None;
+    for (id, entry) in &costs {
+        if !in_window.contains(id) {
+            continue;
+        }
         if let Some(c) = entry.cost_usd {
             total = Some(total.unwrap_or(0.0) + c);
         }
@@ -189,6 +223,37 @@ pub fn rotate_usage_if_large_in(data_dir: &Path, project: &str) {
     let rotated = live.with_extension("jsonl.1");
     if let Err(e) = std::fs::rename(&live, &rotated) {
         log::warn!("usage rotation failed for {}: {e}", live.display());
+        return;
+    }
+    // Rotation shrank the window — drop now-orphaned sidecar entries.
+    prune_cost_cache_in(data_dir, project);
+}
+
+/// Rewrites the sidecar to one line per `response_id` (last-write-wins),
+/// keeping only ids still in the usage window. Bounds growth; non-fatal on IO.
+pub fn prune_cost_cache_in(data_dir: &Path, project: &str) {
+    if crate::validation::validate_project_name(project).is_err() {
+        return;
+    }
+    let path = crate::usage_cost::cost_cache_file_in(data_dir, project);
+    if !path.exists() {
+        return;
+    }
+    let in_window = response_ids_in_window(data_dir, project);
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
+    let mut kept: Vec<&crate::usage_cost::CostEntry> = costs
+        .values()
+        .filter(|e| in_window.contains(&e.response_id))
+        .collect();
+    kept.sort_by(|a, b| a.response_id.cmp(&b.response_id));
+    let body: String = kept
+        .iter()
+        .filter_map(|e| serde_json::to_string(e).ok())
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if let Err(e) = crate::fs_perms::write_restricted_file_atomic(&path, &body) {
+        // Orphans survive until the next successful prune; readers stay window-correct.
+        log::warn!("cost-cache prune failed for {}: {e}", path.display());
     }
 }
 
@@ -221,16 +286,14 @@ pub fn for_each_usage_record(
     skipped
 }
 
-/// Sidecar cost for a record, joined by `response_id`: the sidecar value when
-/// known, else the record's inline cost (a non-null inline cost is never lost).
+/// Sidecar cost for a record, joined by `effective_response_id` (gen_id when
+/// message.id is absent), else the record's inline cost (never lost).
 fn joined_cost(
     record: &UsageRecord,
     costs: &std::collections::HashMap<String, crate::usage_cost::CostEntry>,
 ) -> Option<f64> {
-    let sidecar = record
-        .response_id
-        .as_deref()
-        .and_then(|id| costs.get(id))
+    let sidecar = crate::usage_cost::effective_response_id(record)
+        .and_then(|id| costs.get(&id))
         .and_then(|e| e.cost_usd);
     sidecar.or(record.cost_usd)
 }
@@ -245,9 +308,9 @@ pub fn read_usage_summary_in(data_dir: &Path, project: &str) -> UsageSummary {
     let mut summary = UsageSummary::default();
     let mut seen_ids = std::collections::HashSet::new();
     summary.skipped_lines = for_each_usage_record(data_dir, project, |record| {
-        // Dedup by response_id; first-seen wins.
-        if let Some(id) = record.response_id.as_deref() {
-            if !id.is_empty() && !seen_ids.insert(id.to_string()) {
+        // Dedup by effective_response_id (gen_id fallback); first-seen wins.
+        if let Some(id) = crate::usage_cost::effective_response_id(&record) {
+            if !seen_ids.insert(id) {
                 return;
             }
         }
@@ -615,6 +678,66 @@ mod tests {
     }
 
     #[test]
+    fn conversation_cost_sums_only_listed_response_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_a","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_b","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        // Only msg_a is in this conversation → $5.00, not the project's $10.00.
+        let only_a = conversation_cost_in(dir.path(), "proj", &["msg_a".to_string()]).unwrap();
+        assert!((only_a - 5.0).abs() < 1e-9, "got {only_a}");
+        // Both turns → $10.00 (matches a two-turn conversation).
+        let both =
+            conversation_cost_in(dir.path(), "proj", &["msg_a".into(), "msg_b".into()]).unwrap();
+        assert!((both - 10.0).abs() < 1e-9, "got {both}");
+    }
+
+    #[test]
+    fn conversation_cost_empty_list_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(conversation_cost_in(dir.path(), "proj", &[]).is_none());
+    }
+
+    #[test]
+    fn conversation_cost_unpriced_turns_are_none() {
+        // A subscription-only conversation is unpriced → None (not 0.0).
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_sub","provider_kind":"anthropic_oauth"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert!(conversation_cost_in(dir.path(), "proj", &["msg_sub".to_string()]).is_none());
+    }
+
+    #[test]
+    fn conversation_cost_free_zero_does_not_vanish() {
+        // A free/local conversation is priced 0.0, not unpriced None.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/q","response_id":"msg_local","provider_kind":"local"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert_eq!(
+            conversation_cost_in(dir.path(), "proj", &["msg_local".to_string()]),
+            Some(0.0)
+        );
+    }
+
+    #[test]
     fn get_usage_for_response_without_sidecar_uses_inline_cost() {
         let dir = tempfile::tempdir().unwrap();
         write_usage(
@@ -627,5 +750,266 @@ mod tests {
         let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
         assert_eq!(u.cost_usd, Some(0.02));
         assert_eq!(u.cost_source, "");
+    }
+
+    #[test]
+    fn session_cost_excludes_failed_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_ok","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"failure","model":"claude-opus-4-8","response_id":"msg_fail","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        // Only the successful $5.00 counts; the failed line is not billed.
+        let total = session_cost_in(dir.path(), "proj").unwrap();
+        assert!((total - 5.0).abs() < 1e-9, "got {total}");
+    }
+
+    #[test]
+    fn failed_request_counts_as_failure_not_priced() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"failure","model":"claude-opus-4-8","response_id":"msg_fail","provider_kind":"anthropic_apikey","prompt_tokens":100,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        let s = read_usage_summary_in(dir.path(), "proj");
+        assert_eq!(s.totals.failures, 1);
+        assert_eq!(s.totals.priced_requests, 0);
+        assert_eq!(s.totals.unpriced_requests, 1);
+        assert!(s.totals.cost_usd.is_none(), "failed must not be priced");
+    }
+
+    #[test]
+    fn session_cost_only_counts_window_after_rotation() {
+        // An old priced line rotated entirely out of the window must not be
+        // summed by the footer; footer total then equals the dashboard total.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_live","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+            ],
+        );
+        // Price the live line.
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        // Inject an orphan sidecar entry whose usage line is NOT in the window.
+        let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
+        let orphan = serde_json::to_string(&crate::usage_cost::CostEntry {
+            response_id: "msg_orphan".into(),
+            cost_usd: Some(99.0),
+            cost_source: crate::usage_cost::CostSource::Catalog,
+        })
+        .unwrap();
+        let mut existing = std::fs::read_to_string(&cache).unwrap();
+        existing.push_str(&orphan);
+        existing.push('\n');
+        std::fs::write(&cache, existing).unwrap();
+        // Footer ignores the orphan; equals dashboard ($5.00 from the live line).
+        let footer = session_cost_in(dir.path(), "proj").unwrap();
+        let dashboard = read_usage_summary_in(dir.path(), "proj")
+            .totals
+            .cost_usd
+            .unwrap();
+        assert!((footer - 5.0).abs() < 1e-9, "footer {footer}");
+        assert!(
+            (footer - dashboard).abs() < 1e-9,
+            "footer must equal dashboard"
+        );
+    }
+
+    #[test]
+    fn prune_drops_orphans_and_compacts_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/q","response_id":"msg_keep","provider_kind":"local"}"#,
+            ],
+        );
+        let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        // Two duplicate lines for the kept id + one orphan not in the window.
+        std::fs::write(
+            &cache,
+            concat!(
+                r#"{"response_id":"msg_keep","cost_usd":0.0,"cost_source":"free"}"#,
+                "\n",
+                r#"{"response_id":"msg_keep","cost_usd":0.0,"cost_source":"free"}"#,
+                "\n",
+                r#"{"response_id":"msg_orphan","cost_usd":1.0,"cost_source":"catalog"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        prune_cost_cache_in(dir.path(), "proj");
+        let lines: Vec<String> = std::fs::read_to_string(&cache)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(lines.len(), 1, "duplicates collapsed + orphan dropped");
+        assert!(lines[0].contains("msg_keep"));
+    }
+
+    #[test]
+    fn rotation_prunes_orphaned_sidecar_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = usage_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        // Oversized live file with one record → triggers rotation.
+        let mut content =
+            r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","response_id":"msg_in","provider_kind":"local","model":"local/q"}"#.to_string();
+        content.push('\n');
+        content.push_str(&"x".repeat((USAGE_ROTATE_BYTES + 1) as usize));
+        std::fs::write(&live, content).unwrap();
+        // Sidecar carries an orphan whose usage line never existed.
+        let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache,
+            "{\"response_id\":\"msg_orphan\",\"cost_usd\":1.0,\"cost_source\":\"catalog\"}\n",
+        )
+        .unwrap();
+        rotate_usage_if_large_in(dir.path(), "proj");
+        // The orphan is gone after rotation pruned the sidecar.
+        let map = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
+        assert!(map.get("msg_orphan").is_none(), "orphan pruned on rotation");
+    }
+
+    #[test]
+    fn footer_and_dashboard_cost_agree_across_provider_mix() {
+        // Invariant 6: footer total == dashboard total over a mixed session.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_api","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"local/q","response_id":"msg_local","provider_kind":"local"}"#,
+                r#"{"ts":"2026-06-26T10:02:00+0200","status":"success","model":"or/x","response_id":"msg_or","provider_kind":"openrouter","gen_id":"gen-1"}"#,
+                r#"{"ts":"2026-06-26T10:03:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_sub","provider_kind":"anthropic_oauth"}"#,
+                r#"{"ts":"2026-06-26T10:04:00+0200","status":"failure","model":"claude-opus-4-8","response_id":"msg_fail","provider_kind":"anthropic_apikey","prompt_tokens":500,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|gen| {
+            (gen == "gen-1").then_some(0.0046)
+        })
+        .unwrap();
+        // apikey 5.00 + local 0.00 + openrouter 0.0046 = 5.0046; sub/fail unpriced.
+        let footer = session_cost_in(dir.path(), "proj").unwrap();
+        let dashboard = read_usage_summary_in(dir.path(), "proj")
+            .totals
+            .cost_usd
+            .unwrap();
+        assert!((footer - 5.0046).abs() < 1e-9, "footer {footer}");
+        assert!(
+            (footer - dashboard).abs() < 1e-9,
+            "footer {footer} must equal dashboard {dashboard}"
+        );
+    }
+
+    #[test]
+    fn gen_id_only_line_is_priced_on_dashboard_and_footer() {
+        // An OpenRouter line with no message.id (response_id=null) but a gen_id
+        // must be priced (keyed by gen_id) on BOTH dashboard and footer — not $0.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"or/x","provider_kind":"openrouter","gen_id":"gen-1","prompt_tokens":10,"completion_tokens":5}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|gen| {
+            (gen == "gen-1").then_some(0.02)
+        })
+        .unwrap();
+        let dashboard = read_usage_summary_in(dir.path(), "proj")
+            .totals
+            .cost_usd
+            .unwrap();
+        let footer = session_cost_in(dir.path(), "proj").unwrap();
+        assert!((dashboard - 0.02).abs() < 1e-9, "dashboard {dashboard}");
+        assert!(
+            (footer - dashboard).abs() < 1e-9,
+            "footer must equal dashboard"
+        );
+        // The conversation footer keyed by gen_id also resolves it.
+        let convo = conversation_cost_in(dir.path(), "proj", &["gen-1".to_string()]).unwrap();
+        assert!((convo - 0.02).abs() < 1e-9, "convo {convo}");
+    }
+
+    #[test]
+    fn orphan_sidecar_entry_excluded_even_if_prune_did_not_run() {
+        // If prune fails (or hasn't run), an orphan whose usage line is gone must
+        // still be excluded from session_cost_in — the window filter is the guard,
+        // not the prune. This keeps footer == dashboard regardless of prune state.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/q","response_id":"msg_live","provider_kind":"local"}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        // Manually inject a numeric-cost orphan not present in the usage window.
+        let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
+        let orphan = serde_json::to_string(&crate::usage_cost::CostEntry {
+            response_id: "msg_orphan".into(),
+            cost_usd: Some(42.0),
+            cost_source: crate::usage_cost::CostSource::Catalog,
+        })
+        .unwrap();
+        let mut body = std::fs::read_to_string(&cache).unwrap();
+        body.push_str(&orphan);
+        body.push('\n');
+        std::fs::write(&cache, body).unwrap();
+        // session_cost_in excludes the orphan (window filter), equals dashboard.
+        let footer = session_cost_in(dir.path(), "proj").unwrap();
+        let dashboard = read_usage_summary_in(dir.path(), "proj")
+            .totals
+            .cost_usd
+            .unwrap();
+        assert_eq!(footer, 0.0, "only the in-window free line counts");
+        assert!(
+            (footer - dashboard).abs() < 1e-9,
+            "footer must equal dashboard"
+        );
+        // The orphan is still physically in the file (prune didn't remove it).
+        assert!(std::fs::read_to_string(&cache)
+            .unwrap()
+            .contains("msg_orphan"));
+    }
+
+    #[test]
+    fn unpriced_only_session_is_none_on_both_surfaces() {
+        // Subscription + failed only → both surfaces None, not 0.
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_sub","provider_kind":"anthropic_oauth"}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"failure","model":"claude-opus-4-8","response_id":"msg_fail","provider_kind":"anthropic_apikey","prompt_tokens":5}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        assert!(session_cost_in(dir.path(), "proj").is_none());
+        assert!(read_usage_summary_in(dir.path(), "proj")
+            .totals
+            .cost_usd
+            .is_none());
     }
 }

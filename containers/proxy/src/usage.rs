@@ -73,6 +73,10 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                     if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
                         acc.prompt_tokens = v;
                     }
+                    // Coalesced/single-frame backends put output on message_start.
+                    if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
+                        acc.completion_tokens = v;
+                    }
                     if let Some(v) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
                         acc.cache_read = v;
                     }
@@ -94,17 +98,24 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                         acc.prompt_tokens = v;
                     }
                 }
+                // Guard >0: a trailing 0 must not wipe a message_start value.
                 if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
-                    acc.completion_tokens = v;
+                    if v > 0 {
+                        acc.completion_tokens = v;
+                    }
                 }
                 if let Some(v) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
-                    acc.cache_read = v;
+                    if v > 0 {
+                        acc.cache_read = v;
+                    }
                 }
                 if let Some(v) = usage
                     .get("cache_creation_input_tokens")
                     .and_then(Value::as_u64)
                 {
-                    acc.cache_write = v;
+                    if v > 0 {
+                        acc.cache_write = v;
+                    }
                 }
             }
         }
@@ -112,27 +123,45 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
     }
 }
 
+/// Terminal status on the usage line; `Failure` = upstream ≥400 or aborted stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestStatus {
+    Success,
+    Failure,
+}
+
+impl RequestStatus {
+    fn as_wire(self) -> &'static str {
+        match self {
+            RequestStatus::Success => "success",
+            RequestStatus::Failure => "failure",
+        }
+    }
+}
+
 impl UsageAcc {
-    /// Convert to a `UsageLine`, tagging it with the resolved route's
-    /// provider kind/id. Returns `None` when no usage frame was seen
-    /// (prevents writing zero-only lines for non-usage SSE streams).
+    /// Convert to a `UsageLine` tagged with provider kind/id and `status`.
+    /// `None` when no usage frame was seen. Falls back to `gen_id` as
+    /// `response_id` when `message.id` is absent (keeps enrich/dedup keyed).
     pub fn finish(
         self,
         model: &str,
         latency_ms: u64,
         provider_kind: &str,
         provider_id: &str,
+        status: RequestStatus,
     ) -> Option<UsageLine> {
         if !self.saw_usage {
             return None;
         }
         let ts = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false);
+        let response_id = self.response_id.or_else(|| self.gen_id.clone());
         Some(UsageLine {
             ts,
             capture: "forwarder".to_string(),
-            status: "success".to_string(),
+            status: status.as_wire().to_string(),
             model: Some(model.to_string()),
-            response_id: self.response_id,
+            response_id,
             provider_kind: provider_kind.to_string(),
             provider_id: provider_id.to_string(),
             gen_id: self.gen_id,
@@ -233,7 +262,9 @@ mod tests {
             &json!({"type":"message_delta","usage":{"input_tokens":1234,"output_tokens":50}}),
             &mut a,
         );
-        let line = a.finish("m", 500, "openrouter", "openrouter").unwrap();
+        let line = a
+            .finish("m", 500, "openrouter", "openrouter", RequestStatus::Success)
+            .unwrap();
         assert_eq!(line.prompt_tokens, 1234);
         assert_eq!(line.completion_tokens, 50);
     }
@@ -245,7 +276,15 @@ mod tests {
             &json!({"type":"content_block_delta","delta":{"text":"hi"}}),
             &mut a,
         );
-        assert!(a.finish("m", 0, "anthropic_oauth", "anthropic").is_none());
+        assert!(a
+            .finish(
+                "m",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success
+            )
+            .is_none());
     }
 
     #[test]
@@ -259,7 +298,9 @@ mod tests {
             &json!({"type":"message_delta","usage":{"output_tokens":0}}),
             &mut a,
         );
-        let line = a.finish("m", 0, "openrouter", "openrouter").unwrap();
+        let line = a
+            .finish("m", 0, "openrouter", "openrouter", RequestStatus::Success)
+            .unwrap();
         assert_eq!(line.cache_read, 0);
     }
 
@@ -335,6 +376,133 @@ mod tests {
     }
 
     #[test]
+    fn output_tokens_captured_from_message_start_only_stream() {
+        // Coalesced backend: final output count arrives on message_start, no delta.
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{
+                "input_tokens":10,
+                "output_tokens":42
+            }}}),
+            &mut a,
+        );
+        let line = a
+            .finish("m", 0, "local", "local", RequestStatus::Success)
+            .unwrap();
+        assert_eq!(line.prompt_tokens, 10);
+        assert_eq!(line.completion_tokens, 42);
+    }
+
+    #[test]
+    fn message_delta_output_overrides_message_start_output() {
+        // A later message_delta carries the authoritative final output count.
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"input_tokens":5,"output_tokens":1}}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"message_delta","usage":{"output_tokens":99}}),
+            &mut a,
+        );
+        let line = a
+            .finish(
+                "m",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success,
+            )
+            .unwrap();
+        assert_eq!(line.completion_tokens, 99);
+    }
+
+    #[test]
+    fn zero_output_delta_does_not_wipe_message_start_output() {
+        // A trailing message_delta with output_tokens:0 must keep message_start's value.
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"output_tokens":42}}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"message_delta","usage":{"output_tokens":0}}),
+            &mut a,
+        );
+        let line = a
+            .finish(
+                "m",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success,
+            )
+            .unwrap();
+        assert_eq!(
+            line.completion_tokens, 42,
+            "zero delta must not wipe output"
+        );
+    }
+
+    #[test]
+    fn zero_cache_delta_does_not_wipe_message_start_cache() {
+        // A delta re-sending cache fields as 0 must keep the message_start values.
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{
+                "input_tokens":100,
+                "cache_read_input_tokens":40,
+                "cache_creation_input_tokens":20
+            }}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"message_delta","usage":{
+                "output_tokens":7,
+                "cache_read_input_tokens":0,
+                "cache_creation_input_tokens":0
+            }}),
+            &mut a,
+        );
+        let line = a
+            .finish(
+                "m",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success,
+            )
+            .unwrap();
+        assert_eq!(line.cache_read, 40, "zero delta must not wipe cache_read");
+        assert_eq!(line.cache_write, 20, "zero delta must not wipe cache_write");
+        assert_eq!(line.completion_tokens, 7);
+    }
+
+    #[test]
+    fn nonzero_cache_delta_still_overrides() {
+        // A delta with a real (>0) cache value still updates the accumulator.
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"cache_read_input_tokens":40}}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"message_delta","usage":{"cache_read_input_tokens":55}}),
+            &mut a,
+        );
+        let line = a
+            .finish(
+                "m",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success,
+            )
+            .unwrap();
+        assert_eq!(line.cache_read, 55);
+    }
+
+    #[test]
     fn message_start_populates_cache_fields() {
         let mut a = UsageAcc::default();
         sniff(
@@ -345,7 +513,15 @@ mod tests {
             }}}),
             &mut a,
         );
-        let line = a.finish("m", 750, "anthropic_oauth", "anthropic").unwrap();
+        let line = a
+            .finish(
+                "m",
+                750,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success,
+            )
+            .unwrap();
         assert_eq!(line.cache_read, 40);
         assert_eq!(line.cache_write, 20);
         assert_eq!(line.response_id.unwrap(), "msg_2");
@@ -370,7 +546,60 @@ mod tests {
             &mut a,
         );
         assert!(a
-            .finish("model", 0, "anthropic_oauth", "anthropic")
+            .finish(
+                "model",
+                0,
+                "anthropic_oauth",
+                "anthropic",
+                RequestStatus::Success
+            )
             .is_none());
+    }
+
+    #[test]
+    fn failure_status_serializes_to_wire() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        let line = a
+            .finish(
+                "m",
+                0,
+                "anthropic_apikey",
+                "anthropic",
+                RequestStatus::Failure,
+            )
+            .unwrap();
+        assert_eq!(line.status, "failure");
+    }
+
+    #[test]
+    fn response_id_falls_back_to_gen_id_when_message_id_absent() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","id":"gen-xyz","message":{"usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        let line = a
+            .finish("m", 0, "openrouter", "openrouter", RequestStatus::Success)
+            .unwrap();
+        assert_eq!(line.response_id.as_deref(), Some("gen-xyz"));
+        assert_eq!(line.gen_id.as_deref(), Some("gen-xyz"));
+    }
+
+    #[test]
+    fn message_id_preferred_over_gen_id_for_response_id() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","id":"gen-xyz","message":{"id":"msg_1","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        let line = a
+            .finish("m", 0, "openrouter", "openrouter", RequestStatus::Success)
+            .unwrap();
+        assert_eq!(line.response_id.as_deref(), Some("msg_1"));
+        assert_eq!(line.gen_id.as_deref(), Some("gen-xyz"));
     }
 }

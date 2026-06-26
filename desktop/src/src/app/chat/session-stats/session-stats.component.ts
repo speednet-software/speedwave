@@ -108,11 +108,11 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
       <span
         class="hidden whitespace-nowrap sm:inline"
         [class.ml-auto]="!branch()"
-        appTooltip="Cumulative cost of this session"
+        appTooltip="Cost of this conversation (excludes subscription and local)"
         placement="top"
       >
-        session:
-        <span class="text-[var(--ink-dim)]">\${{ (stats()?.total_cost ?? 0).toFixed(4) }}</span>
+        chat:
+        <span class="text-[var(--ink-dim)]">{{ costLabel() }}</span>
       </span>
     </div>
   `,
@@ -126,6 +126,12 @@ export class SessionStatsComponent {
 
   /** Current git branch of the active project's working tree, or `null` when not a git repo. */
   readonly branch = input<string | null>(null);
+
+  /** Project cost label: `$X.XXXX` when priced, `—` when unpriced (subscription/local). */
+  readonly costLabel = computed<string>(() => {
+    const c = this.stats()?.total_cost;
+    return typeof c === 'number' && Number.isFinite(c) ? `$${c.toFixed(4)}` : '—';
+  });
 
   /** New input tokens this turn — `input_tokens` only, excludes cached reads. */
   readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);

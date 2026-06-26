@@ -997,8 +997,18 @@ pub async fn get_usage_for_response(
 #[tauri::command]
 pub async fn get_session_cost(project: String) -> Option<f64> {
     let data_dir = speedwave_runtime::consts::data_dir();
+    speedwave_runtime::usage::rotate_usage_if_large_in(data_dir.as_path(), &project);
     enrich_with_openrouter(data_dir.as_path(), &project).await;
     speedwave_runtime::usage::session_cost_in(data_dir.as_path(), &project)
+}
+
+/// Summed cost (USD) for the current conversation's `response_id`s — the chat
+/// footer total. `None` when none are priced (subscription/unknown), never 0.0.
+#[tauri::command]
+pub async fn get_conversation_cost(project: String, response_ids: Vec<String>) -> Option<f64> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    enrich_with_openrouter(data_dir.as_path(), &project).await;
+    speedwave_runtime::usage::conversation_cost_in(data_dir.as_path(), &project, &response_ids)
 }
 
 /// Fetches pending OpenRouter `/generation` costs and writes them into the cost

@@ -2,7 +2,6 @@ import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
-import { setPricingCatalog, type PricedAnthropicModel } from '../chat/pricing';
 
 /** Model-id prefixes for the premium tiers the everyday-placeholder hint skips. */
 const PREMIUM_MODEL_ID_PREFIXES = ['claude-opus-', 'claude-fable-'] as const;
@@ -30,8 +29,6 @@ export class AnthropicModelsService {
         const result = await this.tauri.invoke<AnthropicModel[]>('list_anthropic_models');
         if (Array.isArray(result)) {
           this.cache = result;
-          // Feed the cost meter's pricing index from the same SSOT payload.
-          setPricingCatalog(result as unknown as PricedAnthropicModel[]);
           return result;
         }
         // Non-array payload is a contract violation; not caching.

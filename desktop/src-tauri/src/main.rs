@@ -1124,6 +1124,7 @@ fn main() {
             llm_cmd::get_llm_usage,
             llm_cmd::get_usage_for_response,
             llm_cmd::get_session_cost,
+            llm_cmd::get_conversation_cost,
             // Authentication
             auth_commands::save_api_key,
             auth_commands::delete_api_key,

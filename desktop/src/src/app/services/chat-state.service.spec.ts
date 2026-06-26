@@ -602,16 +602,16 @@ describe('ChatStateService', () => {
       });
     });
 
-    it('footer total comes from get_session_cost (single aggregator), not a frontend sum', async () => {
+    it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
-      // get_session_cost is the SSOT total; the per-turn delta is no longer
+      // get_conversation_cost is the SSOT total; the per-turn delta is no longer
       // summed in the frontend. The aggregator already reflects every recorded
       // turn, so the footer mirrors whatever it returns.
       let aggregatorTotal = 0.2;
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
         if (cmd === 'get_usage_for_response') return { cost_usd: 0.2, cost_source: 'catalog' };
-        if (cmd === 'get_session_cost') return aggregatorTotal;
+        if (cmd === 'get_conversation_cost') return aggregatorTotal;
         return undefined;
       });
 
@@ -635,12 +635,12 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
     });
 
-    it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_session_cost', async () => {
+    it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
         if (cmd === 'get_usage_for_response') return null; // proxy hasn't recorded this turn yet
-        if (cmd === 'get_session_cost') return 9.99;
+        if (cmd === 'get_conversation_cost') return 9.99;
         return undefined;
       });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
@@ -651,7 +651,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
       // Line not present yet → footer stays on the live CC value, aggregator not consulted.
       expect(service.sessionStats?.total_cost).toBe(0.42);
-      expect(spy).not.toHaveBeenCalledWith('get_session_cost', expect.anything());
+      expect(spy).not.toHaveBeenCalledWith('get_conversation_cost', expect.anything());
     });
 
     it('reconcile overwrites the per-message meta.cost from the proxy SSOT', async () => {
@@ -671,15 +671,15 @@ describe('ChatStateService', () => {
       expect(entry?.meta?.cost).toBe(0);
     });
 
-    it('subscription (null aggregator total) yields $0 footer, not CC estimate', async () => {
+    it('subscription (null aggregator total) yields null footer ("—"), not CC estimate', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
         // The turn's line is present (unpriced); the session aggregator returns
-        // null (nothing priced) → footer reads $0, not CC's estimate.
+        // null (nothing priced) → footer stays null ("—"), not CC's estimate.
         if (cmd === 'get_usage_for_response')
           return { cost_usd: null, cost_source: 'subscription' };
-        if (cmd === 'get_session_cost') return null;
+        if (cmd === 'get_conversation_cost') return null;
         return undefined;
       });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
@@ -688,8 +688,8 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Subscription is unpriced → 0, replacing CC's $0.42 estimate.
-      expect(service.sessionStats?.total_cost).toBe(0);
+      // Subscription is unpriced → null (rendered "—"), replacing CC's $0.42 estimate.
+      expect(service.sessionStats?.total_cost).toBeNull();
     });
 
     it('re-reconciles a deferred OpenRouter cost once /generation prices it later', async () => {
@@ -705,7 +705,7 @@ describe('ChatStateService', () => {
               ? { cost_usd: 0.0046, cost_source: 'actual' }
               : { cost_usd: null, cost_source: 'deferred' };
           }
-          if (cmd === 'get_session_cost') return priced ? 0.0046 : null;
+          if (cmd === 'get_conversation_cost') return priced ? 0.0046 : null;
           return undefined;
         });
 
@@ -727,9 +727,9 @@ describe('ChatStateService', () => {
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Initial reconcile: still deferred → per-message 0, footer 0.
-        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0);
-        expect(service.sessionStats?.total_cost).toBe(0);
+        // Initial reconcile: still deferred (unpriced) → per-message hidden, footer "—".
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeUndefined();
+        expect(service.sessionStats?.total_cost).toBeNull();
 
         // OpenRouter finishes pricing; the retry must pick it up.
         priced = true;
@@ -752,7 +752,7 @@ describe('ChatStateService', () => {
             calls += 1;
             return { cost_usd: null, cost_source: 'deferred' };
           }
-          if (cmd === 'get_session_cost') return null;
+          if (cmd === 'get_conversation_cost') return null;
           return undefined; // send_message etc. resolve
         });
 
@@ -2177,7 +2177,9 @@ describe('ChatStateService', () => {
       expect(meta?.cost).toBe(0.018);
     });
 
-    it('falls back to pricing.ts cost calculation when backend omits turn_cost', () => {
+    it('does not compute cost on the frontend when backend omits turn_cost', () => {
+      // No frontend pricing (SSOT is the proxy): an absent turn_cost leaves the
+      // per-message cost undefined until reconcileFooterCost fills it from the proxy.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -2197,7 +2199,9 @@ describe('ChatStateService', () => {
       });
 
       const meta = service.messages[0].meta;
-      expect(meta?.cost).toBeCloseTo(3, 6); // 1M input * $3/1M for Sonnet
+      // model + usage are still recorded; cost stays undefined (no fabrication).
+      expect(meta?.model).toBe('claude-sonnet-4-6');
+      expect(meta?.cost).toBeUndefined();
     });
 
     it('uses SystemInit model when the Result chunk omits `model`', () => {
@@ -2236,13 +2240,9 @@ describe('ChatStateService', () => {
     });
 
     it('simulates patch sequence: Add → Replace meta provisional → Replace meta final', () => {
-      // Mimics the Feature-3 patch stream: text streams in, then a
-      // provisional meta arrives (no turn_cost yet), then a final Result
-      // overrides the provisional values.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hi.' } });
 
-      // Provisional: usage without turn_cost — the frontend should fall
-      // back to pricing.ts. First finalize (provisional Result).
+      // Provisional: no turn_cost → cost stays undefined (no frontend pricing).
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: {
@@ -2260,11 +2260,10 @@ describe('ChatStateService', () => {
         },
       });
 
-      // After provisional: meta.cost is the pricing.ts fallback
-      // Haiku: 1000 * 1 / 1M + 500 * 5 / 1M = 0.001 + 0.0025 = 0.0035
+      // After provisional: model recorded, cost undefined (no frontend pricing).
       const provisional = service.messages[0].meta;
       expect(provisional?.model).toBe('claude-haiku-4-5');
-      expect(provisional?.cost).toBeCloseTo(0.0035, 6);
+      expect(provisional?.cost).toBeUndefined();
 
       // Simulate final Result in a fresh assistant turn — replaces the
       // previous entry behaviour is per-turn. Test that turn_cost wins.
@@ -2489,7 +2488,7 @@ describe('ChatStateService', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
       service.seedResumedSession('resumed-sess-1');
       expect(service.sessionStats?.session_id).toBe('resumed-sess-1');
-      expect(service.sessionStats?.total_cost).toBe(0);
+      expect(service.sessionStats?.total_cost).toBeNull();
       expect(service.sessionStats?.total_output_tokens).toBe(0);
     });
 

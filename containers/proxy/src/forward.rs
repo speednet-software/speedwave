@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
-use crate::usage::{append_usage, sniff, UsageAcc};
+use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
 /// Drain all complete (`\n`-terminated) lines from `buf`, returning them
 /// without their newlines (CRLF-stripped).  Any remaining incomplete line
@@ -154,6 +154,16 @@ fn format_resp_log(
     )
 }
 
+/// Terminal status for a forwarded request: failure on an upstream ≥400 or a
+/// byte stream that errored mid-flight, success otherwise.
+fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStatus {
+    if status_code >= 400 || stream_errored {
+        RequestStatus::Failure
+    } else {
+        RequestStatus::Success
+    }
+}
+
 /// Resolve the upstream route from the request body, forward the request with
 /// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
 /// sniffing usage frames, and append one usage line on stream end.
@@ -218,6 +228,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         req = req.header(name, value);
     }
 
+    // Clock starts before send() so latency includes connect + TTFT, not just body.
+    let start = std::time::Instant::now();
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -248,8 +260,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let model_owned = model.clone();
     let status_code = status.as_u16();
 
-    let start = std::time::Instant::now();
-
     // Channel-based unbuffered relay: each upstream chunk is forwarded immediately.
     // The spawned task sniffs SSE frames while forwarding — RAM stays flat.
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
@@ -259,6 +269,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         let mut acc = UsageAcc::default();
         // Buffer for incomplete SSE lines across chunks.
         let mut line_buf = String::new();
+        // Stream aborted mid-flight (upstream byte error) → failure, even on a 2xx.
+        let mut stream_errored = false;
 
         use futures_util::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
@@ -286,12 +298,14 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 }
                 Err(e) => {
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    stream_errored = true;
                     break;
                 }
             }
         }
 
         let latency_ms = start.elapsed().as_millis() as u64;
+        let req_status = resolve_request_status(status_code, stream_errored);
         let (in_tok, out_tok) = if acc.saw_usage {
             (Some(acc.prompt_tokens), Some(acc.completion_tokens))
         } else {
@@ -301,7 +315,13 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
             "{}",
             format_resp_log(&model_owned, status_code, latency_ms, in_tok, out_tok)
         );
-        if let Some(line) = acc.finish(&model_owned, latency_ms, &provider_kind, &provider_id) {
+        if let Some(line) = acc.finish(
+            &model_owned,
+            latency_ms,
+            &provider_kind,
+            &provider_id,
+            req_status,
+        ) {
             append_usage(&usage_path, &line);
         }
         // tx is dropped here; ReceiverStream terminates cleanly.
@@ -561,5 +581,15 @@ mod tests {
             buf.is_empty(),
             "buffer must be empty after complete line consumed"
         );
+    }
+
+    #[test]
+    fn request_status_failure_on_4xx_5xx_or_abort() {
+        assert_eq!(resolve_request_status(200, false), RequestStatus::Success);
+        assert_eq!(resolve_request_status(200, true), RequestStatus::Failure);
+        assert_eq!(resolve_request_status(401, false), RequestStatus::Failure);
+        assert_eq!(resolve_request_status(429, false), RequestStatus::Failure);
+        assert_eq!(resolve_request_status(500, false), RequestStatus::Failure);
+        assert_eq!(resolve_request_status(503, true), RequestStatus::Failure);
     }
 }

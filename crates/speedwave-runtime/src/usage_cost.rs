@@ -26,6 +26,8 @@ pub enum CostSource {
     Unknown,
     /// OpenRouter `/generation` not yet resolved; retryable.
     Deferred,
+    /// Request failed (upstream ≥400 / aborted) — not billed; terminal.
+    Failed,
 }
 
 impl CostSource {
@@ -46,6 +48,7 @@ impl CostSource {
             CostSource::Actual => "actual",
             CostSource::Unknown => "unknown",
             CostSource::Deferred => "deferred",
+            CostSource::Failed => "failed",
         }
     }
 }
@@ -75,11 +78,28 @@ pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
 /// no HTTP/SSRF surface; `None` on missing id, transport error, or absent field.
 pub type GenCostFetcher<'a> = dyn Fn(&str) -> Option<f64> + 'a;
 
+/// The id a usage record is keyed by: its `response_id`, or the OpenRouter
+/// `gen_id` when the backend sent no `message.id`. None when neither is present.
+pub fn effective_response_id(r: &UsageRecord) -> Option<String> {
+    r.response_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| r.gen_id.clone().filter(|s| !s.is_empty()))
+}
+
 /// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
 /// with the line's `gen_id`: a `None` result with a gen_id is `deferred`
 /// (retryable), a missing gen_id is `unknown` (terminal — no other source).
 pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
-    let id = r.response_id.clone().unwrap_or_default();
+    let id = effective_response_id(r).unwrap_or_default();
+    // A failed request is never billed, regardless of provider.
+    if r.status == "failure" {
+        return CostEntry {
+            response_id: id,
+            cost_usd: None,
+            cost_source: CostSource::Failed,
+        };
+    }
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
         "anthropic_apikey" => match anthropic_catalog_cost(r) {
             Some(c) => (Some(c), CostSource::Catalog),
@@ -116,7 +136,11 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
         .iter()
         .find(|m| m.id == base)?;
     let p = if is_1m {
-        info.pricing_1m.as_ref().unwrap_or(&info.pricing)
+        info.pricing_1m.as_ref().unwrap_or_else(|| {
+            // A [1m] pin on a model without 1M pricing would silently mis-charge.
+            log::warn!("model {base}[1m] has no 1M pricing; using base rate");
+            &info.pricing
+        })
     } else {
         &info.pricing
     };
@@ -143,7 +167,8 @@ pub fn enrich_cost_with_in(
     let mut to_append: Vec<CostEntry> = Vec::new();
     let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
     crate::usage::for_each_usage_record(data_dir, project, |record| {
-        let Some(id) = record.response_id.clone().filter(|s| !s.is_empty()) else {
+        // Key off response_id, or gen_id when message.id was absent (B6).
+        let Some(id) = effective_response_id(&record) else {
             return;
         };
         let prior = already.get(&id);
@@ -369,6 +394,7 @@ mod tests {
             CostSource::Free,
             CostSource::Subscription,
             CostSource::Unknown,
+            CostSource::Failed,
         ] {
             assert!(s.is_terminal(), "{s:?} should be terminal");
         }
@@ -384,6 +410,7 @@ mod tests {
             (CostSource::Actual, "\"actual\""),
             (CostSource::Unknown, "\"unknown\""),
             (CostSource::Deferred, "\"deferred\""),
+            (CostSource::Failed, "\"failed\""),
         ];
         for (src, wire) in cases {
             assert_eq!(serde_json::to_string(&src).unwrap(), wire);
@@ -412,6 +439,86 @@ mod tests {
         let e = compute_cost_with(&record("", "whatever", 100, 0, 0, 0), &|_| None);
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn failed_request_is_not_billed_even_for_apikey() {
+        // status=failure short-circuits before the provider match → Failed, no cost.
+        let mut r = record("anthropic_apikey", "claude-opus-4-8", 1_000_000, 0, 0, 0);
+        r.status = "failure".to_string();
+        let e = compute_cost_with(&r, &|_| None);
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, CostSource::Failed);
+    }
+
+    #[test]
+    fn failed_openrouter_is_failed_not_deferred() {
+        // A failed OpenRouter line must not become a retryable `deferred`.
+        let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
+        r.gen_id = Some("gen-abc".into());
+        r.status = "failure".to_string();
+        let e = compute_cost_with(&r, &|_| Some(9.9));
+        assert!(e.cost_usd.is_none());
+        assert_eq!(e.cost_source, CostSource::Failed);
+    }
+
+    #[test]
+    fn failed_cost_source_is_terminal() {
+        assert!(CostSource::Failed.is_terminal());
+        assert_eq!(CostSource::Failed.as_wire_str(), "failed");
+    }
+
+    #[test]
+    fn effective_response_id_falls_back_to_gen_id() {
+        let mut r = record("openrouter", "x", 1, 1, 0, 0);
+        r.response_id = None;
+        r.gen_id = Some("gen-xyz".into());
+        assert_eq!(effective_response_id(&r).as_deref(), Some("gen-xyz"));
+        // response_id wins when both present.
+        r.response_id = Some("msg_1".into());
+        assert_eq!(effective_response_id(&r).as_deref(), Some("msg_1"));
+        // Neither present → None.
+        r.response_id = None;
+        r.gen_id = None;
+        assert!(effective_response_id(&r).is_none());
+    }
+
+    #[test]
+    fn openrouter_no_message_id_keyed_by_gen_id() {
+        // A line with no response_id but a gen_id is priced and keyed by gen_id.
+        let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
+        r.response_id = None;
+        r.gen_id = Some("gen-xyz".into());
+        let e = compute_cost_with(&r, &|id| {
+            assert_eq!(id, "gen-xyz");
+            Some(0.01)
+        });
+        assert_eq!(e.response_id, "gen-xyz");
+        assert_eq!(e.cost_usd, Some(0.01));
+        assert_eq!(e.cost_source, CostSource::Actual);
+    }
+
+    #[test]
+    fn one_m_suffix_without_pricing_1m_falls_back_to_base() {
+        // haiku has no pricing_1m; a [1m] pin must fall back to the base rate.
+        let e = compute_cost_with(
+            &record(
+                "anthropic_apikey",
+                "claude-haiku-4-5[1m]",
+                1_000_000,
+                0,
+                0,
+                0,
+            ),
+            &|_| None,
+        );
+        // haiku base input = 1.0/MTok → $1.00 for 1M input.
+        assert!(
+            (e.cost_usd.unwrap() - 1.0).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+        assert_eq!(e.cost_source, CostSource::Catalog);
     }
 
     #[test]

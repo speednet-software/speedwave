@@ -123,6 +123,23 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" != *'1.23'* ]]
 }
 
+@test "SSOT excludes failed/null lines from the cost sum" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # A failed and a subscription line carry cost_usd:null → not summed; only
+    # the priced 0.04 catalog line counts.
+    printf '%s\n' \
+        '{"response_id":"m_ok","cost_usd":0.0400,"cost_source":"catalog"}' \
+        '{"response_id":"m_fail","cost_usd":null,"cost_source":"failed"}' \
+        '{"response_id":"m_sub","cost_usd":null,"cost_source":"subscription"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$0.0400'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
 @test "extracts display_name from JSON" {
     local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
