@@ -62,7 +62,9 @@ pub struct LlmProviderEntry {
     /// `active.model` is only a pointer that must agree with the active entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// True when `tokens/<project>/llm/<id>_api_key` exists.
+    /// True when `tokens/<project>/llm/<id>_api_key` exists. Derived from disk
+    /// at config resolve, never trusted from the persisted value — the key file
+    /// is the single source of truth (see `sync_has_api_key_from_disk_in`).
     #[serde(default)]
     pub has_api_key: bool,
     /// Context window of this provider's selected model, when known.
@@ -159,6 +161,19 @@ impl LlmConfig {
             }
             // Entry has no model: active-only is unattributable → drop it.
             (_, None) => None,
+        }
+    }
+
+    /// Sets each provider's `has_api_key` from whether its key file exists on
+    /// disk — the authoritative source (ADR-073). The persisted flag is only an
+    /// echo; this re-derives it so a stale value can never reach the renderer.
+    pub fn sync_has_api_key_from_disk_in(&mut self, data_dir: &Path, project: &str) {
+        for entry in &mut self.providers {
+            if let Ok(key_path) =
+                crate::compose::llm_provider_key_path_in(data_dir, project, &entry.id)
+            {
+                entry.has_api_key = key_path.exists();
+            }
         }
     }
 }
@@ -670,6 +685,11 @@ pub fn resolve_project_config(
     // Migrate to the current LLM schema (ADR-073).
     migrate_llm(&mut llm, anthropic_secret_exists(project_name));
 
+    // Re-derive each provider's `has_api_key` from disk — the key file is the
+    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
+    // injection) reads the resolved config, so this is the single sync point.
+    llm.sync_has_api_key_from_disk_in(crate::consts::data_dir(), project_name);
+
     // Local LLMs get the full default Claude Code system prompt.
     let flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
@@ -1141,6 +1161,47 @@ mod tests {
         let parsed: SpeedwaveUserConfig = serde_json::from_str(pre_adr_json).expect("parse");
         assert!(parsed.ui.is_none());
         assert!(!parsed.beta_enabled());
+    }
+
+    /// `sync_has_api_key_from_disk_in` derives the flag from the key file's
+    /// existence, overriding whatever was persisted (stale-true and stale-false).
+    #[test]
+    fn sync_has_api_key_from_disk_overrides_persisted_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = |id: &str, has_api_key: bool| LlmProviderEntry {
+            id: id.into(),
+            kind: LlmProviderKind::OpenRouter,
+            base_url: None,
+            model: None,
+            has_api_key,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        let mut llm = LlmConfig {
+            providers: vec![
+                // Persisted true, but no key file on disk → must flip to false.
+                provider("stale-true", true),
+                // Persisted false, but key file exists → must flip to true.
+                provider("stale-false", false),
+            ],
+            ..Default::default()
+        };
+        crate::compose::write_llm_provider_key_in(dir.path(), "proj", "stale-false", "sk-x")
+            .unwrap();
+
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+
+        assert!(!llm.providers[0].has_api_key, "no key file → false");
+        assert!(llm.providers[1].has_api_key, "key file present → true");
+    }
+
+    /// Edge: empty provider list is a no-op (no panic, nothing to sync).
+    #[test]
+    fn sync_has_api_key_from_disk_empty_providers_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = LlmConfig::default();
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+        assert!(llm.providers.is_empty());
     }
 
     #[test]

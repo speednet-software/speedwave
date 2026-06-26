@@ -140,28 +140,12 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     migrate_legacy_local_key_in(data_dir, project, llm);
-    // `has_api_key` is the on-disk key file's existence (config.rs), not the
-    // persisted flag — a stale `false` would render `auth:none` and drop the
-    // provider key, 401-ing a backend that requires it. Deliberate trade-off:
-    // we re-derive at render time rather than drop the persisted serde flag,
-    // which would ripple through config.rs + the Desktop frontend.
-    let llm = sync_has_api_key_from_disk(data_dir, project, llm);
-    let content = render_proxy_config(&llm);
+    // `llm.has_api_key` is already re-derived from disk at config resolve
+    // (`LlmConfig::sync_has_api_key_from_disk_in`) — the SSOT for the flag — so
+    // the renderer trusts it directly.
+    let content = render_proxy_config(llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
-}
-
-/// Returns a copy of `llm` with each provider's `has_api_key` set to whether
-/// its key file actually exists on disk — the authoritative source.
-fn sync_has_api_key_from_disk(data_dir: &Path, project: &str, llm: &LlmConfig) -> LlmConfig {
-    let mut synced = llm.clone();
-    for entry in &mut synced.providers {
-        if let Ok(key_path) = super::tokens::llm_provider_key_path_in(data_dir, project, &entry.id)
-        {
-            entry.has_api_key = key_path.exists();
-        }
-    }
-    synced
 }
 
 /// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
@@ -620,26 +604,27 @@ mod tests {
         assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
     }
 
+    /// `write_proxy_config_in` trusts the resolved `has_api_key` flag (the SSOT
+    /// re-derive lives in config resolve, not here): a `true` flag renders a
+    /// bearer swap, not `auth:none`, so the key reaches the backend.
     #[test]
-    fn render_uses_key_file_existence_over_stale_has_api_key_flag() {
+    fn write_renders_bearer_when_has_api_key_set() {
         let dir = tempfile::tempdir().unwrap();
-        // Config says local has NO key, but the key file exists on disk.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 base_url: Some("http://10.0.0.1:4000".into()),
+                has_api_key: true,
                 ..entry("local", LlmProviderKind::Local)
             }],
             active: None,
             ..LlmConfig::default()
         };
-        assert!(!llm.providers[0].has_api_key, "config flag is stale-false");
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-real").unwrap();
         let path = write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let rendered = std::fs::read_to_string(&path).unwrap();
-        // File exists → bearer swap, not auth:none — the key reaches the backend.
         assert!(
             rendered.contains(r#""swap_env":"SPW_KEY_LOCAL""#),
-            "local route must use bearer when the key file exists: {rendered}"
+            "local route must use bearer when has_api_key is set: {rendered}"
         );
         assert!(!rendered
             .contains(r#""prefix":"local","base_url":"http://10.0.0.1:4000","auth":"none""#));

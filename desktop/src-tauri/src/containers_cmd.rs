@@ -897,11 +897,16 @@ pub async fn factory_reset(
 #[tauri::command]
 pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let llm = user_config
+    let mut llm = user_config
         .active_project_entry()
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
+    // `has_api_key` is the key file's existence (SSOT), not the persisted flag —
+    // re-derive it before the frontend reads it.
+    if let Some(active) = user_config.active_project.as_deref() {
+        llm.sync_has_api_key_from_disk_in(speedwave_runtime::consts::data_dir().as_path(), active);
+    }
     let default_base_url = llm
         .provider
         .as_deref()
