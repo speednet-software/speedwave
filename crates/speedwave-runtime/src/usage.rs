@@ -25,7 +25,7 @@ pub struct UsageRecord {
     /// Provider response id (dedup key when present).
     #[serde(default)]
     pub response_id: Option<String>,
-    /// Active route kind (`anthropic_apikey`/`anthropic_oauth`/`openrouter`/`local`/`openai_compat`).
+    /// Active route kind (`anthropic_apikey`/`anthropic_oauth`/`openrouter`/`local`).
     #[serde(default)]
     pub provider_kind: String,
     /// Active provider id (route prefix); empty on pre-enrichment lines.

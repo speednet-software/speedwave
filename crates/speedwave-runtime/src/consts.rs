@@ -1064,8 +1064,8 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     // slug verbatim as the bridge name). No compose service — pure reservation.
     "ide",
     // Reserves the `llm` token-dir namespace (`tokens/<project>/llm/`,
-    // per-provider LiteLLM API keys — ADR-073) against plugin slug collisions.
-    // The `litellm` compose service itself needs no entry here: plugin compose
+    // per-provider Proxy API keys — ADR-073) against plugin slug collisions.
+    // The `proxy` compose service itself needs no entry here: plugin compose
     // names are `mcp-<slug>`-prefixed, so they can never collide with it.
     "llm",
 ];

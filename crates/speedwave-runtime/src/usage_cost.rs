@@ -18,7 +18,7 @@ pub enum CostSource {
     Catalog,
     /// Anthropic OAuth — billed on the subscription, no per-call USD.
     Subscription,
-    /// Local / OpenAI-compatible — no charge ($0.00).
+    /// Local custom-URL server — no charge ($0.00).
     Free,
     /// Real cost fetched from OpenRouter `/generation`.
     Actual,
@@ -86,7 +86,7 @@ pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> Co
             None => (None, CostSource::Unknown),
         },
         "anthropic_oauth" => (None, CostSource::Subscription),
-        "local" | "openai_compat" => (Some(0.0), CostSource::Free),
+        "local" => (Some(0.0), CostSource::Free),
         // With a gen_id the cost is still fetchable later → `deferred` (retryable);
         // without one no source exists → `unknown` (terminal).
         "openrouter" => match r.gen_id.as_deref().filter(|g| !g.is_empty()) {

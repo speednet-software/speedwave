@@ -1184,10 +1184,7 @@ fn validate_provider_entries(
         if !seen.insert(entry.id.as_str()) {
             return Err(format!("duplicate provider id '{}'", entry.id));
         }
-        let needs_url = matches!(
-            entry.kind,
-            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat
-        );
+        let needs_url = matches!(entry.kind, LlmProviderKind::Local);
         match (&entry.base_url, needs_url) {
             (Some(url), _) => {
                 let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
@@ -1837,8 +1834,8 @@ mod tests {
         .is_err());
         // Credentials embedded in the URL.
         assert!(validate_provider_entries(&[v2_entry(
-            "compat",
-            K::OpenAiCompat,
+            "remote",
+            K::Local,
             Some("http://user:pass@example.com")
         )])
         .is_err());

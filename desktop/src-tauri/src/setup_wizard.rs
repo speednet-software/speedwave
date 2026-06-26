@@ -1120,7 +1120,6 @@ mod tests {
             (K::AnthropicApiKey, false),
             (K::Local, false),
             (K::OpenRouter, false),
-            (K::OpenAiCompat, false),
         ] {
             let cfg = SpeedwaveUserConfig {
                 projects: vec![project_with_v2_kind("proj", kind)],

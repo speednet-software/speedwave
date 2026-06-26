@@ -82,7 +82,7 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                     r#"{{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{{"swap_env":"{env}","scheme":"bearer"}},"provider_kind":"openrouter","provider_id":"{id}"}}"#
                 ));
             }
-            LlmProviderKind::Local | LlmProviderKind::OpenAiCompat => {
+            LlmProviderKind::Local => {
                 let Some(base_url) = entry.base_url.as_deref() else {
                     log::warn!(
                         "proxy config: provider '{}' has no base_url — skipped",
@@ -102,10 +102,7 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                 // (common in Ollama/LiteLLM base URLs) so it isn't doubled.
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 let id = &entry.id;
-                let kind = match entry.kind {
-                    LlmProviderKind::OpenAiCompat => "openai_compat",
-                    _ => "local",
-                };
+                let kind = "local";
                 // Two distinct route shapes: object-auth (key swap) vs string-auth (none).
                 if entry.has_api_key {
                     let env = spw_key_env_name(id);
@@ -212,9 +209,9 @@ fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) 
         return;
     };
     if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
-        log::warn!("litellm: legacy local key migration failed: {e}");
+        log::warn!("proxy: legacy local key migration failed: {e}");
     } else {
-        log::info!("litellm: migrated legacy local-llm api_key into the llm token namespace");
+        log::info!("proxy: migrated legacy local-llm api_key into the llm token namespace");
     }
 }
 

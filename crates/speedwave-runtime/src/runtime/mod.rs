@@ -123,7 +123,7 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
     /// Recreates ONE compose service (`--force-recreate`, no orphan removal)
-    /// without touching the rest of the stack — e.g. restarting `litellm`
+    /// without touching the rest of the stack — e.g. restarting `proxy`
     /// after an LLM-settings change while the claude session keeps running
     /// (ADR-073). `service` must be a built-in compose service name; impls
     /// validate before splicing it into argv.
@@ -564,7 +564,7 @@ pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
 
 /// Guards a compose service name before it is spliced into engine argv.
 /// Only built-in services qualify — `compose_up_service` exists for
-/// runtime-managed services (litellm), never plugin/user input.
+/// runtime-managed services (proxy), never plugin/user input.
 pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()> {
     if consts::BUILT_IN_SERVICES.contains(&service) {
         Ok(())

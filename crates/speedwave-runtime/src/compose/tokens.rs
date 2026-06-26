@@ -43,11 +43,11 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 /// (validated by `plugin::validate_manifest`).
 const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
 
-/// LiteLLM per-provider key namespace (ADR-073), reserved against plugin
+/// Proxy per-provider key namespace (ADR-073), reserved against plugin
 /// slugs in `consts::BUILT_IN_SERVICE_IDS`.
 pub const LLM_TOKEN_SERVICE: &str = "llm";
 
-/// Suffix every LiteLLM provider key file carries: `<provider_id>_api_key`.
+/// Suffix every Proxy provider key file carries: `<provider_id>_api_key`.
 pub const LLM_TOKEN_FILE_SUFFIX: &str = "_api_key";
 
 /// Per-service whitelist of file names allowed under
@@ -88,7 +88,7 @@ fn validate_token_file(service: &str, file: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Resolves the key-file path for one LiteLLM provider:
+/// Resolves the key-file path for one Proxy provider:
 /// `tokens/<project>/llm/<provider_id>_api_key`. Slug-validates the id.
 pub fn llm_provider_key_path_in(
     data_dir: &Path,

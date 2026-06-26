@@ -77,12 +77,7 @@ export interface LlmConfigResponse {
  * Provider kind discriminator (ADR-073). Mirror of the Rust
  * `LlmProviderKind` serde rep; drift guarded by `llm_provider_kind_matches_ts_union`.
  */
-export type LlmProviderKind =
-  | 'anthropic_oauth'
-  | 'anthropic_api_key'
-  | 'local'
-  | 'open_router'
-  | 'open_ai_compat';
+export type LlmProviderKind = 'anthropic_oauth' | 'anthropic_api_key' | 'local' | 'open_router';
 
 /**
  * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust

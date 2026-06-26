@@ -406,7 +406,7 @@ chat access. Enforced at two layers:
   containers are running, calls `get_auth_status`. The gate blocks only when the
   active provider needs Anthropic auth (`needs_anthropic_auth`, derived from
   `project_needs_anthropic_auth` — R7) **and** neither OAuth nor API key is
-  configured; a non-anthropic provider (local/openrouter/openai-compat) is never
+  configured; a non-anthropic provider (local/openrouter) is never
   walled. When it does block, the auth overlay offers two ways to log in:
   - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
     host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on

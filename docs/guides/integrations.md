@@ -676,13 +676,12 @@ Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) every sess
 
 Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
 
-| Kind                    | What it is                                                             | Key needed                        |
-| ----------------------- | ---------------------------------------------------------------------- | --------------------------------- |
-| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                 | No (managed by Claude Code login) |
-| **Anthropic (API key)** | Anthropic via a raw API key                                            | Yes                               |
-| **Local**               | A local server (Ollama, LM Studio, llama.cpp, …)                       | Only if the server requires one   |
-| **OpenRouter**          | OpenRouter's model catalog                                             | Yes                               |
-| **OpenAI-compatible**   | Any remote backend serving the Anthropic Messages API (vLLM, gateways) | Usually                           |
+| Kind                    | What it is                                                                                                                | Key needed                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                                                                    | No (managed by Claude Code login) |
+| **Anthropic (API key)** | Anthropic via a raw API key                                                                                               | Yes                               |
+| **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, gateways) | Only if the server requires one   |
+| **OpenRouter**          | OpenRouter's model catalog                                                                                                | Yes                               |
 
 Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
 
@@ -697,7 +696,7 @@ The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streami
 | **llama.cpp**  | Jan 2026 build (#17570)   | `llama-server` native Anthropic Messages support (incl. `count_tokens`, tools) |
 | **Ollama**     | 0.14.0                    | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
 | **LM Studio**  | 0.4.1                     | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
-| **vLLM**       | build with `/v1/messages` | Use the **OpenAI-compatible** row for a remote vLLM                            |
+| **vLLM**       | build with `/v1/messages` | Use the **Local** row with the remote URL for a remote vLLM                    |
 | **OpenRouter** | —                         | Remote; exposes the Anthropic Messages API natively                            |
 
 A stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
@@ -733,7 +732,7 @@ A stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) 
 
 ### Non-standard addresses
 
-If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select a local or OpenAI-compatible provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
+If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select the **Local** provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
 
 ### Servers requiring authentication
 
@@ -754,11 +753,11 @@ For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscript
 2. Click **Discover models** to pull OpenRouter's catalog (the dropdown lists tool-capable models); pick one.
 3. Set the row active. No base URL is needed — OpenRouter is a fixed endpoint.
 
-### OpenAI-compatible servers (vLLM, TGI, gateways)
+### Remote / custom-URL servers (vLLM, gateways)
 
 The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). Modern builds of vLLM (`/v1/messages` endpoint), llama.cpp, LM Studio, and Ollama all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
-1. In Settings → LLM Provider, open the **OpenAI-compatible** row (use it for any remote backend that serves the Anthropic Messages API).
+1. In Settings → LLM Provider, open the **Local** row (it serves both local and remote custom-URL backends that speak the Anthropic Messages API).
 2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). A trailing `/v1` is fine — it's normalized away, and the forwarder appends `/v1/messages` itself.
 3. Enter an **api_key** if the server requires one, then **Discover models** and pick one.
 4. Set the row active.

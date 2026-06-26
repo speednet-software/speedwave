@@ -96,7 +96,7 @@ SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
 `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only
 an active `anthropic_oauth` provider runs the in-container OAuth check; all
-other kinds (api key, local, openrouter, openai-compat) skip it. An
+other kinds (api key, local, openrouter) skip it. An
 unconfigured project (no providers, dangling active, or fresh/missing) also
 skips it (R7) — the user is routed to provider configuration, not an OAuth
 wall. Legacy v1 keeps the `LOCAL_PROVIDERS` rule; an unset provider is

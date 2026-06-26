@@ -195,11 +195,9 @@ Cost is computed per provider (API key → catalog, OpenRouter → real `/genera
 Settings → Appearance controls two independent choices:
 
 - **Mode** — `light`, `dark`, or `auto`. `auto` follows the operating system's `prefers-color-scheme` and switches live when the system theme changes. The choice persists locally (browser `localStorage`, key `speedwave-theme-mode`); on first run the app defaults to `dark`. An inline script in `index.html` applies the persisted mode before the app boots, so the first paint never flashes the wrong scheme.
-- **Accent color** — one of six accent palettes (crimson, mint, amber, iris, cyan, sand) used for buttons, links, active-state indicators, and syntax highlighting. Persisted under `speedwave-theme`.
+- **Accent color** — one of six accent palettes (ember, crimson, mint, iris, cyan, sand) used for buttons, links, active-state indicators, and syntax highlighting. Ember is the default. Persisted under `speedwave-theme`.
 
 The two axes are orthogonal: any accent works in either mode. Accent colors are tuned per mode so text and icons meet WCAG AA contrast against the active background. The native window titlebar stays system-native and is not themed by the app. Both axes are managed by `ThemeService`; accent values live in `desktop/src/src/styles.css` as CSS custom properties (the single source of truth — components read `var(--accent)` etc., never hard-coded hex).
-
-WCAG contrast waivers, if any, are recorded in [accessibility/contrast-report.md](../accessibility/contrast-report.md).
 
 ## See Also
 

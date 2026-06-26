@@ -16,17 +16,15 @@ pub const LLM_SCHEMA_VERSION: u32 = 3;
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderKind {
     /// Anthropic via the user's Claude subscription (OAuth managed by Claude
-    /// Code, ADR-052). Inference passes through LiteLLM's `/anthropic` route.
+    /// Code, ADR-052). Inference passes through the proxy's `/anthropic` route.
     AnthropicOauth,
     /// Anthropic via a raw API key (key in the llm token namespace).
     AnthropicApiKey,
-    /// Local Anthropic-Messages or OpenAI-compatible server (Ollama,
-    /// LM Studio, llama.cpp, custom URL).
+    /// Local or remote Anthropic-Messages server at a custom URL (Ollama, LM
+    /// Studio, llama.cpp, vLLM, …), key optional.
     Local,
     /// OpenRouter (key required).
     OpenRouter,
-    /// Any remote OpenAI-compatible endpoint (key required).
-    OpenAiCompat,
 }
 
 impl LlmProviderKind {
@@ -50,11 +48,11 @@ pub fn is_foreign_anthropic_model(model: &str) -> bool {
 pub struct LlmProviderEntry {
     /// Stable user-scoped identifier; plugin-grade slug
     /// (`^[a-z][a-z0-9-]{0,63}$`). Becomes the token file name segment and
-    /// the `SPW_KEY_<ID>` env name in the litellm container.
+    /// the `SPW_KEY_<ID>` env name in the proxy container.
     pub id: String,
     /// Backend class.
     pub kind: LlmProviderKind,
-    /// Base URL for `Local`/`OpenAiCompat` kinds (user-only).
+    /// Base URL for the `Local` kind (user-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Model this provider routes (per-provider SSOT). The routing model is
@@ -324,9 +322,9 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.model.clone_from(&entry.model);
         }
         // No v1 equivalent — flat masquerades as anthropic, so its model must
-        // NOT carry the OR/compat id (would 404 a downgrade reader). v2 fields
+        // NOT carry the OpenRouter id (would 404 a downgrade reader). v2 fields
         // keep the real selection.
-        LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
+        LlmProviderKind::OpenRouter => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
             llm.has_api_key = false;
@@ -1020,7 +1018,6 @@ mod tests {
             LlmProviderKind::AnthropicApiKey,
             LlmProviderKind::Local,
             LlmProviderKind::OpenRouter,
-            LlmProviderKind::OpenAiCompat,
         ];
         // Exhaustiveness gate: a new variant fails to compile until added above.
         for kind in all {
@@ -1028,8 +1025,7 @@ mod tests {
                 LlmProviderKind::AnthropicOauth
                 | LlmProviderKind::AnthropicApiKey
                 | LlmProviderKind::Local
-                | LlmProviderKind::OpenRouter
-                | LlmProviderKind::OpenAiCompat => {}
+                | LlmProviderKind::OpenRouter => {}
             }
         }
         let mut rust_kinds: Vec<String> = all
@@ -1440,7 +1436,7 @@ mod tests {
                         "schema_version": 2,
                         "providers": [{{
                             "id": "evil",
-                            "kind": "open_ai_compat",
+                            "kind": "local",
                             "base_url": "http://attacker.example.com/v1",
                             "has_api_key": true
                         }}],
@@ -1551,7 +1547,6 @@ mod tests {
         assert!(LlmProviderKind::AnthropicApiKey.is_anthropic());
         assert!(!LlmProviderKind::Local.is_anthropic());
         assert!(!LlmProviderKind::OpenRouter.is_anthropic());
-        assert!(!LlmProviderKind::OpenAiCompat.is_anthropic());
         // Foreign = provider/model shape, NOT catalog membership.
         assert!(is_foreign_anthropic_model("nex-agi/nex-n2-pro:free"));
         assert!(is_foreign_anthropic_model("openrouter/z-ai/glm-5.2"));
@@ -1644,11 +1639,11 @@ mod tests {
         assert_eq!(LlmConfig::default().effective_active_model(), None);
     }
 
-    /// `sync_llm_legacy_fields` must never stamp an OR/compat model under the
+    /// `sync_llm_legacy_fields` must never stamp an OpenRouter model under the
     /// masqueraded flat `provider="anthropic"` (would 404 a downgrade reader).
     #[test]
     fn test_sync_legacy_fields_no_foreign_model_under_flat_anthropic() {
-        for kind in [LlmProviderKind::OpenRouter, LlmProviderKind::OpenAiCompat] {
+        for kind in [LlmProviderKind::OpenRouter] {
             let mut llm = LlmConfig {
                 schema_version: Some(LLM_SCHEMA_VERSION),
                 providers: vec![LlmProviderEntry {

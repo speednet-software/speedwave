@@ -1,5 +1,5 @@
 //! LLM provider switching (ADR-073): routes the `claude` container at the
-//! per-project LiteLLM proxy, with the pre-proxy direct-injection path kept
+//! per-project proxy, with the pre-proxy direct-injection path kept
 //! behind the `proxy_enabled` kill-switch (removal in N+2).
 
 use super::{inject_claude_env, tokens_path_in};
@@ -27,14 +27,11 @@ pub(crate) fn apply_llm_config_in(
     } else if let Some(entry) = llm.active_provider() {
         // Kill-switch (legacy direct path) only supports anthropic + local.
         // Erroring beats silently billing the Anthropic subscription for an
-        // OpenRouter/Compat session via the flat anthropic masquerade.
-        if matches!(
-            entry.kind,
-            LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat
-        ) {
+        // OpenRouter session via the flat anthropic masquerade.
+        if matches!(entry.kind, LlmProviderKind::OpenRouter) {
             anyhow::bail!(
                 "Provider '{}' requires the LLM proxy. Re-enable it (unset proxy_enabled=false) \
-                 to use OpenRouter / OpenAI-compatible providers.",
+                 to use OpenRouter.",
                 entry.id
             );
         }
@@ -48,7 +45,7 @@ pub(crate) fn apply_llm_config_in(
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
 
-/// ADR-073 proxy path: every session talks to the litellm service; the
+/// ADR-073 proxy path: every session talks to the proxy service; the
 /// provider kind picks the route and model prefix.
 fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let entry = llm
@@ -78,7 +75,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.clone());
             }
         }
-        LlmProviderKind::Local | LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
+        LlmProviderKind::Local | LlmProviderKind::OpenRouter => {
             if model.is_empty() {
                 anyhow::bail!(
                     "Provider '{}' requires a model name. \
@@ -86,7 +83,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                     entry.id
                 );
             }
-            // `<id>/<model>` matches the per-provider wildcard route in the litellm config.
+            // `<id>/<model>` matches the per-provider wildcard route in the proxy config.
             let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
                 model.clone()
             } else {

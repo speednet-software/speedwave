@@ -38,7 +38,7 @@ import {
  */
 interface ExtraProviderEdit {
   id: string;
-  kind: 'open_router' | 'open_ai_compat';
+  kind: 'open_router';
   baseUrl: string;
   model: string;
   keyInput: string;
@@ -52,8 +52,8 @@ interface ExtraProviderEdit {
 }
 
 /**
- * The two permanent remote rows (`openrouter`, `compat`) — rendered like the
- * anthropic/local cards; an unconfigured row is simply not persisted.
+ * The permanent remote row (`openrouter`) — rendered like the anthropic/local
+ * cards; an unconfigured row is simply not persisted.
  */
 function fixedExtraRows(): ExtraProviderEdit[] {
   const empty = (id: string, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
@@ -68,7 +68,7 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     discovering: false,
     contextTokens: null,
   });
-  return [empty('openrouter', 'open_router'), empty('compat', 'open_ai_compat')];
+  return [empty('openrouter', 'open_router')];
 }
 
 /**
@@ -496,25 +496,13 @@ type DiscoveryState =
             (click)="onExtraHeaderClick(entry)"
           >
             {{ selectedTarget === entry.id ? '●' : '○' }} {{ entry.id }}
-            <span class="text-[10px] text-[var(--ink-mute)]">
-              · {{ entry.kind === 'open_router' ? 'openrouter' : 'openai-compatible' }}
-            </span>
+            <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
           </button>
           @if (expandedExtraId === entry.id) {
             <div
               class="grid grid-cols-1 gap-2 border-t border-[var(--line)] px-3 py-3 md:grid-cols-2"
             >
-              @if (entry.kind === 'open_ai_compat') {
-                <input
-                  type="text"
-                  [value]="entry.baseUrl"
-                  (input)="entry.baseUrl = $any($event.target).value"
-                  placeholder="base_url (e.g. https://api.example.com/v1)"
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  [attr.data-testid]="'settings-llm-extra-url-' + entry.id"
-                />
-              }
-              @if (entry.kind === 'open_router' && entry.models && entry.models.length > 0) {
+              @if (entry.models && entry.models.length > 0) {
                 <div class="flex items-center gap-2">
                   <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
                   <select
@@ -668,7 +656,7 @@ export class LlmProviderComponent implements OnInit {
   /**
    * `provider_id|model` snapshot taken on load. When Save leaves it
    * unchanged, only the proxy config changed (keys, added/removed
-   * providers) — a litellm-only hot reload suffices and the running claude
+   * providers) — a proxy-only hot reload suffices and the running claude
    * session survives. Any change to it requires the full project restart
    * (the claude env carries the active provider/model).
    */
@@ -1297,17 +1285,14 @@ export class LlmProviderComponent implements OnInit {
     for (const extra of this.extraProviders) {
       // Only configured rows persist; hasKey drops when the field is cleared.
       const hasKey = extra.keyTouched ? extra.keyInput.trim() !== '' : extra.hasKey;
-      const configured =
-        extra.kind === 'open_ai_compat'
-          ? extra.baseUrl.trim() !== ''
-          : hasKey || extra.model.trim() !== '';
+      const configured = hasKey || extra.model.trim() !== '';
       if (!configured) {
         continue;
       }
       providers.push({
         id: extra.id,
         kind: extra.kind,
-        base_url: extra.kind === 'open_ai_compat' ? extra.baseUrl || null : null,
+        base_url: null,
         model: extra.model || null,
         has_api_key: hasKey,
         context_tokens: extra.contextTokens,
@@ -1398,10 +1383,6 @@ export class LlmProviderComponent implements OnInit {
     const activeExtra = this.extraProviders.find((p) => p.id === this.effectiveTarget());
     if (activeExtra && !activeExtra.model.trim()) {
       this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a model name`);
-      return;
-    }
-    if (activeExtra?.kind === 'open_ai_compat' && !activeExtra.baseUrl.trim()) {
-      this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a base URL`);
       return;
     }
     this.saving = true;
@@ -1572,7 +1553,7 @@ export class LlmProviderComponent implements OnInit {
       // then kind so entries saved under older generated ids still land).
       this.extraProviders = fixedExtraRows();
       for (const p of config.providers ?? []) {
-        if (p.kind !== 'open_router' && p.kind !== 'open_ai_compat') {
+        if (p.kind !== 'open_router') {
           continue;
         }
         const row = this.findExtraRow(p.id, p.kind);

@@ -3713,7 +3713,7 @@ services:
     /// renderer-created mount dirs.
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_litellm_service_rendered() {
+    fn test_proxy_service_rendered() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3799,7 +3799,7 @@ services:
         // Renderer must create the host-side mount sources.
         assert!(
             data_dir.path().join("proxy").join("test-project").is_dir(),
-            "litellm config dir must be created"
+            "proxy config dir must be created"
         );
         assert!(
             data_dir
@@ -4162,7 +4162,7 @@ services:
 
     #[test]
     fn test_base_url_accepts_single_segment_path() {
-        // LiteLLM `/anthropic`, AWS-style `/v1`, any single ASCII segment.
+        // The proxy's `/anthropic`, AWS-style `/v1`, any single ASCII segment.
         for ok in &[
             "http://host.docker.internal:4000/anthropic",
             "http://litellm.local/v1",
@@ -7182,7 +7182,7 @@ services:
     }
 
     /// Speedwave proxy service YAML with parameterised volumes (ADR-073 tests).
-    fn litellm_yaml(volumes: &str, extra: &str) -> String {
+    fn proxy_yaml(volumes: &str, extra: &str) -> String {
         format!(
             r#"
 version: "3"
@@ -7206,10 +7206,10 @@ services:
     }
 
     #[test]
-    fn test_security_litellm_canonical_mounts_pass() {
+    fn test_security_proxy_canonical_mounts_pass() {
         let data_dir = tempfile::tempdir().unwrap();
-        let yaml = litellm_yaml(
-            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+        let yaml = proxy_yaml(
+            "      - /test/.speedwave/proxy/test:/config:ro\n      \
              - /test/.speedwave/tokens/test/llm:/tokens:ro\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw",
             "",
@@ -7225,16 +7225,16 @@ services:
             !violations
                 .iter()
                 .any(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes),
-            "canonical litellm mounts must pass, got: {violations:?}"
+            "canonical proxy mounts must pass, got: {violations:?}"
         );
     }
 
     #[test]
-    fn test_security_litellm_rejects_writable_tokens_and_extra_mounts() {
+    fn test_security_proxy_rejects_writable_tokens_and_extra_mounts() {
         let data_dir = tempfile::tempdir().unwrap();
         // tokens :rw + an extra workspace mount → both flagged.
-        let yaml = litellm_yaml(
-            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+        let yaml = proxy_yaml(
+            "      - /test/.speedwave/proxy/test:/config:ro\n      \
              - /test/.speedwave/tokens/test/llm:/tokens:rw\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw\n      \
              - /test/project:/workspace:rw",
@@ -7247,27 +7247,27 @@ services:
             &test_expected_paths(),
             data_dir.path(),
         );
-        let litellm: Vec<_> = violations
+        let proxy: Vec<_> = violations
             .iter()
             .filter(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes)
             .collect();
         assert!(
-            litellm.iter().any(|v| v.message.contains("/tokens")),
-            "rw tokens mount must be flagged: {litellm:?}"
+            proxy.iter().any(|v| v.message.contains("/tokens")),
+            "rw tokens mount must be flagged: {proxy:?}"
         );
         assert!(
-            litellm.iter().any(|v| v.message.contains("unexpected")),
-            "extra workspace mount must be flagged: {litellm:?}"
+            proxy.iter().any(|v| v.message.contains("unexpected")),
+            "extra workspace mount must be flagged: {proxy:?}"
         );
     }
 
     #[test]
-    fn test_security_litellm_rejects_foreign_tokens_namespace_and_host_network() {
+    fn test_security_proxy_rejects_foreign_tokens_namespace_and_host_network() {
         let data_dir = tempfile::tempdir().unwrap();
         // Whole tokens dir (all services!) instead of the llm namespace +
         // host networking → both flagged.
-        let yaml = litellm_yaml(
-            "      - /test/.speedwave/litellm/test:/config:ro\n      \
+        let yaml = proxy_yaml(
+            "      - /test/.speedwave/proxy/test:/config:ro\n      \
              - /test/.speedwave/tokens/test:/tokens:ro\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw",
             "    network_mode: host",
@@ -7279,17 +7279,17 @@ services:
             &test_expected_paths(),
             data_dir.path(),
         );
-        let litellm: Vec<_> = violations
+        let proxy: Vec<_> = violations
             .iter()
             .filter(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes)
             .collect();
         assert!(
-            litellm.iter().any(|v| v.message.contains("llm namespace")),
-            "whole-tokens-dir mount must be flagged: {litellm:?}"
+            proxy.iter().any(|v| v.message.contains("llm namespace")),
+            "whole-tokens-dir mount must be flagged: {proxy:?}"
         );
         assert!(
-            litellm.iter().any(|v| v.message.contains("network_mode")),
-            "host network must be flagged: {litellm:?}"
+            proxy.iter().any(|v| v.message.contains("network_mode")),
+            "host network must be flagged: {proxy:?}"
         );
     }
 
@@ -7311,7 +7311,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/litellm/test:/config:ro
+      - /test/.speedwave/proxy/test:/config:ro
       - /test/.speedwave/tokens/test/llm:/tokens:rw
       - /test/.speedwave/usage/test/proxy:/usage:rw
 "#,
@@ -7343,8 +7343,8 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_security_litellm_full_render_passes() {
-        // The real rendered compose must satisfy the litellm profile checks
+    fn test_security_proxy_full_render_passes() {
+        // The real rendered compose must satisfy the proxy profile checks
         // (read_only/tmpfs/no-ports come from the shared core rules).
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
@@ -10982,7 +10982,7 @@ services:
         assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
     }
 
-    // ── LiteLLM `llm` token namespace (ADR-073) ──────────────────────────
+    // ── Proxy `llm` token namespace (ADR-073) ──────────────────────────
 
     #[test]
     fn llm_provider_key_path_resolves_for_valid_slug() {
