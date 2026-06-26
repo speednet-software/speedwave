@@ -453,7 +453,7 @@ mod tests {
             ],
         );
         // Sidecar: local priced 0.0 (free), oauth unpriced (subscription).
-        crate::usage_cost::enrich_cost_in(dir.path(), "proj").unwrap();
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(
             s.totals.cost_usd,
@@ -525,7 +525,7 @@ mod tests {
                 r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
             ],
         );
-        crate::usage_cost::enrich_cost_in(dir.path(), "proj").unwrap();
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
         assert_eq!(u.prompt_tokens, 1_000_000);
         assert!(u.cost_usd.unwrap() > 0.0);

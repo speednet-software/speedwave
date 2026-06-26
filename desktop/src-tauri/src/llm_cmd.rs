@@ -947,14 +947,7 @@ pub async fn get_llm_usage(
 ) -> Result<speedwave_runtime::usage::UsageSummary, String> {
     let data_dir = speedwave_runtime::consts::data_dir();
     speedwave_runtime::usage::rotate_usage_if_large_in(data_dir.as_path(), &project);
-    // Pre-fetch OpenRouter costs (async), then enrich the sidecar with a sync
-    // closure reading the resolved map — keeps runtime free of HTTP/async.
-    let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
-    let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
-        data_dir.as_path(),
-        &project,
-        &|gen_id| gen_costs.get(gen_id).copied(),
-    );
+    enrich_with_openrouter(data_dir.as_path(), &project).await;
     Ok(speedwave_runtime::usage::read_usage_summary_in(
         data_dir.as_path(),
         &project,
@@ -990,23 +983,31 @@ pub async fn get_usage_for_response(
     if u.cost_usd.is_some() {
         return Some(u);
     }
-    let gen_costs = openrouter_costs_for_project(data_dir.as_path(), &project).await;
-    let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(
-        data_dir.as_path(),
-        &project,
-        &|gen_id| gen_costs.get(gen_id).copied(),
-    );
+    enrich_with_openrouter(data_dir.as_path(), &project).await;
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
 }
 
-/// Resolves real OpenRouter cost for every not-yet-priced `gen_id` in the
-/// project's usage JSONL, into a `gen_id` → USD map (host-side `/generation`).
-/// Fetches run concurrently — the generations are independent.
-async fn openrouter_costs_for_project(
+/// Fetches pending OpenRouter `/generation` costs and writes them into the cost
+/// sidecar. No-op (no HTTP) when nothing is pending — the common case.
+async fn enrich_with_openrouter(data_dir: &std::path::Path, project: &str) {
+    let gen_ids = pending_openrouter_gen_ids(data_dir, project);
+    if gen_ids.is_empty() {
+        return;
+    }
+    let gen_costs = openrouter_costs_for(data_dir, project, gen_ids).await;
+    let _ = speedwave_runtime::usage_cost::enrich_cost_with_in(data_dir, project, &|gen_id| {
+        gen_costs.get(gen_id).copied()
+    });
+}
+
+/// Resolves real OpenRouter cost for the given `gen_id`s into a `gen_id` → USD
+/// map (host-side `/generation`). Fetches run concurrently — the generations
+/// are independent.
+async fn openrouter_costs_for(
     data_dir: &std::path::Path,
     project: &str,
+    gen_ids: Vec<String>,
 ) -> std::collections::HashMap<String, f64> {
-    let gen_ids = pending_openrouter_gen_ids(data_dir, project);
     let fetches = gen_ids.into_iter().map(|gen| async move {
         fetch_openrouter_gen_cost(data_dir, project, &gen)
             .await
@@ -2197,7 +2198,8 @@ mod tests {
             r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/qwen3","response_id":"m1","provider_kind":"local"}"#,
         )
         .unwrap();
-        let map = super::openrouter_costs_for_project(dir.path(), "proj").await;
+        let gen_ids = super::pending_openrouter_gen_ids(dir.path(), "proj");
+        let map = super::openrouter_costs_for(dir.path(), "proj", gen_ids).await;
         assert!(map.is_empty());
     }
 

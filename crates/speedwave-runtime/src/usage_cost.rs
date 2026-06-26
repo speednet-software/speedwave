@@ -34,13 +34,6 @@ pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
 /// no HTTP/SSRF surface; `None` on missing id, transport error, or absent field.
 pub type GenCostFetcher<'a> = dyn Fn(&str) -> Option<f64> + 'a;
 
-/// Computes the cost for one usage record by its `provider_kind`, with no
-/// OpenRouter fetcher — the `openrouter` branch resolves to `unknown` (used by
-/// non-HTTP callers and the catalog/local/oauth paths).
-pub fn compute_cost(r: &UsageRecord) -> CostEntry {
-    compute_cost_with(r, &|_| None)
-}
-
 /// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
 /// with the line's `gen_id`: a `None` result with a gen_id is `deferred`
 /// (retryable), a missing gen_id is `unknown` (terminal — no other source).
@@ -102,12 +95,7 @@ pub fn is_terminal_cost(source: &str) -> bool {
 }
 
 /// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
-/// JSONL read-only. No fetcher — `openrouter` → `unknown` (see [`enrich_cost_with_in`]).
-pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
-    enrich_cost_with_in(data_dir, project, &|_| None)
-}
-
-/// Like [`enrich_cost_in`], but `openrouter` lines are priced via the injected
+/// JSONL read-only. `openrouter` lines are priced via the injected
 /// `fetch_gen_cost` (real `GET /generation`, host-side).
 pub fn enrich_cost_with_in(
     data_dir: &Path,
@@ -267,14 +255,10 @@ mod tests {
     #[test]
     fn anthropic_apikey_cost_from_catalog() {
         // 1M input tokens of opus (input 5.0/MTok) = $5.00 exactly.
-        let e = compute_cost(&record(
-            "anthropic_apikey",
-            "claude-opus-4-8",
-            1_000_000,
-            0,
-            0,
-            0,
-        ));
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-opus-4-8", 1_000_000, 0, 0, 0),
+            &|_| None,
+        );
         assert!(
             (e.cost_usd.unwrap() - 5.0).abs() < 1e-9,
             "got {:?}",
@@ -285,36 +269,28 @@ mod tests {
 
     #[test]
     fn oauth_cost_is_null_subscription() {
-        let e = compute_cost(&record(
-            "anthropic_oauth",
-            "claude-opus-4-8",
-            100,
-            100,
-            0,
-            0,
-        ));
+        let e = compute_cost_with(
+            &record("anthropic_oauth", "claude-opus-4-8", 100, 100, 0, 0),
+            &|_| None,
+        );
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, "subscription");
     }
 
     #[test]
     fn local_cost_is_zero_free() {
-        let e = compute_cost(&record("local", "qwen3", 100, 100, 0, 0));
+        let e = compute_cost_with(&record("local", "qwen3", 100, 100, 0, 0), &|_| None);
         assert_eq!(e.cost_usd, Some(0.0));
         assert_eq!(e.cost_source, "free");
     }
 
     #[test]
     fn openrouter_without_fetcher_is_unknown() {
-        // No injected fetcher (default compute_cost) can't reach /generation.
-        let e = compute_cost(&record(
-            "openrouter",
-            "anthropic/claude-3.5-haiku",
-            100,
-            50,
-            0,
-            0,
-        ));
+        // A fetcher that resolves nothing can't reach /generation.
+        let e = compute_cost_with(
+            &record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0),
+            &|_| None,
+        );
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, "unknown");
     }
@@ -360,14 +336,17 @@ mod tests {
 
     #[test]
     fn catalog_miss_is_null_unknown() {
-        let e = compute_cost(&record("anthropic_apikey", "made-up-model", 100, 0, 0, 0));
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "made-up-model", 100, 0, 0, 0),
+            &|_| None,
+        );
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, "unknown");
     }
 
     #[test]
     fn unknown_provider_kind_is_unknown() {
-        let e = compute_cost(&record("", "whatever", 100, 0, 0, 0));
+        let e = compute_cost_with(&record("", "whatever", 100, 0, 0, 0), &|_| None);
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, "unknown");
     }
@@ -384,7 +363,7 @@ mod tests {
         );
         let usage = usage_file_in(dir.path(), "proj");
         let before = std::fs::read(&usage).unwrap();
-        enrich_cost_in(dir.path(), "proj").unwrap();
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let after = std::fs::read(&usage).unwrap();
         assert_eq!(before, after, "usage JSONL must be byte-identical");
         let cache = read_cost_cache_in(dir.path(), "proj");
@@ -396,8 +375,8 @@ mod tests {
     fn enrich_is_idempotent_per_response_id() {
         let dir = tempfile::tempdir().unwrap();
         write_usage_line(dir.path(), "proj", "msg_1", "local", "qwen3");
-        enrich_cost_in(dir.path(), "proj").unwrap();
-        enrich_cost_in(dir.path(), "proj").unwrap();
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         assert_eq!(read_cost_cache_in(dir.path(), "proj").len(), 1);
     }
 
@@ -486,7 +465,7 @@ mod tests {
             "anthropic_apikey",
             "claude-opus-4-8",
         );
-        enrich_cost_in(dir.path(), "proj").unwrap();
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         // A second pass with a fetcher must NOT add a duplicate for a terminal (catalog) id.
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(99.0)).unwrap();
         // Exactly one cache line for msg_1 still resolves to the catalog cost.
@@ -520,21 +499,24 @@ mod tests {
     #[test]
     fn enrich_missing_usage_file_is_ok() {
         let dir = tempfile::tempdir().unwrap();
-        enrich_cost_in(dir.path(), "proj").unwrap();
+        enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         assert!(read_cost_cache_in(dir.path(), "proj").is_empty());
     }
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
         // sonnet 1M output (22.5/MTok) differs from base (15.0/MTok).
-        let e = compute_cost(&record(
-            "anthropic_apikey",
-            "claude-sonnet-4-6[1m]",
-            0,
-            1_000_000,
-            0,
-            0,
-        ));
+        let e = compute_cost_with(
+            &record(
+                "anthropic_apikey",
+                "claude-sonnet-4-6[1m]",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            &|_| None,
+        );
         assert!(
             (e.cost_usd.unwrap() - 22.5).abs() < 1e-9,
             "got {:?}",
