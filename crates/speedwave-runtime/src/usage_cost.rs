@@ -89,10 +89,8 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     Some(cost)
 }
 
-/// Reads every usage line for the project and appends a `CostEntry` to the
-/// sidecar for each `response_id` not already priced. Idempotent: a second call
-/// adds nothing. The usage JSONL is read only — never rewritten. No OpenRouter
-/// fetcher — `openrouter` lines resolve to `unknown` (see [`enrich_cost_with_in`]).
+/// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
+/// JSONL read-only. No fetcher — `openrouter` → `unknown` (see [`enrich_cost_with_in`]).
 pub fn enrich_cost_in(data_dir: &Path, project: &str) -> std::io::Result<()> {
     enrich_cost_with_in(data_dir, project, &|_| None)
 }

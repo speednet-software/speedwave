@@ -25,7 +25,7 @@ pub struct UsageRecord {
     /// Provider response id (dedup key when present).
     #[serde(default)]
     pub response_id: Option<String>,
-    /// Active route kind: `anthropic_apikey` | `anthropic_oauth` | `openrouter` | `local` | `openai_compat`.
+    /// Active route kind (`anthropic_apikey`/`anthropic_oauth`/`openrouter`/`local`/`openai_compat`).
     #[serde(default)]
     pub provider_kind: String,
     /// Active provider id (route prefix); empty on pre-enrichment lines.
@@ -54,8 +54,8 @@ pub struct UsageRecord {
     pub cache_write: Option<u64>,
 }
 
-/// Aggregate for one (day, model) bucket. No `PartialEq` derive: the
-/// `cost_usd` f64 makes `==` an exact-float trap; tests compare fields.
+/// Aggregate for one (day, model) bucket. No `PartialEq`: the float
+/// `cost_usd` makes `==` an exact-float trap; tests compare fields.
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct UsageBucket {
     /// Total requests in the bucket.
@@ -70,8 +70,12 @@ pub struct UsageBucket {
     pub cache_read: u64,
     /// Summed prompt-cache write tokens.
     pub cache_write: u64,
-    /// Summed cost in USD (0.0 in the MVP forwarder — cost enrichment is a follow-up).
-    pub cost_usd: f64,
+    /// Summed cost over priced requests; `None` when none priced (never 0.0).
+    pub cost_usd: Option<f64>,
+    /// Requests with a known cost (catalog/actual/free).
+    pub priced_requests: u64,
+    /// Requests with no known cost (subscription/unknown).
+    pub unpriced_requests: u64,
     /// Throughput numerator: completion tokens from success records that also
     /// carried a latency. Paired with `throughput_latency_ms_sum`.
     pub throughput_completion_tokens: u64,
@@ -132,10 +136,11 @@ pub fn read_usage_summary_in(data_dir: &Path, project: &str) -> UsageSummary {
         .map(|()| {
             let live = usage_file_in(data_dir, project);
             let rotated = live.with_extension("jsonl.1");
+            let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
             let mut summary = UsageSummary::default();
             let mut seen_ids = std::collections::HashSet::new();
             for path in [rotated, live] {
-                aggregate_file(&path, &mut summary, &mut seen_ids);
+                aggregate_file(&path, &mut summary, &mut seen_ids, &costs);
             }
             summary
         })
@@ -146,6 +151,7 @@ fn aggregate_file(
     path: &Path,
     summary: &mut UsageSummary,
     seen_ids: &mut std::collections::HashSet<String>,
+    costs: &std::collections::HashMap<String, crate::usage_cost::CostEntry>,
 ) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
@@ -178,18 +184,25 @@ fn aggregate_file(
         {
             summary.hours.entry(day.clone()).or_insert([0; 24])[hour] += 1;
         }
+        // Cost: sidecar entry by response_id, else the record's inline cost.
+        let cost = record
+            .response_id
+            .as_deref()
+            .and_then(|id| costs.get(id))
+            .map_or(record.cost_usd, |e| e.cost_usd);
         let bucket = summary
             .days
             .entry(day)
             .or_default()
             .entry(model)
             .or_default();
-        apply_record(bucket, &record);
-        apply_record(&mut summary.totals, &record);
+        apply_record(bucket, &record, cost);
+        apply_record(&mut summary.totals, &record, cost);
     }
 }
 
-fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord) {
+/// Aggregates one record; `cost` is the sidecar-joined cost (`None` = unpriced).
+fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord, cost: Option<f64>) {
     bucket.requests += 1;
     let is_failure = r.status == "failure";
     if is_failure {
@@ -200,7 +213,13 @@ fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord) {
     bucket.completion_tokens += completion;
     bucket.cache_read += r.cache_read.unwrap_or(0);
     bucket.cache_write += r.cache_write.unwrap_or(0);
-    bucket.cost_usd += r.cost_usd.unwrap_or(0.0);
+    match cost {
+        Some(c) => {
+            bucket.priced_requests += 1;
+            bucket.cost_usd = Some(bucket.cost_usd.unwrap_or(0.0) + c);
+        }
+        None => bucket.unpriced_requests += 1,
+    }
     // Throughput counts only successful records with output and latency.
     if let Some(latency) = r.latency_ms {
         if !is_failure && completion > 0 && latency > 0 {
@@ -238,7 +257,7 @@ mod tests {
         assert_eq!(s.totals.requests, 3);
         assert_eq!(s.totals.failures, 1);
         assert_eq!(s.totals.prompt_tokens, 50019);
-        assert!((s.totals.cost_usd - 0.005).abs() < 1e-9);
+        assert!((s.totals.cost_usd.unwrap() - 0.005).abs() < 1e-9);
         assert_eq!(s.days.len(), 2);
         let day1 = &s.days["2026-06-12"];
         assert_eq!(day1["claude-haiku-4-5"].requests, 1);
@@ -354,11 +373,37 @@ mod tests {
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(s.totals.requests, 2, "msg_1 counted once");
         assert_eq!(s.totals.prompt_tokens, 13);
-        // First-seen wins: the stream_iterator record (no cost) arrives before
-        // the success_event (cost=0.01) and is the one kept, so cost stays 0.
+        // First-seen (costless stream_iterator) wins; both kept records unpriced.
         assert!(
-            s.totals.cost_usd < 1e-9,
-            "first-seen (costless stream_iterator) wins the dedup"
+            s.totals.cost_usd.is_none(),
+            "no priced request → None, not 0.0"
+        );
+        assert_eq!(s.totals.unpriced_requests, 2);
+    }
+
+    #[test]
+    fn aggregation_keeps_unknown_vs_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-12T10:00:00+0200","status":"success","model":"local/qwen3","response_id":"msg_local","provider_kind":"local"}"#,
+                r#"{"ts":"2026-06-12T10:01:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_oauth","provider_kind":"anthropic_oauth"}"#,
+            ],
+        );
+        // Sidecar: local priced 0.0 (free), oauth unpriced (subscription).
+        crate::usage_cost::enrich_cost_in(dir.path(), "proj").unwrap();
+        let s = read_usage_summary_in(dir.path(), "proj");
+        assert_eq!(
+            s.totals.cost_usd,
+            Some(0.0),
+            "free 0.0 must not vanish into None"
+        );
+        assert_eq!(s.totals.priced_requests, 1);
+        assert_eq!(
+            s.totals.unpriced_requests, 1,
+            "subscription is unpriced, not $0"
         );
     }
 
