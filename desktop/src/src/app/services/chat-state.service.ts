@@ -95,8 +95,10 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  /** Proxy-reconciled cost per `response_id` (turn); summed for the footer total. */
+  /** Proxy-reconciled cost per `response_id` (turn); kept to diff on re-record. */
   private _reconciledCosts = new Map<string, number>();
+  /** Running sum of {@link _reconciledCosts} values; the footer total (O(1) update). */
+  private _reconciledTotal = 0;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -782,6 +784,7 @@ export class ChatStateService {
     this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._reconciledCosts.clear();
+    this._reconciledTotal = 0;
     this._contextWindowSize = null;
   }
 
@@ -946,6 +949,7 @@ export class ChatStateService {
       if (this.projectState.status === 'switching') {
         this.resetCoreStreamState();
         this._reconciledCosts.clear();
+        this._reconciledTotal = 0;
         this._persistedContextTokens = null;
         this._currentProvider = null;
         this.notifyChange();
@@ -976,12 +980,13 @@ export class ChatStateService {
       });
       const cur = this._sessionStats();
       if (!u || !cur) return;
-      // Proxy recorded this turn: accumulate its cost (unpriced → 0) and show
-      // the running total, replacing the live cumulative estimate.
-      this._reconciledCosts.set(assistantUuid, u.cost_usd ?? 0);
-      let total = 0;
-      for (const c of this._reconciledCosts.values()) total += c;
-      this._sessionStats.set({ ...cur, total_cost: total });
+      // Proxy recorded this turn: fold its cost (unpriced → 0) into the running
+      // total via a delta, replacing the live cumulative estimate.
+      const cost = u.cost_usd ?? 0;
+      const prev = this._reconciledCosts.get(assistantUuid) ?? 0;
+      this._reconciledTotal += cost - prev;
+      this._reconciledCosts.set(assistantUuid, cost);
+      this._sessionStats.set({ ...cur, total_cost: this._reconciledTotal });
       this.notifyChange();
     } catch {
       // Footer stays on the live value; reconcile is best-effort.
