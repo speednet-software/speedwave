@@ -106,6 +106,23 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" != *'1.23'* ]]
 }
 
+@test "SSOT dedups duplicate response_id, last write wins" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # Re-enrichment appended a second line for msg_1: only the last (0.05) counts.
+    printf '%s\n' \
+        '{"response_id":"msg_1","cost_usd":0.0200,"cost_source":"catalog"}' \
+        '{"response_id":"msg_1","cost_usd":0.0500,"cost_source":"actual"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # Last write wins: $0.05, NOT 0.02+0.05=0.07.
+    [[ "$output" == *'$0.0500'* ]]
+    [[ "$output" != *'0.0700'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
 @test "extracts display_name from JSON" {
     local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"

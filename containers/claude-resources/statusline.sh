@@ -176,15 +176,28 @@ cost_cache="$USAGE_DIR/cost-cache.jsonl"
 if [[ -r "$cost_cache" ]]; then
     # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
     # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).
-    # `n` counts priced lines so an all-zero (free local) sidecar still shows $0
-    # rather than falling back to the Claude Code value.
+    # Dedup by response_id (last write wins, mirrors usage_cost::read_cost_cache_in):
+    # re-enrichment may append duplicate ids; sum the per-id map, not every line.
+    # `n` counts priced ids so an all-zero (free local) sidecar still shows $0.
     ssot_cost="$(LC_ALL=C awk '
+        {
+            id = ""
+            if (match($0, /"response_id"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                seg = substr($0, RSTART, RLENGTH)
+                sub(/^.*:[[:space:]]*"/, "", seg); sub(/"$/, "", seg)
+                id = seg
+            }
+        }
         match($0, /"cost_usd"[[:space:]]*:[[:space:]]*-?[0-9.]+([eE][-+]?[0-9]+)?/) {
             seg = substr($0, RSTART, RLENGTH)
             sub(/^.*:[[:space:]]*/, "", seg)
-            sum += seg + 0; n++
+            cost[id] = seg + 0
         }
-        END { if (n > 0) printf "%.4f", sum }
+        END {
+            n = 0
+            for (k in cost) { sum += cost[k]; n++ }
+            if (n > 0) printf "%.4f", sum
+        }
     ' "$cost_cache" 2>/dev/null)"
     if [[ -n "$ssot_cost" ]]; then
         total_cost="$ssot_cost"
