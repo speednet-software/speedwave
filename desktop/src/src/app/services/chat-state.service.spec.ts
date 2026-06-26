@@ -633,6 +633,23 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
     });
 
+    it('reconcile overwrites the per-message meta.cost from the proxy SSOT', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0, cost_source: 'free' };
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        // CC reports a non-zero turn_cost (local estimate); proxy says $0.
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', turn_cost: 0.046 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      const entry = service.messages.find((m) => m.uuid === 'msg_1');
+      expect(entry?.meta?.cost).toBe(0);
+    });
+
     it('subscription (null proxy cost) yields $0 footer, not CC estimate', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       const spy = vi.spyOn(mockTauri, 'invoke');

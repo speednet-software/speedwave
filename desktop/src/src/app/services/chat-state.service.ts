@@ -710,7 +710,7 @@ export class ChatStateService {
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
-        // Reconcile the footer cost from the proxy SSOT (live CC is a preview).
+        // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
       }
@@ -987,10 +987,28 @@ export class ChatStateService {
       this._reconciledTotal += cost - prev;
       this._reconciledCosts.set(assistantUuid, cost);
       this._sessionStats.set({ ...cur, total_cost: this._reconciledTotal });
+      // Same SSOT for the per-message cost line: overwrite the entry's meta.cost.
+      this.overwriteEntryCost(assistantUuid, cost);
       this.notifyChange();
     } catch {
       // Footer stays on the live value; reconcile is best-effort.
     }
+  }
+
+  /**
+   * Overwrite an assistant entry's per-message cost from the proxy SSOT.
+   * @param uuid - assistant_uuid identifying the entry.
+   * @param cost - proxy cost in USD to display.
+   */
+  private overwriteEntryCost(uuid: string, cost: number): void {
+    const idx = this._messages.findIndex((m) => m.uuid === uuid && m.meta);
+    if (idx < 0) return;
+    const m = this._messages[idx];
+    this._messages = [
+      ...this._messages.slice(0, idx),
+      { ...m, meta: { ...m.meta, cost } },
+      ...this._messages.slice(idx + 1),
+    ];
   }
 
   /**
