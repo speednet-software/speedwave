@@ -51,9 +51,12 @@ speedwave --help | -h | help   # print usage and exit (no runtime required)
 - **`speedwave logout [--project <name>]`** — deletes Claude Code's credential files (`.credentials.json`, `.claude.json`) from the project's `CLAUDE_HOME` mount. No runtime required. Idempotent — succeeds even when nothing is stored. If `--project <name>` is omitted, targets the active project.
 - **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows; no host-level prerequisites on macOS) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps. Note: `check` is diagnostic-only — it reports permission violations but does NOT auto-fix them. All container start paths (`speedwave`, update, rollback) auto-fix file permissions before running SecurityCheck. `check` (and every other runtime command except `--help`, `self-update`, `init`, and the `plugin install`/`list`/`remove` recovery commands) first runs the **plugin signature audit**: if any plugin under `~/.speedwave/plugins/` no longer matches its signed contents, the command prints the affected plugins to stderr and exits `2` before doing anything else. Recover with `speedwave plugin remove <slug>` or by deleting the plugin directory.
 - **`speedwave update [--project <name>]`** — rebuilds the built-in images whose build inputs changed (per-image hash tags, ADR-072), syncs claude-resources, and recreates containers with the current bundle manifest. Targets the active project by default; `--project <name>` overrides it.
-- **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.
 
-  > **Note:** If the rebuild fails (e.g., when run without Desktop running), start Desktop and run `speedwave update` again. `update` targets the active project; select a different project in the Desktop switcher to update it, or restart the Desktop app.
+  Two failure modes:
+  - **Early failure** (prereq/security/build) — containers are still running; the error is printed and the old state is preserved. Start Desktop and run `speedwave update` again.
+  - **Torn-down failure** (after `compose down`) — containers are stopped; `speedwave update` automatically restores the pre-update snapshot ("Rolled back to the previous container state."). Old images are not pruned on failure, so the rollback uses previously built images. If the automatic rollback also fails, run `speedwave` to start the containers manually.
+
+- **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.
 
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it.
 

@@ -197,6 +197,41 @@ JSON
   [[ "$output" =~ "19.9.9" ]]
 }
 
+# ── Error: generic plist cannot be read (missing file) ───────────────────────
+
+@test "generic plist file missing causes read error" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
+  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
+  # Intentionally do NOT create the plist file.
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Info.plist" ]]
+}
+
+# ── Error: generic plist marker line has no <string>…</string> ───────────────
+
+@test "generic plist marker without string tag causes extraction error" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
+  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
+  mkdir -p "$fixture_root/native/macos/x/Resources"
+  # Marker present but no <string>…</string> on that line.
+  printf '9.9.9 <!-- x-release-please-version -->\n' \
+    > "$fixture_root/native/macos/x/Resources/Info.plist"
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Info.plist" ]]
+}
+
 # ── Unknown extra-file type must fail loudly (not be silently skipped) ────────
 
 @test "unsupported extra-file type is reported" {

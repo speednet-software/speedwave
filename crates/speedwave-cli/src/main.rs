@@ -571,18 +571,12 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             }
             Err(e) => {
-                // Only roll back when the failure tore the containers down
-                // (after compose_down). Early failures (prereq/security/build)
-                // leave the old containers running and an up-to-date compose, so
-                // rolling back would needlessly recreate healthy containers from
-                // a possibly stale snapshot.
-                let torn_down = e.downcast_ref::<update::ContainersTornDown>().is_some();
                 let msg = redact_err(&e);
                 err!("Container update failed: {msg}");
-                if torn_down {
-                    // The project has no running containers; restore the
-                    // pre-update snapshot (old images survive — prune runs only
-                    // on success) so the user is not left with nothing running.
+                // Roll back only when containers are torn down (compose_down+).
+                // Early failures leave old containers running; rollback there
+                // would needlessly recreate from a possibly stale snapshot.
+                if update::is_torn_down(&e) {
                     match update::rollback_containers(&runtime, &project_name) {
                         Ok(()) => err!("Rolled back to the previous container state."),
                         Err(rollback_err) => {
