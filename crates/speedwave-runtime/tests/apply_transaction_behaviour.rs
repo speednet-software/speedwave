@@ -132,6 +132,12 @@ fn apply_update_transaction_fails_after_down_when_recreate_fails() {
         !err.to_string().is_empty(),
         "recreate failure must propagate"
     );
+    // The marker must be present so the CLI knows to roll back.
+    assert!(
+        err.downcast_ref::<speedwave_runtime::update::ContainersTornDown>()
+            .is_some(),
+        "a post-compose_down failure must carry the ContainersTornDown marker"
+    );
 
     let down = handles.down_calls.lock().unwrap().clone();
     let recreate = handles.recreate_calls.lock().unwrap().clone();
@@ -153,6 +159,32 @@ fn apply_update_transaction_fails_after_down_when_recreate_fails() {
     assert!(
         snapshot.exists(),
         "a snapshot must exist so the CLI can roll back after a recreate failure"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn apply_update_transaction_down_failure_has_no_torn_down_marker() {
+    // A failure AT compose_down (containers may still be running) must NOT carry
+    // the ContainersTornDown marker — the CLI must not roll back in that case.
+    let data_dir = shared_data_dir();
+    let project = "tx-down-fail-no-marker";
+    let compose_dir = data_dir.join("compose").join(project);
+    std::fs::create_dir_all(&compose_dir).unwrap();
+    std::fs::write(
+        compose_dir.join("compose.yml"),
+        "version: '3'\nservices: {}\n",
+    )
+    .unwrap();
+
+    let (rt, _handles) = MockRuntimeBuilder::new()
+        .with_fail_on_down(&[project])
+        .build();
+    let err = apply_update_transaction(&rt, project, VALID_YAML).unwrap_err();
+    assert!(
+        err.downcast_ref::<speedwave_runtime::update::ContainersTornDown>()
+            .is_none(),
+        "a compose_down failure must NOT carry the ContainersTornDown marker"
     );
 }
 

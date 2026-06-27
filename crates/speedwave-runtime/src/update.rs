@@ -24,6 +24,22 @@ pub struct UpdateSnapshot {
     pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
+/// Marker attached to an update failure that occurred AFTER `compose_down` tore
+/// the project's containers down — the project now has no running containers and
+/// a rollback is warranted. Early failures (prereq/security/build/render, before
+/// `compose_down`) leave the old containers running and must NOT trigger a
+/// rollback. Detect with `err.downcast_ref::<ContainersTornDown>()`.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainersTornDown;
+
+impl std::fmt::Display for ContainersTornDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "containers were torn down before the failure")
+    }
+}
+
+impl std::error::Error for ContainersTornDown {}
+
 /// Outcome of a container update for one project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContainerUpdateResult {
@@ -265,8 +281,13 @@ fn apply_update_transaction_inner(
         save_snapshot(project)?;
         compose::save_compose(project, compose_yml)?;
         runtime.compose_down(project)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
-        runtime.compose_up_recreate(project)?;
+        // Past this point the project's containers are down; any failure must
+        // carry the ContainersTornDown marker so the caller knows to roll back.
+        crate::runtime::compose_validate_with_retry(runtime, project)
+            .map_err(|e| e.context(ContainersTornDown))?;
+        runtime
+            .compose_up_recreate(project)
+            .map_err(|e| e.context(ContainersTornDown))?;
         Ok(())
     })
 }

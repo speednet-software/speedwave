@@ -571,22 +571,29 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             }
             Err(e) => {
-                let e = redact_err(&e);
-                err!("Container update failed: {e}");
-                // Auto-rollback: a failed recreate after compose_down leaves the
-                // project with no running containers. Restore the pre-update
-                // snapshot (old images are still present — prune runs only on
-                // success) so the user is not left with a half-applied update.
-                match update::rollback_containers(&runtime, &project_name) {
-                    Ok(()) => {
-                        err!("Rolled back to the previous container state.");
-                    }
-                    Err(rollback_err) => {
-                        let rollback_err = redact_err(&rollback_err);
-                        err!(
-                            "Automatic rollback also failed: {rollback_err}. \
-                             Run `speedwave` to start containers manually."
-                        );
+                // Only roll back when the failure tore the containers down
+                // (after compose_down). Early failures (prereq/security/build)
+                // leave the old containers running and an up-to-date compose, so
+                // rolling back would needlessly recreate healthy containers from
+                // a possibly stale snapshot.
+                let torn_down = e
+                    .downcast_ref::<update::ContainersTornDown>()
+                    .is_some();
+                let msg = redact_err(&e);
+                err!("Container update failed: {msg}");
+                if torn_down {
+                    // The project has no running containers; restore the
+                    // pre-update snapshot (old images survive — prune runs only
+                    // on success) so the user is not left with nothing running.
+                    match update::rollback_containers(&runtime, &project_name) {
+                        Ok(()) => err!("Rolled back to the previous container state."),
+                        Err(rollback_err) => {
+                            let rollback_err = redact_err(&rollback_err);
+                            err!(
+                                "Automatic rollback also failed: {rollback_err}. \
+                                 Run `speedwave` to start containers manually."
+                            );
+                        }
                     }
                 }
                 std::process::exit(1);
