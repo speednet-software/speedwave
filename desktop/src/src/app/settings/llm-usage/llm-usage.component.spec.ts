@@ -22,7 +22,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     cache_write: 0,
     cost_usd: 0,
     throughput_completion_tokens: 0,
-    throughput_latency_ms_sum: 0,
+    decode_latency_ms_sum: 0,
     ...overrides,
   };
 }
@@ -87,7 +87,7 @@ describe('LlmUsageComponent', () => {
           cost_usd: 0.005,
           cache_read: 25_010,
           throughput_completion_tokens: 12,
-          throughput_latency_ms_sum: 1200,
+          decode_latency_ms_sum: 1200,
         }),
         days: {
           '2026-06-12': {
@@ -234,15 +234,15 @@ describe('LlmUsageComponent metrics', () => {
     expect(c.cacheHitRate(bucket({ prompt_tokens: 0, cache_read: 0 }))).toBe(0);
   });
 
-  it('computes tok/s from matched throughput numerator and denominator only', async () => {
+  it('computes tok/s from decode time (latency minus ttft)', async () => {
     const c = await makeComponent();
-    // 12 tokens over 1.2 s of timed successful latency = 10 tok/s.
+    // 12 tokens over 1.2 s of decode time = 10 tok/s.
     expect(
-      c.tokensPerSec(bucket({ throughput_completion_tokens: 12, throughput_latency_ms_sum: 1200 }))
+      c.tokensPerSec(bucket({ throughput_completion_tokens: 12, decode_latency_ms_sum: 1200 }))
     ).toBeCloseTo(10);
-    // No timed successful records → null (not a divide-by-zero or inflated rate).
+    // No decode time → null (not a divide-by-zero or inflated rate).
     expect(
-      c.tokensPerSec(bucket({ completion_tokens: 9999, throughput_latency_ms_sum: 0 }))
+      c.tokensPerSec(bucket({ completion_tokens: 9999, decode_latency_ms_sum: 0 }))
     ).toBeNull();
   });
 });

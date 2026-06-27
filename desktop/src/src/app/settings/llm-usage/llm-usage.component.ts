@@ -397,9 +397,9 @@ export class LlmUsageComponent {
    * @param bucket - Aggregate bucket (totals or a table row).
    */
   tokensPerSec(bucket: UsageBucket): number | null {
-    // Falsy checks also cover payloads from a binary older than these fields.
-    if (!bucket.throughput_latency_ms_sum) return null;
-    return bucket.throughput_completion_tokens / (bucket.throughput_latency_ms_sum / 1000);
+    // Falsy guard also covers payloads from a binary without this field.
+    if (!bucket.decode_latency_ms_sum) return null;
+    return bucket.throughput_completion_tokens / (bucket.decode_latency_ms_sum / 1000);
   }
 }
 

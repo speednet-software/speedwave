@@ -117,8 +117,8 @@ export interface UsageBucket {
   cost_usd: number | null;
   /** Throughput numerator: completion tokens from successful timed records. */
   throughput_completion_tokens: number;
-  /** Throughput denominator: latency of the same successful timed records. */
-  throughput_latency_ms_sum: number;
+  /** Throughput denominator: decode-phase ms (latency − ttft) of timed records. */
+  decode_latency_ms_sum: number;
 }
 
 /** Usage dashboard payload from `get_llm_usage` (ADR-073). */
