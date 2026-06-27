@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Current LLM config schema version. v2: provider list + active selection
-/// (ADR-073). v3: provenance quarantine — a foreign model under an Anthropic
-/// entry is cleared (see [`quarantine_foreign_anthropic_models`]).
+/// LLM config schema version. v2: provider list + active (ADR-073). v3:
+/// provenance quarantine ([`quarantine_foreign_anthropic_models`]).
 pub const LLM_SCHEMA_VERSION: u32 = 3;
 
 /// What class of backend a configured provider entry is (ADR-073).
@@ -35,8 +34,7 @@ impl LlmProviderKind {
 }
 
 /// SSOT predicate (ADR-073): a `provider/model`-shaped id is foreign to
-/// Anthropic — never inject it as `ANTHROPIC_MODEL`. Shape check, not catalog
-/// membership, so a retired-but-valid `claude-*` (no `/`) is kept.
+/// Anthropic — shape check, not catalog membership; retired `claude-*` kept.
 pub fn is_foreign_anthropic_model(model: &str) -> bool {
     // Mirrored in llm-provider.component.ts::isForeignModel (frontend can't call Rust).
     model.contains('/')
@@ -46,23 +44,20 @@ pub fn is_foreign_anthropic_model(model: &str) -> bool {
 /// they sit in `tokens/<project>/llm/<id>_api_key`; only presence flags do.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LlmProviderEntry {
-    /// Stable user-scoped identifier; plugin-grade slug
-    /// (`^[a-z][a-z0-9-]{0,63}$`). Becomes the token file name segment and
-    /// the `SPW_KEY_<ID>` env name in the proxy container.
+    /// Stable user-scoped plugin-grade slug (`^[a-z][a-z0-9-]{0,63}$`);
+    /// becomes the token file name segment + proxy `SPW_KEY_<ID>` env name.
     pub id: String,
     /// Backend class.
     pub kind: LlmProviderKind,
     /// Base URL for the `Local` kind (user-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Model this provider routes (per-provider SSOT). The routing model is
-    /// derived from THIS field via [`LlmConfig::effective_active_model`];
-    /// `active.model` is only a pointer that must agree with the active entry.
+    /// Model this provider routes (per-provider SSOT). Routing derives from
+    /// here via [`LlmConfig::effective_active_model`]; `active.model` is a pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// True when `tokens/<project>/llm/<id>_api_key` exists. Derived from disk
-    /// at config resolve, never trusted from the persisted value — the key file
-    /// is the single source of truth (see `sync_has_api_key_from_disk_in`).
+    /// True when `tokens/<project>/llm/<id>_api_key` exists. Re-derived from
+    /// disk at resolve (the SSOT), never the persisted echo (`sync_has_api_key_from_disk_in`).
     #[serde(default)]
     pub has_api_key: bool,
     /// Context window of this provider's selected model, when known.
@@ -79,16 +74,14 @@ pub struct LlmProviderEntry {
 pub struct LlmActive {
     /// `LlmProviderEntry::id` of the selected provider.
     pub provider_id: String,
-    /// Pointer to the active provider's model. Must agree with the active
-    /// entry's `model`; the routing model is derived via
+    /// Pointer to the active provider's model. Routing derives via
     /// [`LlmConfig::effective_active_model`], not read raw from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
 
-/// LLM provider selection and model settings (ADR-073 migration).
-/// v1 (legacy, flat): `provider`/`model`/`base_url`/`context_tokens`/`has_api_key`/`has_custom_headers`.
-/// v2: `providers` list + `active` selection. v3: + foreign-model quarantine.
+/// LLM provider selection and model settings (ADR-073 migration). v1 = legacy
+/// flat fields; v2 = `providers` + `active`; v3 = + foreign-model quarantine.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
     /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
@@ -110,9 +103,8 @@ pub struct LlmConfig {
     /// LLM schema version; `None` = legacy v1 (see [`LLM_SCHEMA_VERSION`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
-    /// Kill-switch (ADR-073): `false` routes Claude Code directly at the
-    /// provider (pre-proxy behaviour). Default `true`. User-only — the repo
-    /// layer cannot set it (merge_llm_repo ignores it).
+    /// Kill-switch (ADR-073): `false` routes Claude Code direct at the provider
+    /// (pre-proxy). Default `true`. User-only — `merge_llm_repo` ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_enabled: Option<bool>,
     /// Configured providers (v2). Entries with invalid slugs are dropped on
@@ -162,9 +154,8 @@ impl LlmConfig {
         }
     }
 
-    /// Sets each provider's `has_api_key` from whether its key file exists on
-    /// disk — the authoritative source (ADR-073). The persisted flag is only an
-    /// echo; this re-derives it so a stale value can never reach the renderer.
+    /// Sets each provider's `has_api_key` from its key file's existence — the
+    /// authoritative source (ADR-073), so a stale echo never reaches the renderer.
     pub fn sync_has_api_key_from_disk_in(&mut self, data_dir: &Path, project: &str) {
         for entry in &mut self.providers {
             if let Ok(key_path) =
@@ -176,10 +167,8 @@ impl LlmConfig {
     }
 }
 
-/// Migrates an `LlmConfig` to the current schema ([`LLM_SCHEMA_VERSION`]):
-/// lifts legacy v1 flat shape, drops invalid ids, and quarantines foreign
-/// Anthropic models (v3). Idempotent. Returns `true` if anything changed.
-/// `has_anthropic_secret` distinguishes `AnthropicApiKey` from `AnthropicOauth`.
+/// Migrates an `LlmConfig` to [`LLM_SCHEMA_VERSION`] (lift v1, drop invalid ids,
+/// quarantine foreign). Idempotent; `true` if changed. `has_anthropic_secret` = key vs OAuth.
 pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
     let snapshot_before = serde_json::to_string(&*llm).ok();
     if llm.schema_version.is_none() && llm.providers.is_empty() {
@@ -222,9 +211,8 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
     }
     llm.schema_version = Some(LLM_SCHEMA_VERSION);
 
-    // Lift the flat model into active only when it belongs to the active
-    // provider entry — a foreign flat model lifted here is cleared by the
-    // quarantine step below, so the transient is never persisted.
+    // Lift the flat model into active only when it belongs to the active entry;
+    // a foreign one would be cleared by the quarantine step below anyway.
     let flat = llm.model.as_deref().map(str::trim);
     let flat_belongs_to_active = llm
         .active_provider()
@@ -322,8 +310,7 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.model.clone_from(&entry.model);
         }
         // No v1 equivalent — flat masquerades as anthropic, so its model must
-        // NOT carry the OpenRouter id (would 404 a downgrade reader). v2 fields
-        // keep the real selection.
+        // NOT carry the OpenRouter id (404s a downgrade reader); v2 fields keep it.
         LlmProviderKind::OpenRouter => {
             llm.provider = Some("anthropic".to_string());
             llm.base_url = None;
@@ -380,9 +367,8 @@ impl OsIntegrationsConfig {
         true
     }
 
-    /// SSOT for service-key → field mapping. Returns `None` for unknown keys
-    /// so callers cannot silently miss a new service added to
-    /// `TOGGLEABLE_OS_SERVICES` without also updating this match.
+    /// SSOT for service-key → field mapping; `None` for unknown keys so a new
+    /// `TOGGLEABLE_OS_SERVICES` entry can't be silently missed without this match.
     pub fn get_service(&self, key: &str) -> Option<&IntegrationConfig> {
         match key {
             "reminders" => self.reminders.as_ref(),
@@ -442,8 +428,7 @@ impl IntegrationsConfig {
     }
 
     /// Set plugin enabled state. Does NOT validate against installed manifests
-    /// (caller must do that). Separate from set_service() to prevent typos
-    /// from silently creating plugin entries.
+    /// (caller's job). Separate from `set_service` so typos can't create entries.
     pub fn set_plugin_enabled(&mut self, service_id: &str, enabled: bool) {
         let plugins = self.plugins.get_or_insert_with(HashMap::new);
         plugins.insert(
@@ -683,9 +668,8 @@ pub fn resolve_project_config(
     // Migrate to the current LLM schema (ADR-073).
     migrate_llm(&mut llm, anthropic_secret_exists(project_name));
 
-    // Re-derive each provider's `has_api_key` from disk — the key file is the
-    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
-    // injection) reads the resolved config, so this is the single sync point.
+    // Re-derive each provider's `has_api_key` from disk (key file is SSOT) —
+    // the single sync point before any renderer reads the resolved config.
     llm.sync_has_api_key_from_disk_in(crate::consts::data_dir(), project_name);
 
     // Local LLMs get the full default Claude Code system prompt.
@@ -698,9 +682,8 @@ pub fn resolve_project_config(
     (claude, integrations)
 }
 
-/// True when `secrets/<project>/anthropic_api_key` exists in the production
-/// data dir. Used by the v1→v2 LLM migration to classify legacy `anthropic`
-/// configs; tests call [`migrate_llm`] directly with an explicit bool.
+/// True when `secrets/<project>/anthropic_api_key` exists in the prod data dir;
+/// used by v1→v2 migration to classify legacy `anthropic` configs.
 fn anthropic_secret_exists(project_name: &str) -> bool {
     anthropic_secret_exists_in(crate::consts::data_dir(), project_name)
 }
@@ -714,14 +697,12 @@ fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
         .is_file()
 }
 
-/// Provider names that route through a local LLM server (no Anthropic API
-/// call). SSOT for code that enumerates the set (e.g. tests that exercise
-/// every local provider). `is_local_provider` is the matching predicate.
+/// Provider names that route through a local LLM server. SSOT for the set;
+/// `is_local_provider` is the matching predicate.
 pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio", "llamacpp", "local"];
 
-/// Returns true for provider values that point at a local LLM server
-/// (Ollama, LM Studio, or llama.cpp).
-/// `None` / `Some("anthropic")` → false (Anthropic-hosted models).
+/// True for provider values pointing at a local LLM server;
+/// `None` / `Some("anthropic")` → false (Anthropic-hosted).
 pub fn is_local_provider(provider: Option<&str>) -> bool {
     provider.is_some_and(|p| LOCAL_PROVIDERS.contains(&p))
 }
@@ -829,9 +810,8 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
     crate::fs_perms::write_restricted_file_atomic(path, &content)
 }
 
-/// Runs `f` while holding an exclusive lock on `<data_dir>/config.lock`
-/// (serialises CLI/Desktop read-modify-write of `config.json`).
-/// Testable variant that accepts an explicit data directory.
+/// Runs `f` holding an exclusive lock on `<data_dir>/config.lock` (serialises
+/// CLI/Desktop read-modify-write of `config.json`); explicit data dir variant.
 pub fn with_config_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
@@ -853,9 +833,8 @@ where
     result
 }
 
-/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
-/// closure `f` while the lock is held.  Delegates to `with_config_lock_in`
-/// using `consts::data_dir()`.
+/// Runs `f` holding an exclusive lock on `~/.speedwave/config.lock`.
+/// Delegates to `with_config_lock_in` with `consts::data_dir()`.
 pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
@@ -863,9 +842,8 @@ where
     with_config_lock_in(crate::consts::data_dir(), f)
 }
 
-/// One-shot self-heal: migrate every project's LLM config to the current
-/// schema and persist atomically if anything changed. Idempotent — a no-op
-/// once all projects are at [`LLM_SCHEMA_VERSION`]. Held under the config lock.
+/// One-shot self-heal: migrate every project's LLM config and persist if
+/// changed. Idempotent once all are at [`LLM_SCHEMA_VERSION`]; under the config lock.
 pub fn heal_llm_config_on_disk() -> anyhow::Result<()> {
     heal_llm_config_in(crate::consts::data_dir())
 }
@@ -900,18 +878,16 @@ fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String,
     }
 }
 
-/// Anthropic auth/routing env keys a repo `.speedwave.json` must never set —
-/// they could redirect or hijack authenticated Claude traffic. `ANTHROPIC_MODEL`
-/// stays allowed (documented repo override). Mirrors `merge_llm_repo`'s spirit.
+/// Anthropic auth/routing env keys a repo `.speedwave.json` must never set
+/// (hijack risk); `ANTHROPIC_MODEL` stays allowed as a documented override.
 const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
 
-/// Strips security-class keys from a repo-layer `claude.env` overlay before
-/// merge (Anthropic auth/routing + every `consts::RESERVED_ENV_KEYS` vector),
-/// case-insensitively. User config is unaffected.
+/// Strips security-class keys (Anthropic auth/routing + `RESERVED_ENV_KEYS`,
+/// case-insensitive) from a repo-layer `claude.env`; user config is unaffected.
 fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
     env.map(|mut map| {
         map.retain(|key, _| !repo_env_key_is_denied(key));
@@ -969,9 +945,8 @@ fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     }
 }
 
-/// Removes the obsolete `log_level` field from `<data_dir>/config.json`.
-/// `Ok(true)` = field removed, `Ok(false)` = nothing changed; unknown future
-/// fields are preserved (operates on `serde_json::Value`).
+/// Removes the obsolete `log_level` field from `<data_dir>/config.json`;
+/// `Ok(true)` = removed. Unknown fields preserved (operates on `Value`).
 pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
     with_config_lock_in(data_dir, || {
         let path = data_dir.join("config.json");
@@ -1062,9 +1037,8 @@ mod tests {
 
     #[test]
     fn old_user_config_with_a_transcription_block_still_loads() {
-        // The `transcription` field was removed (no toggle, no per-feature
-        // defaults). An existing config that still carries the block must
-        // deserialize fine — the key is tolerated as unknown.
+        // The `transcription` field was removed; a config still carrying the
+        // block must deserialize fine (the key is tolerated as unknown).
         let old_json = r#"{
             "projects": [],
             "transcription": {
@@ -1866,9 +1840,8 @@ mod tests {
         assert!(healed.projects[0].claude.is_none());
     }
 
-    /// End-to-end regression for the original bug (F-5): active OpenRouter with
-    /// its model, then switch active to anthropic — the anthropic entry must
-    /// never inherit the OpenRouter model across migrate/sync round-trips.
+    /// Regression (F-5): switching active OpenRouter→anthropic must never let
+    /// the anthropic entry inherit the OR model across migrate/sync round-trips.
     #[test]
     fn test_roundtrip_openrouter_then_anthropic_does_not_poison_entry() {
         let or = LlmProviderEntry {
@@ -2022,9 +1995,8 @@ mod tests {
         assert_eq!(resolved.llm.model.as_deref(), Some("hacked-model"));
     }
 
-    /// A cloned repo `.speedwave.json` must not be able to redirect or hijack
-    /// authenticated Claude traffic via `claude.env`. The Anthropic auth/routing
-    /// keys and every `RESERVED_ENV_KEYS` vector are stripped from the repo layer.
+    /// A cloned repo `.speedwave.json` must not hijack Claude traffic via
+    /// `claude.env`: Anthropic auth keys + every `RESERVED_ENV_KEYS` are stripped.
     #[test]
     fn test_repo_env_cannot_inject_anthropic_or_reserved_keys() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2100,9 +2072,8 @@ mod tests {
         assert!(!resolved.env.contains_key("Anthropic_Base_Url"));
     }
 
-    /// The deny-list applies ONLY to the repo layer — user config.json is the
-    /// trusted, user-owned source and may set any env key, including the
-    /// Anthropic auth/routing keys (e.g. when pointing at a local LLM).
+    /// The deny-list applies ONLY to the repo layer — the trusted user
+    /// config.json may set any env key, including Anthropic auth/routing keys.
     #[test]
     fn test_user_env_can_set_anthropic_and_reserved_keys() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2533,9 +2504,8 @@ mod tests {
         }
     }
 
-    /// Upgrade path: a `config.json` pre-dating the `playwright` field still
-    /// deserializes (`playwright: None`), the toggle flips it, and the
-    /// save → load round-trip preserves the new value.
+    /// Upgrade path: a `config.json` pre-dating `playwright` deserializes
+    /// (`None`), the toggle flips it, and save→load preserves the new value.
     #[test]
     fn test_existing_user_config_accepts_new_integration() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2697,9 +2667,8 @@ mod tests {
         assert!(!resolved.sharepoint); // default is disabled
     }
 
-    /// The retired `host_exec` worker (ADR-054, reverted) left a `hostExec` key
-    /// in some on-disk user configs. `IntegrationsConfig` has no `deny_unknown_fields`,
-    /// so a legacy block must parse-and-drop silently and enable nothing.
+    /// The retired `host_exec` worker (ADR-054) left a `hostExec` key in some
+    /// configs; with no `deny_unknown_fields` it must parse-and-drop, enabling nothing.
     #[test]
     fn test_legacy_host_exec_key_is_ignored() {
         let raw = r#"{

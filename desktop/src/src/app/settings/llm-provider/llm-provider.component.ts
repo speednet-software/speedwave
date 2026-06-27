@@ -32,9 +32,8 @@ import {
 } from '../../models/llm';
 
 /**
- * Edit-state row of a remote (proxy-routed) provider — ADR-073. The key
- * VALUE lives only in `keyInput` until Save sends it through
- * `set_llm_provider_key`; config carries the `hasKey` presence flag.
+ * Edit-state row of a remote (proxy-routed) provider — ADR-073. Key VALUE
+ * lives in `keyInput` until Save; config carries the `hasKey` presence flag.
  */
 interface ExtraProviderEdit {
   id: string;
@@ -82,13 +81,8 @@ function nullIfEmpty(value: string): string | null {
 }
 
 /**
- * Discovery state for the LLM model listing. Discriminated union makes the
- * allowed transitions explicit and prevents inconsistent combinations of
- * `discovering + discoveryFailed + discoveredModels` booleans.
- *
- * The `id` on `in-flight` matches the component's monotonic counter — arriving
- * responses whose id is not the latest counter value are discarded as stale
- * (handles rapid blur / provider change races).
+ * Discovery state for the LLM model listing (discriminated union). `in-flight.id`
+ * matches the monotonic counter; non-latest responses are discarded as stale.
  */
 type DiscoveryState =
   | { kind: 'idle' }
@@ -260,9 +254,8 @@ type DiscoveryState =
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
-                <!-- Empty value = no ANTHROPIC_MODEL injected. The real default
-                     depends on the account plan (Pro→Sonnet, Max→Opus), which
-                     Speedwave can't see — so the label stays plan-neutral. -->
+                <!-- Empty value = no ANTHROPIC_MODEL injected; real default is
+                     plan-dependent (Pro→Sonnet, Max→Opus), unseen by Speedwave. -->
                 <option value="">Default — depends on your plan (switchable via /model)</option>
                 @if (latestAnthropicModels().length > 0) {
                   <optgroup label="Latest">
@@ -603,11 +596,8 @@ export class LlmProviderComponent implements OnInit {
   saved = false;
 
   /**
-   * Local-LLM API key (Bearer). Form-only — the value never round-trips
-   * through `get_llm_config`; backend stores it in a per-project token file
-   * and exposes only `has_api_key` to the frontend. `apiKeyTouched` flips on
-   * any user edit so Save can distinguish "leave unchanged" from "set to
-   * empty" from "set to value".
+   * Local-LLM API key (Bearer), form-only — backend stores it per-project and
+   * exposes only `has_api_key`. `apiKeyTouched` gates the unchanged/empty/value tri-state.
    */
   apiKey = '';
   apiKeyTouched = false;
@@ -628,10 +618,8 @@ export class LlmProviderComponent implements OnInit {
   readonly activeProject = input<string | null>(null);
 
   /**
-   * Anthropic auth (absorbed from the former Authentication section):
-   * subscription OAuth is the recommended default; the api-key tab is one
-   * click away. The key VALUE goes through `save_api_key` into
-   * `secrets/<project>/anthropic_api_key` — never through LlmConfig.
+   * Anthropic auth — OAuth default, api-key tab one click away. The key VALUE
+   * goes via `save_api_key` to `secrets/<project>/anthropic_api_key`, never LlmConfig.
    */
   authMethod: 'oauth' | 'api_key' = 'oauth';
   anthropicApiKeyInput = '';
@@ -641,9 +629,8 @@ export class LlmProviderComponent implements OnInit {
   oauthAuthenticated = false;
 
   /**
-   * Remote (proxy-routed) providers — ADR-073. Parsed from the v2
-   * `providers` list on load (anthropic/local entries stay on the cards);
-   * Save sends the reconstructed full set.
+   * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
+   * list on load (anthropic/local stay on cards); Save sends the full set.
    */
   extraProviders: ExtraProviderEdit[] = fixedExtraRows();
 
@@ -654,30 +641,20 @@ export class LlmProviderComponent implements OnInit {
   selectedTarget = 'anthropic';
 
   /**
-   * `provider_id|model` snapshot taken on load. When Save leaves it
-   * unchanged, only the proxy config changed (keys, added/removed
-   * providers) — a proxy-only hot reload suffices and the running claude
-   * session survives. Any change to it requires the full project restart
-   * (the claude env carries the active provider/model).
+   * `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot
+   * reload (session survives); any change → full project restart (claude env).
    */
   private loadedActiveKey = '';
 
   /**
-   * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) detected in the
-   * persisted config. `null` when the config carries the current `local`
-   * name or `anthropic`. Drives the auto-migration banner above the
-   * provider cards — the rewrite to `local` only happens on the next Save,
-   * which keeps downgrade safety until the user opts in.
+   * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config,
+   * else `null`. Drives the migration banner; rewrite to `local` waits for Save.
    */
   legacyMigrationProvider: string | null = null;
 
   /**
-   * Context window persisted in `claude.llm.context_tokens` for the active
-   * project — seeded from `get_llm_config` on load. Used as a fallback by
-   * `resolveContextTokensForSave` when the discovery probe hasn't run yet
-   * (typical right after a fresh app start with a saved local provider).
-   * Once discovery yields a value for the picked model, the discoveryState
-   * payload becomes the source of truth and this seed is no longer read.
+   * Persisted `context_tokens`, seeded on load. Fallback for
+   * `resolveContextTokensForSave` until discovery yields the picked model's value.
    */
   private loadedLocalContextTokens: number | null = null;
 
@@ -687,9 +664,8 @@ export class LlmProviderComponent implements OnInit {
   discoveryState: DiscoveryState = { kind: 'idle' };
 
   /**
-   * Monotonic counter incremented on every discovery trigger. An arriving
-   * response whose `id` is not equal to the counter is a stale response from
-   * a superseded trigger and must be discarded.
+   * Monotonic counter bumped per discovery trigger; a response whose `id`
+   * differs from it is stale (superseded trigger) and discarded.
    */
   private discoveryCounter = 0;
 
@@ -700,12 +676,8 @@ export class LlmProviderComponent implements OnInit {
   private lastKnownProvider = 'anthropic';
 
   /**
-   * Session cache of the last URL the user had in the Base URL field per
-   * provider. Lets us restore their previous entry when they switch back to
-   * a provider instead of overwriting it with the hard-coded default
-   * (which is often wrong for the user's specific setup — e.g. llama.cpp
-   * default is :8080 but many users run it on a different port).
-   * Seeded from the persisted config on init for the config's provider.
+   * Per-provider session cache of the last Base URL, restored on switch-back
+   * instead of the often-wrong default. Seeded from config on init.
    */
   private baseUrlByProvider: Record<string, string> = {};
 
@@ -716,10 +688,8 @@ export class LlmProviderComponent implements OnInit {
   private loadedAnthropicModel: string | null = null;
 
   /**
-   * Cache of the backend-authoritative default base URL per provider.
-   * Populated on ngOnInit via `get_default_base_url` for each local provider
-   * so that `isDefaultBaseUrl` stays synchronous (no await on the hot path).
-   * Backend is SSOT for these values (see `speedwave_runtime::compose::default_base_url`).
+   * Per-provider default base URL cache (via `get_default_base_url`) keeping
+   * `isDefaultBaseUrl` sync. SSOT: `speedwave_runtime::compose::default_base_url`.
    */
   private defaultBaseUrlsByProvider: Record<string, string> = {};
 
@@ -743,9 +713,8 @@ export class LlmProviderComponent implements OnInit {
   private log = inject(LoggerService);
 
   /**
-   * Cached SSOT catalog of Anthropic models from the backend
-   * (`list_anthropic_models`). Empty until the first fetch settles; UI
-   * gracefully renders nothing in the optgroups while loading.
+   * Cached SSOT Anthropic model catalog (`list_anthropic_models`). Empty until
+   * the first fetch settles; optgroups render nothing while loading.
    */
   protected readonly anthropicCatalog = signal<readonly AnthropicModel[]>([]);
 
@@ -767,8 +736,7 @@ export class LlmProviderComponent implements OnInit {
 
   /**
    * Format a catalog entry into the dropdown label, e.g.
-   * `"Opus 4.7 · 1M ctx (claude-opus-4-7)"`. Showing the API id keeps users
-   * who copy values into config files honest about which alias they picked.
+   * `"Opus 4.7 · 1M ctx (claude-opus-4-7)"` — the id keeps copied aliases honest.
    * @param m - Catalog entry returned by the backend SSOT.
    */
   protected formatModelLabel(m: AnthropicModel): string {
@@ -784,9 +752,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Format a discovered local model into a dropdown label. When the
-   * provider exposed a context window we render `id · 32k ctx`; otherwise
-   * we show the bare id so the option still reads honestly.
+   * Format a discovered local model into a dropdown label: `id · 32k ctx` when
+   * a context window is known, otherwise the bare id.
    * @param m - Discovered model returned by the backend probe.
    */
   protected formatLocalModelLabel(m: DiscoveredModel): string {
@@ -802,10 +769,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Local-model `<select>` change handler. The `context_tokens` for the
-   * picked entry are derived on demand by `resolveContextTokensForSave`
-   * from `discoveryState.models`, so we don't cache them here — keeping
-   * one source of truth (the discovery payload).
+   * Local-model `<select>` change handler. `context_tokens` are derived on
+   * demand from `discoveryState.models` (one source), not cached here.
    * @param id - Model id from the dropdown's value attribute.
    */
   protected onLocalModelChange(id: string): void {
@@ -831,15 +796,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Resolves the value to send as `context_tokens` on save.
-   *
-   * - Anthropic + non-empty model id → SSOT catalog lookup.
-   * - Local provider + discovery loaded → context window from the picked
-   *   `discoveryState.models[]` entry (single source of truth).
-   * - Local provider + discovery not loaded yet → fall back to the value
-   *   we loaded from config so saving without re-running discovery doesn't
-   *   wipe the persisted token count.
-   * - Anything else → `null` (chat fallback chain takes over).
+   * `context_tokens` to save: anthropic→catalog lookup; local+discovery→picked
+   * model's window; local pre-discovery→loaded config value; else `null`.
    */
   private resolveContextTokensForSave(): number | null {
     if (!this.model) return null;
@@ -861,9 +819,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Click handler for provider cards. Routes through the existing
-   * `onProviderChange` so URL caching, default fetching, and discovery probe
-   * gating all stay intact — the cards are just a different control surface.
+   * Provider-card click handler. Routes through `onProviderChange` so URL
+   * caching, default fetching, and probe gating stay intact.
    * @param id - Card-class provider id (`anthropic` | `local`).
    */
   async selectProvider(id: 'anthropic' | 'local'): Promise<void> {
@@ -922,9 +879,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Fetches the OpenRouter catalog (host-side, filtered to tool-capable
-   * models). Failure keeps the free-text input — the catalog is a
-   * convenience, not a gate.
+   * Fetches the OpenRouter catalog (host-side, tool-capable models). Failure
+   * keeps the free-text input — the catalog is a convenience, not a gate.
    * @param entry - The openrouter row to populate.
    */
   async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
@@ -996,10 +952,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Returns a placeholder model name based on the selected LLM provider. For
-   * Anthropic it derives the hint from the SSOT catalog (latest non-Opus, i.e.
-   * the everyday Sonnet) rather than a hard-coded string — empty while the
-   * catalog loads so we never flash a stale model id.
+   * Placeholder model name per provider. Anthropic derives it from the SSOT
+   * catalog (latest everyday Sonnet); empty while loading to avoid a stale id.
    */
   modelPlaceholder(): string {
     if (this.provider === 'anthropic') {
@@ -1009,9 +963,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Human-readable explanation of why model discovery failed, shown inline
-   * under the Model field so the user understands why the select fell back
-   * to a free-text input.
+   * Human-readable reason discovery failed, shown inline under the Model field
+   * to explain the fallback to a free-text input.
    */
   discoveryFailureMessage(): string {
     if (this.discoveryState.kind !== 'failed') return '';
@@ -1033,16 +986,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Handles a change of the provider dropdown.
-   *
-   * Each provider has a different default port, so baseUrl must be reset on
-   * any real change — keeping an Ollama URL around for LM Studio would send
-   * probes to the wrong server. After the reset, defaultBaseUrl is shown as
-   * the input placeholder and discovery is kicked off against it; if the
-   * server isn't running the UI gracefully falls back to the text input.
-   *
-   * Counter bump invalidates any in-flight probe from the previous provider
-   * so its response is discarded on arrival.
+   * Provider-dropdown change. Resets baseUrl (per-provider default ports),
+   * re-probes against the new default, and bumps the counter to drop stale probes.
    */
   async onProviderChange(): Promise<void> {
     if (this.provider === this.lastKnownProvider) {
@@ -1093,13 +1038,9 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Probes the local LLM server for the list of available models.
-   * Fires only on explicit intent: user blur on baseUrl, Refresh click, or
-   * initial load with persisted baseUrl. Provider switches do NOT probe
-   * automatically — the new provider's default URL is typically wrong for
-   * this user (different port, server not running).
-   * @param isRefresh When true, bypass the same-URL dedupe check. Used by the
-   *   Refresh button to let the user force a re-probe.
+   * Probes the local LLM server for models. Fires only on explicit intent
+   * (blur, Refresh, initial load with persisted baseUrl), never on switch.
+   * @param isRefresh When true, bypass the same-URL dedupe to force a re-probe.
    */
   async discoverModels(isRefresh: boolean): Promise<void> {
     if (this.provider === 'anthropic') return;
@@ -1139,8 +1080,7 @@ export class LlmProviderComponent implements OnInit {
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
-      // so a resolved Ok always carries a non-empty array — the success path
-      // never observes length === 0.
+      // so a resolved Ok always carries a non-empty array.
       this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
       this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
       // Auto-select only when blank (a3): a restored-but-unlisted model is a
@@ -1236,19 +1176,15 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Builds the full v2 provider set (ADR-073): the two cards map to the
-   * `anthropic`/`local` entries, remote rows append verbatim.
-   * @param anthropicHasApiKey - Whether the project has an Anthropic API
-   * key configured (classifies the anthropic entry's kind).
+   * Builds the full v2 provider set (ADR-073): cards map to `anthropic`/`local`
+   * entries, remote rows append verbatim.
+   * @param anthropicHasApiKey - Whether an Anthropic key is configured (sets the entry kind).
    */
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
     // Resolve the active target once — it's stable for this invocation.
     const target = this.effectiveTarget();
-    // The anthropic entry carries the model too — symmetric with local/remote.
-    // When the anthropic card is active `this.model` is authoritative; when
-    // another provider is active the card field was cleared, so fall back to
-    // the snapshot taken on load (otherwise an explicit Anthropic model is
-    // wiped the first time the user activates another provider and saves).
+    // Anthropic card active → `this.model`; else the load-time snapshot, so
+    // an explicit Anthropic model survives activating another provider.
     const anthropicModel = target === 'anthropic' ? this.model : this.loadedAnthropicModel;
     const providers: LlmProviderEntry[] = [
       {
@@ -1258,9 +1194,8 @@ export class LlmProviderComponent implements OnInit {
         has_api_key: anthropicHasApiKey,
       },
     ];
-    // When the local card is NOT being edited, its loaded entry passes
-    // through verbatim — rebuilding it from the (then anthropic- or
-    // extra-derived) card fields silently erased base_url and model.
+    // Local card not being edited → pass its loaded entry verbatim; rebuilding
+    // from the card fields silently erased base_url and model.
     const editingLocal = target === 'local';
     if (!editingLocal && this.loadedLocalEntry) {
       providers.push({ ...this.loadedLocalEntry });
@@ -1302,9 +1237,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Resolves the radio state to a concrete target id. When `selectedTarget`
-   * points at no extra row, the cards win — `provider` decides (covers
-   * programmatic `provider` mutation that bypasses `selectProvider`).
+   * Resolves the radio state to a concrete target id. With no matching extra
+   * row, the cards win — `provider` decides (covers programmatic mutation).
    */
   private effectiveTarget(): string {
     if (this.extraProviders.some((p) => p.id === this.selectedTarget)) {
@@ -1314,9 +1248,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Finds a permanent remote row by exact id, falling back to kind so entries
-   * saved under a legacy generated id (`openrouter-2`, suffixed compat) still
-   * land on their fixed row.
+   * Finds a permanent remote row by exact id, falling back to kind so legacy
+   * generated ids (`openrouter-2`) still land on their fixed row.
    * @param id - Exact provider id to match first.
    * @param kind - Optional kind to fall back on when no id matches.
    * @returns The matching row, or undefined.
@@ -1372,9 +1305,8 @@ export class LlmProviderComponent implements OnInit {
 
   /** Persists the LLM provider configuration to the backend. */
   async saveConfig(): Promise<void> {
-    // Surface the model-required error at Save time. compose::apply_llm_config
-    // also rejects this, but its error only surfaces at container start —
-    // a user who clicks Save sees no immediate feedback otherwise.
+    // Surface the model-required error at Save time; compose::apply_llm_config
+    // also rejects it but only at container start (no immediate feedback).
     const localIsActive = this.effectiveTarget() === 'local';
     if (this.provider !== 'anthropic' && !this.model && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
@@ -1485,12 +1417,8 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * Returns true when `url` exactly matches the backend-authoritative default
-   * for `provider`. Uses the `defaultBaseUrlsByProvider` cache (populated on
-   * init via `get_default_base_url` — backend is SSOT, see compose.rs).
-   * Used by `loadConfig` to distinguish a known-safe default from a
-   * user-supplied URL so we never silently probe arbitrary hosts on startup
-   * (SSRF mitigation).
+   * True when `url` matches the backend-authoritative default for `provider`
+   * (cache via `get_default_base_url`). Gates startup auto-probe (SSRF mitigation).
    * @param provider The selected provider (e.g. `ollama`, `lmstudio`, `llamacpp`).
    * @param url The base URL to check against the provider's cached default.
    */
@@ -1503,10 +1431,8 @@ export class LlmProviderComponent implements OnInit {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       const persistedProvider = config.provider || 'anthropic';
-      // Auto-migration UX: configs with legacy provider names
-      // (`ollama`/`lmstudio`/`llamacpp`) display the unified `local` card
-      // and a one-time banner. The persisted value is only rewritten on
-      // the user's next Save, preserving downgrade-safety until then.
+      // Legacy provider names (`ollama`/`lmstudio`/`llamacpp`) show the `local`
+      // card + banner; persisted value rewritten only on next Save (downgrade-safe).
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
         this.legacyMigrationProvider = persistedProvider;
         this.provider = 'local';

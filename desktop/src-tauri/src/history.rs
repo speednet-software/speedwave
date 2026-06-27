@@ -54,9 +54,8 @@ pub struct ConversationMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
-    /// Stable UUID written into the JSONL by Claude Code; needed by the
-    /// retry-last-turn flow (ADR-046) to anchor the rewind point. `None`
-    /// when the line lacks a `uuid` field.
+    /// Stable JSONL UUID; anchors the retry-last-turn rewind point (ADR-046).
+    /// `None` when the line lacks a `uuid` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
 }
@@ -207,10 +206,8 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 /// hold the last several JSONL lines (incl. trailing `last-prompt`/`ai-title`).
 const TAIL_READ_BYTES: u64 = 64 * 1024;
 
-/// Timestamp of the last JSONL line carrying one — the session's real last
-/// activity, used for sort/display. Reads only the file's final
-/// [`TAIL_READ_BYTES`] (not the whole transcript) and scans those lines
-/// backwards. `None` if unreadable or none present.
+/// Timestamp of the last JSONL line carrying one — the session's last activity.
+/// Scans only the final [`TAIL_READ_BYTES`] backwards; `None` if none present.
 fn last_message_timestamp(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).ok()?;
@@ -498,9 +495,8 @@ fn list_conversations_impl(
         let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
         const MAX_SCAN_LINES: usize = 50;
-        // Tracks whether the head scan saw the whole file; the junk-slash drop
-        // below is only safe when it did (else a real 2nd user message past the
-        // cap could be hidden behind an early lone `/`).
+        // Whether the head scan saw the whole file — gates the junk-slash drop
+        // below (a real 2nd user message past the cap must keep the session).
         let mut scanned_lines: usize = 0;
 
         for line in reader.lines().take(MAX_SCAN_LINES) {
@@ -540,9 +536,8 @@ fn list_conversations_impl(
         // `last_timestamp`/`user_message_count` are authoritative.
         let head_saw_whole_file = scanned_lines < MAX_SCAN_LINES;
 
-        // Only re-read the tail when the head was truncated — a fully-scanned
-        // short file already has the authoritative last activity, so the second
-        // open is skipped. Tail value wins when present.
+        // Re-read the tail only when the head was truncated; tail wins when
+        // present (a fully-scanned short file already has the last activity).
         if !head_saw_whole_file {
             if let Some(ts) = last_message_timestamp(&path) {
                 last_timestamp = Some(ts);
@@ -553,10 +548,8 @@ fn list_conversations_impl(
             continue;
         }
 
-        // Drop junk sessions whose sole user message is a lone `/` (slash-menu
-        // trigger sent as a message), regardless of any "you typed /" reply.
-        // Only when the head scan saw the whole file — a real 2nd user message
-        // past the cap must keep the session. Real `/code-review` survives.
+        // Drop junk sessions whose sole user message is a lone `/`, only when the
+        // head saw the whole file. Real `/code-review` and 2nd messages survive.
         if head_saw_whole_file
             && user_message_count == 1
             && speedwave_runtime::slash::is_bare_slash(&preview)
@@ -669,9 +662,8 @@ fn delete_conversation_impl(
 // Resume snapshot
 // ---------------------------------------------------------------------------
 
-/// Cumulative session state recovered from an existing transcript. Seeded
-/// into the `StreamParser` on resume so the first new turn reports a real
-/// delta instead of `cumulative - 0`.
+/// Cumulative session state recovered from a transcript. Seeds the
+/// `StreamParser` on resume so the first new turn reports a real delta.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResumeSnapshot {
     /// Cumulative input tokens across the session.
@@ -690,9 +682,8 @@ pub struct ResumeSnapshot {
     pub model: Option<String>,
 }
 
-/// Compute the cumulative session snapshot from an existing JSONL transcript.
-/// Prefers the latest `modelUsage`, falls back to summed flat `usage`; model
-/// from the latest `modelUsage` else the last `system init` line.
+/// Compute the cumulative session snapshot from a JSONL transcript: prefers the
+/// latest `modelUsage`, falls back to summed flat `usage` / last `system init`.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
@@ -1229,9 +1220,8 @@ mod tests {
 
     #[test]
     fn list_conversations_timestamp_skips_trailing_metadata_lines() {
-        // Real transcripts end with `last-prompt`/`ai-title` lines that carry
-        // no timestamp; the reported timestamp is the last real message before
-        // them, not None.
+        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the report
+        // is the last real message before them, not None.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "acme");
         let id = "00000000-0000-0000-0000-00000000000d";
@@ -1528,9 +1518,8 @@ mod tests {
 
     #[test]
     fn list_conversations_keeps_slash_session_with_real_message_past_head_scan() {
-        // A lone `/`, then >50 JSONL lines of tool/system noise, then a real 2nd
-        // user message: the head scan (50-line cap) sees only `user_count==1` and
-        // preview `/`, but the file is longer — the session must NOT be dropped.
+        // Lone `/`, then >50 noise lines, then a real 2nd user message past the
+        // head-scan cap: the session must NOT be dropped.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";

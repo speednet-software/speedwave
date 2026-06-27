@@ -15,9 +15,8 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
   imports: [TooltipDirective, IconComponent],
   host: { class: 'block' },
   template: `
-    <!-- One row, always rendered. Every segment defaults to 0 so a new chat, a
-         freshly-resumed session, and a live one all share the identical shape;
-         numbers fill in as stream data arrives. No second placeholder view. -->
+    <!-- One row, always rendered; every segment defaults to 0 so new/resumed/live
+         sessions share one shape, filled in as stream data arrives. -->
     <div
       data-testid="session-stats"
       class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
@@ -142,9 +141,8 @@ export class SessionStatsComponent {
   });
 
   /**
-   * Context window usage as integer percent (0–100), or `null` when the window
-   * size is unknown (local model, ADR-041) — the ctx segment is then hidden, not
-   * fabricated. A known window with no usage yet returns 0.
+   * Context usage as integer percent (0–100); `null` when window unknown (local
+   * model, ADR-041 — segment hidden, not fabricated), 0 when known but unused.
    */
   readonly ctxPct = computed<number | null>(() => {
     const windowSize = this.stats()?.context_window_size;

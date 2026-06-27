@@ -51,7 +51,7 @@ The user-level config file stores project definitions, the active project, and I
 
 #### `claude.llm` schema v3 (ADR-073)
 
-The example above shows the legacy flat `llm` shape, which is still read and auto-migrated. Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) the Settings UI writes a provider **list** with an `active` selection and `schema_version: 3` (v3 adds provenance quarantine — a foreign model under an Anthropic entry is cleared on migration). A typical block (with the equivalent flat fields the app also writes for one-release downgrade) looks like:
+The example above shows the legacy flat `llm` shape, which is still read and auto-migrated. Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) the Settings UI writes a provider **list** with an `active` selection and `schema_version: 3` (v3 adds provenance quarantine — a foreign model under an Anthropic entry is cleared on migration). A typical block (with the equivalent flat fields the app also writes for one-release downgrade) looks like:
 
 ```json
 "llm": {
@@ -87,7 +87,7 @@ Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). W
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider configuration. Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) the schema is a provider **list** (`providers[]` with `id`, `kind`, optional `base_url`, `has_api_key`) plus an `active` selection (`provider_id` + `model`) and `schema_version: 3`; provider kinds are `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`. The legacy flat fields (`provider`, `model`, `base_url`, `context_tokens`) are still read (auto-migrated on resolve) and still written for one release (downgrade story). `proxy_enabled: false` is the temporary kill-switch restoring pre-proxy direct injection (removal in N+2). See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` / `providers` / `active` / `proxy_enabled` are not merged from the repo file** — only the user config may set them; the repo may suggest `model` only.
+- `claude.llm` — LLM provider configuration. Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) the schema is a provider **list** (`providers[]` with `id`, `kind`, optional `base_url`, `has_api_key`) plus an `active` selection (`provider_id` + `model`) and `schema_version: 3`; provider kinds are `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`. The legacy flat fields (`provider`, `model`, `base_url`, `context_tokens`) are still read (auto-migrated on resolve) and still written for one release (downgrade story). `proxy_enabled: false` is the temporary kill-switch restoring pre-proxy direct injection (removal in N+2). See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` / `providers` / `active` / `proxy_enabled` are not merged from the repo file** — only the user config may set them; the repo may suggest `model` only.
 - `integrations` — enable/disable individual integrations per project.
 
 ### `claude.llm.context_tokens`

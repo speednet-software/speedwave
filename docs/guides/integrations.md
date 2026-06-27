@@ -672,7 +672,7 @@ The entrypoint records every link it creates in `~/.claude/.speedwave-managed-li
 
 You can run Claude Code inside Speedwave against a local or third-party LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to configure providers.
 
-Since [ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
+Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
 
 Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
 

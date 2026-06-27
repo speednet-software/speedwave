@@ -360,9 +360,8 @@ describe('ChatStateService', () => {
     });
 
     it('waits (no competing start_chat) when a resume start is in progress', async () => {
-      // beginStartingSession marks a resume in flight; a racing send that hits
-      // "no active session" must wait for it, NOT fire a competing start_chat
-      // that would tear down the resumed session (cross-session error race).
+      // A racing "no active session" send must wait for the in-flight resume,
+      // not fire a competing start_chat that tears down the resumed session.
       let sendAttempt = 0;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -604,9 +603,8 @@ describe('ChatStateService', () => {
 
     it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
-      // get_conversation_cost is the SSOT total; the per-turn delta is no longer
-      // summed in the frontend. The aggregator already reflects every recorded
-      // turn, so the footer mirrors whatever it returns.
+      // get_conversation_cost is the SSOT total (no frontend delta sum); the
+      // footer mirrors whatever the aggregator returns.
       let aggregatorTotal = 0.2;
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
@@ -725,8 +723,8 @@ describe('ChatStateService', () => {
       vi.useFakeTimers();
       try {
         TestBed.inject(ProjectStateService).activeProject = 'proj';
-        // First read: OpenRouter cost not yet computed (deferred, null). Later
-        // reads: priced (actual). Footer aggregator follows the same arc.
+        // First read: OpenRouter cost deferred (null); later reads priced
+        // (actual). Footer aggregator follows the same arc.
         let priced = false;
         vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
           if (cmd === 'get_usage_for_response') {
@@ -756,8 +754,8 @@ describe('ChatStateService', () => {
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Initial reconcile: deferred → keep the live preview (footer 0.99), do
-        // not blank it; the per-message stays on its preview (here undefined).
+        // Initial reconcile: deferred keeps the live preview (footer 0.99), not
+        // blanked; per-message stays on its preview (here undefined).
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeUndefined();
         expect(service.sessionStats?.total_cost).toBe(0.99);
 
@@ -880,8 +878,8 @@ describe('ChatStateService', () => {
         await vi.advanceTimersByTimeAsync(0);
         const callsAfterFirst = calls;
 
-        // A new turn starts (sendMessage bumps `_turnId`) → the stale deferred
-        // retry for msg_1 must abandon instead of firing through its backoff.
+        // A new turn (sendMessage bumps `_turnId`) must abandon msg_1's stale
+        // deferred retry instead of firing through its backoff.
         await service.sendMessage('next question');
         await vi.advanceTimersByTimeAsync(10_000);
 
@@ -2320,8 +2318,8 @@ describe('ChatStateService', () => {
     });
 
     it('does not compute cost on the frontend when backend omits turn_cost', () => {
-      // No frontend pricing (SSOT is the proxy): an absent turn_cost leaves the
-      // per-message cost undefined until reconcileFooterCost fills it from the proxy.
+      // No frontend pricing (proxy is SSOT): absent turn_cost leaves cost
+      // undefined until reconcileFooterCost fills it from the proxy.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -2693,10 +2691,8 @@ describe('ChatStateService', () => {
     });
 
     it('does not dedupe — every call hits the backend', async () => {
-      // Regression guard: the previous implementation skipped re-fetches
-      // when the active project hadn't changed, which silently broke the
-      // post-save chat-footer refresh. The dedupe was removed because the
-      // command is cheap.
+      // Regression guard: dedupe was removed (cheap command) — skipping
+      // re-fetches per project silently broke the post-save footer refresh.
       let calls = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') {
@@ -2728,9 +2724,8 @@ describe('ChatStateService', () => {
     });
 
     it('falls back to the Anthropic SSOT when no live value is available', async () => {
-      // The ChatStateService injects AnthropicModelsService — populate the
-      // shared cache by going through its public list() once with a fixture
-      // backend.
+      // Populate the injected AnthropicModelsService cache via its public
+      // list() once with a fixture backend.
       const anthropic = TestBed.inject(AnthropicModelsService);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_anthropic_models') {

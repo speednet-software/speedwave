@@ -145,9 +145,8 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     "--strict-mcp-config",
     "--thinking-display",
     "summarized",
-    // Triggers lock-file auto-connect to the IDE bridge (~/.claude/ide/),
-    // complementing CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the
-    // integrated-terminal path). Skipped silently when no lock is present.
+    // Lock-file auto-connect to the IDE bridge (~/.claude/ide/); silent when no lock.
+    // Complements CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the terminal path).
     "--ide",
 ];
 
@@ -171,14 +170,12 @@ pub fn base_env() -> HashMap<String, String> {
     env
 }
 
-/// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the
-/// longest worker timeout in `mcp-servers/shared/src/timeouts.ts`
-/// (`STALE_CHUNK_TIMEOUT_MS`); enforced by `mcp_tool_idle_timeout_covers_worker_max`.
+/// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the longest
+/// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
-/// Anthropic-branch alias pins: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
-/// from the `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable is omitted
-/// — its `fable` alias resolves natively on the passthrough, no pin needed.
+/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from the
+/// `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable omitted — resolves natively.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
@@ -300,9 +297,8 @@ mod tests {
 
     #[test]
     fn mcp_tool_idle_timeout_covers_worker_max() {
-        // SSOT-alignment: idle ceiling must stay >= the largest static worker timeout
-        // (STALE_CHUNK_TIMEOUT_MS) in timeouts.ts. Env-raised BASE_MS/SHAREPOINT_SYNC_MS
-        // are invisible to this static check — raising them needs a manual bump.
+        // SSOT-alignment: idle ceiling must stay >= STALE_CHUNK_TIMEOUT_MS in timeouts.ts.
+        // Env-raised BASE_MS/SHAREPOINT_SYNC_MS are invisible here — raise them manually.
         let src = include_str!("../../../mcp-servers/shared/src/timeouts.ts");
         let re = regex::Regex::new(r"STALE_CHUNK_TIMEOUT_MS:\s*([0-9*\s]+?),").unwrap();
         let expr = re
@@ -415,9 +411,8 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_omits_fable_alias() {
-        // The anthropic-branch pins skip Fable (its `fable` alias resolves
-        // natively on the passthrough). Non-anthropic remapping injects FABLE
-        // separately — see compose/llm.rs, asserted there.
+        // Anthropic-branch pins skip Fable (`fable` alias resolves natively).
+        // Non-anthropic remapping injects FABLE separately — see compose/llm.rs.
         let env = anthropic_default_models_env();
         assert!(
             !env.keys().any(|k| k.contains("FABLE")),

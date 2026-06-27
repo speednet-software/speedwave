@@ -155,10 +155,8 @@ export class ChatStateService {
   }
 
   /**
-   * Mark a session start in progress so a concurrent `sendMessage` waits for it
-   * instead of firing a competing `start_chat` (used around resume). Bumping the
-   * generation makes any in-flight background `start_chat` no-op. Returns a
-   * disposer that clears the flag — call it in a `finally`.
+   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
+   * bumps the generation to no-op in-flight starts. Returns a flag-clearing disposer.
    */
   beginStartingSession(): () => void {
     this.startingSession = true;
@@ -460,9 +458,8 @@ export class ChatStateService {
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
 
-    // Snapshot the pre-mutation current_index so the error path can revert
-    // to it precisely — resetting to questionIdx would be wrong if the user
-    // submitted out of order.
+    // Snapshot the pre-mutation current_index so the error path reverts precisely
+    // (resetting to questionIdx breaks on out-of-order submits).
     let prevIndex: number | null = null;
 
     this._currentBlocks = this._currentBlocks.map((b) => {
@@ -487,10 +484,8 @@ export class ChatStateService {
         answer: value,
       });
     } catch (err) {
-      // If stopConversation ran while submit_question_answer was in flight,
-      // `_turnId` has moved on. Suppress the error block: the user
-      // deliberately cancelled — a "Broken pipe" / "no active session"
-      // surfacing would be confusing noise.
+      // If stop ran while submit was in flight (`_turnId` moved on), suppress the
+      // error: the user cancelled, so a "Broken pipe" surfacing is just noise.
       if (capturedTurn !== this._turnId) {
         this.log.debug(`[chat-state] submitAnswer: suppressing error after stop: ${String(err)}`);
         return;
@@ -516,9 +511,8 @@ export class ChatStateService {
   }
 
   /**
-   * Stops the current Claude turn. Safe to call when not streaming (no-op).
-   * Synchronously resets UI state so the input is re-enabled immediately,
-   * then fires the backend stop in the background.
+   * Stops the current Claude turn (no-op when not streaming). Resets UI state
+   * synchronously to re-enable input, then fires the backend stop in background.
    */
   async stopConversation(): Promise<void> {
     if (!this.isStreaming) return;
@@ -558,9 +552,8 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
-    // 4. Fire the backend interrupt. "no active session" is benign (idle or
-    //    already exited); any other failure means the turn may still be
-    //    running on the backend, so surface an error block to the user.
+    // 4. Fire the backend interrupt. "no active session" is benign (idle/exited);
+    //    any other failure means the turn may still run, so surface an error.
     try {
       await this.tauri.invoke('stop_chat');
     } catch (err) {
@@ -982,9 +975,8 @@ export class ChatStateService {
         responseId: assistantUuid,
       });
       if (!u) return;
-      // A non-terminal cost (OpenRouter `deferred`, or no sidecar entry yet)
-      // must keep the live preview instead of blanking it; only a terminal
-      // cost_source overwrites the footer/per-message. Deferred retries below.
+      // Non-terminal cost (deferred / no sidecar yet) keeps the live preview;
+      // only a terminal cost_source overwrites footer/per-message (deferred retries below).
       if (isTerminalCostSource(u.cost_source)) {
         // Per-message cost from the SSOT; null (unpriced) hides the segment.
         this.overwriteEntryCost(assistantUuid, u.cost_usd);
@@ -1300,9 +1292,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
 }
 
 /**
- * Project committed `state().entries` onto the legacy `ChatMessage[]` shape.
- * The trailing live-streaming entry (uuid_status=pending and no meta) is
- * dropped — it lives separately under `currentBlocksFromState`.
+ * Project committed `state().entries` onto the legacy `ChatMessage[]` shape;
+ * the trailing live-streaming entry is dropped (it lives under `currentBlocksFromState`).
  * @param entries - State-tree entries to convert.
  */
 export function stateEntriesToChatMessages(

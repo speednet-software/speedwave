@@ -1,7 +1,5 @@
-//! Host-side cost enrichment for the proxy usage JSONL (ADR-073).
-//! The proxy writes token lines with `cost_usd: null`; cost is computed here,
-//! per provider, into an append-only sidecar keyed by `response_id` — the usage
-//! JSONL is never mutated (it races the proxy's append + rotation).
+//! Host-side cost enrichment for the proxy usage JSONL (ADR-073): per-provider
+//! cost into an append-only `response_id` sidecar; the usage JSONL is never mutated.
 
 use crate::usage::UsageRecord;
 use serde::{Deserialize, Serialize};
@@ -32,17 +30,15 @@ pub enum CostSource {
 }
 
 impl CostSource {
-    /// A source that won't change on re-enrichment. Only `Deferred` (an
-    /// OpenRouter line whose `/generation` fetch has not yet succeeded) is
-    /// non-terminal and re-priced on a later pass; `Unknown` is permanent.
+    /// A source that won't change on re-enrichment. Only `Deferred` (OpenRouter
+    /// `/generation` not yet fetched) is non-terminal and re-priced later.
     pub fn is_terminal(&self) -> bool {
         !matches!(self, CostSource::Deferred)
     }
 }
 
-/// The snake_case wire string for DTOs that carry provenance as a plain string.
-/// Must match the serde `rename_all` representation — pinned by the
-/// `cost_source_wire_format_is_snake_case` test (no per-call allocation).
+/// Snake_case wire string matching the serde `rename_all` repr — pinned by the
+/// `cost_source_wire_format_is_snake_case` test.
 impl std::fmt::Display for CostSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -99,9 +95,8 @@ pub(crate) fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
         .join("cost-cache.jsonl")
 }
 
-/// Fetches OpenRouter's real cost for a generation id via `GET /generation`
-/// (`data.total_cost`, USD). Injected host-side (Desktop) so the runtime keeps
-/// no HTTP/SSRF surface; `None` on missing id, transport error, or absent field.
+/// Fetches OpenRouter's real cost (`GET /generation` `data.total_cost`, USD).
+/// Injected host-side so the runtime keeps no HTTP/SSRF surface; `None` on miss.
 pub type GenCostFetcher<'a> = dyn Fn(&str) -> Option<f64> + 'a;
 
 /// The id a usage record is keyed by: its `response_id`, or the OpenRouter
@@ -113,9 +108,8 @@ pub fn effective_response_id(r: &UsageRecord) -> Option<String> {
         .or_else(|| r.gen_id.clone().filter(|s| !s.is_empty()))
 }
 
-/// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
-/// with the line's `gen_id`: a `None` result with a gen_id is `deferred`
-/// (retryable), a missing gen_id is `unknown` (terminal — no other source).
+/// Computes the cost for one usage record. For `openrouter`: a gen_id with a
+/// `None` fetch is `deferred` (retryable), a missing gen_id is terminal `unknown`.
 pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
     let id = effective_response_id(r).unwrap_or_default();
     // A failed request is never billed, regardless of provider.
@@ -171,8 +165,7 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
 }
 
 /// Appends a `CostEntry` per not-yet-priced `response_id`; idempotent, usage
-/// JSONL read-only. `openrouter` lines are priced via the injected
-/// `fetch_gen_cost` (real `GET /generation`, host-side).
+/// JSONL read-only. `openrouter` priced via the injected `fetch_gen_cost`.
 pub fn enrich_cost_with_in(
     data_dir: &Path,
     project: &str,
@@ -246,9 +239,8 @@ pub fn read_cost_cache_in(data_dir: &Path, project: &str) -> HashMap<String, Cos
     out
 }
 
-/// Deduped `gen_id`s of OpenRouter lines still needing a `/generation` fetch:
-/// no cached cost yet, or a non-terminal (`deferred`) one. Keyed by
-/// `effective_response_id` so gen-id-only lines (no `message.id`) are included.
+/// Deduped `gen_id`s of OpenRouter lines still needing a `/generation` fetch
+/// (uncached or `deferred`); keyed by `effective_response_id` (incl. gen-id-only).
 pub fn pending_deferred_gen_ids(data_dir: &Path, project: &str) -> Vec<String> {
     let priced = read_cost_cache_in(data_dir, project);
     let mut seen = std::collections::HashSet::new();

@@ -1,6 +1,5 @@
-//! LLM provider switching (ADR-073): routes the `claude` container at the
-//! per-project proxy, with the pre-proxy direct-injection path kept
-//! behind the `proxy_enabled` kill-switch (see ADR-040/ADR-073).
+//! LLM provider switching (ADR-073): routes `claude` at the per-project proxy,
+//! with the pre-proxy direct path behind the `proxy_enabled` kill-switch.
 
 use super::{inject_claude_env, tokens_path_in};
 use crate::config::{LlmConfig, LlmProviderKind};
@@ -25,9 +24,8 @@ pub(crate) fn apply_llm_config_in(
             log::info!("llm: custom headers configured — using the direct (non-proxy) path");
         }
     } else if let Some(entry) = llm.active_provider() {
-        // Kill-switch (legacy direct path) only supports anthropic + local.
-        // Erroring beats silently billing the Anthropic subscription for an
-        // OpenRouter session via the flat anthropic masquerade.
+        // Legacy direct path supports only anthropic + local; erroring beats
+        // silently billing the Anthropic subscription for an OpenRouter session.
         if matches!(entry.kind, LlmProviderKind::OpenRouter) {
             anyhow::bail!(
                 "Provider '{}' requires the LLM proxy. Re-enable it (unset proxy_enabled=false) \
@@ -249,9 +247,8 @@ fn apply_llm_config_legacy_in(
     }
 }
 
-/// Reads a local-LLM token file. Returns `None` on any failure (missing
-/// file, I/O error, empty content). Callers decide whether to fall back to
-/// a dummy or skip env injection.
+/// Reads a local-LLM token file. Returns `None` on any failure (missing file,
+/// I/O error, empty content); callers fall back to a dummy or skip injection.
 pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
     read_local_llm_token_opt_in(consts::data_dir().as_path(), project, file)
 }
@@ -268,9 +265,8 @@ pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -
     }
 }
 
-/// Strips any trailing `/v1` and trailing slashes from a base URL.
-/// Exposed so `update_llm_config` can normalize before validating, keeping
-/// save-time and render-time acceptance consistent.
+/// Strips trailing `/v1` and slashes from a base URL; exposed so
+/// `update_llm_config` normalizes save-time and render-time acceptance alike.
 pub fn strip_trailing_v1(url: &str) -> String {
     let stripped = url.trim_end_matches('/');
     if let Some(without_v1) = stripped.strip_suffix("/v1") {

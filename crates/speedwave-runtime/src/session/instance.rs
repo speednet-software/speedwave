@@ -1,7 +1,5 @@
-//! Per-spawn instance marker for surgically reaping a leaked in-container
-//! `claude` process. The host-side `nerdctl exec` wrapper does not propagate
-//! SIGKILL into the container, so a stopped session's `claude` is orphaned;
-//! we tag each spawn with a unique env var and kill by matching `/proc`.
+//! Per-spawn instance marker for reaping a leaked in-container `claude`
+//! process (`nerdctl exec` drops SIGKILL): tag each spawn, kill by `/proc`.
 
 /// Env var carrying the per-spawn instance id into the container process.
 /// Lands in `/proc/<pid>/environ`, matched by [`kill_by_instance_command`].
@@ -13,9 +11,8 @@ pub fn instance_env_argv(id: &str) -> Vec<String> {
     vec!["env".to_string(), format!("{SESSION_INSTANCE_ENV}={id}")]
 }
 
-/// Busybox-safe `sh -c` body that kills exactly the in-container process(es)
-/// whose environ carries `SPW_SESSION_INSTANCE_ID=<id>`. No `pkill`/procps
-/// dependency. Other sessions (different id, CLI, other UI) are untouched.
+/// Busybox-safe `sh -c` body killing only process(es) whose environ carries
+/// `SPW_SESSION_INSTANCE_ID=<id>`; no procps, other sessions untouched.
 pub fn kill_by_instance_command(id: &str) -> Vec<String> {
     let marker = format!("{SESSION_INSTANCE_ENV}={id}");
     let script = format!(

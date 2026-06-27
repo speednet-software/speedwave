@@ -1,16 +1,13 @@
 //! LLM command surface: discovery probes and usage/cost aggregation.
-//!
-//! This parent module holds the helpers shared by both submodules and
-//! re-exports their Tauri commands so `main.rs` registrations resolve unchanged.
+//! Holds shared helpers and re-exports the submodules' Tauri commands.
 
 pub(crate) mod discovery;
 pub(crate) mod usage;
 
 pub(crate) use discovery::validate_llm_base_url;
 
-// Re-export the Tauri commands + the helper macros `#[tauri::command]` generates
-// (`__cmd__*` / `__tauri_command_name_*`) so `main.rs`'s `generate_handler!`
-// entries (`llm_cmd::<command>`) resolve without edits.
+// Re-export the commands + `#[tauri::command]` helper macros (`__cmd__*` /
+// `__tauri_command_name_*`) so `main.rs`'s `generate_handler!` resolves unchanged.
 pub(crate) use discovery::{
     __cmd__discover_llm_models, __tauri_command_name_discover_llm_models, discover_llm_models,
 };
@@ -22,14 +19,11 @@ pub(crate) use usage::{
     get_session_cost, get_usage_for_response,
 };
 
-/// Production timeout for the HTTP probe. Localhost / LAN should respond well
-/// under this; a model mid-load that hasn't come up yet will time out and
-/// the UI falls back to the free-text input.
+/// Production timeout for the HTTP probe. A model still loading times out and
+/// the UI falls back to free-text input.
 pub(crate) const DISCOVERY_TIMEOUT_SECS: u64 = 5;
 
-// ---------------------------------------------------------------------------
 // HTTP client helper (shared by discovery + usage)
-// ---------------------------------------------------------------------------
 
 /// Builds an HTTP client without auth. Test-only convenience; production
 /// always goes through `build_llm_probe_client_with_auth`.
@@ -102,9 +96,7 @@ pub(crate) fn strip_bearer_prefix(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // ─────────────────────────────────────────────────────────────────────
     // build_llm_probe_client_with_auth — header construction
-    // ─────────────────────────────────────────────────────────────────────
 
     #[test]
     fn build_client_rejects_authorization_in_custom_headers() {

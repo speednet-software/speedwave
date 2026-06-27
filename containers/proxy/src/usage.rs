@@ -139,9 +139,8 @@ impl RequestStatus {
 }
 
 impl UsageAcc {
-    /// Convert to a `UsageLine` tagged with provider kind/id and `status`.
-    /// `None` when no usage frame was seen. Falls back to `gen_id` as
-    /// `response_id` when `message.id` is absent (keeps enrich/dedup keyed).
+    /// Convert to a `UsageLine`; `None` when no usage frame was seen.
+    /// Falls back to `gen_id` for `response_id` when `message.id` is absent.
     pub fn finish(
         self,
         model: &str,

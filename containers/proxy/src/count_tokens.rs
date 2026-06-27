@@ -1,10 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-/// Synthetic count_tokens response so Anthropic-protocol clients do not
-/// 404-cascade when they probe `/v1/messages/count_tokens`.
-///
-/// Returns 200 with `{"input_tokens":0}` — no upstream call needed.
+/// Synthetic count_tokens 200 (`{"input_tokens":0}`) so Anthropic-protocol
+/// clients don't 404-cascade probing `/v1/messages/count_tokens`.
 pub async fn shim() -> impl IntoResponse {
     (
         StatusCode::OK,

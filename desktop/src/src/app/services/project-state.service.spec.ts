@@ -142,8 +142,7 @@ describe('ProjectStateService', () => {
     });
 
     it('reaches ready for a non-anthropic provider with no anthropic auth (needs_anthropic_auth=false)', async () => {
-      // The active provider is OpenRouter/local: no Anthropic api key, no OAuth,
-      // but the backend says this project does not need Anthropic auth. The
+      // Non-anthropic provider, no Anthropic creds, backend says auth not needed:
       // gate must not strand the user on "auth required" (the free-model bug).
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {

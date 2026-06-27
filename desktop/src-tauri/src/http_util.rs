@@ -8,10 +8,8 @@ pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MiB
 /// command; discovery probes override this per-request with their own value.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Reads a response body chunk-by-chunk, aborting if the accumulated size
-/// exceeds `MAX_RESPONSE_BODY_BYTES`.
-///
-/// `label` is included in error messages to identify the failed HTTP operation.
+/// Reads a body chunk-by-chunk, aborting past `MAX_RESPONSE_BODY_BYTES`.
+/// `label` identifies the failed HTTP operation in error messages.
 pub(crate) async fn read_body_limited(
     resp: reqwest::Response,
     label: &str,
@@ -48,9 +46,8 @@ pub(crate) async fn read_body_limited(
     Ok(buf)
 }
 
-/// Builds a `reqwest::Client` with the ADR-041 host-side hardening baseline:
-/// no redirect following (SSRF defence), a default request timeout, Speedwave
-/// User-Agent, plus any caller-supplied default headers (e.g. `Authorization`).
+/// Builds a `reqwest::Client` with the ADR-041 hardening baseline: no redirects,
+/// default timeout, Speedwave UA, plus caller-supplied default headers.
 pub(crate) fn build_hardened_client(
     default_headers: Option<reqwest::header::HeaderMap>,
 ) -> Result<reqwest::Client, String> {
@@ -66,8 +63,7 @@ pub(crate) fn build_hardened_client(
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
-/// Translates the canonical container-side host alias to `127.0.0.1`. Host-side only.
-///
+/// Translates the container host alias to `127.0.0.1` (host-side only).
 /// Returns `None` for any host other than `HOST_GATEWAY_ALIAS`.
 pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static str> {
     if host == speedwave_runtime::consts::HOST_GATEWAY_ALIAS {
@@ -77,9 +73,7 @@ pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -79,9 +79,8 @@ mod tests {
         assert_eq!(&body[..], br#"{"status":"ok"}"#);
     }
 
-    /// Spawn a minimal mock SSE backend that emits the three Anthropic stream events
-    /// needed to exercise the usage sniffer: message_start (input tokens) +
-    /// content delta + message_delta (output tokens).
+    /// Mock SSE backend emitting the three Anthropic events the usage sniffer
+    /// needs: message_start (input), content delta, message_delta (output).
     async fn spawn_mock_sse_backend() -> std::net::SocketAddr {
         use axum::response::IntoResponse;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -122,6 +121,7 @@ mod tests {
                 provider_id: "local".to_string(),
             }],
             usage_path,
+            ..Default::default()
         }
     }
 

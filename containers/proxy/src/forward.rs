@@ -15,9 +15,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
-/// Drain all complete (`\n`-terminated) lines from `buf`, returning them
-/// without their newlines (CRLF-stripped).  Any remaining incomplete line
-/// stays in `buf`.
+/// Drain all complete (`\n`-terminated) lines from `buf`, CRLF-stripped.
+/// Any remaining incomplete line stays in `buf`.
 pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
     let mut lines = Vec::new();
     while let Some(pos) = buf.find('\n') {
@@ -29,8 +28,7 @@ pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
 }
 
 /// Build the outbound `HeaderMap`: passthrough copies auth verbatim; swap drops
-/// inbound auth and injects the provider key (read from `/tokens` only when the
-/// `SPW_KEY_<ID>` name reverses to a valid slug — ADR-073 contract).
+/// inbound auth and injects the provider key from `/tokens` (ADR-073 contract).
 pub fn outbound_headers(auth: &Auth, inbound: &HeaderMap) -> HeaderMap {
     outbound_headers_with(auth, inbound, crate::keys::provider_key_for_env_name)
 }
@@ -98,10 +96,8 @@ pub fn outbound_headers_with(
     out
 }
 
-/// Rewrites the already-parsed body's `model` to drop the route prefix
-/// (`local/foo` → `foo`), so the backend sees its own model name. Returns the
-/// original bytes unchanged when the model has no prefix or re-serialisation
-/// fails — `body` and `parsed` must be the same request.
+/// Rewrites the parsed body's `model` to drop the route prefix (`local/foo` →
+/// `foo`); returns `body` unchanged when no prefix or re-serialisation fails.
 fn strip_model_prefix(body: &[u8], parsed: &serde_json::Value, model: &str) -> Vec<u8> {
     let Some((_, bare)) = model.split_once('/') else {
         return body.to_vec();
@@ -164,9 +160,8 @@ fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStat
     }
 }
 
-/// Resolve the upstream route from the request body, forward the request with
-/// swapped/verbatim headers, relay the SSE byte stream back unbuffered while
-/// sniffing usage frames, and append one usage line on stream end.
+/// Resolve the route, forward with swapped/verbatim headers, relay the SSE byte
+/// stream unbuffered while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
     // Parse the body once: the model selects the backend route, the same
     // parsed value is reused to strip the route prefix before forwarding.
@@ -210,25 +205,15 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
-    // Strip the route prefix from the model before forwarding: the backend
-    // only knows `unsloth/Qwen3.6` (its own name), not Speedwave's `local/…`
-    // routing prefix. Anthropic passthrough has no prefix and is untouched.
+    // Strip the route prefix so the backend sees its own model name (the
+    // anthropic passthrough has no prefix and is untouched).
     let outbound_body = strip_model_prefix(&body, &parsed, &model);
     // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
 
-    let client = match reqwest::Client::builder().use_rustls_tls().build() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("failed to build TLS client: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "proxy TLS setup failed"})),
-            )
-                .into_response();
-        }
-    };
+    // Shared client (built once with no-redirect — SSRF, ADR-041); clone is cheap.
+    let client = cfg.client.clone();
 
     let mut req = client.post(&upstream_url).body(outbound_body);
     for (name, value) in &out_headers {
@@ -250,8 +235,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let status = upstream.status();
     // Surface backend rejections at the proxy (model name only, never a key or
-    // body) — otherwise a 401/403/5xx is invisible here and only shows up in
-    // the Claude Code logs.
+    // body) — else a 401/403/5xx only shows up in the Claude Code logs.
     if status.as_u16() >= 400 {
         log::warn!(
             "upstream {} for model '{}' via prefix '{}'",
@@ -549,9 +533,8 @@ mod tests {
         assert_eq!(out.get("authorization").unwrap(), "Bearer or-REALKEY");
     }
 
-    /// A `data: {...}` SSE line split across two chunks must be parsed
-    /// exactly once — no partial sniff on the first chunk, full parse on
-    /// the second when `\n` arrives.
+    /// A `data: {...}` SSE line split across two chunks must parse exactly
+    /// once — no partial sniff on chunk 1, full parse on chunk 2's `\n`.
     #[test]
     fn split_sse_frame_across_chunks_parses_once() {
         let full_line = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n";

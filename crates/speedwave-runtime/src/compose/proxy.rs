@@ -1,31 +1,47 @@
-//! Renders the per-project `proxy.json` routing config (ADR-073).
-//!
-//! The file lands at `<data_dir>/proxy/<project>/proxy.json` (0600,
-//! atomic) and is mounted `:ro` at `/config` in the `proxy` container.
-//! It carries NO secrets: non-Anthropic keys are referenced by env name only
-//! (`SPW_KEY_<PROVIDER_ID>`), resolved inside the container from `/tokens`.
-//!
-//! INVARIANT: the rendered config must never contain a key value or a canonical
-//! Anthropic credential name (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`).
+//! Renders the per-project `proxy.json` routing config (ADR-073): no secrets
+//! (keys by env name `SPW_KEY_<ID>`), never a key value or Anthropic cred name.
 
 use crate::config::{LlmConfig, LlmProviderKind};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+/// Auth leg of a rendered route — mirror of `router.rs::Auth` (untagged: a
+/// bare `"passthrough"`/`"none"` string, or a key-swap object).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RouteAuth {
+    Bare(&'static str),
+    Swap {
+        swap_env: String,
+        scheme: &'static str,
+    },
+}
+
+/// One rendered route. Field order is the golden wire order — mirror of
+/// `router.rs::Route`; serde keeps declaration order.
+#[derive(Serialize)]
+struct RenderRoute {
+    prefix: String,
+    base_url: String,
+    auth: RouteAuth,
+    provider_kind: &'static str,
+    provider_id: String,
+}
+
+#[derive(Serialize)]
+struct RenderConfig {
+    routes: Vec<RenderRoute>,
+}
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
 pub const PROXY_PORT: u16 = 4000;
 
-/// In-network base URL of the proxy as the claude container sees it. Every
-/// session (subscription + non-anthropic) points `ANTHROPIC_BASE_URL` here;
-/// routing is by the model prefix in the request body, not the URL path.
+/// In-network proxy URL every session points `ANTHROPIC_BASE_URL` at; routing
+/// is by the request body's model prefix, not the URL path.
 pub const PROXY_BASE_URL: &str = "http://proxy:4000";
 
-/// `SPW_KEY_<ID>` env name for a provider id (hyphens → underscores,
-/// uppercased — same normalisation as `plugin::derive_worker_env`).
-///
-/// SSOT-alignment: the in-container inverse is
-/// `containers/proxy/src/keys.rs::provider_id_from_env_name`. The
-/// `spw_key_env_name_round_trips_with_proxy_reverse` test below pins
-/// `reverse(forward(id)) == id`; changing this normalisation must update both.
+/// `SPW_KEY_<ID>` env name (hyphens → underscores, uppercased — like
+/// `plugin::derive_worker_env`). SSOT inverse: `containers/proxy/src/keys.rs::provider_id_from_env_name`.
 pub fn spw_key_env_name(provider_id: &str) -> String {
     format!(
         "SPW_KEY_{}",
@@ -43,11 +59,8 @@ pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     proxy_config_dir_in(data_dir, project).join("proxy.json")
 }
 
-/// Renders the proxy routing config for the project's provider set.
-///
-/// Emits a JSON object with a `routes` array consumed by the Rust forwarder
-/// (see `containers/proxy/src/router.rs`). Pure — no filesystem
-/// access; `write_proxy_config_in` persists the result.
+/// Renders the proxy routing config (a `routes` array consumed by the forwarder
+/// `containers/proxy/src/router.rs`). Pure; `write_proxy_config_in` persists it.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
     let mut routes = Vec::new();
 
@@ -58,29 +71,35 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
         _ => "anthropic_oauth",
     };
 
-    // Anthropic passthrough is always first — bare model names (no prefix)
-    // resolve here. It forwards the caller's Authorization header unchanged.
-    routes.push(format!(
-        r#"{{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough","provider_kind":"{anthropic_kind}","provider_id":"anthropic"}}"#
-    ));
+    // Anthropic passthrough is always first — bare model names resolve here and
+    // the caller's Authorization header is forwarded unchanged.
+    routes.push(RenderRoute {
+        prefix: "anthropic".into(),
+        base_url: "https://api.anthropic.com".into(),
+        auth: RouteAuth::Bare("passthrough"),
+        provider_kind: anthropic_kind,
+        provider_id: "anthropic".into(),
+    });
 
     for entry in &llm.providers {
-        // Re-check: ids are embedded bare in JSON below.
         if !crate::plugin::is_valid_slug(&entry.id) {
             log::warn!("proxy config: skipping provider with invalid id");
             continue;
         }
         match entry.kind {
-            // Subscription rides the /anthropic passthrough; no extra route.
-            LlmProviderKind::AnthropicOauth => {}
-            // API-key Anthropic: still passthrough — key is in /tokens, not here.
-            LlmProviderKind::AnthropicApiKey => {}
+            // Subscription + API-key Anthropic both ride the passthrough; no route.
+            LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
-                let env = spw_key_env_name(&entry.id);
-                let id = &entry.id;
-                routes.push(format!(
-                    r#"{{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{{"swap_env":"{env}","scheme":"bearer"}},"provider_kind":"openrouter","provider_id":"{id}"}}"#
-                ));
+                routes.push(RenderRoute {
+                    prefix: "openrouter".into(),
+                    base_url: "https://openrouter.ai/api".into(),
+                    auth: RouteAuth::Swap {
+                        swap_env: spw_key_env_name(&entry.id),
+                        scheme: "bearer",
+                    },
+                    provider_kind: "openrouter",
+                    provider_id: entry.id.clone(),
+                });
             }
             LlmProviderKind::Local => {
                 let Some(base_url) = entry.base_url.as_deref() else {
@@ -90,7 +109,6 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 };
-                // Re-validate before embedding bare in JSON.
                 if let Err(e) = super::llm::validate_base_url(base_url) {
                     log::warn!(
                         "proxy config: provider '{}' has invalid base_url — skipped: {e}",
@@ -98,33 +116,34 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 }
-                // The forwarder appends `/v1/messages`; strip a trailing `/v1`
-                // (common in Ollama/LiteLLM base URLs) so it isn't doubled.
+                // Forwarder appends `/v1/messages`; strip a trailing `/v1` to avoid doubling.
                 let base_url = super::llm::strip_trailing_v1(base_url);
-                let id = &entry.id;
-                let kind = "local";
-                // Two distinct route shapes: object-auth (key swap) vs string-auth (none).
-                if entry.has_api_key {
-                    let env = spw_key_env_name(id);
-                    routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":{{"swap_env":"{env}","scheme":"bearer"}},"provider_kind":"{kind}","provider_id":"{id}"}}"#
-                    ));
+                let auth = if entry.has_api_key {
+                    RouteAuth::Swap {
+                        swap_env: spw_key_env_name(&entry.id),
+                        scheme: "bearer",
+                    }
                 } else {
-                    routes.push(format!(
-                        r#"{{"prefix":"{id}","base_url":"{base_url}","auth":"none","provider_kind":"{kind}","provider_id":"{id}"}}"#
-                    ));
-                }
+                    RouteAuth::Bare("none")
+                };
+                routes.push(RenderRoute {
+                    prefix: entry.id.clone(),
+                    base_url,
+                    auth,
+                    provider_kind: "local",
+                    provider_id: entry.id.clone(),
+                });
             }
         }
     }
 
-    let routes_json = routes.join(",");
-    format!(r#"{{"routes":[{routes_json}]}}"#)
+    // serde guarantees valid JSON + the golden field order; serialization of a
+    // plain struct cannot fail, so the fallback is unreachable.
+    serde_json::to_string(&RenderConfig { routes }).unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
-/// Renders and atomically persists the proxy routing config (0600 + fsync) under
-/// `<data_dir>/proxy/<project>/`. Also lifts a legacy `local-llm/api_key`
-/// into the llm token namespace (ADR-073 migration).
+/// Renders + atomically persists the config (0600 + fsync) under
+/// `<data_dir>/proxy/<project>/`; lifts a legacy `local-llm/api_key` (ADR-073).
 pub fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,
@@ -137,17 +156,15 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     migrate_legacy_local_key_in(data_dir, project, llm);
-    // `llm.has_api_key` is already re-derived from disk at config resolve
-    // (`LlmConfig::sync_has_api_key_from_disk_in`) — the SSOT for the flag — so
-    // the renderer trusts it directly.
+    // `has_api_key` is the SSOT flag re-derived at config resolve
+    // (`LlmConfig::sync_has_api_key_from_disk_in`); the renderer trusts it.
     let content = render_proxy_config(llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
 
-/// `SPW_CONFIG_DIGEST` value: sha256 over every rendered `/config` file and
-/// every key file's name + content hash (key values folded in as their own
-/// sha256, never raw). Changing it forces a proxy container recreate.
+/// `SPW_CONFIG_DIGEST`: sha256 over every `/config` file + each key file's name
+/// and content-hash (values folded as sha256, never raw); change forces recreate.
 pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -215,9 +232,8 @@ fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) 
     }
 }
 
-/// Validates and persists one provider's API key under the llm token
-/// namespace: strips a `Bearer ` prefix, rejects control chars and empty
-/// values (ADR-040 rules).
+/// Validates + persists one provider's API key in the llm token namespace:
+/// strips `Bearer `, rejects control chars and empty values (ADR-040).
 pub fn write_llm_provider_key_in(
     data_dir: &Path,
     project: &str,
@@ -348,10 +364,8 @@ mod tests {
 
     #[test]
     fn render_strips_trailing_v1_so_forwarder_does_not_double_it() {
-        // The forwarder appends `/v1/messages`; a stored base_url ending in `/v1`
-        // (common in Ollama/LiteLLM docs) must NOT survive into proxy.json, or
-        // the upstream URL becomes `…/v1/v1/messages` → 404. (A trailing slash
-        // is rejected by validate_base_url, so `/v1/` never reaches here.)
+        // Forwarder appends `/v1/messages`; a base_url ending in `/v1` must not
+        // survive or the URL becomes `…/v1/v1/messages` → 404 (trailing `/` is rejected upstream).
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 base_url: Some("http://host.docker.internal:9000/v1".into()),
@@ -475,9 +489,8 @@ mod tests {
         );
     }
 
-    /// v1→v2 key migration: a legacy `local-llm/api_key` is lifted into the
-    /// llm namespace when the migrated entry references SPW_KEY_LOCAL —
-    /// once, without clobbering an existing new-namespace key.
+    /// v1→v2 key migration: legacy `local-llm/api_key` is lifted into the llm
+    /// namespace once, without clobbering an existing new-namespace key.
     #[test]
     fn write_config_migrates_legacy_local_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -601,9 +614,8 @@ mod tests {
         assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
     }
 
-    /// `write_proxy_config_in` trusts the resolved `has_api_key` flag (the SSOT
-    /// re-derive lives in config resolve, not here): a `true` flag renders a
-    /// bearer swap, not `auth:none`, so the key reaches the backend.
+    /// `write_proxy_config_in` trusts the resolved `has_api_key` flag: `true`
+    /// renders a bearer swap, not `auth:none`, so the key reaches the backend.
     #[test]
     fn write_renders_bearer_when_has_api_key_set() {
         let dir = tempfile::tempdir().unwrap();

@@ -52,8 +52,7 @@ export function isLocalProvider(provider: string | null | undefined): boolean {
 }
 
 /**
- * Frontend mirror of the Rust `LlmConfigResponse` returned by the
- * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`).
+ * Mirror of Rust `LlmConfigResponse` (`get_llm_config` Tauri command).
  * Keep in sync with `LlmConfig` in `crates/speedwave-runtime/src/config.rs`.
  */
 export interface LlmConfigResponse {
@@ -76,14 +75,14 @@ export interface LlmConfigResponse {
 }
 
 /**
- * Provider kind discriminator (ADR-073). Mirror of the Rust
- * `LlmProviderKind` serde rep; drift guarded by `llm_provider_kind_matches_ts_union`.
+ * Provider kind discriminator (ADR-073). Mirror of Rust `LlmProviderKind`;
+ * drift guarded by `llm_provider_kind_matches_ts_union`.
  */
 export type LlmProviderKind = 'anthropic_oauth' | 'anthropic_api_key' | 'local' | 'open_router';
 
 /**
- * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust
- * `LlmProviderEntry`. Key VALUES never reach the frontend, only `has_api_key`.
+ * One configured LLM provider (ADR-073 v2). Mirror of Rust `LlmProviderEntry`;
+ * key VALUES never reach the frontend, only `has_api_key`.
  */
 export interface LlmProviderEntry {
   /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
@@ -147,9 +146,8 @@ export type CostSourceKind =
   | 'failed';
 
 /**
- * A cost source that will not change on re-enrichment (mirror of Rust
- * `CostSource::is_terminal`). `'deferred'` and the empty/no-sidecar `''` are
- * non-terminal; everything else is final.
+ * Cost source that won't change on re-enrichment (mirror of Rust
+ * `CostSource::is_terminal`); `'deferred'` and `''` are non-terminal.
  * @param src - Cost provenance string from the sidecar.
  */
 export function isTerminalCostSource(src: CostSourceKind | ''): boolean {

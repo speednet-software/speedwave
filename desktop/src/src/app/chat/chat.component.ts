@@ -59,8 +59,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   projectMemory = '';
   memoryError = '';
   /**
-   * Current git branch of the active project's working tree, or `null` when
-   * the project is not a git repo. Re-read after each turn finishes.
+   * Active project's git branch, or `null` when not a repo. Re-read after each turn.
    */
   readonly gitBranch = signal<string | null>(null);
   /**
@@ -148,9 +147,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     });
 
-    // A container restart (e.g. a model switch) recreates the claude container
-    // and kills the live session. Resume it so the conversation keeps context
-    // instead of the next message starting a fresh, history-less session.
+    // A container restart kills the live session; resume it so the next message
+    // keeps context instead of starting fresh.
     this.unsubRestart = this.projectState.onRestartComplete(() => {
       const sessionId = this.chat.sessionStats?.session_id;
       if (sessionId) void this.resumeConversation(sessionId);
@@ -180,10 +178,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   private gitBranchLastReadAt = 0;
 
   /**
-   * Pulls the current git branch from the backend for the active project.
-   * Silent on errors — the chip just hides when the read fails so a missing
-   * git binary or non-repo project doesn't surface a noisy error. Reads
-   * within the TTL window are no-ops.
+   * Pulls the active project's git branch; silent on errors (chip hides) and
+   * a no-op within the TTL window.
    * @param force - Skip the TTL check (used after a project switch).
    */
   private async refreshGitBranch(force = false): Promise<void> {
@@ -213,10 +209,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * ESC stops the current turn — but only when no AskUserQuestion is awaiting an answer.
-   *
-   * Wired via `host: { '(document:keydown.escape)': … }` because the project's
-   * best-practices forbid `@HostListener` (use the `host` decorator metadata).
+   * ESC stops the turn unless an AskUserQuestion awaits an answer. Wired via the
+   * `host` decorator metadata (project forbids `@HostListener`).
    * @param event - keyboard event; consumed (preventDefault) when we handle it.
    */
   onEscape(event: Event): void {
@@ -335,9 +329,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.resetForNewConversation();
     // Show the transcript loader until messages render.
     this.chat.beginTranscriptLoad();
-    // Mark the start in progress so a racing send waits instead of firing a
-    // competing start_chat that would tear down this resumed session; the
-    // disposer is released in the `finally` below.
+    // Mark start in progress so a racing send waits instead of tearing down this
+    // resumed session; disposer released in the `finally` below.
     const endStartingSession = this.chat.beginStartingSession();
     // Stamp session id optimistically so drawer accent follows click without flicker.
     this.optimisticSessionId = sessionId;

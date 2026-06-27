@@ -3,8 +3,7 @@ import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 
 /**
- * True when `text` trimmed is exactly `/` — the slash-menu trigger, not a
- * message. Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
+ * True when `text` trimmed is `/` (slash-menu trigger). Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
  * @param text - Raw composer text to test.
  */
 export function isBareSlash(text: string): boolean {

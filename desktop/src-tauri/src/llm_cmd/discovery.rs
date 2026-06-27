@@ -1,7 +1,5 @@
-//! LLM model discovery via HTTP probes (see ADR-041 for the threat model).
-//!
-//! Probes a local/remote LLM server's `/v1/models` (+ Ollama `/api/show`)
-//! endpoints to enumerate models and their context windows.
+//! LLM model discovery via HTTP probes (threat model: ADR-041).
+//! Probes `/v1/models` (+ Ollama `/api/show`) for models and context windows.
 
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -19,7 +17,6 @@ use crate::url_validation::{is_private_on_premise, validate_url, PrivatePolicy};
 
 // ---------------------------------------------------------------------------
 // Public DTO surfaced through Tauri to the frontend
-// ---------------------------------------------------------------------------
 
 /// One discovered model; `context_tokens` is `None` when unavailable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,7 +36,6 @@ pub struct DiscoverResult {
 
 // ---------------------------------------------------------------------------
 // Pure parsers (tested in isolation, no HTTP)
-// ---------------------------------------------------------------------------
 
 /// Parses `POST /api/show` response; extracts context window from the
 /// architecture-specific `*.context_length` key.
@@ -74,11 +70,9 @@ fn non_zero_u32(n: u64) -> Option<u32> {
 
 // ---------------------------------------------------------------------------
 // URL validation (shared between discover and save paths)
-// ---------------------------------------------------------------------------
 
 /// Validates a base URL for a local LLM provider (policy: ADR-041). Allows
-/// loopback/private/public with `warn!`, rejects link-local/metadata/reserved,
-/// credentials, backslashes, query, fragment, and non-HTTP schemes.
+/// loopback/private/public with `warn!`; rejects link-local/metadata/reserved, creds, backslashes, query, fragment, non-HTTP schemes.
 pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
@@ -158,10 +152,8 @@ fn is_loopback_host(url: &url::Url) -> bool {
 
 // ---------------------------------------------------------------------------
 // URL normalisation pipeline
-// ---------------------------------------------------------------------------
 
-/// Strips `/v1`, rewrites container host aliases, and runs SSRF validation.
-///
+/// Strips `/v1`, rewrites container host aliases, runs SSRF validation.
 /// Returns the validated `url::Url` ready for endpoint path composition.
 fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, String> {
     // 1. Strip trailing /v1 (Ollama docs sometimes include it).
@@ -185,11 +177,8 @@ fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, Stri
     validate_llm_base_url(parsed.as_str())
 }
 
-// ---------------------------------------------------------------------------
-// Probe transport — abstracts "HTTP from host" vs "HTTP from VM" so the
-// discovery probe can reach corporate-VPN-protected servers that the host
-// cannot route to but the VM (via Apple VZ NAT / WSL2 mirrored) can.
-// ---------------------------------------------------------------------------
+// Probe transport — "HTTP from host" vs "HTTP from VM"; the VM path (Apple VZ
+// NAT / WSL2 mirrored) reaches corporate-VPN servers the host cannot route to.
 
 /// Minimal HTTP transport for the discovery probe; `body` capped at
 /// [`MAX_RESPONSE_BODY_BYTES`]. Auth headers are pre-configured on the impl.
@@ -331,9 +320,8 @@ impl ProbeTransport for VmProbe {
     }
 }
 
-/// Builds the curl argv (auth headers + write-out trailer) and runs it via
-/// `vm_exec`, returning the parsed `ProbeResponse`. Sync because `vm_exec`
-/// is blocking; called from async via `spawn_blocking`.
+/// Builds the curl argv (auth headers + write-out trailer), runs it via blocking
+/// `vm_exec` (called from async via `spawn_blocking`), returns the `ProbeResponse`.
 async fn run_vm_curl(
     method: &str,
     url: &str,
@@ -479,7 +467,6 @@ fn run_vm_curl_blocking(
 
 // ---------------------------------------------------------------------------
 // Core logic (parameterized timeout for testing)
-// ---------------------------------------------------------------------------
 
 /// Bounded fan-out concurrency for `/api/show` probes.
 const MAX_OLLAMA_PROBE_CONCURRENCY: usize = 8;
@@ -586,9 +573,8 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Parses an OpenAI-shape `/v1/models` response, extracting `id` plus a
-/// per-entry inline context window from `meta.n_ctx_train` or
-/// `max_context_length` (`None` when neither is present).
+/// Parses an OpenAI-shape `/v1/models` response: `id` plus inline context from
+/// `meta.n_ctx_train` or `max_context_length` (`None` when neither present).
 fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("failed to parse /v1/models response: {e}"))?;
@@ -628,9 +614,8 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
 /// Public OpenRouter model catalog — fixed URL, never user input.
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
-/// Parses the OpenRouter `/api/v1/models` catalog, keeping only models that
-/// list `"tools"` in `supported_parameters` — Claude Code cannot run a
-/// session without tool calling, so the rest are unselectable by design.
+/// Parses the OpenRouter `/api/v1/models` catalog, keeping only models that list
+/// `"tools"` in `supported_parameters` (Claude Code needs tool calling).
 fn parse_openrouter_models(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("failed to parse OpenRouter models response: {e}"))?;
@@ -772,11 +757,9 @@ pub(crate) async fn do_discover_llm_models(
 
 // ---------------------------------------------------------------------------
 // Tauri command (thin wrapper)
-// ---------------------------------------------------------------------------
 
-/// Tri-state credential params for discovery: `None` = use stored token;
-/// `Some(None)`/`Some(Some(""))` = probe without auth; `Some(Some(v))` =
-/// use transient value. Same semantics for `custom_headers`.
+/// Tri-state credential params (same for `custom_headers`): `None` = stored token;
+/// `Some(None)`/`Some(Some(""))` = no auth; `Some(Some(v))` = transient value.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverLlmModelsArgs {
@@ -839,7 +822,6 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -853,9 +835,8 @@ mod tests {
         models.iter().map(|m| m.id.as_str()).collect()
     }
 
-    /// Test shim: legacy `do_discover_llm_models(provider, url, client, timeout)`
-    /// signature wrapping the host transport. Keeps the existing mockito tests
-    /// terse without re-wiring every call site to construct a `HostProbe`.
+    /// Test shim: legacy `(provider, url, client, timeout)` signature wrapping
+    /// the host transport, so mockito tests skip building a `HostProbe`.
     async fn do_discover_llm_models(
         provider: &str,
         base_url: &str,
@@ -1583,9 +1564,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // discover_local (provider="local") — per-entry inline context detection
-    // and `/v1/messages` sanity probe
-    // ─────────────────────────────────────────────────────────────────────
+    // discover_local — per-entry inline context + `/v1/messages` sanity probe
 
     #[test]
     fn parse_openai_models_with_context_extracts_llamacpp_shape() {
@@ -1803,7 +1782,6 @@ mod tests {
         messages_mock.assert_async().await;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
     // resolve_transient_credential — tri-state semantics
     // ─────────────────────────────────────────────────────────────────────
 

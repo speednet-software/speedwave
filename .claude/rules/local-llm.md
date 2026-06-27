@@ -11,7 +11,7 @@ paths:
   - 'desktop/src/src/app/settings/llm-provider/**'
   - 'docs/adr/ADR-040-remove-litellm-direct-provider-injection.md'
   - 'docs/adr/ADR-041-local-llm-model-discovery.md'
-  - 'docs/adr/ADR-073-embedded-per-project-litellm-proxy.md'
+  - 'docs/adr/ADR-073-embedded-per-project-speedwave-proxy.md'
 ---
 
 # LLM Provider Rules

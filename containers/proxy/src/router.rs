@@ -57,14 +57,26 @@ pub struct Route {
     pub provider_id: String,
 }
 
-/// Top-level proxy routing configuration, deserialized from `/config/proxy.json`.
-/// `usage_path` is resolved once at startup from `SPW_USAGE_PATH` (default
-/// `/usage/usage.jsonl`) so request handlers need not touch the environment.
+/// Top-level proxy routing config, deserialized from `/config/proxy.json`.
+/// `usage_path` is resolved once at startup from `SPW_USAGE_PATH`.
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
     #[serde(skip)]
     pub usage_path: PathBuf,
+    /// Shared outbound client (cloned per request — cheap, Arc-backed). Built
+    /// once with no-redirect (SSRF, ADR-041) and connection reuse.
+    #[serde(skip, default = "build_forward_client")]
+    pub client: reqwest::Client,
+}
+
+/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence).
+fn build_forward_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("building the proxy forward client must not fail at startup")
 }
 
 impl Default for Config {
@@ -75,6 +87,7 @@ impl Default for Config {
                 std::env::var("SPW_USAGE_PATH")
                     .unwrap_or_else(|_| "/usage/usage.jsonl".to_string()),
             ),
+            client: build_forward_client(),
         }
     }
 }
@@ -86,9 +99,8 @@ struct RoutesFile {
 }
 
 impl Config {
-    /// Load the routing table from `path` (`/config/proxy.json`), resolving
-    /// `usage_path` from `SPW_USAGE_PATH`. The rendered file carries only
-    /// `routes`; an unreadable or malformed file is a fatal startup error.
+    /// Load the routing table from `path`, resolving `usage_path` from
+    /// `SPW_USAGE_PATH`. Unreadable or malformed file is a fatal startup error.
     pub fn load_from(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -101,9 +113,8 @@ impl Config {
     }
 }
 
-/// Resolve a model string to its backend route by its prefix (the part before
-/// the first `/`). A bare model (no slash) uses the `"anthropic"` prefix;
-/// returns `None` for an empty model or an unknown prefix.
+/// Resolve a model string to its backend route by its prefix (before the first
+/// `/`); a bare model uses `"anthropic"`. `None` for empty/unknown prefix.
 pub fn resolve<'a>(cfg: &'a Config, model: &str) -> Option<&'a Route> {
     if model.is_empty() {
         return None;
@@ -152,6 +163,7 @@ mod tests {
                 },
             ],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
+            ..Default::default()
         }
     }
 

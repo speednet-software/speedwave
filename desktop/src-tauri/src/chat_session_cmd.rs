@@ -7,14 +7,12 @@ use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
-/// Serialises the whole start/stop/start sequence so `start_chat` and
-/// `resume_conversation` can never interleave and tear down each other's live
-/// session. Poison is recovered: this guards ordering, not data invariants.
+/// Serialises start/stop/start so `start_chat`/`resume_conversation` can't
+/// interleave. Poison is recovered: this guards ordering, not data invariants.
 static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Shared impl for `start_chat`/`resume_conversation`: acquires the per-project
-/// compose lock + checks Claude auth, stops the old session outside the session
-/// lock, then starts the new one under it.
+/// Shared impl for `start_chat`/`resume_conversation`: locks + checks auth,
+/// stops the old session outside the session lock, then starts the new one under it.
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,

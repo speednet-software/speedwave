@@ -1,8 +1,5 @@
-//! LLM usage/cost aggregation (ADR-073).
-//!
-//! Reads the proxy usage JSONL + host cost sidecar to surface the dashboard,
-//! chat-footer, and session/conversation totals, enriching pending OpenRouter
-//! `/generation` costs host-side.
+//! LLM usage/cost aggregation (ADR-073): proxy usage JSONL + host cost sidecar
+//! for dashboard/footer/totals, enriching pending OpenRouter costs host-side.
 
 use crate::http_util::read_body_limited;
 use crate::llm_cmd::{build_llm_probe_client_with_auth, strip_bearer_prefix};
@@ -10,9 +7,8 @@ use crate::llm_cmd::{build_llm_probe_client_with_auth, strip_bearer_prefix};
 /// OpenRouter generation-cost endpoint — fixed host, never user input.
 const OPENROUTER_GENERATION_URL: &str = "https://openrouter.ai/api/v1/generation";
 
-/// Aggregated LLM usage for the project's dashboard. The single source is
-/// the proxy callback JSONL (see `speedwave_runtime::usage`); chat-stream
-/// session stats are deliberately NOT mixed in (double counting).
+/// Aggregated LLM usage for the dashboard. Single source: the proxy callback
+/// JSONL (`speedwave_runtime::usage`); chat-stream stats excluded (double count).
 #[tauri::command]
 pub async fn get_llm_usage(
     project: String,
@@ -26,18 +22,16 @@ pub async fn get_llm_usage(
     ))
 }
 
-/// Final usage (tokens + cost) for one response id, for the chat-footer
-/// reconcile. Bounded retry: the proxy append can lag Claude Code's `result`.
-/// `None` on miss (the footer then keeps Claude Code's live values).
+/// Final usage (tokens + cost) for one response id (chat-footer reconcile);
+/// bounded retry for the lagging proxy append. `None` keeps CC's live values.
 #[tauri::command]
 pub async fn get_usage_for_response(
     project: String,
     response_id: String,
 ) -> Option<speedwave_runtime::usage::ResponseUsage> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    // Wait (cheap, no HTTP) for the proxy's async usage append. Backoff grows
-    // 100→1600ms (~3.1s total) to tolerate slow I/O (Windows/WSL2); the proxy
-    // write usually lands on the first attempt.
+    // Wait (no HTTP) for the proxy's async append; backoff 100→1600ms
+    // (~3.1s) tolerates slow I/O (WSL2), but usually lands on attempt 0.
     let mut found = None;
     let mut delay = std::time::Duration::from_millis(100);
     for attempt in 0..6 {
@@ -63,9 +57,8 @@ pub async fn get_usage_for_response(
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
 }
 
-/// Summed session cost (USD) from the proxy cost sidecar — the single
-/// aggregator (invariant 6). `None` when nothing priced, never 0.0. Enriches
-/// pending OpenRouter `/generation` costs first so the total is current.
+/// Summed session cost (USD) from the proxy cost sidecar (sole aggregator,
+/// invariant 6). `None` when nothing priced, never 0.0; enriches pending first.
 #[tauri::command]
 pub async fn get_session_cost(project: String) -> Option<f64> {
     let data_dir = speedwave_runtime::consts::data_dir();
@@ -116,8 +109,7 @@ async fn enrich_openrouter_gen_ids(
 }
 
 /// Resolves real OpenRouter cost for the given `gen_id`s into a `gen_id` → USD
-/// map (host-side `/generation`). Fetches run concurrently — the generations
-/// are independent.
+/// map (host-side `/generation`); fetches run concurrently (independent).
 async fn openrouter_costs_for(
     data_dir: &std::path::Path,
     project: &str,

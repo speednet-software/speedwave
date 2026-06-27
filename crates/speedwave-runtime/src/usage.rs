@@ -1,6 +1,5 @@
-//! LLM usage aggregation (ADR-073): reads the proxy usage JSONL
-//! (`<data_dir>/usage/<project>/proxy/usage.jsonl`) for the Desktop
-//! dashboard. Records are deduplicated by `response_id`, first-seen wins.
+//! LLM usage aggregation (ADR-073): reads the proxy usage JSONL for the
+//! Desktop dashboard, deduplicated by `response_id` (first-seen wins).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -257,8 +256,7 @@ pub fn session_cost_for_window_in(
 }
 
 /// Rotation threshold: past this size the live file is renamed to `.1`
-/// (replacing any previous `.1`). The callback's per-write `open(append)`
-/// picks up the fresh file on its next request.
+/// (replacing any previous `.1`); the callback's `open(append)` reopens fresh.
 pub const USAGE_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Rotates `usage.jsonl` → `usage.jsonl.1` when it exceeds the threshold.
@@ -308,9 +306,8 @@ pub fn prune_cost_cache_in(data_dir: &Path, project: &str) {
     }
 }
 
-/// Walks the project's usage JSONL (rotated file first, then live), parsing
-/// each line and invoking `f` per record. Returns the count of unparseable
-/// lines. Single owner of the rotated/live file layout — all readers use it.
+/// Walks the project's usage JSONL (rotated first, then live), invoking `f` per
+/// record and returning the unparseable-line count. Sole owner of the layout.
 pub fn for_each_usage_record(
     data_dir: &Path,
     project: &str,
@@ -1104,9 +1101,8 @@ mod tests {
 
     #[test]
     fn orphan_sidecar_entry_excluded_even_if_prune_did_not_run() {
-        // If prune fails (or hasn't run), an orphan whose usage line is gone must
-        // still be excluded from session_cost_in — the window filter is the guard,
-        // not the prune. This keeps footer == dashboard regardless of prune state.
+        // Even if prune never ran, an orphan whose usage line is gone is excluded
+        // by the window filter (not prune) — footer == dashboard regardless.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
