@@ -11,6 +11,8 @@ export interface AnthropicModel {
   context_tokens: number;
   /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
+  /** Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint. */
+  premium: boolean;
 }
 
 /** Default fallback context window for a model the SSOT doesn't know. */
@@ -50,8 +52,7 @@ export function isLocalProvider(provider: string | null | undefined): boolean {
 }
 
 /**
- * Frontend mirror of the Rust `LlmConfigResponse` returned by the
- * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`).
+ * Mirror of Rust `LlmConfigResponse` (`get_llm_config` Tauri command).
  * Keep in sync with `LlmConfig` in `crates/speedwave-runtime/src/config.rs`.
  */
 export interface LlmConfigResponse {
@@ -74,19 +75,14 @@ export interface LlmConfigResponse {
 }
 
 /**
- * Provider kind discriminator (ADR-073). Mirror of the Rust
- * `LlmProviderKind` serde rep; drift guarded by `llm_provider_kind_matches_ts_union`.
+ * Provider kind discriminator (ADR-073). Mirror of Rust `LlmProviderKind`;
+ * drift guarded by `llm_provider_kind_matches_ts_union`.
  */
-export type LlmProviderKind =
-  | 'anthropic_oauth'
-  | 'anthropic_api_key'
-  | 'local'
-  | 'open_router'
-  | 'open_ai_compat';
+export type LlmProviderKind = 'anthropic_oauth' | 'anthropic_api_key' | 'local' | 'open_router';
 
 /**
- * One configured LLM provider (ADR-073 schema v2). Mirror of the Rust
- * `LlmProviderEntry`. Key VALUES never reach the frontend, only `has_api_key`.
+ * One configured LLM provider (ADR-073 v2). Mirror of Rust `LlmProviderEntry`;
+ * key VALUES never reach the frontend, only `has_api_key`.
  */
 export interface LlmProviderEntry {
   /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
@@ -117,7 +113,8 @@ export interface UsageBucket {
   completion_tokens: number;
   cache_read: number;
   cache_write: number;
-  cost_usd: number;
+  /** Summed cost over priced requests; `null` when none priced (never 0). */
+  cost_usd: number | null;
   /** Throughput numerator: completion tokens from successful timed records. */
   throughput_completion_tokens: number;
   /** Throughput denominator: latency of the same successful timed records. */
@@ -133,6 +130,43 @@ export interface UsageSummary {
   totals: UsageBucket;
   /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
   skipped_lines: number;
+}
+
+/**
+ * Cost provenance wire strings — mirror of Rust `usage_cost::CostSource`
+ * (snake_case serde). Kept in sync by `cost_source_ts_union_matches_rust`.
+ */
+export type CostSourceKind =
+  | 'catalog'
+  | 'subscription'
+  | 'free'
+  | 'actual'
+  | 'unknown'
+  | 'deferred'
+  | 'failed';
+
+/**
+ * Cost source that won't change on re-enrichment (mirror of Rust
+ * `CostSource::is_terminal`); `'deferred'` and `''` are non-terminal.
+ * @param src - Cost provenance string from the sidecar.
+ */
+export function isTerminalCostSource(src: CostSourceKind | ''): boolean {
+  return src !== 'deferred' && src !== '';
+}
+
+/**
+ * Final usage for one response from `get_usage_for_response` — the proxy SSOT
+ * used to reconcile the chat footer. Mirror of Rust `usage::ResponseUsage`.
+ */
+export interface ResponseUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** `null` when unpriced (subscription/unknown). */
+  cost_usd: number | null;
+  /** Provenance; `''` when no sidecar entry yet. */
+  cost_source: CostSourceKind | '';
 }
 
 /**

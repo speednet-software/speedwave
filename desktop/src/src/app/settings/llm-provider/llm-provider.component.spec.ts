@@ -39,36 +39,42 @@ const TEST_ANTHROPIC_MODELS = [
     family: 'Fable 5',
     context_tokens: 1_000_000,
     latest: true,
+    premium: true,
   },
   {
     id: 'claude-opus-4-8',
     family: 'Opus 4.8',
     context_tokens: 1_000_000,
     latest: true,
+    premium: true,
   },
   {
     id: 'claude-sonnet-4-6',
     family: 'Sonnet 4.6',
     context_tokens: 1_000_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-haiku-4-5',
     family: 'Haiku 4.5',
     context_tokens: 200_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-opus-4-7',
     family: 'Opus 4.7',
     context_tokens: 1_000_000,
     latest: false,
+    premium: true,
   },
   {
     id: 'claude-opus-4-6',
     family: 'Opus 4.6',
     context_tokens: 1_000_000,
     latest: false,
+    premium: true,
   },
 ];
 
@@ -1228,15 +1234,13 @@ describe('LlmProviderComponent', () => {
 
   // ── Remote providers (ADR-073) ──────────────────────────────────────────
 
-  it('renders the two permanent remote rows with no add or remove controls', () => {
-    expect(component.extraProviders.map((p) => p.id)).toEqual(['openrouter', 'compat']);
+  it('renders the openrouter permanent remote row with no add or remove controls', () => {
+    expect(component.extraProviders.map((p) => p.id)).toEqual(['openrouter']);
     fixture.detectChanges();
 
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="settings-llm-extra-openrouter"]')).toBeTruthy();
-    expect(el.querySelector('[data-testid="settings-llm-extra-compat"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="settings-llm-add-openrouter"]')).toBeNull();
-    expect(el.querySelector('[data-testid="settings-llm-add-compat"]')).toBeNull();
     expect(el.querySelector('[data-testid="settings-llm-extra-remove-openrouter"]')).toBeNull();
   });
 
@@ -1254,11 +1258,10 @@ describe('LlmProviderComponent', () => {
 
     const ids = (captured!['providers'] as Array<Record<string, unknown>>).map((p) => p['id']);
     expect(ids).not.toContain('openrouter');
-    expect(ids).not.toContain('compat');
   });
 
   it('toggles a row open and closed without changing the active provider', () => {
-    const entry = component.extraProviders[1];
+    const entry = component.extraProviders[0];
     const activeBefore = component.selectedTarget;
 
     component.toggleExtraExpanded(entry);

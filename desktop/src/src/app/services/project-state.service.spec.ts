@@ -43,7 +43,11 @@ describe('ProjectStateService', () => {
         case 'start_containers':
           return undefined;
         case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: true };
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+          };
         default:
           return undefined;
       }
@@ -137,6 +141,66 @@ describe('ProjectStateService', () => {
       expect(service.status).toBe('ready');
     });
 
+    it('reaches ready for a non-anthropic provider with no anthropic auth (needs_anthropic_auth=false)', async () => {
+      // Non-anthropic provider, no Anthropic creds, backend says auth not needed:
+      // gate must not strand the user on "auth required" (the free-model bug).
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('ready');
+    });
+
+    it('still requires anthropic auth when needs_anthropic_auth=true and neither credential present', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('auth_required');
+    });
+
     it('sets checking then starting then ready when containers not running', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
@@ -151,7 +215,11 @@ describe('ProjectStateService', () => {
           case 'start_containers':
             return undefined;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -206,7 +274,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           case 'get_health':
             healthCalls += 1;
             return healthCalls < 3 ? makeHealth({ overall_healthy: false }) : makeHealth({});
@@ -234,7 +306,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           case 'get_health':
             return makeHealth({
               overall_healthy: false,
@@ -274,7 +350,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           case 'get_health':
             return healthy;
           default:
@@ -301,7 +381,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           case 'get_health':
             healthCalls += 1;
             if (healthCalls === 1) throw new Error('probe boom');
@@ -709,7 +793,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -730,7 +818,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -751,7 +843,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: true, oauth_authenticated: false };
+            return {
+              api_key_configured: true,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -794,7 +890,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: authed };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: authed,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -836,7 +936,11 @@ describe('ProjectStateService', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }
@@ -850,13 +954,21 @@ describe('ProjectStateService', () => {
 
     it('applyAuthStatus sets ready when auth is valid', () => {
       service.status = 'auth_required';
-      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+      });
       expect(service.status).toBe('ready');
     });
 
     it('applyAuthStatus sets auth_required when no auth', () => {
       service.status = 'ready';
-      service.applyAuthStatus({ api_key_configured: false, oauth_authenticated: false });
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+      });
       expect(service.status).toBe('auth_required');
     });
 
@@ -864,7 +976,11 @@ describe('ProjectStateService', () => {
       service.status = 'ready';
       const cb = vi.fn();
       service.onChange(cb);
-      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+      });
       expect(service.status).toBe('ready');
       expect(cb).not.toHaveBeenCalled();
     });
@@ -881,7 +997,11 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+            };
           default:
             return undefined;
         }

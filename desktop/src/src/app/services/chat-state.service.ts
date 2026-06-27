@@ -6,8 +6,14 @@ import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
-import { calculateCost } from '../chat/pricing';
-import { DEFAULT_CONTEXT_TOKENS, isLocalProvider, type LlmConfigResponse } from '../models/llm';
+import { isBareSlash } from '../chat/slash/slash.service';
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  isLocalProvider,
+  isTerminalCostSource,
+  type LlmConfigResponse,
+  type ResponseUsage,
+} from '../models/llm';
 import {
   DEFAULT_STATE_TREE,
   type ConversationEntryState,
@@ -77,11 +83,14 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
-  private _sessionStats: SessionStats | null = null;
+  /** Session cost/usage stats signal — drives the OnPush footer reactively. */
+  private readonly _sessionStats = signal<SessionStats | null>(null);
   /** Session cost/usage stats from the most recent result. */
   get sessionStats(): SessionStats | null {
-    return this._sessionStats;
+    return this._sessionStats();
   }
+  /** Read-only signal mirror so OnPush components re-render on stats changes. */
+  readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
@@ -105,6 +114,11 @@ export class ChatStateService {
   private listenerReady = false;
   private initialized = false;
   private startingSession = false;
+  /**
+   * Bumped whenever a resume supersedes the session; a stale background
+   * start_chat that finishes later no-ops instead of clobbering the resume.
+   */
+  private _sessionGeneration = 0;
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
@@ -124,6 +138,33 @@ export class ChatStateService {
 
   /** ADR-042 — projection of `state().is_streaming` onto a signal. */
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
+
+  /** True while a resumed conversation's transcript is being fetched. */
+  private readonly _loadingTranscript = signal<boolean>(false);
+  /** Read-only signal: drives the transcript-loading spinner. */
+  readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
+
+  /** Mark the start of a transcript fetch (shows the loader). */
+  beginTranscriptLoad(): void {
+    this._loadingTranscript.set(true);
+  }
+
+  /** Mark the end of a transcript fetch (hides the loader). */
+  endTranscriptLoad(): void {
+    this._loadingTranscript.set(false);
+  }
+
+  /**
+   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
+   * bumps the generation to no-op in-flight starts. Returns a flag-clearing disposer.
+   */
+  beginStartingSession(): () => void {
+    this.startingSession = true;
+    this._sessionGeneration += 1;
+    return () => {
+      this.startingSession = false;
+    };
+  }
 
   /** Signal mirror of {@link canRetryLastAssistant}. */
   readonly retryEnabled: Signal<boolean> = computed(() => {
@@ -161,7 +202,7 @@ export class ChatStateService {
   ): void {
     if (state.messages !== undefined) this._messages = state.messages;
     if (state.currentBlocks !== undefined) this._currentBlocks = state.currentBlocks;
-    if (state.sessionStats !== undefined) this._sessionStats = state.sessionStats;
+    if (state.sessionStats !== undefined) this._sessionStats.set(state.sessionStats);
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
   }
 
@@ -178,7 +219,7 @@ export class ChatStateService {
         currentBlocks: this._currentBlocks,
         isStreaming: this.isStreaming,
         pendingQueue: this._pendingQueue,
-        sessionStats: this._sessionStats,
+        sessionStats: this._sessionStats(),
         model: this._model,
       })
     );
@@ -199,9 +240,8 @@ export class ChatStateService {
     }
     if (!this.initialized) {
       this.initialized = true;
-      // Start chat session in the background — don't await so the UI stays
-      // responsive.  If the user sends a message before start_chat completes,
-      // sendMessage's auto-retry handles "no active session" transparently.
+      // Start session in background (UI stays responsive); sendMessage
+      // auto-retries on "no active session" if a message races start_chat.
       if (this.projectState.status === 'ready') {
         this.startChatSession();
       } else {
@@ -217,19 +257,25 @@ export class ChatStateService {
     const project = this.projectState.activeProject;
     if (project && !this.startingSession) {
       this.startingSession = true;
+      const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
       } catch (err) {
+        // A resume superseded this start while it was in flight — don't surface
+        // its failure as the resumed session's error.
+        if (gen !== this._sessionGeneration) {
+          this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
+          return;
+        }
         const msg = String(err);
         if (msg.includes('not authenticated')) {
           this.projectState.status = 'auth_required';
           this.notifyChange();
         } else {
-          // Non-auth start failure is fatal for the chat session — surface it
-          // in the project state so the UI shows an error instead of a silently
-          // dead chat (mirrors the stream-listener failure handling below).
+          // Non-auth start failure is fatal — surface it in project state so
+          // the UI shows an error instead of a silently dead chat.
           this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
           this.projectState.status = 'error';
           this.projectState.error = `Failed to start chat session: ${msg}`;
@@ -251,6 +297,10 @@ export class ChatStateService {
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
     if (!hasContent || this.isStreaming) return;
+    // Drop whitespace-only or bare-slash input before streaming; hasContent
+    // misses these and the backend would bail with a stray error bubble.
+    const isBlankOrSlash = chatInput.text.trim().length === 0 || isBareSlash(chatInput.text);
+    if (chatInput.attachments.length === 0 && isBlankOrSlash) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
     const displayBlocks: MessageBlock[] = [];
@@ -408,9 +458,8 @@ export class ChatStateService {
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
 
-    // Snapshot the pre-mutation current_index so the error path can revert
-    // to it precisely — resetting to questionIdx would be wrong if the user
-    // submitted out of order.
+    // Snapshot the pre-mutation current_index so the error path reverts precisely
+    // (resetting to questionIdx breaks on out-of-order submits).
     let prevIndex: number | null = null;
 
     this._currentBlocks = this._currentBlocks.map((b) => {
@@ -435,10 +484,8 @@ export class ChatStateService {
         answer: value,
       });
     } catch (err) {
-      // If stopConversation ran while submit_question_answer was in flight,
-      // `_turnId` has moved on. Suppress the error block: the user
-      // deliberately cancelled — a "Broken pipe" / "no active session"
-      // surfacing would be confusing noise.
+      // If stop ran while submit was in flight (`_turnId` moved on), suppress the
+      // error: the user cancelled, so a "Broken pipe" surfacing is just noise.
       if (capturedTurn !== this._turnId) {
         this.log.debug(`[chat-state] submitAnswer: suppressing error after stop: ${String(err)}`);
         return;
@@ -464,9 +511,8 @@ export class ChatStateService {
   }
 
   /**
-   * Stops the current Claude turn. Safe to call when not streaming (no-op).
-   * Synchronously resets UI state so the input is re-enabled immediately,
-   * then fires the backend stop in the background.
+   * Stops the current Claude turn (no-op when not streaming). Resets UI state
+   * synchronously to re-enable input, then fires the backend stop in background.
    */
   async stopConversation(): Promise<void> {
     if (!this.isStreaming) return;
@@ -506,9 +552,8 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
-    // 4. Fire the backend interrupt. "no active session" is benign (idle or
-    //    already exited); any other failure means the turn may still be
-    //    running on the backend, so surface an error block to the user.
+    // 4. Fire the backend interrupt. "no active session" is benign (idle/exited);
+    //    any other failure means the turn may still run, so surface an error.
     try {
       await this.tauri.invoke('stop_chat');
     } catch (err) {
@@ -598,9 +643,9 @@ export class ChatStateService {
             utilization: chunk.data.utilization,
             resets_at: chunk.data.resets_at,
           };
-          // Update existing sessionStats immediately if present
-          if (this._sessionStats) {
-            this._sessionStats = { ...this._sessionStats, rate_limit: this._rateLimit };
+          const cur = this._sessionStats();
+          if (cur) {
+            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
           }
         }
         break;
@@ -641,15 +686,21 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
-        this._sessionStats = {
+        const livePreviewCost =
+          typeof chunk.data.total_cost === 'number' && Number.isFinite(chunk.data.total_cost)
+            ? chunk.data.total_cost
+            : null;
+        this._sessionStats.set({
           session_id: chunk.data.session_id,
-          total_cost: chunk.data.total_cost ?? 0,
+          total_cost: livePreviewCost,
           usage: chunk.data.usage,
           model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
-        };
+        });
+        // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
+        void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
       }
 
@@ -677,7 +728,6 @@ export class ChatStateService {
           ...this._currentBlocks,
           { type: 'error', content: chunk.data.content },
         ];
-        // Finalize as error turn
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -709,17 +759,25 @@ export class ChatStateService {
     this.notifyChange();
   }
 
-  /** Clears all chat state to start a fresh conversation. */
-  resetForNewConversation(): void {
-    this.log.debug('[chat-state] resetForNewConversation');
+  /**
+   * Resets the per-conversation stream/usage fields shared by new-conversation
+   * and project-switch clears. Callers add their own extra fields + notify.
+   */
+  private resetCoreStreamState(): void {
     this._messages = [];
     this._currentBlocks = [];
     this.isStreaming = false;
-    this._sessionStats = null;
+    this._sessionStats.set(null);
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
+  }
+
+  /** Clears all chat state to start a fresh conversation. */
+  resetForNewConversation(): void {
+    this.log.debug('[chat-state] resetForNewConversation');
+    this.resetCoreStreamState();
     this._pendingQueue = null;
     this.initialized = false;
     this.startingSession = false;
@@ -733,6 +791,12 @@ export class ChatStateService {
   loadMessages(msgs: ChatMessage[]): void {
     this._messages = msgs;
     this.notifyChange();
+    // Re-reconcile the last turn from the proxy SSOT — corrects a cost that was
+    // still `deferred` when the live retry gave up. Terminal costs are idempotent.
+    const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && m.uuid);
+    if (lastAssistant?.uuid) {
+      void this.reconcileFooterCost(lastAssistant.uuid);
+    }
   }
 
   /**
@@ -741,17 +805,18 @@ export class ChatStateService {
    */
   seedResumedSession(sessionId: string): void {
     if (!sessionId) return;
-    if (this._sessionStats?.session_id === sessionId) return;
+    const cur = this._sessionStats();
+    if (cur?.session_id === sessionId) return;
     // The seed is replaced as soon as the next `Result` chunk arrives with
     // an authoritative `context_window_size`.
-    const seeded = this.resolveContextWindow(undefined, this._sessionStats?.model);
-    this._sessionStats = {
-      total_cost: 0,
+    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    this._sessionStats.set({
+      total_cost: null,
       context_window_size: seeded,
       total_output_tokens: 0,
-      ...this._sessionStats,
+      ...cur,
       session_id: sessionId,
-    };
+    });
     this.notifyChange();
   }
 
@@ -761,7 +826,7 @@ export class ChatStateService {
    * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId || !text) return null;
     try {
       const prior = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
@@ -779,7 +844,7 @@ export class ChatStateService {
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
       // No session yet — clear the local slot anyway.
       this._pendingQueue = null;
@@ -825,7 +890,7 @@ export class ChatStateService {
     userIdx: number;
   } | null {
     if (this.isStreaming) return null;
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) return null;
     const anchor = findRetryAnchorIn(this._messages, 'Committed');
     return anchor === null ? null : { sessionId, ...anchor };
@@ -874,14 +939,7 @@ export class ChatStateService {
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
       if (this.projectState.status === 'switching') {
-        this._messages = [];
-        this._currentBlocks = [];
-        this.isStreaming = false;
-        this._sessionStats = null;
-        this._model = '';
-        this._rateLimit = null;
-        this._totalOutputTokens = 0;
-        this._contextWindowSize = null;
+        this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
         this.notifyChange();
@@ -891,6 +949,92 @@ export class ChatStateService {
         void this.refreshLlmConfigCache();
       }
     });
+  }
+
+  /**
+   * Backoff schedule (ms) for re-reconciling a `deferred` OpenRouter cost.
+   * Spans ~60s total: `/generation` can take ~30s+ to price a large turn.
+   */
+  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+
+  /**
+   * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6),
+   * retrying on a backoff while OpenRouter cost is `deferred`. Best-effort.
+   * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
+   * @param attempt - Backoff index for a deferred re-reconcile (0 on the first call).
+   */
+  private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
+    if (!assistantUuid) return;
+    const project = this.projectState.activeProject;
+    if (!project) return;
+    // A newer turn (or a stop) bumps `_turnId`; abandon a stale deferred retry.
+    const capturedTurn = this._turnId;
+    try {
+      const u = await this.tauri.invoke<ResponseUsage | null>('get_usage_for_response', {
+        project,
+        responseId: assistantUuid,
+      });
+      if (!u) return;
+      // Non-terminal cost (deferred / no sidecar yet) keeps the live preview;
+      // only a terminal cost_source overwrites footer/per-message (deferred retries below).
+      if (isTerminalCostSource(u.cost_source)) {
+        // Per-message cost from the SSOT; null (unpriced) hides the segment.
+        this.overwriteEntryCost(assistantUuid, u.cost_usd);
+        // Footer = this conversation's turns only; skipped when no live session.
+        const cur = this._sessionStats();
+        if (cur) {
+          const responseIds = this.conversationResponseIds(assistantUuid);
+          const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
+            project,
+            responseIds,
+          });
+          this._sessionStats.set({ ...cur, total_cost: conversationCost });
+        }
+        this.notifyChange();
+      }
+      const backoff = ChatStateService.DEFERRED_RECONCILE_BACKOFF_MS;
+      if (u.cost_source === 'deferred' && attempt < backoff.length) {
+        setTimeout(() => {
+          if (capturedTurn === this._turnId) {
+            void this.reconcileFooterCost(assistantUuid, attempt + 1);
+          }
+        }, backoff[attempt]);
+      }
+    } catch (err) {
+      // Footer stays on the live value; reconcile is best-effort.
+      this.log.debug(`[chat-state] reconcileFooterCost best-effort failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Response ids of the current conversation's assistant turns, for the footer
+   * cost sum.
+   * @param latestUuid - just-finished turn's assistant uuid (caller guards non-empty).
+   */
+  private conversationResponseIds(latestUuid: string): string[] {
+    const ids = new Set<string>();
+    for (const m of this._messages) {
+      if (m.role === 'assistant' && m.uuid) ids.add(m.uuid);
+    }
+    ids.add(latestUuid);
+    return [...ids];
+  }
+
+  /**
+   * Overwrite an assistant entry's per-message cost from the proxy SSOT.
+   * @param uuid - assistant_uuid identifying the entry.
+   * @param cost - proxy cost in USD, or null/unpriced → hide the segment.
+   */
+  private overwriteEntryCost(uuid: string, cost: number | null): void {
+    const idx = this._messages.findIndex((m) => m.uuid === uuid && m.meta);
+    if (idx < 0) return;
+    const m = this._messages[idx];
+    const nextCost = typeof cost === 'number' && Number.isFinite(cost) ? cost : undefined;
+    this._messages = [
+      ...this._messages.slice(0, idx),
+      { ...m, meta: { ...m.meta, cost: nextCost } },
+      ...this._messages.slice(idx + 1),
+    ];
   }
 
   /**
@@ -917,7 +1061,7 @@ export class ChatStateService {
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
       // With no live stream value, surface the persisted one.
-      if (this._persistedContextTokens && !this._sessionStats?.usage) {
+      if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
       this.notifyChange();
@@ -983,14 +1127,6 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
 }
 
 /**
- * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
- * @param data - Relevant fields copied from the `Result` chunk payload.
- * @param data.turn_usage - Per-turn token usage (required for fallback cost).
- * @param data.turn_cost - Authoritative per-turn cost from the backend.
- * @param data.model - Model id attached to the `Result` chunk, if any.
- * @param resolvedModel - Model id already resolved by the reducer.
- */
-/**
  * Locates the retry anchor: the (assistant, user) pair replayable via `retry_last_turn` (ADR-046).
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
@@ -1023,6 +1159,14 @@ function findRetryAnchorIn(
   return null;
 }
 
+/**
+ * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
+ * @param data - Fields copied from the `Result` payload.
+ * @param data.turn_usage - Token usage for the turn.
+ * @param data.turn_cost - Cost (USD) for the turn.
+ * @param data.model - Model id from the payload, if present.
+ * @param resolvedModel - Model id already resolved by the reducer.
+ */
 function buildEntryMeta(
   data: {
     turn_usage?: TurnUsage;
@@ -1040,14 +1184,10 @@ function buildEntryMeta(
   if (model) meta.model = model;
   if (turn_usage) meta.usage = turn_usage;
 
-  // Cost: prefer backend turn_cost (authoritative); fallback to computed cost
-  // from pricing.ts when usage is available. Leave undefined otherwise so
-  // the renderer hides the segment rather than showing $0.000.
-  if (turn_cost !== undefined) {
+  // Cost preview = backend turn_cost only; reconcileFooterCost replaces it with
+  // the proxy SSOT. No frontend pricing — undefined hides the segment.
+  if (turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
-  } else if (model && turn_usage) {
-    const computed = calculateCost(model, turn_usage);
-    if (computed !== null) meta.cost = computed;
   }
   return meta;
 }
@@ -1136,6 +1276,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     output_tokens: src.sessionStats?.usage?.output_tokens ?? 0,
     cache_read_tokens: src.sessionStats?.usage?.cache_read_tokens ?? 0,
     cache_write_tokens: src.sessionStats?.usage?.cache_write_tokens ?? 0,
+    // Safe lossy projection: the state-tree total is display-only and never
+    // rendered as $; the authoritative unpriced/null cost lives in total_cost.
     cost: src.sessionStats?.total_cost ?? 0,
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };
@@ -1150,9 +1292,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
 }
 
 /**
- * Project committed `state().entries` onto the legacy `ChatMessage[]` shape.
- * The trailing live-streaming entry (uuid_status=pending and no meta) is
- * dropped — it lives separately under `currentBlocksFromState`.
+ * Project committed `state().entries` onto the legacy `ChatMessage[]` shape;
+ * the trailing live-streaming entry is dropped (it lives under `currentBlocksFromState`).
  * @param entries - State-tree entries to convert.
  */
 export function stateEntriesToChatMessages(

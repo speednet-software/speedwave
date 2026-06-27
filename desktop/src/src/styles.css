@@ -111,12 +111,12 @@
   --ink-mute: #707a96;
 
   /* Accent (rotates per theme). --on-accent is the text/icon drawn on a filled
-     accent; dark ink (#07090f) clears WCAG AA on every dark-mode accent
-     (crimson 6.19:1, iris 7.31:1, pastels higher) — white would fail crimson
-     (3.21:1) and iris (2.72:1). */
-  --accent: #ff4d6d;
-  --accent-dim: #c9304e;
-  --accent-soft: rgba(255, 77, 109, 0.1);
+     accent; dark ink (#07090f) clears WCAG AA on every accent (ember 5.96:1,
+     iris 7.31:1, pastels higher) — white would fail ember (3.34:1) and iris
+     (2.72:1). Ember is the :root default. */
+  --accent: #fb5113;
+  --accent-dim: #d1430e;
+  --accent-soft: rgba(251, 81, 19, 0.1);
   --on-accent: #07090f;
 
   /* Semantic palette */
@@ -134,8 +134,14 @@
 
 /* ── Theme variants — accent rotates per [data-theme]; backgrounds rotate per
       `.dark` class on <html> (see light overlay below). ── */
-/* Crimson is the :root default, but an explicit rule lets a scoped element
-   (e.g. the Appearance swatch) force crimson regardless of the active theme. */
+/* Ember is the :root default, but an explicit rule lets a scoped element
+   (e.g. the Appearance swatch) force ember regardless of the active theme. */
+[data-theme='ember'] {
+  --accent: #fb5113;
+  --accent-dim: #d1430e;
+  --accent-soft: rgba(251, 81, 19, 0.1);
+  --on-accent: #07090f;
+}
 [data-theme='crimson'] {
   --accent: #ff4d6d;
   --accent-dim: #c9304e;
@@ -146,12 +152,6 @@
   --accent: #5eead4;
   --accent-dim: #2dd4bf;
   --accent-soft: rgba(94, 234, 212, 0.1);
-  --on-accent: #07090f;
-}
-[data-theme='amber'] {
-  --accent: #f5b942;
-  --accent-dim: #d99a24;
-  --accent-soft: rgba(245, 185, 66, 0.1);
   --on-accent: #07090f;
 }
 [data-theme='iris'] {
@@ -199,10 +199,18 @@
   --amber: #9a6b00;
   --red: #b91c1c;
 
-  --accent: #c4133a;
-  --accent-dim: #9a0e2d;
-  --accent-soft: rgba(196, 19, 58, 0.14);
-  --on-accent: #ffffff;
+  /* Ember default — same #fb5113 in light + dark. On the light --bg (#ffffff)
+     dark ink (#07090f) clears AA at 5.96:1; white would fail at 3.34:1. */
+  --accent: #fb5113;
+  --accent-dim: #d1430e;
+  --accent-soft: rgba(251, 81, 19, 0.16);
+  --on-accent: #07090f;
+}
+:root:not(.dark)[data-theme='ember'] {
+  --accent: #fb5113;
+  --accent-dim: #d1430e;
+  --accent-soft: rgba(251, 81, 19, 0.16);
+  --on-accent: #07090f;
 }
 :root:not(.dark)[data-theme='crimson'] {
   --accent: #c4133a;
@@ -216,12 +224,6 @@
   --accent: #0a7a64;
   --accent-dim: #0a6e5b;
   --accent-soft: rgba(13, 138, 114, 0.16);
-  --on-accent: #ffffff;
-}
-:root:not(.dark)[data-theme='amber'] {
-  --accent: #9a6b00;
-  --accent-dim: #7a5500;
-  --accent-soft: rgba(154, 107, 0, 0.16);
   --on-accent: #ffffff;
 }
 :root:not(.dark)[data-theme='iris'] {

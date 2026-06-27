@@ -169,6 +169,43 @@ if [[ -z "$total_cost" ]]; then
     total_cost="$(extract_json_float "$INPUT" "total_cost_usd")"
 fi
 
+# Proxy SSOT (ADR-073): cumulative cost from the sidecar overrides the CC value.
+# STATUSLINE_USAGE_DIR overrides /usage for tests. Missing/unreadable → CC value.
+USAGE_DIR="${STATUSLINE_USAGE_DIR:-/usage}"
+cost_cache="$USAGE_DIR/cost-cache.jsonl"
+# No usage-window filter here (the shell can't read the full JSONL cheaply);
+# prune_cost_cache_in drops orphans, so this may briefly exceed the dashboard.
+if [[ -r "$cost_cache" ]]; then
+    # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
+    # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).
+    # Dedup by response_id (last write wins, mirrors usage_cost::read_cost_cache_in):
+    # re-enrichment may append duplicate ids; sum the per-id map, not every line.
+    # `n` counts priced ids so an all-zero (free local) sidecar still shows $0.
+    ssot_cost="$(LC_ALL=C awk '
+        {
+            id = ""
+            if (match($0, /"response_id"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                seg = substr($0, RSTART, RLENGTH)
+                sub(/^.*:[[:space:]]*"/, "", seg); sub(/"$/, "", seg)
+                id = seg
+            }
+        }
+        match($0, /"cost_usd"[[:space:]]*:[[:space:]]*-?[0-9.]+([eE][-+]?[0-9]+)?/) {
+            seg = substr($0, RSTART, RLENGTH)
+            sub(/^.*:[[:space:]]*/, "", seg)
+            cost[id] = seg + 0
+        }
+        END {
+            n = 0
+            for (k in cost) { sum += cost[k]; n++ }
+            if (n > 0) printf "%.4f", sum
+        }
+    ' "$cost_cache" 2>/dev/null)"
+    if [[ -n "$ssot_cost" ]]; then
+        total_cost="$ssot_cost"
+    fi
+fi
+
 # ── Git branch ───────────────────────────────────────────────────────────────
 # No [ -d .git ] check: in git worktrees .git is a file, not a dir.
 # STATUSLINE_WORKSPACE_DIR overrides the workspace path (tests).

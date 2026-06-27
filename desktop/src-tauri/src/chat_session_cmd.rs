@@ -7,9 +7,12 @@ use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
-/// Shared impl for `start_chat`/`resume_conversation`: acquires the per-project
-/// compose lock + checks Claude auth, stops the old session outside the session
-/// lock, then starts the new one under it.
+/// Serialises start/stop/start so `start_chat`/`resume_conversation` can't
+/// interleave. Poison is recovered: this guards ordering, not data invariants.
+static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Shared impl for `start_chat`/`resume_conversation`: locks + checks auth,
+/// stops the old session outside the session lock, then starts the new one under it.
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -17,6 +20,10 @@ fn start_session_inner(
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let _serialize = START_SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
     containers_cmd::ensure_images_ready()?;
@@ -232,6 +239,56 @@ mod tests {
         assert!(
             body.contains("start_session_inner"),
             "resume_conversation must delegate to start_session_inner"
+        );
+    }
+
+    #[test]
+    fn start_session_inner_serializes_before_any_start_stop() {
+        // The serialization guard must be taken before any oauth/image/stop work,
+        // so overlapping start_chat/resume calls run strictly one at a time.
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let guard_pos = body
+            .find("START_SERIALIZE")
+            .expect("start_session_inner must acquire START_SERIALIZE");
+        let work_pos = body
+            .find("ensure_oauth_running")
+            .expect("start_session_inner must call ensure_oauth_running");
+        assert!(
+            guard_pos < work_pos,
+            "START_SERIALIZE must be acquired before any start/stop work"
+        );
+    }
+
+    #[test]
+    fn start_serialize_mutex_admits_one_holder_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // Two threads grab START_SERIALIZE; the concurrent-holder count never
+        // exceeds 1 — proves the guard serialises overlapping starts.
+        let live = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let live = live.clone();
+            let max = max.clone();
+            handles.push(std::thread::spawn(move || {
+                let _g = START_SERIALIZE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                live.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            max.load(Ordering::SeqCst),
+            1,
+            "START_SERIALIZE must admit only one start at a time"
         );
     }
 

@@ -106,9 +106,9 @@ describe('ThemeService', () => {
   }
 
   // Happy path
-  it('defaults to crimson when nothing is stored and removes data-theme', () => {
+  it('defaults to ember when nothing is stored and removes data-theme', () => {
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
@@ -121,33 +121,40 @@ describe('ThemeService', () => {
 
   it('writes data-theme + persists when setTheme switches to a non-default theme', () => {
     const svc = create();
-    svc.setTheme('amber');
-    expect(svc.theme()).toBe<ThemeId>('amber');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('amber');
-    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('amber');
-  });
-
-  it('removes data-theme when switching back to the crimson default', () => {
-    const svc = create();
-    svc.setTheme('amber');
     svc.setTheme('crimson');
     expect(svc.theme()).toBe<ThemeId>('crimson');
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('crimson');
   });
 
+  it('removes data-theme when switching back to the ember default', () => {
+    const svc = create();
+    svc.setTheme('crimson');
+    svc.setTheme('ember');
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('ember');
+  });
+
   // Edge cases
-  it('treats unknown stored values as crimson', () => {
+  it('treats unknown stored values as ember', () => {
     localStorage.setItem(THEME_STORAGE_KEY, 'bogus');
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
-  it('treats an empty stored value as crimson', () => {
+  it('treats a previously persisted amber (now removed) as the ember default', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'amber');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('treats an empty stored value as ember', () => {
     localStorage.setItem(THEME_STORAGE_KEY, '');
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
   });
 
   it('is a no-op when setTheme is called with the current theme', () => {
@@ -178,9 +185,9 @@ describe('ThemeService', () => {
     });
 
     const svc = create();
-    expect(() => svc.setTheme('amber')).not.toThrow();
-    expect(svc.theme()).toBe<ThemeId>('amber');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('amber');
+    expect(() => svc.setTheme('crimson')).not.toThrow();
+    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
   });
 
   // ── Mode axis (light / dark / auto) ──────────────────────────────────────

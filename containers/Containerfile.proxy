@@ -1,0 +1,28 @@
+# Speedwave proxy — musl static binary on scratch (see ADR-073).
+# Builder: rust:alpine (musl native); final stage: scratch (zero OS layer).
+FROM rust:1-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS builder
+
+# tzdata is needed only to populate /usr/share/zoneinfo for the final stage.
+# musl-dev is required for ring's C assembly (ring uses cc-rs to compile ASM).
+RUN apk add --no-cache tzdata musl-dev
+
+WORKDIR /build
+
+COPY proxy/ /build/
+
+# Cache the cargo registry/git so a Cargo.toml change re-fetches only new
+# crates instead of the whole index (parallels the npm cache mounts).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --locked
+
+# Final stage: scratch — zero OS footprint; user 1000:1000 set via compose.
+FROM scratch
+
+# TZ zone database — required so log timestamps carry the host offset, not
+# a bare numeric offset. Injected as TZ env by tz.rs::detect_host_timezone.
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
+COPY --from=builder /build/target/release/proxy /proxy
+
+ENTRYPOINT ["/proxy"]

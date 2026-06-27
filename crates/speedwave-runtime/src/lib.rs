@@ -45,6 +45,7 @@ pub mod tz;
 pub mod update;
 pub mod url_validation;
 pub mod usage;
+pub mod usage_cost;
 pub mod validation;
 
 /// Test-only re-exports of internal transaction helpers.

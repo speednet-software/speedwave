@@ -21,7 +21,7 @@ import {
 } from '@angular/cdk/overlay';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashMenuComponent } from '../slash/slash-menu.component';
-import { SlashService, type SlashCommand } from '../slash/slash.service';
+import { SlashService, isBareSlash, type SlashCommand } from '../slash/slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
 import { FileDropDirective } from './file-drop.directive';
@@ -386,7 +386,9 @@ export class ComposerComponent implements AfterViewInit {
   canSubmit(): boolean {
     if (this.disabled()) return false;
     if (this.anyAttachmentPreprocessing()) return false;
-    const hasText = this.textValue().trim().length > 0;
+    const text = this.textValue();
+    // A lone `/` is the skill-menu trigger, not a message.
+    const hasText = text.trim().length > 0 && !isBareSlash(text);
     const hasAttachments = this.attachments().length > 0;
     if (!hasText && !hasAttachments) return false;
     if (hasAttachments && this.streaming()) return false;

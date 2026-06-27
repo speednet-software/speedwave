@@ -71,6 +71,77 @@ describe('ChatComponent', () => {
     chatState.isStreaming = false;
   });
 
+  // ── resumeConversation: transcript-loading flag ────────────────────────────
+
+  describe('resumeConversation loading flag', () => {
+    it('sets loadingTranscript true during fetch and false after it resolves', async () => {
+      projectState.activeProject = 'test';
+
+      let releaseGetConversation: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          await new Promise<void>((resolve) => {
+            releaseGetConversation = resolve;
+          });
+          return { session_id: 's1', messages: [] };
+        }
+        return undefined;
+      };
+
+      const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
+      await Promise.resolve();
+      // Mid-flight: loader is showing.
+      expect(chatState.loadingTranscriptFromState()).toBe(true);
+
+      releaseGetConversation!();
+      await resumePromise;
+      // Settled: loader is hidden.
+      expect(chatState.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('clears loadingTranscript even when get_conversation fails', async () => {
+      projectState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') throw new Error('boom');
+        return undefined;
+      };
+
+      await component.resumeConversation('11111111-1111-1111-1111-111111111111');
+
+      expect(chatState.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
+      projectState.activeProject = 'test';
+      // Wrap the real disposer so we can assert when the start-in-progress flag
+      // is released (the disposer replaces the old endStartingSession method).
+      const dispose = vi.fn();
+      const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
+
+      let releaseGetConversation: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          await new Promise<void>((resolve) => {
+            releaseGetConversation = resolve;
+          });
+          return { session_id: 's1', messages: [] };
+        }
+        return undefined;
+      };
+
+      const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
+      await Promise.resolve();
+      // Mid-flight: the start-in-progress flag is set, not yet cleared.
+      expect(begin).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
+
+      releaseGetConversation!();
+      await resumePromise;
+      // Settled: disposer released so later sends can start a session normally.
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // ── Composition — shell sub-components ─────────────────────────────────────
 
   describe('shell composition', () => {
@@ -352,6 +423,57 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── restart auto-resume ─────────────────────────────────────────────────────
+
+  describe('auto-resume after a container restart', () => {
+    it('resumes the active session (not a fresh start_chat) when a restart completes', async () => {
+      projectState.activeProject = 'test';
+      // An active session exists (a model switch will restart the container).
+      chatState._setState({
+        messages: [],
+        currentBlocks: [],
+        sessionStats: {
+          session_id: 'live-session-1',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      await component.ngOnInit();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'live-session-1', messages: [] };
+        return undefined;
+      };
+
+      // Container restart finished (model switch path).
+      projectState.notifyRestartComplete();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(invokeCalls).not.toContain('start_chat');
+    });
+
+    it('does nothing on restart when there is no active session', async () => {
+      projectState.activeProject = 'test';
+      chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
+      await component.ngOnInit();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        return undefined;
+      };
+
+      projectState.notifyRestartComplete();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeCalls).not.toContain('resume_conversation');
+    });
+  });
+
   // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
@@ -385,6 +507,19 @@ describe('ChatComponent', () => {
       expect((lastMsg.blocks[0] as { type: 'error'; content: string }).content).toContain(
         'Failed to resume session'
       );
+    });
+
+    it('does not leave the failed session marked active', async () => {
+      projectState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'resume_conversation') throw new Error('container not running');
+        return undefined;
+      };
+
+      await component.resumeConversation('11111111-1111-1111-1111-111111111111');
+
+      // Optimistic accent cleared on failure → drawer doesn't show it as active.
+      expect(component.currentViewSessionId).toBeNull();
     });
 
     it('routes auth error in resumeConversation to retryAuth', async () => {

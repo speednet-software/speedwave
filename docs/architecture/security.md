@@ -46,9 +46,9 @@ Each MCP worker container mounts **only its own** service credentials:
 
 **`/tokens` is `:ro` for all workers.** OAuth refresh moved to the host-side `oauth` worker which writes the refreshed `access_token` to the same per-project tokens directory — the worker only ever reads it (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
 
-Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale. With the LiteLLM proxy in the inference path ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)) the OAuth `Authorization` header transits the proxy's `/anthropic` passthrough verbatim — the proxy holds no Anthropic credential of its own, which is exactly what keeps the forwarding transparent.
+Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale. With the proxy forwarder in the inference path ([ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md)) the OAuth `Authorization` header transits the passthrough leg verbatim — the forwarder holds no Anthropic credential of its own, which is exactly what keeps the forwarding transparent.
 
-**LLM provider keys (ADR-073)** follow the worker token regime, not the claude-env regime: values live in `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (0600) and mount `:ro` into the `litellm` container only, where the entrypoint exports them as `SPW_KEY_<PROVIDER_ID>`. They never enter the `claude` container and never appear in the rendered litellm `config.yaml` (which carries `os.environ/…` references). The one deliberate exception is the Anthropic API key, which stays on the `claude` container env as before (ADR-040 residual risk) because the passthrough forwards `x-api-key` and that preserves `/model` alias semantics. The `LITELLM_VOLUMES` SecurityCheck rule pins the proxy's mount profile (config `:ro`, llm-tokens `:ro`, usage as the only `:rw`, no host network).
+**LLM provider keys (ADR-073)** follow the worker token regime, not the claude-env regime: values live in `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (0600) and mount `:ro` into the `proxy` container only, where compose injects them as `SPW_KEY_<PROVIDER_ID>` env names the forwarder resolves from `/tokens`. They never enter the `claude` container and never appear in the rendered `proxy.json` (which carries `SPW_KEY_<ID>` env-name references only). The one deliberate exception is the Anthropic API key, which stays on the `claude` container env as before (ADR-040 residual risk) because the passthrough forwards `x-api-key` and that preserves `/model` alias semantics. The `SpeedwaveProxyVolumes` SecurityCheck rule pins the forwarder's mount profile (config `:ro`, llm-tokens `:ro`, usage as the only `:rw`, no host network).
 
 ### Clipboard wrappers (OSC 52)
 
@@ -181,13 +181,13 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 ### Network Security Rules
 
-| Rule                          | Scope                     | What it checks                                                                                                                                                                   |
-| ----------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                                                                                                             |
-| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                                                                                                 |
-| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No external-LLM-provider env vars — blocks 9 prefixes: `OPENAI_`, `AZURE_OPENAI_`, `GEMINI_`, `DEEPSEEK_`, `OPENROUTER_`, `COHERE_`, `MISTRAL_`, `TOGETHER_`, `GROQ_`            |
-| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS                                                                                   |
-| `LITELLM_VOLUMES`             | litellm                   | Mount profile is exactly `/config:ro` + `tokens/<project>/llm:/tokens:ro` + `/usage:rw`, and no `network_mode` ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)) |
+| Rule                          | Scope                     | What it checks                                                                                                                                                                     |
+| ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                                                                                                               |
+| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                                                                                                   |
+| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No external-LLM-provider env vars — blocks 9 prefixes: `OPENAI_`, `AZURE_OPENAI_`, `GEMINI_`, `DEEPSEEK_`, `OPENROUTER_`, `COHERE_`, `MISTRAL_`, `TOGETHER_`, `GROQ_`              |
+| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS                                                                                     |
+| `SpeedwaveProxyVolumes`       | proxy                     | Mount profile is exactly `/config:ro` + `tokens/<project>/llm:/tokens:ro` + `/usage:rw`, and no `network_mode` ([ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md)) |
 
 **Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services (sharepoint, slack — ADR-071) by `ensure_host_gateway_extra_host()`. Other built-in workers (github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
 
@@ -403,8 +403,11 @@ chat access. Enforced at two layers:
   stream-json on stdout.
 
 - **Frontend (`ProjectStateService` / `AuthTerminalComponent`):** After
-  containers are running, calls `get_auth_status`. If neither OAuth nor API key
-  is configured, the auth overlay offers two ways to log in:
+  containers are running, calls `get_auth_status`. The gate blocks only when the
+  active provider needs Anthropic auth (`needs_anthropic_auth`, derived from
+  `project_needs_anthropic_auth` — R7) **and** neither OAuth nor API key is
+  configured; a non-anthropic provider (local/openrouter) is never
+  walled. When it does block, the auth overlay offers two ways to log in:
   - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
     host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
     Windows) running `speedwave login`,

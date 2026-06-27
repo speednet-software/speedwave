@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ConversationsSidebarComponent } from './conversations-sidebar.component';
+import {
+  ConversationsSidebarComponent,
+  scrollActiveRowIntoView,
+} from './conversations-sidebar.component';
 import type { ConversationSummary } from '../../models/chat';
 
 @Component({
@@ -175,6 +178,59 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       const els = document.querySelectorAll('[aria-current="true"]');
       expect(els.length).toBe(0);
+    });
+
+    it('marks the active row with data-active so it can be scrolled into view', () => {
+      host.conversations = sample;
+      host.currentSessionId = 's3';
+      fixture.detectChanges();
+      const actives = document.querySelectorAll('[data-active="true"]');
+      expect(actives.length).toBe(1);
+      // The data-active row is the one wrapping the active session's resume button.
+      expect(actives[0].querySelector('[data-testid="conversation-resume-s3"]')).not.toBeNull();
+    });
+
+    it('sets no data-active row when nothing is active', () => {
+      host.conversations = sample;
+      host.currentSessionId = null;
+      fixture.detectChanges();
+      expect(document.querySelectorAll('[data-active="true"]').length).toBe(0);
+    });
+  });
+
+  describe('scrollActiveRowIntoView', () => {
+    it('scrolls the active row to the top of the list (block: start)', () => {
+      const root = document.createElement('div');
+      const other = document.createElement('div');
+      const active = document.createElement('div');
+      active.setAttribute('data-active', 'true');
+      root.append(other, active);
+      let calledWith: ScrollIntoViewOptions | undefined;
+      active.scrollIntoView = (arg?: boolean | ScrollIntoViewOptions) => {
+        calledWith = arg as ScrollIntoViewOptions;
+      };
+      let otherScrolled = false;
+      other.scrollIntoView = () => {
+        otherScrolled = true;
+      };
+
+      scrollActiveRowIntoView(root);
+
+      expect(calledWith).toEqual({ block: 'start' });
+      expect(otherScrolled).toBe(false);
+    });
+
+    it('is a no-op when no row is active', () => {
+      const root = document.createElement('div');
+      const row = document.createElement('div');
+      let scrolled = false;
+      row.scrollIntoView = () => {
+        scrolled = true;
+      };
+      root.append(row);
+
+      expect(() => scrollActiveRowIntoView(root)).not.toThrow();
+      expect(scrolled).toBe(false);
     });
   });
 

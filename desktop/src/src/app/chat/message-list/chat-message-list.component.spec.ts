@@ -50,6 +50,40 @@ describe('ChatMessageListComponent', () => {
     expect(rendered.length).toBe(0);
   });
 
+  // ── Transcript loading spinner ────────────────────────────────────────
+
+  it('shows the transcript spinner when loadingTranscript is true and messages are empty', () => {
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('loadingTranscript', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeTruthy();
+  });
+
+  it('hides the transcript spinner once messages have loaded', () => {
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+    ]);
+    fixture.componentRef.setInput('loadingTranscript', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeFalsy();
+  });
+
+  it('does not show the transcript spinner when loadingTranscript is false', () => {
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('loadingTranscript', false);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeFalsy();
+  });
+
   // ── Streaming: last entry has streaming=true ──────────────────────────
 
   it('appends a streaming placeholder when isStreaming is true and currentBlocks has content', () => {

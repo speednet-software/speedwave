@@ -1,8 +1,24 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { SlashService, type SlashDiscovery } from './slash.service';
+import { SlashService, isBareSlash, type SlashDiscovery } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+
+describe('isBareSlash', () => {
+  it('matches a lone slash, with or without surrounding whitespace', () => {
+    expect(isBareSlash('/')).toBe(true);
+    expect(isBareSlash('  /  ')).toBe(true);
+    expect(isBareSlash('\n/\t')).toBe(true);
+  });
+
+  it('rejects real commands, text, and blanks', () => {
+    expect(isBareSlash('/code-review')).toBe(false);
+    expect(isBareSlash('what is 2/3?')).toBe(false);
+    expect(isBareSlash('hej')).toBe(false);
+    expect(isBareSlash('')).toBe(false);
+    expect(isBareSlash('   ')).toBe(false);
+  });
+});
 
 class MockTauri {
   invokeMock = vi.fn();

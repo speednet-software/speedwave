@@ -1,6 +1,5 @@
-//! Security validation framework: asserts every container-hardening, token
-//! isolation, and plugin/SharePoint volume invariant on the rendered compose
-//! YAML (+ host filesystem). The gate that blocks `compose_up` on any violation.
+//! Security validation framework over rendered compose YAML + host filesystem.
+//! Gate that blocks `compose_up` on any hardening/token/volume violation.
 
 use crate::consts;
 use crate::engine_path::to_engine_path;
@@ -47,9 +46,8 @@ impl SecurityExpectedPaths {
     }
 }
 
-/// Extracts (host_path, mode) for a known container target from a volume string.
-/// Matches by searching for ":<target>:" or ":<target>" at end.
-/// Returns None if the target is not found in the volume string.
+/// Extracts (host_path, mode) for `target` from a volume string by matching
+/// ":<target>:" or trailing ":<target>"; None if not found.
 pub(crate) fn extract_volume_for_target(
     vol: &str,
     target: &str,
@@ -242,18 +240,18 @@ pub enum SecurityRule {
     #[strum(props(description = "Slack has /workspace mount"))]
     SlackMissingWorkspaceMount,
 
-    /// LiteLLM proxy mounts exactly config:ro + tokens:ro + usage:rw and no
+    /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
     /// host network (ADR-073 — it is a worker-class token holder).
-    #[strum(to_string = "LITELLM_VOLUMES")]
-    #[strum(props(description = "LiteLLM mounts are config:ro, tokens:ro, usage:rw only"))]
-    LitellmVolumes,
+    #[strum(to_string = "PROXY_VOLUMES")]
+    #[strum(props(
+        description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw only"
+    ))]
+    SpeedwaveProxyVolumes,
 
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
-    /// Host file or directory has wrong permissions or ownership.
-    /// Covers both mode bits (e.g. 0o644 instead of 0o600) and UID mismatch.
-    /// Unix-only — skipped on Windows.
+    /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
     FileSecurityViolation,
 }
 
@@ -335,13 +333,8 @@ impl std::fmt::Display for SecurityViolation {
 }
 
 impl SecurityCheck {
-    /// Verifies all security invariants on the generated compose YAML and host filesystem.
-    /// Returns Vec of violations — if non-empty, compose_up MUST be blocked.
-    ///
-    /// `plugin_manifests` provides signed manifest data for cross-referencing
-    /// plugin compose services against their declared token mount modes.
-    ///
-    /// Delegates to `run_with_data_dir()` using `consts::data_dir()` for host filesystem checks.
+    /// Verifies all invariants on compose YAML + host fs (non-empty MUST block
+    /// compose_up); `plugin_manifests` give signed token modes. Uses `data_dir()`.
     pub fn run(
         compose_yml: &str,
         project: &str,
@@ -399,8 +392,8 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
-            // LiteLLM proxy mount profile (ADR-073)
-            Self::check_litellm_volumes(&doc, expected_paths),
+            // proxy mount profile (ADR-073)
+            Self::check_proxy_volumes(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -478,7 +471,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let read_only_required = ["claude", "mcp-hub", "litellm"];
+        let read_only_required = ["claude", "mcp-hub", "proxy"];
         for required in &read_only_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let is_read_only = service
@@ -507,7 +500,7 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        let tmpfs_required = ["claude", "mcp-hub", "litellm"];
+        let tmpfs_required = ["claude", "mcp-hub", "proxy"];
         for required in &tmpfs_required {
             if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
                 let has_tmpfs_noexec = service
@@ -585,9 +578,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// mcp-hub must not have TOKEN/KEY/SECRET env vars — auth tokens are
-    /// delivered as file mounts (/secrets/*), not environment variables.
-    /// Allowed: WORKER_*_URL (service discovery) and PORT.
+    /// mcp-hub must not have TOKEN/KEY/SECRET env vars (tokens come via
+    /// /secrets/* mounts); only WORKER_*_URL and PORT are allowed.
     pub(crate) fn check_no_tokens_in_hub(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -670,9 +662,8 @@ impl SecurityCheck {
                             });
                         }
                     }
-                    // Integer port values (e.g., `- 3000`) expose only the container port
-                    // with a random host port on all interfaces. This is not used in our
-                    // template — flag it as a violation.
+                    // Bare integer port (e.g. `- 3000`) binds a random host port on
+                    // all interfaces; not used in our template — flag it.
                     else if port.as_i64().is_some() || port.as_f64().is_some() {
                         violations.push(SecurityViolation {
                             container: name.clone(),
@@ -722,9 +713,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// claude container must not have external LLM API keys (OPENAI_*, AZURE_OPENAI_*,
-    /// GEMINI_*, DEEPSEEK_*, OPENROUTER_*, COHERE_*, MISTRAL_*, TOGETHER_*, GROQ_*).
-    /// Only the dummy ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted.
+    /// claude container must not have external LLM API keys (OPENAI_*, GEMINI_*,
+    /// OPENROUTER_*, …); only the dummy ANTHROPIC_AUTH_TOKEN is permitted.
     fn check_no_external_llm_keys_claude(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -773,9 +763,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// MCP workers and hub must NOT expose ports to the host.
-    /// Only dynamically-injected services (addons) may map ports.
-    /// All inter-container communication uses Docker DNS.
+    /// MCP workers and hub must NOT expose host ports (only addons may); all
+    /// inter-container communication uses Docker DNS.
     fn check_no_ports_on_workers(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -860,12 +849,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// Validates all volumes for plugin services:
-    /// - /tokens mount: correct host path per service_id, mode matches manifest
-    /// - /workspace mount: correct host path (project dir), must be :rw
-    /// - No other volumes allowed
-    /// - Long-form YAML volumes rejected
-    /// - Both mounts must be present
+    /// Validates plugin volumes: /tokens path+mode per manifest, /workspace :rw,
+    /// both required, no other/long-form mounts allowed.
     fn check_plugin_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -925,11 +910,9 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: the litellm proxy is a worker-class token holder. Its mounts
-    /// must be exactly: `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw` —
-    /// nothing else (no workspace, no claude-home, no sockets) — and it must
-    /// not use host networking.
-    fn check_litellm_volumes(
+    /// ADR-073: proxy mounts exactly `/config:ro`, `<tokens>/llm:/tokens:ro`,
+    /// `/usage:rw` — nothing else — and must not use host networking.
+    fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
     ) -> Vec<SecurityViolation> {
@@ -938,7 +921,7 @@ impl SecurityCheck {
             Some(s) => s,
             None => return violations,
         };
-        let (name, service) = match services.iter().find(|(n, _)| n == "litellm") {
+        let (name, service) = match services.iter().find(|(n, _)| n == "proxy") {
             Some(pair) => pair,
             None => return violations, // not rendered (legacy path) — nothing to check
         };
@@ -946,9 +929,9 @@ impl SecurityCheck {
         if service.get("network_mode").is_some() {
             violations.push(SecurityViolation {
                 container: name.clone(),
-                rule: SecurityRule::LitellmVolumes,
-                message: "litellm must not set network_mode".into(),
-                remediation: "Remove 'network_mode' — litellm joins only the per-project network.",
+                rule: SecurityRule::SpeedwaveProxyVolumes,
+                message: "proxy must not set network_mode".into(),
+                remediation: "Remove 'network_mode' — proxy joins only the per-project network.",
             });
         }
 
@@ -970,8 +953,8 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
-                        message: format!("litellm /config mount must be ro: {vol}"),
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
+                        message: format!("proxy /config mount must be ro: {vol}"),
                         remediation: "Mount the rendered config directory ':ro'.",
                     });
                 }
@@ -980,17 +963,17 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
-                        message: format!("litellm /tokens mount must be ro: {vol}"),
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
+                        message: format!("proxy /tokens mount must be ro: {vol}"),
                         remediation: "Mount the llm token directory ':ro'.",
                     });
                 }
                 if host != expected_tokens {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
-                            "litellm /tokens host path must be the llm namespace \
+                            "proxy /tokens host path must be the llm namespace \
                              ('{expected_tokens}'), got: {vol}"
                         ),
                         remediation: "Mount '<data_dir>/tokens/<project>/llm' at /tokens.",
@@ -1001,8 +984,8 @@ impl SecurityCheck {
                 if mode.as_deref() != Some("rw") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: SecurityRule::LitellmVolumes,
-                        message: format!("litellm /usage mount must be rw: {vol}"),
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
+                        message: format!("proxy /usage mount must be rw: {vol}"),
                         remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
                     });
                 }
@@ -1010,18 +993,18 @@ impl SecurityCheck {
             } else {
                 violations.push(SecurityViolation {
                     container: name.clone(),
-                    rule: SecurityRule::LitellmVolumes,
-                    message: format!("litellm has an unexpected volume: {vol}"),
-                    remediation: "litellm mounts exactly /config:ro, /tokens:ro and /usage:rw.",
+                    rule: SecurityRule::SpeedwaveProxyVolumes,
+                    message: format!("proxy has an unexpected volume: {vol}"),
+                    remediation: "proxy mounts exactly /config:ro, /tokens:ro and /usage:rw.",
                 });
             }
         }
         if matched != 3 {
             violations.push(SecurityViolation {
                 container: name.clone(),
-                rule: SecurityRule::LitellmVolumes,
+                rule: SecurityRule::SpeedwaveProxyVolumes,
                 message: format!(
-                    "litellm must mount exactly /config, /tokens and /usage (found {matched})"
+                    "proxy must mount exactly /config, /tokens and /usage (found {matched})"
                 ),
                 remediation: "Restore the three canonical mounts in compose.template.yml.",
             });
@@ -1056,9 +1039,8 @@ impl SecurityCheck {
         )
     }
 
-    /// Shared check for built-in workers that mount the project workspace and
-    /// consume the host-side oauth worker (ADR-060): /tokens:ro, /workspace:rw,
-    /// per-service bearer allowed, nothing else.
+    /// Shared check for built-in workspace workers (ADR-060): /tokens:ro,
+    /// /workspace:rw, per-service oauth bearer allowed, nothing else.
     fn check_builtin_workspace_worker_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1128,9 +1110,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// Validates file permissions and ownership on sensitive host paths under `data_dir`.
-    /// Secret files must be 0o600, secret dirs 0o700, all owned by the current UID.
-    /// Missing paths and symlinks are skipped.
+    /// Validates perms/ownership under `data_dir`: files 0o600, dirs 0o700,
+    /// all owned by current UID; missing paths and symlinks are skipped.
     #[cfg(unix)]
     pub(crate) fn check_file_security(
         data_dir: &std::path::Path,
@@ -1309,9 +1290,8 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::SharepointTokenPathMismatch,
         token_path_mismatch_rem:
             "SharePoint token mount must use the project-specific tokens directory.",
-        // ADR-060/PR3: SharePoint is no longer a special case — `/tokens:ro`
-        // is the universal rule. The dedicated `SharepointTokenMountMode`
-        // variant was removed; we reuse the generic `PluginTokenMountMode`.
+        // ADR-060/PR3: `/tokens:ro` is universal; reuse generic
+        // `PluginTokenMountMode` (dedicated SharePoint variant removed).
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "SharePoint token mount must be :ro (ADR-060)",
         token_mount_mode_rem: "SharePoint refresh moved to the host-side `oauth` worker; \
@@ -1372,11 +1352,8 @@ struct VolumeCheckParams<'a> {
     rules: VolumeCheckRules,
 }
 
-/// Validates volume mounts on a single service definition.
-///
-/// Returns the list of violations and, if a /tokens mount was found, its actual
-/// mode string (so callers like `check_plugin_volumes` can do additional
-/// manifest-specific checks).
+/// Validates volume mounts on one service; returns violations plus the actual
+/// /tokens mode string (for callers' manifest-specific checks), if mounted.
 fn validate_service_volume_mounts(
     service: &serde_yaml_ng::Value,
     params: &VolumeCheckParams,
@@ -1517,4 +1494,18 @@ pub(crate) fn get_services(
             .filter_map(|(key, value)| key.as_str().map(|name| (name.to_string(), value)))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn proxy_volumes_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::SpeedwaveProxyVolumes.to_string(),
+            "PROXY_VOLUMES",
+        );
+    }
 }

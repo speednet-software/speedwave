@@ -245,8 +245,8 @@ export interface RateLimitInfo {
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
-  /** Total session cost in USD — estimated from token counts at API pricing. */
-  total_cost: number;
+  /** Project cost in USD from the proxy SSOT; `null` when unpriced (subscription) → "—". */
+  total_cost: number | null;
   /**
    * Latest turn's full-prompt usage from flat result.usage (not summed across
    * turns). Drives CTX % (input + cache_read + cache_write); `in:` uses input only.

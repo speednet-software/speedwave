@@ -1,6 +1,5 @@
-//! Slash command discovery for Claude Code: parses the `system/init` line
-//! from `claude -p` for slash commands, plugins, and agents (cached per
-//! project, hardcoded fallback).
+//! Slash command discovery: parses the `system/init` line from `claude -p`
+//! for commands, plugins, and agents (cached per project, hardcoded fallback).
 
 use crate::consts;
 use serde::{Deserialize, Serialize};
@@ -15,9 +14,8 @@ use std::time::{Duration, Instant};
 /// before giving up and returning the hardcoded fallback.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a cached discovery result remains valid before we re-run
-/// discovery on the next call. Claude Code installs change rarely; 10
-/// minutes is the sweet spot between freshness and cost.
+/// How long a cached discovery result stays valid before re-running discovery.
+/// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
 /// Polling interval while waiting for the init line.
@@ -29,8 +27,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub enum DiscoverySource {
     /// Discovered from the `system/init` event emitted by `claude -p`.
     Init,
-    /// Returned the hardcoded fallback list because discovery timed out
-    /// or the container was unavailable.
+    /// Hardcoded fallback list: discovery timed out or the container was down.
     Fallback,
 }
 
@@ -96,13 +93,10 @@ impl ProjectHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
-/// Discovers the slash commands available in `project`'s active Claude
-/// session. Returns a cached result younger than [`CACHE_STALENESS`];
-/// otherwise runs discovery and caches the result (fallback included).
+/// Discovers slash commands for `project`'s active Claude session. Returns a
+/// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
 pub fn discover_slash_commands(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -127,9 +121,8 @@ pub fn discover_slash_commands(
     Ok(discovery)
 }
 
-/// Invalidates the cached discovery for a single project. Call this when
-/// a plugin is installed / removed, when the active project changes, or
-/// when the user explicitly asks for a refresh.
+/// Invalidates the cached discovery for one project. Call on plugin
+/// install/remove, active-project change, or an explicit refresh.
 pub fn invalidate_cache(project_name: &str) {
     match cache().lock() {
         Ok(mut map) => {
@@ -148,14 +141,18 @@ pub fn invalidate_all_caches() {
     }
 }
 
+/// True when trimmed `text` is exactly `/` — the slash-menu trigger. SSOT for
+/// the "lone slash" rule (mirrored in TS composer `canSubmit`).
+pub fn is_bare_slash(text: &str) -> bool {
+    text.trim() == "/"
+}
+
 /// Logs a poisoned-mutex condition at `warn!`; the cache update is skipped.
 fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
 }
 
-// ---------------------------------------------------------------------------
 // Cache
-// ---------------------------------------------------------------------------
 
 /// Cache entry tracks when the discovery was stored so we can expire it.
 #[derive(Clone)]
@@ -201,9 +198,7 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Discovery (running claude -p and parsing the init event)
-// ---------------------------------------------------------------------------
 
 /// Raw payload extracted from the first `system/init` line emitted by
 /// `claude -p`.
@@ -359,9 +354,7 @@ fn run_discovery(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Enrichment and filtering
-// ---------------------------------------------------------------------------
 
 /// Frontmatter fields we care about. All fields are optional so missing or
 /// malformed frontmatter degrades gracefully.
@@ -445,9 +438,8 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Classifies a command name based on built-in list, plugin prefix, and
-/// `agents` presence. Default `Command` is the safest fallback; the UI
-/// renders `cmd` for it which matches Claude Code's own terminology.
+/// Classifies a command by built-in list, plugin prefix, and `agents`
+/// presence. Default `Command` is the safest fallback (UI renders `cmd`).
 fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
@@ -566,9 +558,8 @@ fn personal_claude_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude"))
 }
 
-/// Parses YAML frontmatter bounded by `---` delimiters at the top of the
-/// file. Returns `None` when there is no frontmatter block or the YAML
-/// is malformed.
+/// Parses YAML frontmatter bounded by `---` delimiters at the file top.
+/// Returns `None` when the block is absent or the YAML is malformed.
 fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     let trimmed = contents.trim_start_matches('\u{feff}');
     let mut lines = trimmed.lines();
@@ -587,9 +578,7 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // Fallback
-// ---------------------------------------------------------------------------
 
 fn fallback_discovery() -> SlashDiscovery {
     let names = [
@@ -625,23 +614,42 @@ fn fallback_description(name: &str) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
+
+    #[test]
+    fn is_bare_slash_matches_lone_slash_with_surrounding_whitespace() {
+        assert!(is_bare_slash("/"));
+        assert!(is_bare_slash("  /  "));
+        assert!(is_bare_slash("\n/\t"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_real_commands_and_text() {
+        // A real slash command and ordinary text are messages, not the trigger.
+        assert!(!is_bare_slash("/code-review"));
+        assert!(!is_bare_slash("/clear"));
+        assert!(!is_bare_slash("what is 2/3?"));
+        assert!(!is_bare_slash("hej"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_empty() {
+        // Empty is blank, not the slash trigger — callers handle blank separately.
+        assert!(!is_bare_slash(""));
+        assert!(!is_bare_slash("   "));
+    }
 
     fn sample_init_json() -> String {
         serde_json::json!({

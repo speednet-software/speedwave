@@ -54,9 +54,8 @@ pub struct ConversationMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
-    /// Stable UUID written into the JSONL by Claude Code; needed by the
-    /// retry-last-turn flow (ADR-046) to anchor the rewind point. `None`
-    /// when the line lacks a `uuid` field.
+    /// Stable JSONL UUID; anchors the retry-last-turn rewind point (ADR-046).
+    /// `None` when the line lacks a `uuid` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
 }
@@ -201,6 +200,35 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
             None
         }
     }
+}
+
+/// Bytes of the file tail read by [`last_message_timestamp`]. Sized to comfortably
+/// hold the last several JSONL lines (incl. trailing `last-prompt`/`ai-title`).
+const TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// Timestamp of the last JSONL line carrying one — the session's last activity.
+/// Scans only the final [`TAIL_READ_BYTES`] backwards; `None` if none present.
+fn last_message_timestamp(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_READ_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let tail = String::from_utf8_lossy(&buf);
+    // When we started mid-file the first line may be partial — drop it. `skip`
+    // (not slicing) stays panic-free even if the tail read returned no lines.
+    let lines: Vec<&str> = tail.lines().collect();
+    let scan_from = if start > 0 { 1 } else { 0 };
+    for line in lines.iter().skip(scan_from).rev() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(ts) = v["timestamp"].as_str() {
+                return Some(ts.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Detects synthetic `type:"user"` entries with no `isMeta` flag by sniffing content.
@@ -461,17 +489,22 @@ fn list_conversations_impl(
         };
 
         let reader = BufReader::new(file);
-        let mut first_timestamp: Option<String> = None;
+        let mut last_timestamp: Option<String> = None;
         let mut preview = String::new();
         let mut message_count: usize = 0;
+        let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
         const MAX_SCAN_LINES: usize = 50;
+        // Whether the head scan saw the whole file — gates the junk-slash drop
+        // below (a real 2nd user message past the cap must keep the session).
+        let mut scanned_lines: usize = 0;
 
         for line in reader.lines().take(MAX_SCAN_LINES) {
             let line = match line {
                 Ok(l) => l,
                 Err(_) => break,
             };
+            scanned_lines += 1;
             if let Some(msg) = parse_jsonl_message(&line) {
                 // Deduplicate: skip result whose content is a substring of the preceding assistant message.
                 if msg.role == "assistant" {
@@ -485,8 +518,13 @@ fn list_conversations_impl(
                     last_assistant_content = None;
                 }
                 message_count += 1;
-                if first_timestamp.is_none() {
-                    first_timestamp = msg.timestamp.clone();
+                if msg.role == "user" {
+                    user_message_count += 1;
+                }
+                // Head-scan timestamp is only a fallback for when the tail read
+                // below finds none; the tail is the authoritative last activity.
+                if msg.timestamp.is_some() {
+                    last_timestamp = msg.timestamp.clone();
                 }
                 if preview.is_empty() && msg.role == "user" {
                     preview = truncate_preview(&msg.content, 200);
@@ -494,19 +532,40 @@ fn list_conversations_impl(
             }
         }
 
+        // The head scan saw the whole file iff it stopped before its cap; then
+        // `last_timestamp`/`user_message_count` are authoritative.
+        let head_saw_whole_file = scanned_lines < MAX_SCAN_LINES;
+
+        // Re-read the tail only when the head was truncated; tail wins when
+        // present (a fully-scanned short file already has the last activity).
+        if !head_saw_whole_file {
+            if let Some(ts) = last_message_timestamp(&path) {
+                last_timestamp = Some(ts);
+            }
+        }
+
         if message_count == 0 {
+            continue;
+        }
+
+        // Drop junk sessions whose sole user message is a lone `/`, only when the
+        // head saw the whole file. Real `/code-review` and 2nd messages survive.
+        if head_saw_whole_file
+            && user_message_count == 1
+            && speedwave_runtime::slash::is_bare_slash(&preview)
+        {
             continue;
         }
 
         summaries.push(ConversationSummary {
             session_id,
-            timestamp: first_timestamp,
+            timestamp: last_timestamp,
             preview,
             message_count,
         });
     }
 
-    // Sort newest first (by timestamp descending, None last)
+    // Sort by last activity, newest first (None last).
     summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     if dir.is_dir() && summaries.is_empty() {
@@ -603,9 +662,8 @@ fn delete_conversation_impl(
 // Resume snapshot
 // ---------------------------------------------------------------------------
 
-/// Cumulative session state recovered from an existing transcript. Seeded
-/// into the `StreamParser` on resume so the first new turn reports a real
-/// delta instead of `cumulative - 0`.
+/// Cumulative session state recovered from a transcript. Seeds the
+/// `StreamParser` on resume so the first new turn reports a real delta.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResumeSnapshot {
     /// Cumulative input tokens across the session.
@@ -624,9 +682,8 @@ pub struct ResumeSnapshot {
     pub model: Option<String>,
 }
 
-/// Compute the cumulative session snapshot from an existing JSONL transcript.
-/// Prefers the latest `modelUsage`, falls back to summed flat `usage`; model
-/// from the latest `modelUsage` else the last `system init` line.
+/// Compute the cumulative session snapshot from a JSONL transcript: prefers the
+/// latest `modelUsage`, falls back to summed flat `usage` / last `system init`.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
@@ -1128,6 +1185,86 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_sorts_by_last_activity_not_first_message() {
+        // A chat STARTED earlier but REPLIED-TO later must sort above a chat
+        // started later with no further activity — newest activity on top.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+
+        let id_started_early = "00000000-0000-0000-0000-00000000000a";
+        let id_started_late = "00000000-0000-0000-0000-00000000000b";
+
+        write_session(
+            &dir,
+            id_started_early,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"begun monday"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"replied friday"},"timestamp":"2025-01-05T12:00:00Z"}"#,
+            ],
+        );
+        write_session(
+            &dir,
+            id_started_late,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"begun wednesday"},"timestamp":"2025-01-03T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 2);
+        // id_started_early last activity (Jan 5) > id_started_late (Jan 3).
+        assert_eq!(result[0].session_id, id_started_early);
+        assert_eq!(result[1].session_id, id_started_late);
+    }
+
+    #[test]
+    fn list_conversations_timestamp_skips_trailing_metadata_lines() {
+        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the report
+        // is the last real message before them, not None.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+        let id = "00000000-0000-0000-0000-00000000000d";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"yo"}]},"timestamp":"2025-02-02T02:02:02Z"}"#,
+                r#"{"type":"last-prompt"}"#,
+                r#"{"type":"ai-title","title":"chat"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].timestamp.as_deref(), Some("2025-02-02T02:02:02Z"));
+    }
+
+    #[test]
+    fn list_conversations_timestamp_is_last_activity() {
+        // The reported timestamp is the latest message, not the first —
+        // the sidebar renders it as "last activity".
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+        let id = "00000000-0000-0000-0000-00000000000c";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"start"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-09T09:09:09Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].timestamp.as_deref(), Some("2025-01-09T09:09:09Z"));
+    }
+
+    #[test]
     fn list_conversations_extracts_preview_from_first_user_message() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
@@ -1336,6 +1473,235 @@ mod tests {
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_conversations_drops_bare_slash_session() {
+        // A junk session whose only content is a lone `/` (slash-menu trigger
+        // sent as a message) must not pollute the history list.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_conversations_drops_bare_slash_session_with_reply() {
+        // The common junk shape: a lone `/` plus Claude's "you typed /" reply.
+        // The user never sent anything real, so this must be dropped too.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"You typed / with no command."}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_conversations_keeps_slash_session_with_real_message_past_head_scan() {
+        // Lone `/`, then >50 noise lines, then a real 2nd user message past the
+        // head-scan cap: the session must NOT be dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(
+            r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#
+                .to_string(),
+        );
+        // 60 noise lines (assistant text + system) — past the 50-line head cap.
+        for i in 0..60 {
+            lines.push(format!(
+                r#"{{"type":"system","message":"step {i}","timestamp":"2025-01-01T00:00:01Z"}}"#
+            ));
+        }
+        lines.push(
+            r#"{"type":"user","message":{"role":"user","content":"the real question"},"timestamp":"2025-01-01T00:01:00Z"}"#
+                .to_string(),
+        );
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_session(&dir, id, &refs);
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "a real message past the head-scan cap must keep the session"
+        );
+    }
+
+    #[test]
+    fn list_conversations_keeps_session_where_slash_is_followed_by_real_message() {
+        // A lone `/` first, then a real second user message: `user_message_count`
+        // is 2, so the junk filter must NOT drop it — preventing history loss.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"actually, summarize this repo"},"timestamp":"2025-01-01T00:00:05Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure."}]},"timestamp":"2025-01-01T00:00:06Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "a 2nd real user message must keep the session"
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_skips_trailing_metadata_lines() {
+        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the tail
+        // scan walks past them to the last real message's timestamp.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-03-03T03:03:03Z"}"#,
+                r#"{"type":"last-prompt"}"#,
+                r#"{"type":"ai-title","title":"chat"}"#,
+            ],
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2025-03-03T03:03:03Z")
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_none_when_no_line_has_a_timestamp() {
+        // No timestamp anywhere in the tail → None; the list path then keeps the
+        // head-scanned value (the documented fallback).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, "{\"type\":\"last-prompt\"}\n{\"type\":\"ai-title\"}").unwrap();
+        assert!(last_message_timestamp(&path).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_does_not_panic_on_single_huge_line() {
+        // One JSONL line larger than TAIL_READ_BYTES: the 64 KiB tail is a single
+        // partial fragment, `skip(1)` empties the scan — must return None, not panic.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let huge = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}},"timestamp":"2025-01-01T00:00:00Z"}}"#,
+            "x".repeat((TAIL_READ_BYTES as usize) + 1000)
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, huge).unwrap();
+        assert!(last_message_timestamp(&path).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_reads_final_line_without_trailing_newline() {
+        // The last line has no trailing `\n`; `lines()` still yields it, so the
+        // timestamp is found.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\"timestamp\":\"2027-07-07T07:07:07Z\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2027-07-07T07:07:07Z")
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_none_for_unreadable_or_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing file → None (no panic).
+        assert!(last_message_timestamp(&tmp.path().join("nope.jsonl")).is_none());
+        // Empty file → None.
+        let empty = tmp.path().join("empty.jsonl");
+        fs::write(&empty, "").unwrap();
+        assert!(last_message_timestamp(&empty).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_reads_only_the_tail_of_a_large_file() {
+        // A file larger than TAIL_READ_BYTES: the timestamp in the final line is
+        // still found even though earlier lines are never read.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let filler = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}},"timestamp":"2024-01-01T00:00:00Z"}}"#,
+            "x".repeat(2000)
+        );
+        let mut lines: Vec<String> = (0..200).map(|_| filler.clone()).collect();
+        lines.push(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-12-12T12:12:12Z"}"#
+                .to_string(),
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, lines.join("\n")).unwrap();
+        assert!(path.metadata().unwrap().len() > TAIL_READ_BYTES);
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2026-12-12T12:12:12Z")
+        );
+    }
+
+    #[test]
+    fn list_conversations_keeps_real_slash_command_session() {
+        // A real slash command (`/code-review`) with a reply is a genuine
+        // conversation — it must NOT be dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/code-review"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reviewing"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "/code-review");
     }
 
     #[test]

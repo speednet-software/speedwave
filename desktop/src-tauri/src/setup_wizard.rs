@@ -341,11 +341,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     }
 
     // Verify functional before marking started: probes the claude container only.
-    let claude_container = format!(
-        "{}_{}_claude",
-        speedwave_runtime::consts::compose_prefix(),
-        project
-    );
+    let claude_container = crate::chat::claude_container_name(project);
     runtime::ensure_exec_healthy(&rt, project, &claude_container)?;
 
     let mut state = SetupState::load();
@@ -419,7 +415,7 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
-    let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
+    let container_name = crate::chat::claude_container_name(project);
     log::info!("check_claude_auth: container={container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
     log::info!("check_claude_auth: container healthy, checking auth");
@@ -1124,7 +1120,6 @@ mod tests {
             (K::AnthropicApiKey, false),
             (K::Local, false),
             (K::OpenRouter, false),
-            (K::OpenAiCompat, false),
         ] {
             let cfg = SpeedwaveUserConfig {
                 projects: vec![project_with_v2_kind("proj", kind)],

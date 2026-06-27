@@ -5,13 +5,13 @@ import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
 export type { EffectiveMode } from './native-theme-adapter';
 
 /** Identifiers for every accent theme exposed in Settings → Appearance. */
-export type ThemeId = 'crimson' | 'mint' | 'amber' | 'iris' | 'cyan' | 'sand';
+export type ThemeId = 'ember' | 'crimson' | 'mint' | 'iris' | 'cyan' | 'sand';
 
-/** Display order for the Appearance accent picker. */
+/** Display order for the Appearance accent picker. Ember is first and default. */
 export const THEME_IDS: readonly ThemeId[] = [
+  'ember',
   'crimson',
   'mint',
-  'amber',
   'iris',
   'cyan',
   'sand',
@@ -58,12 +58,12 @@ function readStoredChoice<T extends string>(key: string, allowlist: readonly T[]
 }
 
 /**
- * Applies a theme to <html> and persists it. Crimson is the default → no attr written.
+ * Applies a theme to <html> and persists it. Ember is the default → no attr written.
  * @param id Accent theme to activate and persist.
  */
 function writeTheme(id: ThemeId): void {
   const html = document.documentElement;
-  if (id === 'crimson') {
+  if (id === 'ember') {
     html.removeAttribute('data-theme');
   } else {
     html.setAttribute('data-theme', id);
@@ -121,7 +121,7 @@ export class ThemeService implements OnDestroy {
   private readonly native = inject(NativeThemeAdapter);
 
   private readonly themeSignal = signal<ThemeId>(
-    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'crimson')
+    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'ember')
   );
   private readonly modeSignal = signal<ThemeMode>(
     readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')

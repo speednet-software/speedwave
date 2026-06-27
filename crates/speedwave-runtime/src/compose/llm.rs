@@ -1,6 +1,5 @@
-//! LLM provider switching (ADR-073): routes the `claude` container at the
-//! per-project LiteLLM proxy, with the pre-proxy direct-injection path kept
-//! behind the `proxy_enabled` kill-switch (removal in N+2).
+//! LLM provider switching (ADR-073): routes `claude` at the per-project proxy,
+//! with the pre-proxy direct path behind the `proxy_enabled` kill-switch.
 
 use super::{inject_claude_env, tokens_path_in};
 use crate::config::{LlmConfig, LlmProviderKind};
@@ -25,16 +24,12 @@ pub(crate) fn apply_llm_config_in(
             log::info!("llm: custom headers configured — using the direct (non-proxy) path");
         }
     } else if let Some(entry) = llm.active_provider() {
-        // Kill-switch (legacy direct path) only supports anthropic + local.
-        // Erroring beats silently billing the Anthropic subscription for an
-        // OpenRouter/Compat session via the flat anthropic masquerade.
-        if matches!(
-            entry.kind,
-            LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat
-        ) {
+        // Legacy direct path supports only anthropic + local; erroring beats
+        // silently billing the Anthropic subscription for an OpenRouter session.
+        if matches!(entry.kind, LlmProviderKind::OpenRouter) {
             anyhow::bail!(
                 "Provider '{}' requires the LLM proxy. Re-enable it (unset proxy_enabled=false) \
-                 to use OpenRouter / OpenAI-compatible providers.",
+                 to use OpenRouter.",
                 entry.id
             );
         }
@@ -48,7 +43,7 @@ pub(crate) fn apply_llm_config_in(
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
 
-/// ADR-073 proxy path: every session talks to the litellm service; the
+/// ADR-073 proxy path: every session talks to the proxy service; the
 /// provider kind picks the route and model prefix.
 fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let entry = llm
@@ -61,9 +56,11 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
+            // Bare base URL: claude POSTs /v1/messages with a bare claude-* model,
+            // which the forwarder routes to the anthropic passthrough by prefix.
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
-                super::LITELLM_ANTHROPIC_PASSTHROUGH_URL.to_string(),
+                super::PROXY_BASE_URL.to_string(),
             );
             // Defense-in-depth after heal/quarantine: drop a foreign id from a
             // not-yet-healed config → account default, not 404.
@@ -76,7 +73,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.clone());
             }
         }
-        LlmProviderKind::Local | LlmProviderKind::OpenRouter | LlmProviderKind::OpenAiCompat => {
+        LlmProviderKind::Local | LlmProviderKind::OpenRouter => {
             if model.is_empty() {
                 anyhow::bail!(
                     "Provider '{}' requires a model name. \
@@ -84,7 +81,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
                     entry.id
                 );
             }
-            // `<id>/<model>` matches the per-provider wildcard route in the litellm config.
+            // `<id>/<model>` matches the per-provider wildcard route in the proxy config.
             let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
                 model.clone()
             } else {
@@ -92,7 +89,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
             };
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
-                super::LITELLM_BASE_URL.to_string(),
+                super::PROXY_BASE_URL.to_string(),
             );
             // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
             extra_env.insert(
@@ -135,7 +132,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
 }
 
 /// Pre-ADR-073 direct-injection path, kept verbatim behind the
-/// `proxy_enabled` kill-switch. Scheduled for removal in N+2.
+/// `proxy_enabled` kill-switch (see ADR-040/ADR-073).
 fn apply_llm_config_legacy_in(
     data_dir: &Path,
     yaml: &str,
@@ -250,9 +247,8 @@ fn apply_llm_config_legacy_in(
     }
 }
 
-/// Reads a local-LLM token file. Returns `None` on any failure (missing
-/// file, I/O error, empty content). Callers decide whether to fall back to
-/// a dummy or skip env injection.
+/// Reads a local-LLM token file. Returns `None` on any failure (missing file,
+/// I/O error, empty content); callers fall back to a dummy or skip injection.
 pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
     read_local_llm_token_opt_in(consts::data_dir().as_path(), project, file)
 }
@@ -269,9 +265,8 @@ pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -
     }
 }
 
-/// Strips any trailing `/v1` and trailing slashes from a base URL.
-/// Exposed so `update_llm_config` can normalize before validating, keeping
-/// save-time and render-time acceptance consistent.
+/// Strips trailing `/v1` and slashes from a base URL; exposed so
+/// `update_llm_config` normalizes save-time and render-time acceptance alike.
 pub fn strip_trailing_v1(url: &str) -> String {
     let stripped = url.trim_end_matches('/');
     if let Some(without_v1) = stripped.strip_suffix("/v1") {

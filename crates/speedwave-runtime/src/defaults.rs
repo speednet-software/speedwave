@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.173";
+pub const CLAUDE_VERSION: &str = "2.1.191";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -35,6 +35,8 @@ pub struct AnthropicModelInfo {
     pub context_tokens: u32,
     /// Whether this entry belongs to the "Latest" group.
     pub latest: bool,
+    /// Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint.
+    pub premium: bool,
     /// Price of the base model id (e.g. `claude-sonnet-4-6`).
     pub pricing: ModelPricing,
     /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
@@ -82,6 +84,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Fable 5",
         context_tokens: 1_000_000,
         latest: true,
+        premium: true,
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
     },
@@ -90,6 +93,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.8",
         context_tokens: 1_000_000,
         latest: true,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -98,6 +102,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Sonnet 4.6",
         context_tokens: 1_000_000,
         latest: true,
+        premium: false,
         pricing: SONNET_PRICING,
         pricing_1m: Some(SONNET_PRICING_1M),
     },
@@ -106,6 +111,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Haiku 4.5",
         context_tokens: 200_000,
         latest: true,
+        premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
     },
@@ -114,6 +120,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.7",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -122,6 +129,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.6",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -137,9 +145,8 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     "--strict-mcp-config",
     "--thinking-display",
     "summarized",
-    // Triggers lock-file auto-connect to the IDE bridge (~/.claude/ide/),
-    // complementing CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the
-    // integrated-terminal path). Skipped silently when no lock is present.
+    // Lock-file auto-connect to the IDE bridge (~/.claude/ide/); silent when no lock.
+    // Complements CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the terminal path).
     "--ide",
 ];
 
@@ -154,12 +161,21 @@ pub fn base_env() -> HashMap<String, String> {
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
     // Non-empty WAYLAND_DISPLAY routes Claude Code copies through the osc52-copy.sh shim (ADR-052).
     env.insert("WAYLAND_DISPLAY".into(), "speedwave-clipboard".into());
+    // Raise Claude Code's 300s remote-MCP idle abort (CC ≥2.1.187) above the longest
+    // hub→worker op; the CC↔hub HTTP connection is silent until the op finishes.
+    env.insert(
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
+        MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
+    );
     env
 }
 
-/// Anthropic-branch alias pins: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
-/// from the `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable is omitted
-/// — its `fable` alias resolves natively on the passthrough, no pin needed.
+/// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the longest
+/// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
+pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
+
+/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from the
+/// `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable omitted — resolves natively.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
@@ -267,6 +283,46 @@ mod tests {
     }
 
     #[test]
+    fn base_env_sets_mcp_tool_idle_timeout() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+                .map(|s| s.as_str()),
+            Some(MCP_TOOL_IDLE_TIMEOUT_MS.to_string().as_str()),
+            "Claude Code ≥2.1.187 aborts a remote-MCP tool call idle for 300s. The hub \
+             holds the CC↔hub connection silent until a worker op finishes, so long ops \
+             (SharePoint download, plugin long-class) would be killed without this override."
+        );
+    }
+
+    #[test]
+    fn mcp_tool_idle_timeout_covers_worker_max() {
+        // SSOT-alignment: idle ceiling must stay >= STALE_CHUNK_TIMEOUT_MS in timeouts.ts.
+        // Env-raised BASE_MS/SHAREPOINT_SYNC_MS are invisible here — raise them manually.
+        let src = include_str!("../../../mcp-servers/shared/src/timeouts.ts");
+        let re = regex::Regex::new(r"STALE_CHUNK_TIMEOUT_MS:\s*([0-9*\s]+?),").unwrap();
+        let expr = re
+            .captures(src)
+            .expect("timeouts.ts must declare STALE_CHUNK_TIMEOUT_MS as a `*`-product literal")
+            .get(1)
+            .unwrap()
+            .as_str();
+        let worker_max: u64 = expr
+            .split('*')
+            .map(|p| {
+                p.trim()
+                    .parse::<u64>()
+                    .expect("STALE_CHUNK factors must be integers")
+            })
+            .product();
+        assert!(
+            MCP_TOOL_IDLE_TIMEOUT_MS >= worker_max,
+            "MCP_TOOL_IDLE_TIMEOUT_MS ({MCP_TOOL_IDLE_TIMEOUT_MS}) must be >= the longest \
+             worker timeout STALE_CHUNK_TIMEOUT_MS ({worker_max}) from timeouts.ts — bump it"
+        );
+    }
+
+    #[test]
     fn mcp_config_path_points_to_claude_dir() {
         // entrypoint.sh generates mcp-config.json at this path; keep it in sync with DEFAULT_FLAGS.
         assert_eq!(MCP_CONFIG_PATH, "/home/speedwave/.claude/mcp-config.json");
@@ -355,9 +411,8 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_omits_fable_alias() {
-        // The anthropic-branch pins skip Fable (its `fable` alias resolves
-        // natively on the passthrough). Non-anthropic remapping injects FABLE
-        // separately — see compose/llm.rs, asserted there.
+        // Anthropic-branch pins skip Fable (`fable` alias resolves natively).
+        // Non-anthropic remapping injects FABLE separately — see compose/llm.rs.
         let env = anthropic_default_models_env();
         assert!(
             !env.keys().any(|k| k.contains("FABLE")),
@@ -454,6 +509,23 @@ mod tests {
         assert!(
             ANTHROPIC_MODELS.iter().any(|m| m.latest),
             "at least one Latest entry required so the dropdown opens with a current option"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_premium_flag_matches_family() {
+        // Premium tiers are Opus + Fable; Sonnet/Haiku are the everyday tier.
+        for m in ANTHROPIC_MODELS {
+            let expected = m.family.starts_with("Opus") || m.family.starts_with("Fable");
+            assert_eq!(
+                m.premium, expected,
+                "{} premium flag must match its family tier",
+                m.id
+            );
+        }
+        assert!(
+            ANTHROPIC_MODELS.iter().any(|m| !m.premium),
+            "at least one non-premium model so the everyday placeholder resolves"
         );
     }
 

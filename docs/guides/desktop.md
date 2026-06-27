@@ -60,19 +60,19 @@ The bar at the bottom of the chat shows the current state of the session, mirror
 claude-opus-4-8 │ CTX ██░░░ 2% │ 116k/1M │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
 ```
 
-| Element      | Source                                     | Meaning                                                                                                                                                                 |
-| ------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-8`, `llama3.3`).                                                                                                                          |
-| `CTX N%`     | `resolveContextWindow` (see below)         | Percentage of the context window used by the current turn (`input_tokens + cache_read + cache_creation`) ÷ window. Bar turns amber at 50%, red at 76%, bold red at 90%. |
-| `used / max` | `formatContextLabel` (`models/llm.ts`)     | Short-form ratio (`116k/1M`, `42k/200k`). The label is `1M` for ≥ 1_000_000, `Xk` for ≥ 1_000.                                                                          |
-| `Limit N%`   | `rate_limit_event.rate_limit_info`         | 5-hour subscription quota utilisation (Pro/Max only — absent for API-key users).                                                                                        |
-| `$N.NNNN`    | `result.total_cost_usd`                    | Estimated API cost for the session (what it would cost at API pricing — shown even on subscriptions).                                                                   |
-| `In: N`      | `result.usage.input_tokens`                | New input tokens for the last turn (tokens not served from cache).                                                                                                      |
-| `CR: N`      | `result.usage.cache_read_input_tokens`     | Tokens loaded from prompt cache (system prompt, conversation history).                                                                                                  |
-| `CW: N`      | `result.usage.cache_creation_input_tokens` | Tokens written to prompt cache during the last turn.                                                                                                                    |
-| `Out: N`     | Cumulative `result.usage.output_tokens`    | Total tokens generated across all turns in the session.                                                                                                                 |
+| Element      | Source                                     | Meaning                                                                                                                                                                                                                                     |
+| ------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`      | `system.init.model`                        | Model id (e.g. `claude-opus-4-8`, `llama3.3`).                                                                                                                                                                                              |
+| `CTX N%`     | `resolveContextWindow` (see below)         | Percentage of the context window used by the current turn (`input_tokens + cache_read + cache_creation`) ÷ window. Bar turns amber at 50%, red at 76%, bold red at 90%.                                                                     |
+| `used / max` | `formatContextLabel` (`models/llm.ts`)     | Short-form ratio (`116k/1M`, `42k/200k`). The label is `1M` for ≥ 1_000_000, `Xk` for ≥ 1_000.                                                                                                                                              |
+| `Limit N%`   | `rate_limit_event.rate_limit_info`         | 5-hour subscription quota utilisation (Pro/Max only — absent for API-key users).                                                                                                                                                            |
+| `$N.NNNN`    | proxy usage SSOT (reconciled)              | Session cost. Shown live from Claude Code during the turn, then reconciled to the proxy's per-provider cost once recorded (`get_usage_for_response`). API key → real catalog/OpenRouter cost; subscription → "—" (flat-rate); local → `$0`. |
+| `In: N`      | `result.usage.input_tokens`                | New input tokens for the last turn (tokens not served from cache).                                                                                                                                                                          |
+| `CR: N`      | `result.usage.cache_read_input_tokens`     | Tokens loaded from prompt cache (system prompt, conversation history).                                                                                                                                                                      |
+| `CW: N`      | `result.usage.cache_creation_input_tokens` | Tokens written to prompt cache during the last turn.                                                                                                                                                                                        |
+| `Out: N`     | Cumulative `result.usage.output_tokens`    | Total tokens generated across all turns in the session.                                                                                                                                                                                     |
 
-**Latest-turn vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — the latest turn's full-prompt usage, _not_ summed across turns) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat value (`input_tokens + cache_read + cache_creation`) because each turn re-sends the whole conversation, so the latest turn already reflects total context occupancy — summing across turns would double-count the re-sent history. The total cost uses `total_cost_usd` (cumulative) because cost accumulates. In the Desktop footer, `in:` shows `input_tokens` only (the new uncached input) so a short chat doesn't read as the full context size; the CTX gauge keeps the additive total.
+**Latest-turn vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — the latest turn's full-prompt usage, _not_ summed across turns) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat value (`input_tokens + cache_read + cache_creation`) because each turn re-sends the whole conversation, so the latest turn already reflects total context occupancy — summing across turns would double-count the re-sent history. The total cost shows Claude Code's live `total_cost_usd` during the turn, then reconciles to the proxy usage SSOT once the request is recorded (per-provider cost; "—" for subscriptions). In the Desktop footer, `in:` shows `input_tokens` only (the new uncached input) so a short chat doesn't read as the full context size; the CTX gauge keeps the additive total.
 
 **Context window resolution.** `ChatStateService.resolveContextWindow` walks a five-step fallback chain so the footer always has a concrete value:
 
@@ -109,7 +109,7 @@ Speedwave preprocesses with [pica](https://github.com/nodeca/pica) before send:
 
 There is no client-side gate on the active model — every provider gets a chance to accept the attachment. If the active model can't handle images (text-only Anthropic snapshot, local model loaded without vision, BYOK provider that ignores image blocks), the chat shows the provider's API error as a regular error block. See [ADR-065](../adr/ADR-065-image-attachments-structured-input.md) for the rationale (no client-side capability matrix to keep stale).
 
-**Queue + attachments**: image attachments are mutually exclusive with the one-slot queued message (ADR-045). While a turn is streaming, **Send is disabled** for any input that carries attachments; text-only submits still queue normally. The composer surfaces "Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka" when this gate fires.
+**Queue + attachments**: image attachments are mutually exclusive with the one-slot queued message (ADR-045). While a turn is streaming, **Send is disabled** for any input that carries attachments; text-only submits still queue normally. The composer surfaces "Wait for the response to finish before sending an image." when this gate fires.
 
 **Known limitation — no persistence**: attachment bytes live in the composer for the live session only. After a Desktop reload the chat history shows an `🖼 (filename)` placeholder pill instead of the thumbnail — the bytes themselves are not stored to disk (Claude Code's session JSONL is read-only per ADR-046, and a dedicated image store is future work).
 
@@ -179,27 +179,25 @@ See [ADR-056](../adr/ADR-056-host-side-audio-transcription.md) for the full desi
 
 ## LLM usage
 
-A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded LiteLLM proxy ([ADR-073](../adr/ADR-073-embedded-per-project-litellm-proxy.md)). It shows:
+A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates every LLM request the project has made through the embedded proxy forwarder ([ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md)). It shows:
 
 - **Totals cards** — requests, prompt/completion tokens, estimated cost, prompt-cache hit rate, throughput (tok/s), and failures (with failure rate). If any lines could not be parsed, a small `(N records skipped)` note appears rather than silently under-counting.
 - **Daily tokens chart** — a stacked bar per day (prompt vs. completion tokens) over the most recent month, built from plain CSS — no chart library.
 - **Weekday × hour heatmap** — request volume by local hour, so you can see when the project is busiest.
 - **Per-(day, model) table** — the breakdown the cards roll up.
 
-**Source of truth.** This dashboard reads **only** the proxy's usage log — the `litellm_callback.py` JSONL at `~/.speedwave/usage/<project>/litellm/usage.jsonl`, aggregated host-side by `speedwave_runtime::usage` and surfaced through the `get_llm_usage` command. It is deliberately **separate** from the chat footer's [Session stats bar](#session-stats-bar): the footer reflects the live Claude Code result stream for the current session, while this dashboard is the cross-session record. The two are never summed — the same request would otherwise be counted twice (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
+**Source of truth.** This dashboard reads the proxy usage SSOT — the forwarder's per-request JSONL line at `~/.speedwave/usage/<project>/proxy/usage.jsonl` plus the host-side cost sidecar (`cost-cache.jsonl`), aggregated by `speedwave_runtime::usage` and surfaced through `get_llm_usage`. The same SSOT also feeds the chat footer's [Session stats bar](#session-stats-bar) (reconciled at end of turn) and the CLI statusline cost. The Claude Code result stream is a live preview, not a second total — the two are never summed (ADR-073 §usage, invariant 6 of `.claude/rules/local-llm.md`).
 
-Numbers reflect what the proxy could measure: cost is shown only where LiteLLM had pricing (local models read `$0`), and a record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
+Cost is computed per provider (API key → catalog, OpenRouter → real `/generation`, local → `$0`, subscription → "—"); an unpriced request shows "—", never `$0`. A record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
 
 ## Appearance
 
 Settings → Appearance controls two independent choices:
 
 - **Mode** — `light`, `dark`, or `auto`. `auto` follows the operating system's `prefers-color-scheme` and switches live when the system theme changes. The choice persists locally (browser `localStorage`, key `speedwave-theme-mode`); on first run the app defaults to `dark`. An inline script in `index.html` applies the persisted mode before the app boots, so the first paint never flashes the wrong scheme.
-- **Accent color** — one of six accent palettes (crimson, mint, amber, iris, cyan, sand) used for buttons, links, active-state indicators, and syntax highlighting. Persisted under `speedwave-theme`.
+- **Accent color** — one of six accent palettes (ember, crimson, mint, iris, cyan, sand) used for buttons, links, active-state indicators, and syntax highlighting. Ember is the default. Persisted under `speedwave-theme`.
 
 The two axes are orthogonal: any accent works in either mode. Accent colors are tuned per mode so text and icons meet WCAG AA contrast against the active background. The native window titlebar stays system-native and is not themed by the app. Both axes are managed by `ThemeService`; accent values live in `desktop/src/src/styles.css` as CSS custom properties (the single source of truth — components read `var(--accent)` etc., never hard-coded hex).
-
-WCAG contrast waivers, if any, are recorded in [accessibility/contrast-report.md](../accessibility/contrast-report.md).
 
 ## See Also
 

@@ -47,6 +47,11 @@ export type ProjectStatus =
 export interface AuthStatusResponse {
   api_key_configured: boolean;
   oauth_authenticated: boolean;
+  /**
+   * Whether the active provider needs Anthropic auth at all (R7); `false` for
+   * non-anthropic providers, so the gate must not block on the credential flags.
+   */
+  needs_anthropic_auth: boolean;
 }
 
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
@@ -83,6 +88,7 @@ export class ProjectStateService {
   private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
+  private restartListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -106,6 +112,23 @@ export class ProjectStateService {
     return () => {
       this.readyListeners = this.readyListeners.filter((l) => l !== cb);
     };
+  }
+
+  /**
+   * Fires on container-restart completion (distinct from plain ready) so the
+   * chat layer resumes the live session across a model switch. Returns unsubscribe.
+   * @param cb - The callback to invoke after a successful restart.
+   */
+  onRestartComplete(cb: () => void): () => void {
+    this.restartListeners.push(cb);
+    return () => {
+      this.restartListeners = this.restartListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Fires the restart-complete listeners (test seam + restart path). */
+  notifyRestartComplete(): void {
+    for (const cb of this.restartListeners) cb();
   }
 
   /**
@@ -224,7 +247,7 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
         this.status = 'ready';
@@ -238,8 +261,7 @@ export class ProjectStateService {
         this.status = 'check_failed';
         this.errorKind = undefined;
       } else if (msg.startsWith(CLOUDSTORAGE_TCC_PREFIX)) {
-        // CloudStorage TCC denial — parse stable_id and dir from prefix-encoded string.
-        // Format: "CloudStorage TCC required: {stable_id}|{dir}"
+        // CloudStorage TCC denial — parse "{stable_id}|{dir}" from the prefix.
         this.status = 'error';
         this.errorKind = 'cloudstorage_tcc_required';
         const body = msg.slice(CLOUDSTORAGE_TCC_PREFIX.length);
@@ -302,7 +324,7 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         await this.waitForSystemHealthy();
         this.status = 'ready';
         this.notifyChange();
@@ -313,9 +335,8 @@ export class ProjectStateService {
         this.notifyChange();
       }
     } catch (err) {
-      // The auth check itself failed (transient IPC error) — this is NOT the
-      // same as "the user is not authenticated", so do not fall through to
-      // auth_required. Surface it as an error the user can retry.
+      // Auth check failed (transient IPC) — not "unauthenticated", so surface a
+      // retryable error instead of falling through to auth_required.
       const msg = err instanceof Error ? err.message : String(err);
       this.status = 'error';
       this.error = msg;
@@ -331,7 +352,7 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
-    if (auth.api_key_configured || auth.oauth_authenticated) {
+    if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
       if (this.status === 'auth_required') {
         this.status = 'ready';
         this.notifyChange();
@@ -430,6 +451,9 @@ export class ProjectStateService {
     if (restartedOk) {
       this.notifyReady();
       this.notifySettled();
+      // Distinct from a plain ready: the chat layer resumes the live session so
+      // a model switch (which recreates the claude container) keeps context.
+      this.notifyRestartComplete();
     }
   }
 
@@ -490,10 +514,8 @@ export class ProjectStateService {
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
-        // Fire-and-forget refresh of the project list so consumers
-        // (project-pill tooltip, switcher dropdown) eventually see
-        // freshly added/renamed entries. Notifications above don't wait
-        // for the round-trip — a stale list for one tick is acceptable.
+        // Fire-and-forget list refresh so consumers eventually see added/renamed
+        // entries; a stale list for one tick is acceptable.
         void this.refreshProjectList();
       });
 
