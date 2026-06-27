@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 
 import { formatBytes } from '../../shared/format-bytes';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 /** View-model rendered as one pill in the attachment strip. */
 export interface AttachmentViewModel {
@@ -15,7 +16,7 @@ export interface AttachmentViewModel {
 /** Stateless pill-thumbnail row; emits `remove(id)`. */
 @Component({
   selector: 'app-attachment-strip',
-  imports: [],
+  imports: [SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -35,9 +36,7 @@ export interface AttachmentViewModel {
                 role="status"
                 [attr.aria-label]="'Preprocessing ' + att.filename"
               >
-                <span
-                  class="block h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
-                ></span>
+                <app-spin-icon class="h-4 w-4 text-white" />
               </div>
             }
             <button

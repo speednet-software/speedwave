@@ -62,7 +62,10 @@ describe('AttachmentStripComponent', () => {
     }).createComponent(AttachmentStripComponent);
     fixture.componentRef.setInput('attachments', [vm({ preprocessing: true })]);
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[role="status"]')).toBeTruthy();
+    const overlay = fixture.nativeElement.querySelector('[role="status"]');
+    expect(overlay).toBeTruthy();
+    // Uses the shared <app-spin-icon> (SSOT), not an ad-hoc border spinner.
+    expect(overlay.querySelector('app-spin-icon')).toBeTruthy();
   });
 
   it('omits spinner once preprocessing settles', () => {
