@@ -632,6 +632,23 @@ pub fn resolve_project_config(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    resolve_project_config_in(
+        crate::consts::data_dir(),
+        project_dir,
+        user_config,
+        project_name,
+    )
+}
+
+/// Testable variant of [`resolve_project_config`] with an explicit data dir —
+/// every on-disk lookup (legacy-key migration, has_api_key disk-sync, anthropic
+/// secret) resolves under `data_dir` so the migrate→sync ordering can be tested.
+pub fn resolve_project_config_in(
+    data_dir: &Path,
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
     let mut env = defaults::base_env();
@@ -666,17 +683,17 @@ pub fn resolve_project_config(
     }
 
     // Migrate to the current LLM schema (ADR-073).
-    migrate_llm(&mut llm, anthropic_secret_exists(project_name));
+    migrate_llm(&mut llm, anthropic_secret_exists_in(data_dir, project_name));
 
     // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
     // disk-sync below — otherwise the sync re-derives has_api_key from the (still
     // empty) new path and the migration, gated on the new file, never runs.
-    crate::compose::migrate_legacy_local_key_in(crate::consts::data_dir(), project_name, &llm);
+    crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
 
     // Re-derive each provider's `has_api_key` from disk — the key file is the
     // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
     // injection) reads the resolved config, so this is the single sync point.
-    llm.sync_has_api_key_from_disk_in(crate::consts::data_dir(), project_name);
+    llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
     // Local LLMs get the full default Claude Code system prompt.
     let flags: Vec<String> = defaults::DEFAULT_FLAGS
@@ -688,13 +705,9 @@ pub fn resolve_project_config(
     (claude, integrations)
 }
 
-/// True when `secrets/<project>/anthropic_api_key` exists in the prod data dir;
-/// used by v1→v2 migration to classify legacy `anthropic` configs.
-fn anthropic_secret_exists(project_name: &str) -> bool {
-    anthropic_secret_exists_in(crate::consts::data_dir(), project_name)
-}
-
-/// Testable variant of [`anthropic_secret_exists`] with an explicit data dir.
+/// True when `secrets/<project>/anthropic_api_key` exists under `data_dir`.
+/// Used by the v1→v2 LLM migration to classify legacy `anthropic` configs;
+/// tests call [`migrate_llm`] directly with an explicit bool.
 fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
     data_dir
         .join("secrets")
@@ -3450,5 +3463,76 @@ mod plugin_order_tests {
                 "order must be deterministic — env values feed config-hash"
             );
         }
+    }
+
+    /// Locks the real bug site: on a v1→v3 upgrade with a legacy local key on
+    /// disk, the full resolve must end with has_api_key==true. This fails if the
+    /// migrate→sync ordering in resolve_project_config_in is reversed (the
+    /// original bug). Drives the real resolve, unlike the proxy.rs unit test.
+    #[test]
+    fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = "proj";
+
+        // Seed a legacy v1 local key under the OLD path tokens/<project>/local-llm/.
+        let legacy_dir = data_dir
+            .path()
+            .join("tokens")
+            .join(project)
+            .join("local-llm");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
+
+        // v1 flat local config (no providers list, no schema_version) with the
+        // legacy has_api_key flag set — exactly what a v0.13.x user has on disk.
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            model: Some("qwen".to_string()),
+            has_api_key: true,
+            ..Default::default()
+        };
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: project.to_string(),
+                dir: data_dir.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(llm),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+        };
+
+        let (resolved, _) =
+            resolve_project_config_in(data_dir.path(), data_dir.path(), &user_config, project);
+
+        let local = resolved
+            .llm
+            .providers
+            .iter()
+            .find(|p| p.id == "local")
+            .expect("a local provider entry must exist after migration");
+        assert!(
+            local.has_api_key,
+            "after resolve the legacy key must be migrated and has_api_key true \
+             (regression: migrate must run before the disk-sync)"
+        );
+        // The key must now live on the new path so the proxy renders a bearer route.
+        let new_key = data_dir
+            .path()
+            .join("tokens")
+            .join(project)
+            .join("llm")
+            .join("local_api_key");
+        assert!(
+            new_key.exists(),
+            "the legacy key must be copied to the new llm token path"
+        );
     }
 }
