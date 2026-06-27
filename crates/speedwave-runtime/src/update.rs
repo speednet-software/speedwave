@@ -1101,11 +1101,25 @@ mod tests {
             down_pos < validate_pos && validate_pos < recreate_pos,
             "compose_down must precede validate which must precede recreate"
         );
-        // All three steps must be followed by .map_err + ContainersTornDown.
         let down_section = &body[down_pos..validate_pos];
         assert!(
             down_section.contains("ContainersTornDown"),
             "compose_down must have ContainersTornDown marker"
+        );
+        let validate_section = &body[validate_pos..recreate_pos];
+        assert!(
+            validate_section.contains("ContainersTornDown"),
+            "compose_validate_with_retry must have ContainersTornDown marker"
+        );
+        let recreate_end = body[recreate_pos..]
+            .find('\n')
+            .map(|n| recreate_pos + n)
+            .unwrap_or(body.len());
+        let recreate_section =
+            &body[recreate_pos..recreate_end + 80.min(body.len() - recreate_end)];
+        assert!(
+            recreate_section.contains("ContainersTornDown"),
+            "compose_up_recreate must have ContainersTornDown marker"
         );
     }
 }

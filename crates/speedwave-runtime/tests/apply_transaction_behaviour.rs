@@ -188,6 +188,42 @@ fn apply_update_transaction_down_failure_carries_torn_down_marker() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn apply_update_transaction_validate_failure_carries_torn_down_marker() {
+    // A validate failure after compose_down must carry ContainersTornDown so
+    // the CLI knows to roll back (containers are in a torn-down state).
+    let data_dir = shared_data_dir();
+    let project = "tx-validate-fail-marker";
+    let compose_dir = data_dir.join("compose").join(project);
+    std::fs::create_dir_all(&compose_dir).unwrap();
+    std::fs::write(
+        compose_dir.join("compose.yml"),
+        "version: '3'\nservices: {}\n",
+    )
+    .unwrap();
+
+    let (rt, handles) = MockRuntimeBuilder::new()
+        .push_validate_result(Err("virtiofs lag — schema parse error".to_string()))
+        .build();
+    let err = apply_update_transaction(&rt, project, VALID_YAML).unwrap_err();
+    assert!(
+        err.downcast_ref::<speedwave_runtime::update::ContainersTornDown>()
+            .is_some(),
+        "a post-compose_down validate failure must carry ContainersTornDown"
+    );
+    // compose_down ran; validate failed; recreate must NOT have been attempted.
+    assert_eq!(
+        handles.down_calls.lock().unwrap().clone(),
+        vec![project.to_string()],
+        "compose_down ran before validate"
+    );
+    assert!(
+        handles.recreate_calls.lock().unwrap().is_empty(),
+        "compose_up_recreate must NOT run if validate failed"
+    );
+}
+
 /// Pre-ADR-072 state: legacy single-id applied, no per-image map.
 fn legacy_state(applied: Option<&str>) -> speedwave_runtime::bundle::BundleState {
     speedwave_runtime::bundle::BundleState {
