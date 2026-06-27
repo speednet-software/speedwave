@@ -45,7 +45,7 @@ export interface SetupStep {
                 <span aria-hidden="true">✓</span>
               }
               @case ('active') {
-                <app-spin-icon />
+                <app-spin-icon class="h-4 w-4" />
               }
               @case ('error') {
                 <span aria-hidden="true">!</span>

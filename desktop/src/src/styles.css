@@ -175,7 +175,7 @@
 
 /* ── Light mode overlay — applied when <html> lacks `.dark`. Backgrounds and
       ink flip to light; accents use desaturated/darker hexes to keep WCAG AA
-      contrast vs the light --bg. Crimson is the default (no [data-theme] attr). */
+      contrast vs the light --bg. Ember is the default (no [data-theme] attr). */
 :root:not(.dark) {
   color-scheme: light;
 
@@ -411,16 +411,16 @@
     line-height: 1.3;
   }
 
-  /* Two-layer Material spinner (see `@keyframes spin-svg` / `spin-circle`). */
+  /* Two-layer Material spinner (see `@keyframes spin-svg` / `spin-circle`).
+     Default `transform-box: view-box` keeps `50% 50%` on the viewBox centre
+     (12,12 = the circle's cx/cy) at every size; `fill-box` on the root <svg>
+     diverges on WKWebView and is the most engine-risky declaration here. */
   .spin-svg {
     animation: spin-svg 2s linear infinite;
     transform-origin: 50% 50%;
-    transform-box: fill-box;
   }
   .spin-circle {
     animation: spin-circle 1.4s ease-in-out infinite both;
-    transform-origin: 50% 50%;
-    transform-box: fill-box;
   }
 
   /* Streaming caret block. */
