@@ -28,6 +28,7 @@ pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
     spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL, PROXY_PORT,
 };
+pub(crate) use proxy::migrate_legacy_local_key_in;
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{

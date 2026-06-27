@@ -668,8 +668,14 @@ pub fn resolve_project_config(
     // Migrate to the current LLM schema (ADR-073).
     migrate_llm(&mut llm, anthropic_secret_exists(project_name));
 
-    // Re-derive each provider's `has_api_key` from disk (key file is SSOT) —
-    // the single sync point before any renderer reads the resolved config.
+    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
+    // disk-sync below — otherwise the sync re-derives has_api_key from the (still
+    // empty) new path and the migration, gated on the new file, never runs.
+    crate::compose::migrate_legacy_local_key_in(crate::consts::data_dir(), project_name, &llm);
+
+    // Re-derive each provider's `has_api_key` from disk — the key file is the
+    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
+    // injection) reads the resolved config, so this is the single sync point.
     llm.sync_has_api_key_from_disk_in(crate::consts::data_dir(), project_name);
 
     // Local LLMs get the full default Claude Code system prompt.

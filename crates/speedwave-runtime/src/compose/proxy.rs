@@ -155,9 +155,11 @@ pub fn write_proxy_config_in(
         std::fs::create_dir_all(parent)?;
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
+    // Idempotent belt-and-suspenders: the real migration runs at config resolve
+    // before the disk-sync (`config::resolve_project_config`); this re-call is a
+    // no-op once the target exists. `has_api_key` is the disk-derived SSOT
+    // (`LlmConfig::sync_has_api_key_from_disk_in`), so the renderer trusts it.
     migrate_legacy_local_key_in(data_dir, project, llm);
-    // `has_api_key` is the SSOT flag re-derived at config resolve
-    // (`LlmConfig::sync_has_api_key_from_disk_in`); the renderer trusts it.
     let content = render_proxy_config(llm);
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
@@ -207,12 +209,19 @@ pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
 
 /// v1→v2 key-file migration: copies legacy `local-llm/api_key` into the llm
 /// token namespace once when the target is missing. Non-fatal on failure.
-fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
-    let needs_local_key = llm
+///
+/// Gated on the legacy file existing on disk plus a `local`-kind entry — NOT on
+/// `has_api_key`. That flag is re-derived from the *new* path
+/// (`sync_has_api_key_from_disk_in`), which is empty on a fresh upgrade, so
+/// gating on it would skip the very migration that creates the new file
+/// (chicken-and-egg). Must run BEFORE the disk-sync so the re-derived flag
+/// reflects the migrated key (see [`crate::config::resolve_project_config`]).
+pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
+    let has_local_entry = llm
         .providers
         .iter()
-        .any(|p| p.id == "local" && p.kind == LlmProviderKind::Local && p.has_api_key);
-    if !needs_local_key {
+        .any(|p| p.id == "local" && p.kind == LlmProviderKind::Local);
+    if !has_local_entry {
         return;
     }
     let Ok(target) = super::tokens::llm_provider_key_path_in(data_dir, project, "local") else {
@@ -221,8 +230,8 @@ fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) 
     if target.exists() {
         return;
     }
+    // Source of truth for "is there a legacy key to migrate": the legacy file.
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
-        log::warn!("local entry flags has_api_key but no legacy key file to migrate");
         return;
     };
     if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
@@ -525,6 +534,109 @@ mod tests {
         // No legacy file + no target → non-fatal (dummy-key behaviour).
         let dir2 = tempfile::tempdir().unwrap();
         write_proxy_config_in(dir2.path(), "proj", &llm).unwrap();
+    }
+
+    /// Regression: the migration must run even when `has_api_key == false`.
+    /// On a fresh upgrade `sync_has_api_key_from_disk_in` re-derives the flag
+    /// from the (empty) new path → false; gating the migration on that flag
+    /// would skip the very copy that creates the new file (chicken-and-egg),
+    /// leaving the proxy route at `auth:none` for a keyed local LLM.
+    #[test]
+    fn migrate_legacy_local_key_runs_when_flag_is_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir =
+            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
+
+        // has_api_key:false mirrors the post-disk-sync state on a fresh upgrade.
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: false,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+
+        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
+
+        let target =
+            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "sk-legacy",
+            "migration must copy the legacy key based on file existence, not has_api_key"
+        );
+    }
+
+    /// No legacy file → nothing to migrate, no target written (no spurious key).
+    #[test]
+    fn migrate_legacy_local_key_noop_without_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: false,
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
+        let target =
+            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
+        assert!(!target.exists(), "no legacy file → no target key written");
+    }
+
+    /// No `local` entry → migration is skipped even if a legacy file exists
+    /// (e.g. a project that switched to anthropic/openrouter).
+    #[test]
+    fn migrate_legacy_local_key_skipped_without_local_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir =
+            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
+            ..Default::default()
+        };
+        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
+        let target =
+            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
+        assert!(!target.exists(), "no local entry → migration must not run");
+    }
+
+    /// End-to-end ordering: migrate the legacy key, THEN re-derive the flag from
+    /// disk — `has_api_key` must end up `true` so the renderer emits a bearer
+    /// auth route, not `auth:none`. This is the sequence
+    /// `resolve_project_config` runs (migrate_legacy_local_key_in →
+    /// sync_has_api_key_from_disk_in).
+    #[test]
+    fn migrate_then_sync_yields_has_api_key_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir =
+            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
+
+        let mut llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: false,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                ..entry("local", LlmProviderKind::Local)
+            }],
+            ..Default::default()
+        };
+
+        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+
+        assert!(
+            llm.providers[0].has_api_key,
+            "after migrate→sync the flag must be true (key now on the new path)"
+        );
+        let rendered = render_proxy_config(&llm);
+        assert!(
+            !rendered.contains("\"auth\":\"none\"") && !rendered.contains("\"auth\": \"none\""),
+            "a keyed local provider must not render auth:none after migration"
+        );
     }
 
     #[test]
