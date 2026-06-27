@@ -621,6 +621,9 @@ mod tests {
         let ok = [
             "https://huggingface.co/x",
             "https://cas-bridge.xethub.hf.co/y",
+            "https://cdn.hf.co/z",
+            "https://us.aws.cdn.hf.co/model.bin",
+            "https://eu.aws.cdn.hf.co/model.bin",
             "https://github.com/z",
             "https://release-assets.githubusercontent.com/w",
             "https://sub.huggingface.co/q",
@@ -635,6 +638,7 @@ mod tests {
             "https://example.com/x",
             "https://evil-huggingface.co/y",
             "https://huggingface.co.evil.com/z",
+            "https://cdn.hf.co.evil.com/z",
             "http://localhost/w",
         ];
         for u in bad {
