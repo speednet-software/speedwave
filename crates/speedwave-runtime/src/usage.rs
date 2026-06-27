@@ -36,6 +36,9 @@ pub struct UsageRecord {
     /// Wall-clock latency of the request, milliseconds.
     #[serde(default)]
     pub latency_ms: Option<u64>,
+    /// Elapsed ms to the first output token; `None` when not streamed.
+    #[serde(default)]
+    pub ttft_ms: Option<u64>,
     /// Input tokens.
     #[serde(default)]
     pub prompt_tokens: Option<u64>,
@@ -69,11 +72,11 @@ pub struct UsageBucket {
     /// Summed cost over priced requests; `None` when none priced (never 0.0).
     pub cost_usd: Option<f64>,
     /// Throughput numerator: completion tokens from success records that also
-    /// carried a latency. Paired with `throughput_latency_ms_sum`.
+    /// carried a latency and a ttft. Paired with `decode_latency_ms_sum`.
     pub throughput_completion_tokens: u64,
-    /// Throughput denominator: wall-clock latency over the same success+latency
-    /// records that feed `throughput_completion_tokens`.
-    pub throughput_latency_ms_sum: u64,
+    /// Throughput denominator: decode-phase ms (`latency_ms − ttft_ms`) over the
+    /// same success records that feed `throughput_completion_tokens`.
+    pub decode_latency_ms_sum: u64,
 }
 
 /// Dashboard payload: day → model → bucket, plus grand totals.
@@ -411,11 +414,12 @@ fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord, cost: Option<f64>) {
     if let Some(c) = cost {
         bucket.cost_usd = Some(bucket.cost_usd.unwrap_or(0.0) + c);
     }
-    // Throughput counts only successful records with output and latency.
-    if let Some(latency) = r.latency_ms {
-        if !is_failure && completion > 0 && latency > 0 {
+    // Throughput counts only successful records with output, latency, and a
+    // ttft below latency — the decode window is `latency − ttft`.
+    if let (Some(latency), Some(ttft)) = (r.latency_ms, r.ttft_ms) {
+        if !is_failure && completion > 0 && latency > ttft {
             bucket.throughput_completion_tokens += completion;
-            bucket.throughput_latency_ms_sum += latency;
+            bucket.decode_latency_ms_sum += latency - ttft;
         }
     }
 }
@@ -438,8 +442,8 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"success_event","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900}"#,
-                r#"{"ts":"2026-06-12T11:00:00+0200","capture":"stream_iterator","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300}"#,
+                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"success_event","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900,"ttft_ms":100}"#,
+                r#"{"ts":"2026-06-12T11:00:00+0200","capture":"stream_iterator","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300,"ttft_ms":100}"#,
                 // Failure with latency but no output — must NOT feed throughput.
                 r#"{"ts":"2026-06-13T09:00:00+0200","capture":"stream_iterator","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0,"latency_ms":60000}"#,
             ],
@@ -456,17 +460,36 @@ mod tests {
         assert_eq!(s.skipped_lines, 0);
         // Failure with 0 output excluded from throughput numerator and denominator.
         assert_eq!(s.totals.throughput_completion_tokens, 12);
-        assert_eq!(s.totals.throughput_latency_ms_sum, 1200);
-        assert_eq!(day1["claude-haiku-4-5"].throughput_latency_ms_sum, 900);
-        assert_eq!(
-            s.days["2026-06-13"]["local/qwen3"].throughput_latency_ms_sum,
-            0
-        );
+        // Decode = (900−100) + (300−100) = 1000.
+        assert_eq!(s.totals.decode_latency_ms_sum, 1000);
+        assert_eq!(day1["claude-haiku-4-5"].decode_latency_ms_sum, 800);
+        assert_eq!(s.days["2026-06-13"]["local/qwen3"].decode_latency_ms_sum, 0);
         // Hourly histogram: local hours 10 and 11 on day one, 9 on day two.
         assert_eq!(s.hours["2026-06-12"][10], 1);
         assert_eq!(s.hours["2026-06-12"][11], 1);
         assert_eq!(s.hours["2026-06-12"][9], 0);
         assert_eq!(s.hours["2026-06-13"][9], 1);
+    }
+
+    #[test]
+    fn decode_latency_excludes_ttft_and_skips_untimed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                // 100 out, 2000ms wall, 500ms ttft -> decode window 1500ms.
+                r#"{"ts":"2026-06-27T10:00:00+0200","status":"success","model":"local/q","response_id":"r1","provider_kind":"local","completion_tokens":100,"latency_ms":2000,"ttft_ms":500}"#,
+                // No ttft -> excluded from throughput entirely.
+                r#"{"ts":"2026-06-27T10:01:00+0200","status":"success","model":"local/q","response_id":"r2","provider_kind":"local","completion_tokens":50,"latency_ms":1000}"#,
+            ],
+        );
+        let s = read_usage_summary_in(dir.path(), "proj");
+        assert_eq!(
+            s.totals.throughput_completion_tokens, 100,
+            "only the timed record counts"
+        );
+        assert_eq!(s.totals.decode_latency_ms_sum, 1500, "latency minus ttft");
     }
 
     #[test]
