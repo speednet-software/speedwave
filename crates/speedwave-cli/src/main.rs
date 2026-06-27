@@ -576,9 +576,7 @@ fn main() -> anyhow::Result<()> {
                 // leave the old containers running and an up-to-date compose, so
                 // rolling back would needlessly recreate healthy containers from
                 // a possibly stale snapshot.
-                let torn_down = e
-                    .downcast_ref::<update::ContainersTornDown>()
-                    .is_some();
+                let torn_down = e.downcast_ref::<update::ContainersTornDown>().is_some();
                 let msg = redact_err(&e);
                 err!("Container update failed: {msg}");
                 if torn_down {
