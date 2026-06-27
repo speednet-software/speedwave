@@ -1658,4 +1658,37 @@ mod tests {
         );
         stashed.unwrap().join().expect("test thread must not panic");
     }
+
+    /// CSP must allow `blob:`/`data:` images, else WebView2 (Windows) renders
+    /// paste-preview thumbnails as broken-image icons.
+    #[test]
+    fn csp_img_src_allows_blob_and_data_for_paste_preview() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json parses");
+        let csp = conf["app"]["security"]["csp"]
+            .as_str()
+            .expect("app.security.csp is a string");
+
+        // Find the directive that governs <img> loading: img-src, or default-src as fallback.
+        let directive = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("img-src"))
+            .or_else(|| {
+                csp.split(';')
+                    .map(str::trim)
+                    .find(|d| d.starts_with("default-src"))
+            })
+            .unwrap_or_else(|| panic!("CSP must define img-src or default-src; got: {csp}"));
+
+        assert!(
+            directive.contains("blob:"),
+            "CSP image directive must allow blob: for paste-preview thumbnails \
+             (broken-image on Windows WebView2 otherwise); got: {directive}"
+        );
+        assert!(
+            directive.contains("data:"),
+            "CSP image directive must allow data: for image sources; got: {directive}"
+        );
+    }
 }
