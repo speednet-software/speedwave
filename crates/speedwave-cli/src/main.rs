@@ -573,6 +573,22 @@ fn main() -> anyhow::Result<()> {
             Err(e) => {
                 let e = redact_err(&e);
                 err!("Container update failed: {e}");
+                // Auto-rollback: a failed recreate after compose_down leaves the
+                // project with no running containers. Restore the pre-update
+                // snapshot (old images are still present — prune runs only on
+                // success) so the user is not left with a half-applied update.
+                match update::rollback_containers(&runtime, &project_name) {
+                    Ok(()) => {
+                        err!("Rolled back to the previous container state.");
+                    }
+                    Err(rollback_err) => {
+                        let rollback_err = redact_err(&rollback_err);
+                        err!(
+                            "Automatic rollback also failed: {rollback_err}. \
+                             Run `speedwave` to start containers manually."
+                        );
+                    }
+                }
                 std::process::exit(1);
             }
         }
