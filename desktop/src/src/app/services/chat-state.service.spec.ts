@@ -813,6 +813,51 @@ describe('ChatStateService', () => {
       }
     });
 
+    it('picks up an OpenRouter cost that /generation prices only after ~30s', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        // OpenRouter can take far longer than the early backoff to price a
+        // large generation; the retry window must outlast that.
+        let elapsed = 0;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return elapsed >= 30_000
+              ? { cost_usd: 0.0858, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return elapsed >= 30_000 ? 0.0858 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.13, // inflated CC live preview
+            turn_cost: 0.13,
+            model: 'openrouter/z-ai/glm-5-turbo',
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Still deferred at first → preview stays.
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.13);
+
+        // Advance past OpenRouter's pricing latency in small steps.
+        for (let t = 0; t < 35_000; t += 5000) {
+          elapsed += 5000;
+          await vi.advanceTimersByTimeAsync(5000);
+        }
+
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0858, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0858, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('stops re-reconciling a deferred turn once a newer turn supersedes it', async () => {
       vi.useFakeTimers();
       try {
@@ -1245,6 +1290,32 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'loaded' });
+    });
+
+    it('re-reconciles the last assistant turn from the proxy SSOT on reload', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') {
+          return { cost_usd: 0.0858, cost_source: 'actual' };
+        }
+        if (cmd === 'get_conversation_cost') return 0.0858;
+        return undefined;
+      });
+
+      service.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        {
+          role: 'assistant',
+          blocks: [{ type: 'text', content: 'a' }],
+          timestamp: 2,
+          uuid: 'gen-1',
+          meta: { cost: 0.13 }, // stale inflated preview from a deferred turn
+        },
+      ]);
+
+      await vi.waitFor(() => {
+        expect(service.messages.find((m) => m.uuid === 'gen-1')?.meta?.cost).toBeCloseTo(0.0858, 6);
+      });
     });
   });
 

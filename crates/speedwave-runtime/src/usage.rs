@@ -137,14 +137,23 @@ pub fn get_usage_for_response_in(
     });
     let rec = found?;
     let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
-    let entry = costs.get(response_id);
+    // Cost + source come from one lookup so they never disagree: sidecar entry
+    // first, else the inline cost (terminal — it is the final value, not deferred).
+    let sidecar = crate::usage_cost::effective_response_id(&rec).and_then(|id| costs.get(&id));
+    let (cost_usd, cost_source) = match sidecar {
+        Some(e) => (e.cost_usd, e.cost_source.to_string()),
+        None => (
+            rec.cost_usd,
+            if rec.cost_usd.is_some() { "actual" } else { "" }.to_string(),
+        ),
+    };
     Some(ResponseUsage {
         prompt_tokens: rec.prompt_tokens.unwrap_or(0),
         completion_tokens: rec.completion_tokens.unwrap_or(0),
         cache_read: rec.cache_read.unwrap_or(0),
         cache_write: rec.cache_write.unwrap_or(0),
-        cost_usd: joined_cost(&rec, &costs),
-        cost_source: entry.map(|e| e.cost_source.to_string()).unwrap_or_default(),
+        cost_usd,
+        cost_source,
     })
 }
 
@@ -876,7 +885,25 @@ mod tests {
         );
         let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
         assert_eq!(u.cost_usd, Some(0.02));
-        assert_eq!(u.cost_source, "");
+        // A priced inline cost is terminal — source must not be the empty
+        // (non-terminal) string, or the footer treats it as still deferred.
+        assert_eq!(u.cost_source, "actual");
+    }
+
+    #[test]
+    fn get_usage_for_response_no_cost_anywhere_is_nonterminal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[r#"{"ts":"2026-06-26T10:00:00+0200","response_id":"msg_1","prompt_tokens":5}"#],
+        );
+        let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
+        assert_eq!(u.cost_usd, None);
+        assert_eq!(
+            u.cost_source, "",
+            "no cost yet → non-terminal so the footer retries"
+        );
     }
 
     #[test]

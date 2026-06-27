@@ -798,6 +798,12 @@ export class ChatStateService {
   loadMessages(msgs: ChatMessage[]): void {
     this._messages = msgs;
     this.notifyChange();
+    // Re-reconcile the last turn from the proxy SSOT — corrects a cost that was
+    // still `deferred` when the live retry gave up. Terminal costs are idempotent.
+    const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && m.uuid);
+    if (lastAssistant?.uuid) {
+      void this.reconcileFooterCost(lastAssistant.uuid);
+    }
   }
 
   /**
@@ -952,8 +958,11 @@ export class ChatStateService {
     });
   }
 
-  /** Backoff schedule (ms) for re-reconciling a `deferred` OpenRouter cost. */
-  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000];
+  /**
+   * Backoff schedule (ms) for re-reconciling a `deferred` OpenRouter cost.
+   * Spans ~60s total: `/generation` can take ~30s+ to price a large turn.
+   */
+  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
   /**
    * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6),
@@ -972,21 +981,23 @@ export class ChatStateService {
         project,
         responseId: assistantUuid,
       });
-      const cur = this._sessionStats();
-      if (!u || !cur) return;
+      if (!u) return;
       // A non-terminal cost (OpenRouter `deferred`, or no sidecar entry yet)
       // must keep the live preview instead of blanking it; only a terminal
       // cost_source overwrites the footer/per-message. Deferred retries below.
       if (isTerminalCostSource(u.cost_source)) {
         // Per-message cost from the SSOT; null (unpriced) hides the segment.
         this.overwriteEntryCost(assistantUuid, u.cost_usd);
-        // Footer = this conversation's turns only (project total lives in the dashboard).
-        const responseIds = this.conversationResponseIds(assistantUuid);
-        const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
-          project,
-          responseIds,
-        });
-        this._sessionStats.set({ ...cur, total_cost: conversationCost });
+        // Footer = this conversation's turns only; skipped when no live session.
+        const cur = this._sessionStats();
+        if (cur) {
+          const responseIds = this.conversationResponseIds(assistantUuid);
+          const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
+            project,
+            responseIds,
+          });
+          this._sessionStats.set({ ...cur, total_cost: conversationCost });
+        }
         this.notifyChange();
       }
       const backoff = ChatStateService.DEFERRED_RECONCILE_BACKOFF_MS;
