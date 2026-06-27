@@ -493,6 +493,24 @@ mod tests {
     }
 
     #[test]
+    fn zero_decode_window_is_excluded_from_throughput() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                // latency == ttft -> zero decode window -> excluded (undefined rate).
+                r#"{"ts":"2026-06-27T10:00:00+0200","status":"success","model":"local/q","response_id":"r1","provider_kind":"local","completion_tokens":1,"latency_ms":500,"ttft_ms":500}"#,
+                // latency < ttft (clock skew) -> excluded, no u64 underflow.
+                r#"{"ts":"2026-06-27T10:01:00+0200","status":"success","model":"local/q","response_id":"r2","provider_kind":"local","completion_tokens":3,"latency_ms":400,"ttft_ms":500}"#,
+            ],
+        );
+        let s = read_usage_summary_in(dir.path(), "proj");
+        assert_eq!(s.totals.throughput_completion_tokens, 0);
+        assert_eq!(s.totals.decode_latency_ms_sum, 0);
+    }
+
+    #[test]
     fn malformed_timestamps_skip_the_hour_histogram_only() {
         let dir = tempfile::tempdir().unwrap();
         write_usage(

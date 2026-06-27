@@ -43,18 +43,18 @@ pub struct UsageAcc {
 }
 
 /// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta`.
+/// Measures from the first visible text token, not `thinking_delta`, so extended-
+/// thinking models report decode throughput over the user-visible answer.
 pub fn note_first_text_delta(frame: &Value, started: std::time::Instant, acc: &mut UsageAcc) {
     if acc.ttft_ms.is_some() {
         return;
     }
-    let is_text = frame.get("type").and_then(Value::as_str) == Some("content_block_delta")
-        && frame
-            .get("delta")
-            .and_then(|d| d.get("type"))
-            .and_then(Value::as_str)
-            == Some("text_delta");
-    let has_text = frame
-        .get("delta")
+    if frame.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return;
+    }
+    let delta = frame.get("delta");
+    let is_text = delta.and_then(|d| d.get("type")).and_then(Value::as_str) == Some("text_delta");
+    let has_text = delta
         .and_then(|d| d.get("text"))
         .and_then(Value::as_str)
         .is_some_and(|t| !t.is_empty());
@@ -395,8 +395,36 @@ mod tests {
         assert!(parsed.get("gen_id").is_none(), "gen_id must be absent");
         // cost_usd must be absent (skip_serializing_if None).
         assert!(parsed.get("cost_usd").is_none(), "cost_usd must be absent");
+        // ttft_ms must be absent when None (skip_serializing_if).
+        assert!(
+            parsed.get("ttft_ms").is_none(),
+            "ttft_ms must be absent when None"
+        );
         // Ends with a newline (append_usage uses writeln!).
         assert!(written.ends_with('\n'));
+    }
+
+    #[test]
+    fn ttft_ms_serializes_when_some() {
+        let line = UsageLine {
+            ts: "2026-06-12T10:00:00.000+02:00".to_string(),
+            status: "success".to_string(),
+            model: Some("local/q".to_string()),
+            response_id: Some("msg_1".to_string()),
+            provider_kind: "local".to_string(),
+            provider_id: "local".to_string(),
+            gen_id: None,
+            cost_usd: None,
+            latency_ms: 900,
+            ttft_ms: Some(150),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&line).unwrap()).unwrap();
+        assert_eq!(parsed["ttft_ms"], 150);
     }
 
     #[test]

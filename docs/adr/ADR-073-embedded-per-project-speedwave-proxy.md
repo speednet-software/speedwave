@@ -123,4 +123,4 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 
 [^8]: OpenRouter exposes per-generation cost (`data.total_cost`, USD) via `GET /api/v1/generation?id=<gen-id>`: https://openrouter.ai/docs/api-reference/get-a-generation
 
-[^9]: Generation throughput excludes time-to-first-token: `TPOT = (E2E latency − TTFT) / (output tokens − 1)` (Anyscale): https://docs.anyscale.com/llm/serving/benchmarking/metrics ; "total tokens produced by generation time, excluding TTFT" (GMI Cloud): https://www.gmicloud.ai/en/blog/ttft-llm-speed-metrics
+[^9]: Generation throughput excludes time-to-first-token: `TPOT = (E2E latency − TTFT) / (output tokens − 1)` (Anyscale): https://docs.anyscale.com/llm/serving/benchmarking/metrics ; "total tokens produced by generation time, excluding TTFT" (GMI Cloud): https://www.gmicloud.ai/en/blog/ttft-llm-speed-metrics . Speedwave divides by all `output tokens` (not `output − 1`) as a practical approximation for the aggregate metric over many requests; the strict per-request `−1` form differs only on very short responses.
