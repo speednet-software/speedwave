@@ -17,6 +17,8 @@ pub struct UsageLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read: u64,
@@ -36,6 +38,29 @@ pub struct UsageAcc {
     pub gen_id: Option<String>,
     /// True once any usage frame was observed — distinguishes "0/0 real" from "never seen".
     pub saw_usage: bool,
+    /// Elapsed ms to the first output `text_delta` frame; `None` if none seen.
+    pub ttft_ms: Option<u64>,
+}
+
+/// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta`.
+pub fn note_first_text_delta(frame: &Value, started: std::time::Instant, acc: &mut UsageAcc) {
+    if acc.ttft_ms.is_some() {
+        return;
+    }
+    let is_text = frame.get("type").and_then(Value::as_str) == Some("content_block_delta")
+        && frame
+            .get("delta")
+            .and_then(|d| d.get("type"))
+            .and_then(Value::as_str)
+            == Some("text_delta");
+    let has_text = frame
+        .get("delta")
+        .and_then(|d| d.get("text"))
+        .and_then(Value::as_str)
+        .is_some_and(|t| !t.is_empty());
+    if is_text && has_text {
+        acc.ttft_ms = Some(started.elapsed().as_millis() as u64);
+    }
 }
 
 /// Update `acc` from one parsed SSE frame `Value`.
@@ -164,6 +189,7 @@ impl UsageAcc {
             gen_id: self.gen_id,
             cost_usd: None,
             latency_ms,
+            ttft_ms: self.ttft_ms,
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             cache_read: self.cache_read,
@@ -207,6 +233,7 @@ mod tests {
             gen_id: None,
             cost_usd: None,
             latency_ms: 900,
+            ttft_ms: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             cache_read: 0,
@@ -337,6 +364,7 @@ mod tests {
             gen_id: None,
             cost_usd: None,
             latency_ms: 900,
+            ttft_ms: None,
             prompt_tokens: 50000,
             completion_tokens: 10,
             cache_read: 0,
@@ -597,5 +625,38 @@ mod tests {
             .unwrap();
         assert_eq!(line.response_id.as_deref(), Some("msg_1"));
         assert_eq!(line.gen_id.as_deref(), Some("gen-xyz"));
+    }
+
+    #[test]
+    fn ttft_set_on_first_text_delta_only() {
+        use std::time::Instant;
+        let mut acc = UsageAcc::default();
+        let start = Instant::now();
+        // Non-text / empty frames before the first token must NOT set ttft.
+        note_first_text_delta(&json!({"type":"message_start"}), start, &mut acc);
+        note_first_text_delta(
+            &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":""}}),
+            start,
+            &mut acc,
+        );
+        assert!(
+            acc.ttft_ms.is_none(),
+            "empty/other frames must not set ttft"
+        );
+        // First non-empty text_delta sets it.
+        note_first_text_delta(
+            &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}),
+            start,
+            &mut acc,
+        );
+        let first = acc.ttft_ms;
+        assert!(first.is_some(), "first text_delta must set ttft");
+        // A later text_delta must NOT overwrite it.
+        note_first_text_delta(
+            &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"!"}}),
+            start,
+            &mut acc,
+        );
+        assert_eq!(acc.ttft_ms, first, "ttft must latch on the first token");
     }
 }
