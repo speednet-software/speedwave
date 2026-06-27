@@ -101,10 +101,21 @@ def find_errors(root: pathlib.Path) -> list[str]:
                 )
                 continue
             for line in marked:
-                if expected not in line:
+                # Extract the exact value release-please bumps. Plist shape is
+                # `<string>VERSION</string> <!-- x-release-please-version -->`;
+                # compare the extracted token exactly (not substring, so e.g.
+                # 1.2.3 does not spuriously match 11.2.3).
+                m = re.search(r"<string>([^<]*)</string>", line)
+                if not m:
                     errors.append(
-                        f"{path}: marked line does not contain manifest "
-                        f"version '{expected}': {line.strip()}"
+                        f"{path}: cannot extract <string> version from marked "
+                        f"line: {line.strip()}"
+                    )
+                    continue
+                actual = m.group(1)
+                if actual != expected:
+                    errors.append(
+                        f"{path}: version '{actual}' != manifest '{expected}'"
                     )
         elif isinstance(entry, dict):
             errors.append(

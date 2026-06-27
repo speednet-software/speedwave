@@ -179,6 +179,24 @@ JSON
   [[ "$output" =~ "marker" ]]
 }
 
+# A superstring of the expected version must NOT pass (exact, not substring).
+@test "generic plist superstring version detected (exact match)" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  # manifest 9.9.9; plist 19.9.9 contains "9.9.9" as a substring.
+  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
+  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
+  mkdir -p "$fixture_root/native/macos/x/Resources"
+  printf '<string>19.9.9</string> <!-- x-release-please-version -->\n' \
+    > "$fixture_root/native/macos/x/Resources/Info.plist"
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "19.9.9" ]]
+}
+
 # ── Unknown extra-file type must fail loudly (not be silently skipped) ────────
 
 @test "unsupported extra-file type is reported" {
