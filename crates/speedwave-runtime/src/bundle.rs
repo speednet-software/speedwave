@@ -130,6 +130,10 @@ const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "notes-cli",
         kind: BundledAssetKind::ExecutableFile,
     },
+    BundledAssetSpec {
+        path: "audio-capture-cli",
+        kind: BundledAssetKind::ExecutableFile,
+    },
 ];
 
 const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
@@ -938,6 +942,7 @@ mod tests {
                 write_executable(&root.join("calendar-cli"));
                 write_executable(&root.join("mail-cli"));
                 write_executable(&root.join("notes-cli"));
+                write_executable(&root.join("audio-capture-cli"));
             }
             "windows" => {
                 std::fs::create_dir_all(root.join("wsl")).unwrap();
@@ -1242,6 +1247,19 @@ mod tests {
             .any(|asset| asset.path == "mcp-os/os/dist/index.js"));
     }
 
+    /// Drift guard: every signed macOS Mach-O (sign-bundled-binaries.sh
+    /// SIGN_TARGETS / tauri.macos.conf.json bundle.resources) must also be a
+    /// required bundled asset, or it ships unverified. audio-capture-cli was
+    /// missing here while present in both other lists.
+    #[test]
+    fn required_bundled_assets_for_macos_include_audio_capture_cli() {
+        let assets = required_bundled_assets("macos").unwrap();
+        assert!(
+            assets.iter().any(|asset| asset.path == "audio-capture-cli"),
+            "audio-capture-cli must be a required macOS bundled asset"
+        );
+    }
+
     #[test]
     fn validate_bundled_runtime_assets_accepts_complete_macos_tree() {
         let temp = tempfile::tempdir().unwrap();
@@ -1260,6 +1278,17 @@ mod tests {
 
         let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
         assert!(err.to_string().contains("notes-cli"));
+    }
+
+    #[test]
+    fn validate_bundled_runtime_assets_rejects_missing_audio_capture_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        write_common_bundled_assets(temp.path());
+        write_platform_bundled_assets(temp.path(), "macos");
+        std::fs::remove_file(temp.path().join("audio-capture-cli")).unwrap();
+
+        let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
+        assert!(err.to_string().contains("audio-capture-cli"));
     }
 
     #[test]
@@ -1309,6 +1338,7 @@ mod tests {
         std::fs::write(temp.path().join("calendar-cli"), "").unwrap();
         std::fs::write(temp.path().join("mail-cli"), "").unwrap();
         std::fs::write(temp.path().join("notes-cli"), "").unwrap();
+        std::fs::write(temp.path().join("audio-capture-cli"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
     }
