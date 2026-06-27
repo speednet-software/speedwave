@@ -81,6 +81,37 @@ def find_errors(root: pathlib.Path) -> list[str]:
                     errors.append(
                         f"{toml_path}: version '{actual}' != manifest '{expected}'"
                     )
+        elif isinstance(entry, dict) and entry.get("type") == "generic":
+            # release-please's generic updater bumps every line carrying the
+            # `x-release-please-version` marker comment (e.g. Info.plist
+            # CFBundleShortVersionString). Verify each such line holds `expected`.
+            path = root / entry["path"]
+            try:
+                content = path.read_text()
+            except Exception as e:
+                errors.append(f"{path}: read error: {e}")
+                continue
+            marked = [
+                line for line in content.splitlines()
+                if "x-release-please-version" in line
+            ]
+            if not marked:
+                errors.append(
+                    f"{path}: no 'x-release-please-version' marker found"
+                )
+                continue
+            for line in marked:
+                if expected not in line:
+                    errors.append(
+                        f"{path}: marked line does not contain manifest "
+                        f"version '{expected}': {line.strip()}"
+                    )
+        elif isinstance(entry, dict):
+            errors.append(
+                f"unsupported extra-file type '{entry.get('type')}' for "
+                f"path '{entry.get('path')}' — extend "
+                f"check-version-consistency.py to cover it"
+            )
     return errors
 
 
