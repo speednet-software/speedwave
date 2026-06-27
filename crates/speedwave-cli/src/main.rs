@@ -944,6 +944,10 @@ fn main() -> anyhow::Result<()> {
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
     ensure_exec_healthy(&runtime, &project_name, &container_name)?;
 
+    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065). Spawned
+    // before the login branch so image paste works in `login` sessions too.
+    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
+
     // Handle `speedwave login` — runs `claude` interactively with the resolved
     // flags. The user types /login; Claude writes credentials to the mount.
     if let CliAction::Login(_) = action {
@@ -959,9 +963,6 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(if status.success() { 0 } else { 1 }),
         );
     }
-
-    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065).
-    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
@@ -1149,6 +1150,25 @@ mod tests {
                  the Claude exec with exit 137 (ADR-068)"
             );
         }
+    }
+
+    /// PasteWatcher must spawn BEFORE the `login` branch, which exits the
+    /// process — otherwise image paste is dead in the login session (#image-paste).
+    #[test]
+    fn paste_watcher_spawns_before_login_branch_exit() {
+        let source = include_str!("main.rs");
+        let spawn_idx = source
+            .find(concat!("PasteWatcher::", "spawn"))
+            .expect("main.rs must spawn the PasteWatcher");
+        let login_idx = source
+            .find("if let CliAction::Login(_) = action")
+            .expect("main.rs must handle the login branch");
+        assert!(
+            spawn_idx < login_idx,
+            "PasteWatcher::spawn must run BEFORE the login branch — the login \
+             branch ends in process::exit, so a watcher spawned after it never \
+             runs during `speedwave login` and clipboard image paste fails there"
+        );
     }
 
     #[test]
