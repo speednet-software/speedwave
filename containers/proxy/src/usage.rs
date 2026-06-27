@@ -7,7 +7,6 @@ use std::path::Path;
 #[derive(Debug, Serialize)]
 pub struct UsageLine {
     pub ts: String,
-    pub capture: String,
     pub status: String,
     pub model: Option<String>,
     pub response_id: Option<String>,
@@ -158,7 +157,6 @@ impl UsageAcc {
         let response_id = self.response_id.or_else(|| self.gen_id.clone());
         Some(UsageLine {
             ts,
-            capture: "forwarder".to_string(),
             status: status.as_wire().to_string(),
             model: Some(model.to_string()),
             response_id,
@@ -175,10 +173,12 @@ impl UsageAcc {
     }
 }
 
-/// Append `line` as a compact JSON line to `path`.  Any IO error is swallowed
-/// — usage logging must never break request forwarding.
+/// Append `line` as a compact JSON line to `path`. IO errors are logged but
+/// never propagated — usage logging must not break request forwarding.
 pub fn append_usage(path: &Path, line: &UsageLine) {
-    let _ = append_usage_inner(path, line);
+    if let Err(e) = append_usage_inner(path, line) {
+        log::warn!("usage append failed ({}): {e}", path.display());
+    }
 }
 
 fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
@@ -200,7 +200,6 @@ mod tests {
     fn fixture_line() -> UsageLine {
         UsageLine {
             ts: "2026-06-25T10:00:00.000+02:00".to_string(),
-            capture: "forwarder".to_string(),
             status: "success".to_string(),
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc123".to_string()),
@@ -331,7 +330,6 @@ mod tests {
         // Field names and types must match UsageRecord in speedwave-runtime/src/usage.rs.
         let line = UsageLine {
             ts: "2026-06-12T10:00:00.000+02:00".to_string(),
-            capture: "forwarder".to_string(),
             status: "success".to_string(),
             model: Some("claude-haiku-4-5".to_string()),
             response_id: Some("msg_abc".to_string()),
@@ -353,7 +351,6 @@ mod tests {
         // Must round-trip through serde_json as a valid object with required fields.
         let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
         assert_eq!(parsed["ts"], "2026-06-12T10:00:00.000+02:00");
-        assert_eq!(parsed["capture"], "forwarder");
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["model"], "claude-haiku-4-5");
         assert_eq!(parsed["response_id"], "msg_abc");

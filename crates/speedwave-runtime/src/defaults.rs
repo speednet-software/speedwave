@@ -35,6 +35,8 @@ pub struct AnthropicModelInfo {
     pub context_tokens: u32,
     /// Whether this entry belongs to the "Latest" group.
     pub latest: bool,
+    /// Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint.
+    pub premium: bool,
     /// Price of the base model id (e.g. `claude-sonnet-4-6`).
     pub pricing: ModelPricing,
     /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
@@ -82,6 +84,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Fable 5",
         context_tokens: 1_000_000,
         latest: true,
+        premium: true,
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
     },
@@ -90,6 +93,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.8",
         context_tokens: 1_000_000,
         latest: true,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -98,6 +102,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Sonnet 4.6",
         context_tokens: 1_000_000,
         latest: true,
+        premium: false,
         pricing: SONNET_PRICING,
         pricing_1m: Some(SONNET_PRICING_1M),
     },
@@ -106,6 +111,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Haiku 4.5",
         context_tokens: 200_000,
         latest: true,
+        premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
     },
@@ -114,6 +120,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.7",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -122,6 +129,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         family: "Opus 4.6",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
     },
@@ -506,6 +514,23 @@ mod tests {
         assert!(
             ANTHROPIC_MODELS.iter().any(|m| m.latest),
             "at least one Latest entry required so the dropdown opens with a current option"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_premium_flag_matches_family() {
+        // Premium tiers are Opus + Fable; Sonnet/Haiku are the everyday tier.
+        for m in ANTHROPIC_MODELS {
+            let expected = m.family.starts_with("Opus") || m.family.starts_with("Fable");
+            assert_eq!(
+                m.premium, expected,
+                "{} premium flag must match its family tier",
+                m.id
+            );
+        }
+        assert!(
+            ANTHROPIC_MODELS.iter().any(|m| !m.premium),
+            "at least one non-premium model so the everyday placeholder resolves"
         );
     }
 

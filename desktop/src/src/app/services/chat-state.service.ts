@@ -10,6 +10,7 @@ import { isBareSlash } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isLocalProvider,
+  isTerminalCostSource,
   type LlmConfigResponse,
   type ResponseUsage,
 } from '../models/llm';
@@ -241,9 +242,8 @@ export class ChatStateService {
     }
     if (!this.initialized) {
       this.initialized = true;
-      // Start chat session in the background — don't await so the UI stays
-      // responsive.  If the user sends a message before start_chat completes,
-      // sendMessage's auto-retry handles "no active session" transparently.
+      // Start session in background (UI stays responsive); sendMessage
+      // auto-retries on "no active session" if a message races start_chat.
       if (this.projectState.status === 'ready') {
         this.startChatSession();
       } else {
@@ -276,9 +276,8 @@ export class ChatStateService {
           this.projectState.status = 'auth_required';
           this.notifyChange();
         } else {
-          // Non-auth start failure is fatal for the chat session — surface it
-          // in the project state so the UI shows an error instead of a silently
-          // dead chat (mirrors the stream-listener failure handling below).
+          // Non-auth start failure is fatal — surface it in project state so
+          // the UI shows an error instead of a silently dead chat.
           this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
           this.projectState.status = 'error';
           this.projectState.error = `Failed to start chat session: ${msg}`;
@@ -300,9 +299,8 @@ export class ChatStateService {
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
     if (!hasContent || this.isStreaming) return;
-    // Drop whitespace-only text or a lone `/` (skill-menu trigger) before
-    // streaming — `hasContent` only rejects empty text, not whitespace — so the
-    // backend "empty message" bail never surfaces as a stray error bubble.
+    // Drop whitespace-only or bare-slash input before streaming; hasContent
+    // misses these and the backend would bail with a stray error bubble.
     const isBlankOrSlash = chatInput.text.trim().length === 0 || isBareSlash(chatInput.text);
     if (chatInput.attachments.length === 0 && isBlankOrSlash) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
@@ -652,7 +650,6 @@ export class ChatStateService {
             utilization: chunk.data.utilization,
             resets_at: chunk.data.resets_at,
           };
-          // Update existing sessionStats immediately if present
           const cur = this._sessionStats();
           if (cur) {
             this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
@@ -738,7 +735,6 @@ export class ChatStateService {
           ...this._currentBlocks,
           { type: 'error', content: chunk.data.content },
         ];
-        // Finalize as error turn
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -960,15 +956,8 @@ export class ChatStateService {
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000];
 
   /**
-   * Reconciles the footer + per-message cost from the proxy SSOT. The per-turn
-   * call confirms this turn's line landed (its bounded retry tolerates the proxy
-   * append lagging the `result`) and drives the per-message cost; the footer
-   * total then comes from `get_session_cost` — the single aggregator (invariant
-   * 6), not a frontend sum. When OpenRouter has not priced the turn yet
-   * (`cost_source: 'deferred'`), it retries on a backoff until `/generation`
-   * fills in the real cost — otherwise the footer/per-message would freeze at
-   * the pre-pricing value while the dashboard (which re-enriches on open) moves
-   * on. Best-effort.
+   * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6),
+   * retrying on a backoff while OpenRouter cost is `deferred`. Best-effort.
    * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
    * @param attempt - Backoff index for a deferred re-reconcile (0 on the first call).
    */
@@ -985,18 +974,21 @@ export class ChatStateService {
       });
       const cur = this._sessionStats();
       if (!u || !cur) return;
-      // Per-message cost from the SSOT; null (unpriced) hides the segment.
-      this.overwriteEntryCost(assistantUuid, u.cost_usd);
-      // Footer = this conversation's turns only (project total lives in the dashboard).
-      const responseIds = this.conversationResponseIds(assistantUuid);
-      const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
-        project,
-        responseIds,
-      });
-      this._sessionStats.set({ ...cur, total_cost: conversationCost });
-      this.notifyChange();
-      // Deferred = OpenRouter has not priced /generation yet; retry on a backoff
-      // until it does, unless a newer turn superseded this one.
+      // A non-terminal cost (OpenRouter `deferred`, or no sidecar entry yet)
+      // must keep the live preview instead of blanking it; only a terminal
+      // cost_source overwrites the footer/per-message. Deferred retries below.
+      if (isTerminalCostSource(u.cost_source)) {
+        // Per-message cost from the SSOT; null (unpriced) hides the segment.
+        this.overwriteEntryCost(assistantUuid, u.cost_usd);
+        // Footer = this conversation's turns only (project total lives in the dashboard).
+        const responseIds = this.conversationResponseIds(assistantUuid);
+        const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
+          project,
+          responseIds,
+        });
+        this._sessionStats.set({ ...cur, total_cost: conversationCost });
+        this.notifyChange();
+      }
       const backoff = ChatStateService.DEFERRED_RECONCILE_BACKOFF_MS;
       if (u.cost_source === 'deferred' && attempt < backoff.length) {
         setTimeout(() => {
@@ -1005,8 +997,9 @@ export class ChatStateService {
           }
         }, backoff[attempt]);
       }
-    } catch {
+    } catch (err) {
       // Footer stays on the live value; reconcile is best-effort.
+      this.log.debug(`[chat-state] reconcileFooterCost best-effort failed: ${String(err)}`);
     }
   }
 
@@ -1131,14 +1124,6 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
 }
 
 /**
- * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
- * @param data - Relevant fields copied from the `Result` chunk payload.
- * @param data.turn_usage - Per-turn token usage (required for fallback cost).
- * @param data.turn_cost - Authoritative per-turn cost from the backend.
- * @param data.model - Model id attached to the `Result` chunk, if any.
- * @param resolvedModel - Model id already resolved by the reducer.
- */
-/**
  * Locates the retry anchor: the (assistant, user) pair replayable via `retry_last_turn` (ADR-046).
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
@@ -1171,6 +1156,14 @@ function findRetryAnchorIn(
   return null;
 }
 
+/**
+ * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
+ * @param data - Fields copied from the `Result` payload.
+ * @param data.turn_usage - Token usage for the turn.
+ * @param data.turn_cost - Cost (USD) for the turn.
+ * @param data.model - Model id from the payload, if present.
+ * @param resolvedModel - Model id already resolved by the reducer.
+ */
 function buildEntryMeta(
   data: {
     turn_usage?: TurnUsage;
@@ -1280,6 +1273,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     output_tokens: src.sessionStats?.usage?.output_tokens ?? 0,
     cache_read_tokens: src.sessionStats?.usage?.cache_read_tokens ?? 0,
     cache_write_tokens: src.sessionStats?.usage?.cache_write_tokens ?? 0,
+    // Safe lossy projection: the state-tree total is display-only and never
+    // rendered as $; the authoritative unpriced/null cost lives in total_cost.
     cost: src.sessionStats?.total_cost ?? 0,
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };

@@ -21,8 +21,6 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     cache_read: 0,
     cache_write: 0,
     cost_usd: 0,
-    priced_requests: 0,
-    unpriced_requests: 0,
     throughput_completion_tokens: 0,
     throughput_latency_ms_sum: 0,
     ...overrides,
@@ -102,7 +100,6 @@ describe('LlmUsageComponent', () => {
               prompt_tokens: 5,
               completion_tokens: 10,
               cost_usd: null,
-              unpriced_requests: 1,
             }),
           },
         },
@@ -130,10 +127,10 @@ describe('LlmUsageComponent', () => {
   it('renders $0 for a priced-zero (local) bucket, dash only for null', async () => {
     const { fixture } = await setup(
       summary({
-        totals: bucket({ requests: 1, cost_usd: 0, priced_requests: 1 }),
+        totals: bucket({ requests: 1, cost_usd: 0 }),
         days: {
           '2026-06-12': {
-            'local/qwen3': bucket({ requests: 1, cost_usd: 0, priced_requests: 1 }),
+            'local/qwen3': bucket({ requests: 1, cost_usd: 0 }),
           },
         },
       })

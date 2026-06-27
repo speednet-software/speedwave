@@ -53,9 +53,8 @@ pub enum StreamChunk {
         /// for cumulative `usage`; the per-step `usage` otherwise).
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_usage: Option<TurnUsage>,
-        /// Per-turn cost in USD. Computed as the delta of `total_cost_usd`
-        /// between this and the previous turn when authoritative; the
-        /// frontend falls back to `calculateCost()` if this is `None`.
+        /// Per-turn cost in USD, delta of `total_cost_usd` between turns. `None`
+        /// hides the segment until `reconcileFooterCost` fills it from the proxy SSOT.
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_cost: Option<f64>,
         /// Model name for the turn when known. Populated from `modelUsage`

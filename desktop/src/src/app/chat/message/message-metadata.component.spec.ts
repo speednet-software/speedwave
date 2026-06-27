@@ -160,6 +160,14 @@ describe('MessageMetadataComponent', () => {
     expect(cost?.textContent).toContain('$0.000');
   });
 
+  it('hides cost when undefined (unpriced) even with other meta present', () => {
+    setEntry(baseAssistant({ meta: { model: 'opus', cost: undefined } }));
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="meta-cost"]')).toBeNull();
+  });
+
   it('formats cost to exactly 3 decimal places', () => {
     setEntry(baseAssistant({ meta: { cost: 0.12345 } }));
 

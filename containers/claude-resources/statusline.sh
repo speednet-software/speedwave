@@ -173,6 +173,8 @@ fi
 # STATUSLINE_USAGE_DIR overrides /usage for tests. Missing/unreadable → CC value.
 USAGE_DIR="${STATUSLINE_USAGE_DIR:-/usage}"
 cost_cache="$USAGE_DIR/cost-cache.jsonl"
+# No usage-window filter here (the shell can't read the full JSONL cheaply);
+# prune_cost_cache_in drops orphans, so this may briefly exceed the dashboard.
 if [[ -r "$cost_cache" ]]; then
     # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
     # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).

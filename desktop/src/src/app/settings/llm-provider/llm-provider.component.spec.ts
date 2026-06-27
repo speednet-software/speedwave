@@ -39,36 +39,42 @@ const TEST_ANTHROPIC_MODELS = [
     family: 'Fable 5',
     context_tokens: 1_000_000,
     latest: true,
+    premium: true,
   },
   {
     id: 'claude-opus-4-8',
     family: 'Opus 4.8',
     context_tokens: 1_000_000,
     latest: true,
+    premium: true,
   },
   {
     id: 'claude-sonnet-4-6',
     family: 'Sonnet 4.6',
     context_tokens: 1_000_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-haiku-4-5',
     family: 'Haiku 4.5',
     context_tokens: 200_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-opus-4-7',
     family: 'Opus 4.7',
     context_tokens: 1_000_000,
     latest: false,
+    premium: true,
   },
   {
     id: 'claude-opus-4-6',
     family: 'Opus 4.6',
     context_tokens: 1_000_000,
     latest: false,
+    premium: true,
   },
 ];
 

@@ -218,10 +218,17 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
 
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .unwrap_or_default();
+    let client = match reqwest::Client::builder().use_rustls_tls().build() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("failed to build TLS client: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "proxy TLS setup failed"})),
+            )
+                .into_response();
+        }
+    };
 
     let mut req = client.post(&upstream_url).body(outbound_body);
     for (name, value) in &out_headers {

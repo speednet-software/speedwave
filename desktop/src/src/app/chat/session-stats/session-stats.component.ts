@@ -3,12 +3,10 @@ import type { SessionStats } from '../../models/chat';
 import { formatContextLabel } from '../../models/llm';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { formatTokens, formatUsd } from '../../shared/format-number';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
 const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
-
-/** Shared number formatter for thousands separators (Intl instances are not free). */
-const NUMBER_FMT = new Intl.NumberFormat('en-US');
 
 /** Terminal-minimal session stats strip — a single mono line below the composer. */
 @Component({
@@ -130,7 +128,7 @@ export class SessionStatsComponent {
   /** Project cost label: `$X.XXXX` when priced, `—` when unpriced (subscription/local). */
   readonly costLabel = computed<string>(() => {
     const c = this.stats()?.total_cost;
-    return typeof c === 'number' && Number.isFinite(c) ? `$${c.toFixed(4)}` : '—';
+    return typeof c === 'number' && Number.isFinite(c) ? formatUsd(c, 4) : '—';
   });
 
   /** New input tokens this turn — `input_tokens` only, excludes cached reads. */
@@ -200,11 +198,11 @@ export class SessionStatsComponent {
   });
 
   /**
-   * Formats an integer with `Intl.NumberFormat('en-US')` (thousands separators).
+   * Formats an integer with thousands separators.
    * @param n - Integer token count to format.
    */
   formatNum(n: number): string {
-    return NUMBER_FMT.format(n);
+    return formatTokens(n);
   }
 }
 

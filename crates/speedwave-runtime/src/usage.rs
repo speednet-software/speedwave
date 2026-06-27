@@ -13,9 +13,6 @@ pub struct UsageRecord {
     /// RFC3339-ish local timestamp written by the callback.
     #[serde(default)]
     pub ts: String,
-    /// Capture path: `success_event` | `stream_iterator`.
-    #[serde(default)]
-    pub capture: String,
     /// `success` | `failure`.
     #[serde(default)]
     pub status: String,
@@ -72,10 +69,6 @@ pub struct UsageBucket {
     pub cache_write: u64,
     /// Summed cost over priced requests; `None` when none priced (never 0.0).
     pub cost_usd: Option<f64>,
-    /// Requests with a known cost (catalog/actual/free).
-    pub priced_requests: u64,
-    /// Requests with no known cost (subscription/unknown).
-    pub unpriced_requests: u64,
     /// Throughput numerator: completion tokens from success records that also
     /// carried a latency. Paired with `throughput_latency_ms_sum`.
     pub throughput_completion_tokens: u64,
@@ -151,10 +144,49 @@ pub fn get_usage_for_response_in(
         cache_read: rec.cache_read.unwrap_or(0),
         cache_write: rec.cache_write.unwrap_or(0),
         cost_usd: joined_cost(&rec, &costs),
-        cost_source: entry
-            .map(|e| e.cost_source.as_wire_str().to_string())
-            .unwrap_or_default(),
+        cost_source: entry.map(|e| e.cost_source.to_string()).unwrap_or_default(),
     })
+}
+
+/// One scan of the usage window: in-window ids + pending OpenRouter gen-ids.
+#[derive(Default)]
+pub struct UsageWindow {
+    /// Every `effective_response_id` in the live + rotated files.
+    pub ids: std::collections::HashSet<String>,
+    /// Deduped `gen_id`s with no terminal cached cost yet.
+    pub pending_gen_ids: Vec<String>,
+}
+
+/// Derives both the in-window id set and the pending gen-ids in one scan, so
+/// the cost path reads the JSONL once. `priced` skips terminal-cost lines.
+pub fn scan_usage_window_in(
+    data_dir: &Path,
+    project: &str,
+    priced: &std::collections::HashMap<String, crate::usage_cost::CostEntry>,
+) -> UsageWindow {
+    let mut win = UsageWindow::default();
+    let mut seen_gen = std::collections::HashSet::new();
+    for_each_usage_record(data_dir, project, |rec| {
+        let eff = crate::usage_cost::effective_response_id(&rec);
+        if let Some(id) = eff.clone() {
+            win.ids.insert(id);
+        }
+        if rec.provider_kind != "openrouter" {
+            return;
+        }
+        let Some(gen) = rec.gen_id.as_deref().filter(|g| !g.is_empty()) else {
+            return;
+        };
+        let key = eff.unwrap_or_else(|| gen.to_string());
+        let terminal = priced
+            .get(&key)
+            .is_some_and(|e| e.cost_source.is_terminal());
+        if terminal || !seen_gen.insert(gen.to_string()) {
+            return;
+        }
+        win.pending_gen_ids.push(gen.to_string());
+    });
+    win
 }
 
 /// `effective_response_id`s present in the current usage window (live + `.1`).
@@ -191,8 +223,18 @@ pub fn conversation_cost_in(
 /// Summed project cost (USD), restricted to the current usage window so it
 /// equals the dashboard total. `None` when nothing in-window is priced.
 pub fn session_cost_in(data_dir: &Path, project: &str) -> Option<f64> {
-    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
     let in_window = response_ids_in_window(data_dir, project);
+    session_cost_for_window_in(data_dir, project, &in_window)
+}
+
+/// `session_cost_in` with a pre-computed window, so callers that already
+/// scanned the usage JSONL (`scan_usage_window_in`) skip a second pass.
+pub fn session_cost_for_window_in(
+    data_dir: &Path,
+    project: &str,
+    in_window: &std::collections::HashSet<String>,
+) -> Option<f64> {
+    let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
     let mut total: Option<f64> = None;
     for (id, entry) in &costs {
         if !in_window.contains(id) {
@@ -265,6 +307,11 @@ pub fn for_each_usage_record(
     project: &str,
     mut f: impl FnMut(UsageRecord),
 ) -> u64 {
+    // Guard the only path that turns `project` into a filesystem path — blocks
+    // traversal from Tauri IPC callers (session_cost_in, response_ids_in_window).
+    if crate::validation::validate_project_name(project).is_err() {
+        return 0;
+    }
     let live = usage_file_in(data_dir, project);
     let rotated = live.with_extension("jsonl.1");
     let mut skipped = 0;
@@ -279,7 +326,10 @@ pub fn for_each_usage_record(
             }
             match serde_json::from_str::<UsageRecord>(trimmed) {
                 Ok(record) => f(record),
-                Err(_) => skipped += 1,
+                Err(e) => {
+                    log::debug!("skipping unparseable usage line in {}: {e}", path.display());
+                    skipped += 1;
+                }
             }
         }
     }
@@ -352,12 +402,8 @@ fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord, cost: Option<f64>) {
     bucket.completion_tokens += completion;
     bucket.cache_read += r.cache_read.unwrap_or(0);
     bucket.cache_write += r.cache_write.unwrap_or(0);
-    match cost {
-        Some(c) => {
-            bucket.priced_requests += 1;
-            bucket.cost_usd = Some(bucket.cost_usd.unwrap_or(0.0) + c);
-        }
-        None => bucket.unpriced_requests += 1,
+    if let Some(c) = cost {
+        bucket.cost_usd = Some(bucket.cost_usd.unwrap_or(0.0) + c);
     }
     // Throughput counts only successful records with output and latency.
     if let Some(latency) = r.latency_ms {
@@ -517,7 +563,6 @@ mod tests {
             s.totals.cost_usd.is_none(),
             "no priced request → None, not 0.0"
         );
-        assert_eq!(s.totals.unpriced_requests, 2);
     }
 
     #[test]
@@ -538,11 +583,6 @@ mod tests {
             s.totals.cost_usd,
             Some(0.0),
             "free 0.0 must not vanish into None"
-        );
-        assert_eq!(s.totals.priced_requests, 1);
-        assert_eq!(
-            s.totals.unpriced_requests, 1,
-            "subscription is unpriced, not $0"
         );
     }
 
@@ -624,6 +664,83 @@ mod tests {
     }
 
     #[test]
+    fn scan_window_ids_match_response_ids_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey"}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
+            ],
+        );
+        let priced = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
+        let win = scan_usage_window_in(dir.path(), "proj", &priced);
+        assert_eq!(win.ids, response_ids_in_window(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn scan_window_pending_gen_ids_match_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                // Two distinct gen-ids, one anthropic line (no gen), one dup gen.
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
+                r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
+                r#"{"ts":"2026-06-26T10:02:00+0200","status":"success","model":"or/x","gen_id":"gen-b","provider_kind":"openrouter"}"#,
+                r#"{"ts":"2026-06-26T10:03:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey"}"#,
+            ],
+        );
+        let priced = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
+        let mut got = scan_usage_window_in(dir.path(), "proj", &priced).pending_gen_ids;
+        let mut want = crate::usage_cost::pending_deferred_gen_ids(dir.path(), "proj");
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn scan_window_skips_terminal_priced_gen_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
+            ],
+        );
+        // Resolve gen-a to a terminal Actual cost; it must drop from pending.
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|id| {
+            (id == "gen-a").then_some(0.02)
+        })
+        .unwrap();
+        let priced = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
+        let win = scan_usage_window_in(dir.path(), "proj", &priced);
+        assert!(win.pending_gen_ids.is_empty(), "terminal cost skipped");
+    }
+
+    #[test]
+    fn session_cost_for_window_matches_session_cost_in() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_1","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        let priced = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
+        let win = scan_usage_window_in(dir.path(), "proj", &priced);
+        assert_eq!(
+            session_cost_for_window_in(dir.path(), "proj", &win.ids),
+            session_cost_in(dir.path(), "proj"),
+        );
+    }
+
+    #[test]
     fn session_cost_sums_priced_sidecar_entries() {
         let dir = tempfile::tempdir().unwrap();
         write_usage(
@@ -675,6 +792,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(session_cost_in(dir.path(), "proj").is_none());
         assert!(session_cost_in(dir.path(), "../escape").is_none());
+    }
+
+    #[test]
+    fn for_each_usage_record_rejects_traversal_project_name() {
+        // A traversal project name must short-circuit before any filesystem read.
+        let dir = tempfile::tempdir().unwrap();
+        let mut called = 0;
+        let skipped = for_each_usage_record(dir.path(), "../../etc", |_| called += 1);
+        assert_eq!(called, 0, "callback must never run for an invalid project");
+        assert_eq!(skipped, 0);
     }
 
     #[test]
@@ -782,8 +909,6 @@ mod tests {
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(s.totals.failures, 1);
-        assert_eq!(s.totals.priced_requests, 0);
-        assert_eq!(s.totals.unpriced_requests, 1);
         assert!(s.totals.cost_usd.is_none(), "failed must not be priced");
     }
 
@@ -884,7 +1009,7 @@ mod tests {
         rotate_usage_if_large_in(dir.path(), "proj");
         // The orphan is gone after rotation pruned the sidecar.
         let map = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
-        assert!(map.get("msg_orphan").is_none(), "orphan pruned on rotation");
+        assert!(!map.contains_key("msg_orphan"), "orphan pruned on rotation");
     }
 
     #[test]

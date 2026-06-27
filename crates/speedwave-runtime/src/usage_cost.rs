@@ -22,7 +22,8 @@ pub enum CostSource {
     Free,
     /// Real cost fetched from OpenRouter `/generation`.
     Actual,
-    /// No source available; terminal, never re-priced.
+    /// No cost source (unrecognized provider or OpenRouter line with no gen_id);
+    /// terminal, never re-priced. Both sub-cases share this until one needs splitting.
     Unknown,
     /// OpenRouter `/generation` not yet resolved; retryable.
     Deferred,
@@ -37,11 +38,14 @@ impl CostSource {
     pub fn is_terminal(&self) -> bool {
         !matches!(self, CostSource::Deferred)
     }
+}
 
-    /// The snake_case wire string (same as the serde representation), for DTOs
-    /// that carry the provenance as a plain string to the front-end.
-    pub fn as_wire_str(&self) -> &'static str {
-        match self {
+/// The snake_case wire string for DTOs that carry provenance as a plain string.
+/// Must match the serde `rename_all` representation — pinned by the
+/// `cost_source_wire_format_is_snake_case` test (no per-call allocation).
+impl std::fmt::Display for CostSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             CostSource::Catalog => "catalog",
             CostSource::Subscription => "subscription",
             CostSource::Free => "free",
@@ -49,7 +53,7 @@ impl CostSource {
             CostSource::Unknown => "unknown",
             CostSource::Deferred => "deferred",
             CostSource::Failed => "failed",
-        }
+        })
     }
 }
 
@@ -64,8 +68,30 @@ pub struct CostEntry {
     pub cost_source: CostSource,
 }
 
+impl CostEntry {
+    /// Builds an entry, debug-asserting the source↔cost invariant.
+    pub(crate) fn new(response_id: String, cost_usd: Option<f64>, cost_source: CostSource) -> Self {
+        debug_assert!(
+            match cost_source {
+                CostSource::Catalog | CostSource::Actual => cost_usd.is_some(),
+                CostSource::Free => cost_usd == Some(0.0),
+                CostSource::Subscription
+                | CostSource::Unknown
+                | CostSource::Deferred
+                | CostSource::Failed => cost_usd.is_none(),
+            },
+            "CostEntry invariant: {cost_source:?} with cost {cost_usd:?}"
+        );
+        CostEntry {
+            response_id,
+            cost_usd,
+            cost_source,
+        }
+    }
+}
+
 /// Sidecar cost cache, alongside the proxy usage JSONL.
-pub fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
+pub(crate) fn cost_cache_file_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
         .join("usage")
         .join(project)
@@ -90,15 +116,11 @@ pub fn effective_response_id(r: &UsageRecord) -> Option<String> {
 /// Computes the cost for one usage record. `openrouter` calls `fetch_gen_cost`
 /// with the line's `gen_id`: a `None` result with a gen_id is `deferred`
 /// (retryable), a missing gen_id is `unknown` (terminal — no other source).
-pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
+pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
     let id = effective_response_id(r).unwrap_or_default();
     // A failed request is never billed, regardless of provider.
     if r.status == "failure" {
-        return CostEntry {
-            response_id: id,
-            cost_usd: None,
-            cost_source: CostSource::Failed,
-        };
+        return CostEntry::new(id, None, CostSource::Failed);
     }
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
         "anthropic_apikey" => match anthropic_catalog_cost(r) {
@@ -118,11 +140,7 @@ pub fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> Co
         },
         _ => (None, CostSource::Unknown),
     };
-    CostEntry {
-        response_id: id,
-        cost_usd,
-        cost_source,
-    }
+    CostEntry::new(id, cost_usd, cost_source)
 }
 
 /// Anthropic-API-key cost from the in-repo catalog (USD per 1M tokens). `None`
@@ -198,7 +216,7 @@ pub fn enrich_cost_with_in(
         .append(true)
         .open(&cache)?;
     for entry in &to_append {
-        let line = serde_json::to_string(entry).unwrap_or_default();
+        let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         writeln!(f, "{line}")?;
     }
     Ok(())
@@ -218,11 +236,41 @@ pub fn read_cost_cache_in(data_dir: &Path, project: &str) -> HashMap<String, Cos
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<CostEntry>(trimmed) {
-            out.insert(entry.response_id.clone(), entry);
+        match serde_json::from_str::<CostEntry>(trimmed) {
+            Ok(entry) => {
+                out.insert(entry.response_id.clone(), entry);
+            }
+            Err(e) => log::warn!("skipping malformed cost-cache line: {e}"),
         }
     }
     out
+}
+
+/// Deduped `gen_id`s of OpenRouter lines still needing a `/generation` fetch:
+/// no cached cost yet, or a non-terminal (`deferred`) one. Keyed by
+/// `effective_response_id` so gen-id-only lines (no `message.id`) are included.
+pub fn pending_deferred_gen_ids(data_dir: &Path, project: &str) -> Vec<String> {
+    let priced = read_cost_cache_in(data_dir, project);
+    let mut seen = std::collections::HashSet::new();
+    let mut gen_ids: Vec<String> = Vec::new();
+    crate::usage::for_each_usage_record(data_dir, project, |rec| {
+        if rec.provider_kind != "openrouter" {
+            return;
+        }
+        let Some(gen) = rec.gen_id.as_deref().filter(|g| !g.is_empty()) else {
+            return;
+        };
+        // Cache is keyed by effective_response_id (gen_id when message.id absent).
+        let key = effective_response_id(&rec).unwrap_or_else(|| gen.to_string());
+        let priced_terminal = priced
+            .get(&key)
+            .is_some_and(|e| e.cost_source.is_terminal());
+        if priced_terminal || !seen.insert(gen.to_string()) {
+            return;
+        }
+        gen_ids.push(gen.to_string());
+    });
+    gen_ids
 }
 
 #[cfg(test)]
@@ -401,6 +449,50 @@ mod tests {
     }
 
     #[test]
+    fn cost_source_ts_union_matches_rust() {
+        // The TS CostSourceKind union must list exactly the Rust serde strings
+        // (cf. llm_provider_kind_matches_ts_union).
+        let all = [
+            CostSource::Catalog,
+            CostSource::Subscription,
+            CostSource::Free,
+            CostSource::Actual,
+            CostSource::Unknown,
+            CostSource::Deferred,
+            CostSource::Failed,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for s in all {
+            match s {
+                CostSource::Catalog
+                | CostSource::Subscription
+                | CostSource::Free
+                | CostSource::Actual
+                | CostSource::Unknown
+                | CostSource::Deferred
+                | CostSource::Failed => {}
+            }
+        }
+        let mut rust: Vec<String> = all.iter().map(|s| s.to_string()).collect();
+        rust.sort();
+        let src = include_str!("../../../desktop/src/src/app/models/llm.ts");
+        let re = regex::Regex::new(r"export\s+type\s+CostSourceKind\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("llm.ts must declare `export type CostSourceKind`");
+        let mut ts: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+        assert_eq!(
+            rust, ts,
+            "CostSourceKind (TS) must mirror CostSource (Rust)"
+        );
+    }
+
+    #[test]
     fn cost_source_wire_format_is_snake_case() {
         // The sidecar/statusline/front-end contract: snake_case strings.
         let cases = [
@@ -419,8 +511,8 @@ mod tests {
                 src,
                 "round-trip {wire}"
             );
-            // `as_wire_str` must equal the serde string sans the JSON quotes.
-            assert_eq!(format!("\"{}\"", src.as_wire_str()), wire);
+            // `Display` must equal the serde string sans the JSON quotes.
+            assert_eq!(format!("\"{src}\""), wire);
         }
     }
 
@@ -465,7 +557,7 @@ mod tests {
     #[test]
     fn failed_cost_source_is_terminal() {
         assert!(CostSource::Failed.is_terminal());
-        assert_eq!(CostSource::Failed.as_wire_str(), "failed");
+        assert_eq!(CostSource::Failed.to_string(), "failed");
     }
 
     #[test]
@@ -671,6 +763,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         assert!(read_cost_cache_in(dir.path(), "proj").is_empty());
+    }
+
+    #[test]
+    fn cost_entry_new_accepts_valid_pairings() {
+        // Each source paired with its legal cost; the debug_assert must not fire.
+        CostEntry::new("a".into(), Some(1.0), CostSource::Catalog);
+        CostEntry::new("b".into(), Some(0.5), CostSource::Actual);
+        CostEntry::new("c".into(), Some(0.0), CostSource::Free);
+        CostEntry::new("d".into(), None, CostSource::Subscription);
+        CostEntry::new("e".into(), None, CostSource::Unknown);
+        CostEntry::new("f".into(), None, CostSource::Deferred);
+        CostEntry::new("g".into(), None, CostSource::Failed);
+    }
+
+    #[test]
+    #[should_panic(expected = "CostEntry invariant")]
+    fn cost_entry_new_rejects_catalog_without_cost() {
+        CostEntry::new("x".into(), None, CostSource::Catalog);
+    }
+
+    #[test]
+    #[should_panic(expected = "CostEntry invariant")]
+    fn cost_entry_new_rejects_subscription_with_cost() {
+        CostEntry::new("x".into(), Some(1.0), CostSource::Subscription);
+    }
+
+    #[test]
+    fn pending_gen_ids_includes_gen_id_only_line() {
+        // Regression: a line with response_id=null but gen_id set is keyed by
+        // gen_id in the sidecar; it must still be returned for a /generation fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = usage_file_in(dir.path(), "proj");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": "2026-06-26T10:00:00+0200",
+            "status": "success",
+            "model": "anthropic/claude-3.5-haiku",
+            "response_id": serde_json::Value::Null,
+            "provider_kind": "openrouter",
+            "provider_id": "openrouter",
+            "gen_id": "gen-only",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+        }))
+        .unwrap();
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        assert_eq!(
+            pending_deferred_gen_ids(dir.path(), "proj"),
+            vec!["gen-only".to_string()]
+        );
+    }
+
+    #[test]
+    fn pending_gen_ids_skips_terminal_and_dedups() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two lines: one will resolve to terminal (actual), one stays deferred.
+        write_openrouter_line(dir.path(), "proj", "msg_a", "gen-a");
+        write_openrouter_line(dir.path(), "proj", "msg_b", "gen-b");
+        // Price gen-a terminally; leave gen-b deferred.
+        enrich_cost_with_in(dir.path(), "proj", &|id| (id == "gen-a").then_some(0.01)).unwrap();
+        let pending = pending_deferred_gen_ids(dir.path(), "proj");
+        assert!(!pending.contains(&"gen-a".to_string()), "terminal skipped");
+        assert!(
+            pending.contains(&"gen-b".to_string()),
+            "deferred re-included"
+        );
+    }
+
+    #[test]
+    fn pending_gen_ids_ignores_non_openrouter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usage_line(dir.path(), "proj", "msg_1", "local", "qwen3");
+        assert!(pending_deferred_gen_ids(dir.path(), "proj").is_empty());
     }
 
     #[test]

@@ -635,6 +635,35 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
     });
 
+    it('sends all conversation response_ids (both turns) to get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.2;
+        }
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.1 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 0.2 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Both turns' uuids must reach the aggregator, not just the latest.
+      expect(sentIds).toContain('msg_1');
+      expect(sentIds).toContain('msg_2');
+    });
+
     it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       const spy = vi.spyOn(mockTauri, 'invoke');
@@ -727,14 +756,56 @@ describe('ChatStateService', () => {
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Initial reconcile: still deferred (unpriced) → per-message hidden, footer "—".
+        // Initial reconcile: deferred → keep the live preview (footer 0.99), do
+        // not blank it; the per-message stays on its preview (here undefined).
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeUndefined();
-        expect(service.sessionStats?.total_cost).toBeNull();
+        expect(service.sessionStats?.total_cost).toBe(0.99);
 
         // OpenRouter finishes pricing; the retry must pick it up.
         priced = true;
         await vi.advanceTimersByTimeAsync(5000);
 
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0046, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('deferred reconcile keeps the visible preview cost instead of blanking it (#31)', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        let priced = false;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return priced
+              ? { cost_usd: 0.0046, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return priced ? 0.0046 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.5,
+            turn_cost: 0.5, // CC preview attaches a visible per-message cost
+            model: 'openrouter/anthropic/claude-haiku-4.5',
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Bug #31: deferred must NOT blank the flashed preview — it stays visible.
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.5);
+        expect(service.sessionStats?.total_cost).toBe(0.5);
+
+        // Once OpenRouter prices it, the terminal value overwrites the preview.
+        priced = true;
+        await vi.advanceTimersByTimeAsync(5000);
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
         expect(service.sessionStats?.total_cost).toBeCloseTo(0.0046, 6);
       } finally {
@@ -2593,7 +2664,13 @@ describe('ChatStateService', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_anthropic_models') {
           return [
-            { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
+            {
+              id: 'claude-opus-4-7',
+              family: 'Opus 4.7',
+              context_tokens: 1_000_000,
+              latest: true,
+              premium: true,
+            },
           ];
         }
         return undefined;

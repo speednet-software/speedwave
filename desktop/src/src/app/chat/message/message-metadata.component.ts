@@ -1,7 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import type { ChatMessage } from '../../models/chat';
-
-const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
+import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
 
 /**
  * Mono metadata line rendered below each assistant message:
@@ -37,7 +36,7 @@ const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
         <span data-testid="meta-cache">· cache: {{ formatTokens(cache) }}</span>
       }
       @if (hasCost()) {
-        <span data-testid="meta-cost">· \${{ costFormatted() }}</span>
+        <span data-testid="meta-cost">· {{ costFormatted() }}</span>
       }
     </div>
   `,
@@ -79,16 +78,20 @@ export class MessageMetadataComponent {
     return cache;
   }
 
-  /** Whether meta carries a finite cost value to render (hides null/NaN). */
-  hasCost(): boolean {
+  /** Meta cost when it is a finite number (subscription/null → null). */
+  private finiteMetaCost(): number | null {
     const cost = this.entry().meta?.cost;
-    return typeof cost === 'number' && Number.isFinite(cost);
+    return typeof cost === 'number' && Number.isFinite(cost) ? cost : null;
   }
 
-  /** Per-turn cost formatted to exactly 3 decimal places (guarded by hasCost). */
+  /** Whether meta carries a finite cost value to render (hides null/NaN). */
+  hasCost(): boolean {
+    return this.finiteMetaCost() !== null;
+  }
+
+  /** Per-turn cost in USD to 3 decimals (guarded by hasCost). */
   costFormatted(): string {
-    const cost = this.entry().meta?.cost;
-    return typeof cost === 'number' && Number.isFinite(cost) ? cost.toFixed(3) : '';
+    return formatUsd(this.finiteMetaCost() ?? 0, 3);
   }
 
   /**
@@ -96,6 +99,6 @@ export class MessageMetadataComponent {
    * @param n Raw token count to format.
    */
   formatTokens(n: number): string {
-    return TOKEN_FORMATTER.format(n);
+    return fmtTokens(n);
   }
 }

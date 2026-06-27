@@ -11,6 +11,8 @@ export interface AnthropicModel {
   context_tokens: number;
   /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
+  /** Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint. */
+  premium: boolean;
 }
 
 /** Default fallback context window for a model the SSOT doesn't know. */
@@ -114,10 +116,6 @@ export interface UsageBucket {
   cache_write: number;
   /** Summed cost over priced requests; `null` when none priced (never 0). */
   cost_usd: number | null;
-  /** Requests with a known cost (catalog/actual/free). */
-  priced_requests: number;
-  /** Requests with no known cost (subscription/unknown) — shown as "—". */
-  unpriced_requests: number;
   /** Throughput numerator: completion tokens from successful timed records. */
   throughput_completion_tokens: number;
   /** Throughput denominator: latency of the same successful timed records. */
@@ -136,6 +134,29 @@ export interface UsageSummary {
 }
 
 /**
+ * Cost provenance wire strings — mirror of Rust `usage_cost::CostSource`
+ * (snake_case serde). Kept in sync by `cost_source_ts_union_matches_rust`.
+ */
+export type CostSourceKind =
+  | 'catalog'
+  | 'subscription'
+  | 'free'
+  | 'actual'
+  | 'unknown'
+  | 'deferred'
+  | 'failed';
+
+/**
+ * A cost source that will not change on re-enrichment (mirror of Rust
+ * `CostSource::is_terminal`). `'deferred'` and the empty/no-sidecar `''` are
+ * non-terminal; everything else is final.
+ * @param src - Cost provenance string from the sidecar.
+ */
+export function isTerminalCostSource(src: CostSourceKind | ''): boolean {
+  return src !== 'deferred' && src !== '';
+}
+
+/**
  * Final usage for one response from `get_usage_for_response` — the proxy SSOT
  * used to reconcile the chat footer. Mirror of Rust `usage::ResponseUsage`.
  */
@@ -146,7 +167,8 @@ export interface ResponseUsage {
   cache_write: number;
   /** `null` when unpriced (subscription/unknown). */
   cost_usd: number | null;
-  cost_source: string;
+  /** Provenance; `''` when no sidecar entry yet. */
+  cost_source: CostSourceKind | '';
 }
 
 /**

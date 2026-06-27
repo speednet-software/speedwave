@@ -1,9 +1,7 @@
 import { ChangeDetectionStrategy, Component, effect, inject, input, signal } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import type { UsageBucket, UsageSummary } from '../../models/llm';
-
-/** Shared number formatter for thousands separators. */
-const NUMBER_FMT = new Intl.NumberFormat('en-US');
+import { formatTokens, formatUsd } from '../../shared/format-number';
 
 /** Row of the per-day table: one (day, model) pair. */
 interface UsageRow {
@@ -352,7 +350,7 @@ export class LlmUsageComponent {
    * @param n - Raw count.
    */
   num(n: number): string {
-    return NUMBER_FMT.format(n);
+    return formatTokens(n);
   }
 
   /**
@@ -362,7 +360,7 @@ export class LlmUsageComponent {
   short(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0)}k`;
-    return NUMBER_FMT.format(n);
+    return formatTokens(n);
   }
 
   /**
@@ -370,7 +368,7 @@ export class LlmUsageComponent {
    * @param n - Cost in dollars.
    */
   usd(n: number): string {
-    return `$${n.toFixed(n < 0.1 ? 4 : 2)}`;
+    return formatUsd(n, n < 0.1 ? 4 : 2);
   }
 
   /**

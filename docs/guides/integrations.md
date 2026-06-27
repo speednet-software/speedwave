@@ -736,7 +736,7 @@ If your LLM server is at a non-standard address (e.g. another machine on your LA
 
 ### Servers requiring authentication
 
-When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY`, corporate gateways):
+When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY` for a user-operated LiteLLM gateway — not Speedwave's own stack, corporate gateways):
 
 1. In Settings → LLM Provider, enter the token in the **api_key** field. The value is stored in `~/.speedwave/tokens/<project>/local-llm/api_key` (chmod 0600) — the on-disk config never contains the secret.
 2. Click **Discover models** to verify connectivity (the probe sends an `Authorization: Bearer <token>` header and a 1-token `/v1/messages` sanity request).

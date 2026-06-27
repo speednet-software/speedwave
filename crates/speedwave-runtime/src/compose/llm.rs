@@ -1,6 +1,6 @@
 //! LLM provider switching (ADR-073): routes the `claude` container at the
 //! per-project proxy, with the pre-proxy direct-injection path kept
-//! behind the `proxy_enabled` kill-switch (removal in N+2).
+//! behind the `proxy_enabled` kill-switch (see ADR-040/ADR-073).
 
 use super::{inject_claude_env, tokens_path_in};
 use crate::config::{LlmConfig, LlmProviderKind};
@@ -134,7 +134,7 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
 }
 
 /// Pre-ADR-073 direct-injection path, kept verbatim behind the
-/// `proxy_enabled` kill-switch. Scheduled for removal in N+2.
+/// `proxy_enabled` kill-switch (see ADR-040/ADR-073).
 fn apply_llm_config_legacy_in(
     data_dir: &Path,
     yaml: &str,

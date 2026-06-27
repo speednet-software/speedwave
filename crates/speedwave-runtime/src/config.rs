@@ -112,7 +112,7 @@ pub struct LlmConfig {
     pub schema_version: Option<u32>,
     /// Kill-switch (ADR-073): `false` routes Claude Code directly at the
     /// provider (pre-proxy behaviour). Default `true`. User-only — the repo
-    /// layer cannot set it (merge_llm_repo ignores it). Removal in N+2.
+    /// layer cannot set it (merge_llm_repo ignores it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_enabled: Option<bool>,
     /// Configured providers (v2). Entries with invalid slugs are dropped on
@@ -1643,31 +1643,30 @@ mod tests {
     /// masqueraded flat `provider="anthropic"` (would 404 a downgrade reader).
     #[test]
     fn test_sync_legacy_fields_no_foreign_model_under_flat_anthropic() {
-        for kind in [LlmProviderKind::OpenRouter] {
-            let mut llm = LlmConfig {
-                schema_version: Some(LLM_SCHEMA_VERSION),
-                providers: vec![LlmProviderEntry {
-                    id: "openrouter".into(),
-                    kind,
-                    base_url: None,
-                    model: Some("nex-agi/nex-n2-pro:free".into()),
-                    has_api_key: true,
-                    context_tokens: None,
-                    has_custom_headers: false,
-                }],
-                active: Some(LlmActive {
-                    provider_id: "openrouter".into(),
-                    model: Some("nex-agi/nex-n2-pro:free".into()),
-                }),
-                ..Default::default()
-            };
-            sync_llm_legacy_fields(&mut llm);
-            assert_eq!(llm.provider.as_deref(), Some("anthropic"));
-            assert_eq!(
-                llm.model, None,
-                "{kind:?}: flat model must be None, not the OR/compat id"
-            );
-        }
+        let kind = LlmProviderKind::OpenRouter;
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".into(),
+                kind,
+                base_url: None,
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        sync_llm_legacy_fields(&mut llm);
+        assert_eq!(llm.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            llm.model, None,
+            "{kind:?}: flat model must be None, not the OR/compat id"
+        );
 
         // Local/anthropic keep their own model in the flat field (consistent).
         let mut llm = LlmConfig {

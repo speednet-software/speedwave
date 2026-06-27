@@ -3,9 +3,6 @@ import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
-/** Model-id prefixes for the premium tiers the everyday-placeholder hint skips. */
-const PREMIUM_MODEL_ID_PREFIXES = ['claude-opus-', 'claude-fable-'] as const;
-
 /**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
  * backend (`list_anthropic_models`, from `defaults::ANTHROPIC_MODELS`).
@@ -82,16 +79,13 @@ export class AnthropicModelsService {
   }
 
   /**
-   * The Settings placeholder hint: the latest non-premium entry
-   * (`PREMIUM_MODEL_ID_PREFIXES`), falling back to the first `latest` then the
-   * first entry. Returns `null` while the catalog is loading or empty.
+   * The Settings placeholder hint: the latest non-`premium` entry, falling back
+   * to the first `latest` then the first entry. `null` while loading or empty.
    */
   latestEverydayModelId(): string | null {
     if (!this.cache || this.cache.length === 0) return null;
     const latest = this.cache.filter((m) => m.latest);
-    const everyday = latest.find(
-      (m) => !PREMIUM_MODEL_ID_PREFIXES.some((prefix) => m.id.startsWith(prefix))
-    );
+    const everyday = latest.find((m) => !m.premium);
     return (everyday ?? latest[0] ?? this.cache[0]).id;
   }
 

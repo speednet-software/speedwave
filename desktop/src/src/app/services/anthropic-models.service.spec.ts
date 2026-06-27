@@ -12,24 +12,28 @@ const FIXTURE: AnthropicModel[] = [
     family: 'Opus 4.8',
     context_tokens: 1_000_000,
     latest: true,
+    premium: true,
   },
   {
     id: 'claude-sonnet-4-6',
     family: 'Sonnet 4.6',
     context_tokens: 1_000_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-haiku-4-5',
     family: 'Haiku 4.5',
     context_tokens: 200_000,
     latest: true,
+    premium: false,
   },
   {
     id: 'claude-opus-4-7',
     family: 'Opus 4.7',
     context_tokens: 1_000_000,
     latest: false,
+    premium: true,
   },
 ];
 
@@ -159,8 +163,20 @@ describe('AnthropicModelsService', () => {
 
     it('falls back to the first latest entry when every latest model is premium', async () => {
       const opusOnly = [
-        { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
-        { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: false },
+        {
+          id: 'claude-opus-4-8',
+          family: 'Opus 4.8',
+          context_tokens: 1_000_000,
+          latest: true,
+          premium: true,
+        },
+        {
+          id: 'claude-opus-4-7',
+          family: 'Opus 4.7',
+          context_tokens: 1_000_000,
+          latest: false,
+          premium: true,
+        },
       ] as unknown as AnthropicModel[];
       mockTauri.invokeHandler = async () => opusOnly;
       service.resetForTesting();
@@ -171,9 +187,27 @@ describe('AnthropicModelsService', () => {
     it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
       // Fable 5 leads the catalog but is premium — placeholder must pick Sonnet.
       const withFable = [
-        { id: 'claude-fable-5', family: 'Fable 5', context_tokens: 1_000_000, latest: true },
-        { id: 'claude-opus-4-8', family: 'Opus 4.8', context_tokens: 1_000_000, latest: true },
-        { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
+        {
+          id: 'claude-fable-5',
+          family: 'Fable 5',
+          context_tokens: 1_000_000,
+          latest: true,
+          premium: true,
+        },
+        {
+          id: 'claude-opus-4-8',
+          family: 'Opus 4.8',
+          context_tokens: 1_000_000,
+          latest: true,
+          premium: true,
+        },
+        {
+          id: 'claude-sonnet-4-6',
+          family: 'Sonnet 4.6',
+          context_tokens: 1_000_000,
+          latest: true,
+          premium: false,
+        },
       ] as unknown as AnthropicModel[];
       mockTauri.invokeHandler = async () => withFable;
       service.resetForTesting();

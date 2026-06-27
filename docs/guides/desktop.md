@@ -109,7 +109,7 @@ Speedwave preprocesses with [pica](https://github.com/nodeca/pica) before send:
 
 There is no client-side gate on the active model — every provider gets a chance to accept the attachment. If the active model can't handle images (text-only Anthropic snapshot, local model loaded without vision, BYOK provider that ignores image blocks), the chat shows the provider's API error as a regular error block. See [ADR-065](../adr/ADR-065-image-attachments-structured-input.md) for the rationale (no client-side capability matrix to keep stale).
 
-**Queue + attachments**: image attachments are mutually exclusive with the one-slot queued message (ADR-045). While a turn is streaming, **Send is disabled** for any input that carries attachments; text-only submits still queue normally. The composer surfaces "Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka" when this gate fires.
+**Queue + attachments**: image attachments are mutually exclusive with the one-slot queued message (ADR-045). While a turn is streaming, **Send is disabled** for any input that carries attachments; text-only submits still queue normally. The composer surfaces "Wait for the response to finish before sending an image." when this gate fires.
 
 **Known limitation — no persistence**: attachment bytes live in the composer for the live session only. After a Desktop reload the chat history shows an `🖼 (filename)` placeholder pill instead of the thumbnail — the bytes themselves are not stored to disk (Claude Code's session JSONL is read-only per ADR-046, and a dedicated image store is future work).
 

@@ -30,7 +30,7 @@ export interface SessionTotalsState {
   cache_read_tokens: number;
   /** Cumulative cache-write tokens. */
   cache_write_tokens: number;
-  /** Cumulative cost in USD. */
+  /** Cumulative cost in USD. Mirrors Rust `SessionTotals.cost` (f64). */
   cost: number;
   /** Number of completed turns in this session. */
   turn_count: number;
