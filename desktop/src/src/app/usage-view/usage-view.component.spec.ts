@@ -28,7 +28,7 @@ function bucket() {
     cache_write: 0,
     cost_usd: 0,
     throughput_completion_tokens: 0,
-    throughput_latency_ms_sum: 0,
+    decode_latency_ms_sum: 0,
   };
 }
 

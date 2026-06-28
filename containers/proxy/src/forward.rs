@@ -277,6 +277,9 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                         serde_json::from_str::<serde_json::Value>(data)
                                     {
                                         sniff(&frame, &mut acc);
+                                        crate::usage::note_first_text_delta(
+                                            &frame, start, &mut acc,
+                                        );
                                     }
                                 }
                             }
