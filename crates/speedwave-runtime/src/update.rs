@@ -24,6 +24,20 @@ pub struct UpdateSnapshot {
     pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
+/// Marker on update failures from `compose_down` onwards — containers may be
+/// partially or fully torn down, so a rollback is warranted. Early failures
+/// (prereq/security/build/render) leave old containers running; no marker there.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainersTornDown;
+
+impl std::fmt::Display for ContainersTornDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "containers were torn down before the failure")
+    }
+}
+
+impl std::error::Error for ContainersTornDown {}
+
 /// Outcome of a container update for one project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContainerUpdateResult {
@@ -38,6 +52,12 @@ pub struct ContainerUpdateResult {
 }
 
 pub use crate::validation::validate_project_name;
+
+/// Returns `true` when the error carries [`ContainersTornDown`], i.e. the
+/// update failed after `compose_down` and a rollback is warranted.
+pub fn is_torn_down(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ContainersTornDown>().is_some()
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot helpers
@@ -264,9 +284,16 @@ fn apply_update_transaction_inner(
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
         save_snapshot(project)?;
         compose::save_compose(project, compose_yml)?;
-        runtime.compose_down(project)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
-        runtime.compose_up_recreate(project)?;
+        // Past this point the project's containers may be partially or fully
+        // torn down; all failures carry ContainersTornDown so CLI rolls back.
+        runtime
+            .compose_down(project)
+            .map_err(|e| e.context(ContainersTornDown))?;
+        crate::runtime::compose_validate_with_retry(runtime, project)
+            .map_err(|e| e.context(ContainersTornDown))?;
+        runtime
+            .compose_up_recreate(project)
+            .map_err(|e| e.context(ContainersTornDown))?;
         Ok(())
     })
 }
@@ -1032,6 +1059,67 @@ mod tests {
         assert!(
             !source.contains(&needle),
             "update.rs must not persist bundle state (CLI is a non-writer)"
+        );
+    }
+
+    #[test]
+    fn is_torn_down_true_when_marker_present() {
+        let err = anyhow::anyhow!("compose_up failed").context(ContainersTornDown);
+        assert!(is_torn_down(&err));
+    }
+
+    #[test]
+    fn is_torn_down_false_without_marker() {
+        let err = anyhow::anyhow!("prereq check failed");
+        assert!(!is_torn_down(&err));
+    }
+
+    #[test]
+    fn is_torn_down_false_for_unrelated_context() {
+        let err = anyhow::anyhow!("build failed").context("image rebuild error");
+        assert!(!is_torn_down(&err));
+    }
+
+    #[test]
+    fn compose_down_marker_appears_before_validate_in_transaction() {
+        // Structural guard: compose_down must carry ContainersTornDown before validate.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("fn apply_update_transaction_inner(")
+            .expect("apply_update_transaction_inner must exist");
+        let body = &source[fn_start..];
+        let down_pos = body
+            .find("compose_down(project)")
+            .expect("compose_down call must exist");
+        let validate_pos = body
+            .find("compose_validate_with_retry(")
+            .expect("compose_validate call must exist");
+        let recreate_pos = body
+            .find("compose_up_recreate(project)")
+            .expect("compose_up_recreate call must exist");
+        assert!(
+            down_pos < validate_pos && validate_pos < recreate_pos,
+            "compose_down must precede validate which must precede recreate"
+        );
+        let down_section = &body[down_pos..validate_pos];
+        assert!(
+            down_section.contains("ContainersTornDown"),
+            "compose_down must have ContainersTornDown marker"
+        );
+        let validate_section = &body[validate_pos..recreate_pos];
+        assert!(
+            validate_section.contains("ContainersTornDown"),
+            "compose_validate_with_retry must have ContainersTornDown marker"
+        );
+        let recreate_end = body[recreate_pos..]
+            .find('\n')
+            .map(|n| recreate_pos + n)
+            .unwrap_or(body.len());
+        let recreate_section =
+            &body[recreate_pos..recreate_end + 80.min(body.len() - recreate_end)];
+        assert!(
+            recreate_section.contains("ContainersTornDown"),
+            "compose_up_recreate must have ContainersTornDown marker"
         );
     }
 }

@@ -81,6 +81,48 @@ def find_errors(root: pathlib.Path) -> list[str]:
                     errors.append(
                         f"{toml_path}: version '{actual}' != manifest '{expected}'"
                     )
+        elif isinstance(entry, dict) and entry.get("type") == "generic":
+            # release-please's generic updater bumps every line carrying the
+            # `x-release-please-version` marker comment (e.g. Info.plist
+            # CFBundleShortVersionString). Verify each such line holds `expected`.
+            path = root / entry["path"]
+            try:
+                content = path.read_text()
+            except Exception as e:
+                errors.append(f"{path}: read error: {e}")
+                continue
+            marked = [
+                line for line in content.splitlines()
+                if "x-release-please-version" in line
+            ]
+            if not marked:
+                errors.append(
+                    f"{path}: no 'x-release-please-version' marker found"
+                )
+                continue
+            for line in marked:
+                # Extract the exact value release-please bumps. Plist shape is
+                # `<string>VERSION</string> <!-- x-release-please-version -->`;
+                # compare the extracted token exactly (not substring, so e.g.
+                # 1.2.3 does not spuriously match 11.2.3).
+                m = re.search(r"<string>([^<]*)</string>", line)
+                if not m:
+                    errors.append(
+                        f"{path}: cannot extract <string> version from marked "
+                        f"line: {line.strip()}"
+                    )
+                    continue
+                actual = m.group(1)
+                if actual != expected:
+                    errors.append(
+                        f"{path}: version '{actual}' != manifest '{expected}'"
+                    )
+        elif isinstance(entry, dict):
+            errors.append(
+                f"unsupported extra-file type '{entry.get('type')}' for "
+                f"path '{entry.get('path')}' — extend "
+                f"check-version-consistency.py to cover it"
+            )
     return errors
 
 

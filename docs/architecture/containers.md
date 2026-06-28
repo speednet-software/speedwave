@@ -24,6 +24,7 @@ speedwave_<project>_network
 - Each MCP worker mounts only its own service credentials at `/tokens` (read-only)
 - The Hub has **zero tokens** and acts as a router
 - The proxy is a worker-class token holder: per-provider LLM keys mount `:ro` at `/tokens` (`tokens/<project>/llm/`), the rendered routing config mounts `:ro` at `/config`, and the usage JSONL sink is its only writable mount (`/usage`). No host port, no database, no admin UI; it holds no Anthropic credential and relays native Anthropic streams without translation (ADR-073)
+- The Claude container `depends_on` the proxy with `condition: service_started`, so the proxy is created first on `compose up`. It is start-ordering only — the proxy ships no healthcheck, and Claude Code only sends `/v1/messages` on the first user prompt, by which point the scratch-binary proxy is listening (ADR-073)
 
 ## Compose Template
 

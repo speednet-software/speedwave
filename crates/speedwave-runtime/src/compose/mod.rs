@@ -24,6 +24,7 @@ mod tokens;
 mod workers;
 
 // Speedwave proxy config rendering + key management (ADR-073).
+pub(crate) use proxy::migrate_legacy_local_key_in;
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
     spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL, PROXY_PORT,
@@ -2427,6 +2428,35 @@ services:
                 .filter(|l| l.contains("environment") || l.contains("MCP") || l.contains("CLAUDE"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    #[test]
+    fn test_claude_depends_on_proxy() {
+        // ADR-073: Claude routes /v1/messages through the proxy, so the proxy
+        // must start first (deterministic ordering — service_started).
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let depends = &doc["services"]["claude"]["depends_on"]["proxy"]["condition"];
+        assert_eq!(
+            depends.as_str(),
+            Some("service_started"),
+            "claude must depend_on proxy with condition service_started"
         );
     }
 

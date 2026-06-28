@@ -210,15 +210,17 @@ fn phase_name(phase: bundle::BundleReconcilePhase) -> String {
 }
 
 pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
-    bundle_status_from(&bundle::load_bundle_state())
-}
-
-fn bundle_status_from(state: &bundle::BundleState) -> BundleReconcileStatus {
     let current_bundle_id = bundle::load_current_bundle_manifest()
         .ok()
-        .map(|manifest| manifest.bundle_id);
+        .map(|m| m.bundle_id);
+    bundle_status_from(&bundle::load_bundle_state(), current_bundle_id.as_deref())
+}
+
+fn bundle_status_from(
+    state: &bundle::BundleState,
+    current_bundle_id: Option<&str>,
+) -> BundleReconcileStatus {
     let bundle_changed = current_bundle_id
-        .as_deref()
         .map(|current| state.applied_bundle_id.as_deref() != Some(current))
         .unwrap_or(false);
 
@@ -1538,7 +1540,6 @@ mod tests {
         /// avoid the global `data_dir()` OnceLock. Phase-mutating tests must be `#[serial]`.
 
         #[test]
-        #[serial]
         fn current_bundle_status_marks_bundle_change_as_in_progress() {
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
@@ -1550,7 +1551,7 @@ mod tests {
                 last_error: None,
             };
 
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(status.in_progress);
             assert_eq!(status.phase, "pending");
             assert_eq!(status.pending_running_projects, vec!["alpha"]);
@@ -1558,20 +1559,18 @@ mod tests {
         }
 
         #[test]
-        #[serial]
         fn current_bundle_status_hides_stale_error_when_bundle_already_applied() {
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
-            let manifest = bundle::load_current_bundle_manifest().unwrap();
 
             let state = bundle::BundleState {
-                applied_bundle_id: Some(manifest.bundle_id),
+                applied_bundle_id: Some("current-bundle".to_string()),
                 applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::ImagesBuilt,
                 pending_running_projects: vec!["alpha".to_string()],
                 last_error: Some("stale error".to_string()),
             };
 
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(!status.in_progress);
             assert!(status.last_error.is_none());
             assert!(status.pending_running_projects.is_empty());
@@ -1580,10 +1579,8 @@ mod tests {
         #[test]
         #[serial]
         fn checking_phase_is_not_reported_as_in_progress() {
-            let manifest = bundle::load_current_bundle_manifest().unwrap();
-
             let state = bundle::BundleState {
-                applied_bundle_id: Some(manifest.bundle_id),
+                applied_bundle_id: Some("current-bundle".to_string()),
                 applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
@@ -1593,7 +1590,7 @@ mod tests {
             // Simulate the CHECKING phase (thread spawned, not yet confirmed rebuild)
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_CHECKING, Ordering::Relaxed);
 
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(
                 !status.in_progress,
                 "CHECKING phase must not show as in_progress"
@@ -1606,10 +1603,8 @@ mod tests {
         #[test]
         #[serial]
         fn rebuilding_phase_is_reported_as_in_progress() {
-            let manifest = bundle::load_current_bundle_manifest().unwrap();
-
             let state = bundle::BundleState {
-                applied_bundle_id: Some(manifest.bundle_id),
+                applied_bundle_id: Some("current-bundle".to_string()),
                 applied_image_hashes: Default::default(),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
@@ -1619,7 +1614,7 @@ mod tests {
             // Simulate the REBUILDING phase
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
 
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(
                 status.in_progress,
                 "REBUILDING phase must show as in_progress"
@@ -1630,7 +1625,6 @@ mod tests {
         }
 
         #[test]
-        #[serial]
         fn current_bundle_status_surfaces_reconcile_error_for_new_bundle() {
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
@@ -1642,7 +1636,7 @@ mod tests {
                 last_error: Some("Image rebuild failed".to_string()),
             };
 
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(!status.in_progress);
             assert_eq!(status.phase, "images_built");
             assert_eq!(status.last_error.as_deref(), Some("Image rebuild failed"));
@@ -1653,14 +1647,13 @@ mod tests {
         }
 
         #[test]
-        #[serial]
         fn missing_applied_bundle_id_is_reported_as_in_progress() {
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
             // Simulate fresh install: no bundle-state.json → applied_bundle_id is None
             // (default BundleState). This should be in_progress because bundle_changed=true.
             let state = bundle::BundleState::default();
-            let status = bundle_status_from(&state);
+            let status = bundle_status_from(&state, Some("current-bundle"));
             assert!(
                 status.in_progress,
                 "missing applied_bundle_id (fresh install) must report in_progress"

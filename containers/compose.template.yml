@@ -7,6 +7,12 @@ services:
     image: ${IMAGE_CLAUDE}
     pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
+    # Start the proxy first: Claude routes /v1/messages through it (ADR-073).
+    # service_started (not _healthy) — the proxy has no healthcheck; Claude only
+    # POSTs on the first user prompt, by which time the scratch binary is up.
+    depends_on:
+      proxy:
+        condition: service_started
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:

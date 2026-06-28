@@ -15,6 +15,9 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
+      # Bundled into build-context/ (proxy image + compose template) — a
+      # containers-only change still affects the desktop bundle.
+      - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
   push:
@@ -31,6 +34,9 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
+      # Bundled into build-context/ (proxy image + compose template) — a
+      # containers-only change still affects the desktop bundle.
+      - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
 
