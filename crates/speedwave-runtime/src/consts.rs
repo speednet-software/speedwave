@@ -171,6 +171,7 @@ pub const MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 /// unrecognised host errors instead of following. ADR-056 spike 0C.
 pub const TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS: &[&str] = &[
     "huggingface.co",
+    "cdn.hf.co",
     "cas-bridge.xethub.hf.co",
     "github.com",
     "release-assets.githubusercontent.com",
