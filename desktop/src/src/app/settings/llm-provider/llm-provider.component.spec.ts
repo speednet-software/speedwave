@@ -654,19 +654,20 @@ describe('LlmProviderComponent', () => {
     expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
   });
 
-  it('shows model and base URL fields for ollama provider', async () => {
+  it('shows base URL field for ollama provider; model field hidden until discovery', async () => {
     component.provider = 'ollama';
     component.selectedTarget = 'local';
+    component.model = '';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-
-    const modelInput = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(modelInput).not.toBeNull();
 
     const baseUrlInput = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
     );
     expect(baseUrlInput).not.toBeNull();
+    // No model field on a fresh form — it appears only after discovery.
+    const modelInput = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
+    expect(modelInput).toBeNull();
   });
 
   it('shows model and base URL fields for lmstudio provider', async () => {
@@ -953,10 +954,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('preserves_legacy_model_spoza_listy', async () => {
-    // A persisted model name must survive loadConfig even when the stored
-    // base_url is non-default (discovery is not auto-triggered on startup for
-    // user-supplied URLs). The model field stays as a text input so the user
-    // can see and edit their persisted value.
+    // A persisted model survives loadConfig without auto-discovery and renders
+    // as a single-option <select> (no free-text fallback).
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       model: 'legacy',
@@ -967,13 +966,66 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    // Model value is preserved from config even without auto-discovery.
     expect(component.model).toBe('legacy');
-    // No auto-probe → discoveryState stays idle → model field is a text INPUT.
     expect(component.discoveryState.kind).toBe('idle');
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).not.toBeNull();
-    expect(el.tagName).toBe('INPUT');
+    expect(el.tagName).toBe('SELECT');
+    expect((el.textContent || '').trim()).toContain('legacy');
+  });
+
+  it('shows_saved_model_without_discovery', async () => {
+    // A loaded config with a local provider entry renders the model as a
+    // single-option <select>, with no discovery probe.
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_llm_config') {
+        return {
+          provider: 'local',
+          model: 'gemma',
+          base_url: 'http://host.docker.internal:8888',
+          providers: [
+            {
+              id: 'local',
+              kind: 'local',
+              base_url: 'http://host.docker.internal:8888',
+              model: 'gemma',
+              has_api_key: false,
+              has_custom_headers: false,
+            },
+          ],
+          active: { provider_id: 'local', model: 'gemma' },
+        };
+      }
+      if (cmd === 'list_anthropic_models') return [];
+      return undefined;
+    };
+    await component.ngOnInit();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(component.model).toBe('gemma');
+    const field = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
+    expect(field).toBeTruthy();
+    expect(field.tagName).toBe('SELECT');
+  });
+
+  it('hides_model_field_on_discovery_failure', async () => {
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('auth');
+      },
+    });
+    component.provider = 'local';
+    component.selectedTarget = 'local';
+    component.model = '';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(true);
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+    expect(component.discoveryState.kind).toBe('failed');
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
+    const err = fixture.nativeElement.querySelector('[data-testid="settings-llm-discovery-error"]');
+    expect(err.textContent).toContain('API key');
   });
 
   it('explicit_discovery_renders_all_options_and_keeps_listed_model', async () => {
@@ -1020,8 +1072,9 @@ describe('LlmProviderComponent', () => {
 
     expect(discoverCalls.length).toBe(0);
     expect(component.discoveryState.kind).toBe('idle');
+    // No saved model + no discovery → no model field (no free-text fallback).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(el.tagName).toBe('INPUT');
+    expect(el).toBeNull();
   });
 
   it('non_default_stored_base_url_probes_on_explicit_refresh', async () => {

@@ -373,16 +373,18 @@ function classifyDiscoveryFailure(msg: string): {
                       <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
                     }
                   </select>
-                } @else {
-                  <input
+                } @else if (hasSavedModel()) {
+                  <!-- Saved config: show the model without re-probing. No free-text
+                       fallback — the field exists only with a real model. -->
+                  <select
                     id="llm-model"
-                    type="text"
                     [value]="model"
-                    (input)="model = $any($event.target).value"
-                    [placeholder]="modelPlaceholder()"
+                    (change)="onLocalModelChange($any($event.target).value)"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     data-testid="settings-llm-model"
-                  />
+                  >
+                    <option [value]="model">{{ model }}</option>
+                  </select>
                 }
                 @if (discoveryState.kind === 'failed') {
                   <p
@@ -789,6 +791,11 @@ export class LlmProviderComponent implements OnInit {
   /** Ids of every model returned by the most recent discovery probe. */
   protected discoveredModelIds(): string[] {
     return this.discoveryState.kind === 'ready' ? this.discoveryState.models.map((m) => m.id) : [];
+  }
+
+  /** True when a non-empty model should render while discovery is idle. */
+  protected hasSavedModel(): boolean {
+    return this.discoveryState.kind === 'idle' && !!this.model;
   }
 
   /**
