@@ -59,8 +59,8 @@ pub(crate) use llm::apply_llm_config_in;
 #[cfg(test)]
 use llm::provider_display_label;
 pub use llm::{
-    canonicalize_local_base_url, default_base_url, read_local_llm_token_opt,
-    read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
+    anthropic_login_unset_keys, canonicalize_local_base_url, default_base_url,
+    read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
 // Plugin compose injection.

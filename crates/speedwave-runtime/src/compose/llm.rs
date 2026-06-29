@@ -322,6 +322,24 @@ pub(crate) fn provider_display_label(provider: &str) -> &'static str {
     }
 }
 
+/// Env keys a `speedwave login` session must clear so Claude Code runs the
+/// Anthropic OAuth `/login` instead of a non-Anthropic provider's route.
+pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
+    &[
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    ]
+}
+
 fn custom_model_display_name(provider: &str, model: &str) -> String {
     format!("{} ({})", model, provider_display_label(provider))
 }
@@ -369,4 +387,47 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
         anyhow::bail!("base_url must not contain query or fragment");
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_unset_keys_cover_local_proxy_env() {
+        // Render the local proxy env and confirm every model/aux key it sets
+        // (except ANTHROPIC_BASE_URL) is in the login unset list.
+        let cfg = crate::config::LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "local".into(),
+                kind: crate::config::LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: Some("qwen".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_proxy("services: {}", &cfg).unwrap();
+        let unset: std::collections::HashSet<&str> =
+            anthropic_login_unset_keys().iter().copied().collect();
+        for line in rendered.lines() {
+            let t = line.trim().trim_start_matches('-').trim().trim_matches('"');
+            if let Some((key, _)) = t.split_once('=') {
+                let key = key.trim();
+                if (key.starts_with("ANTHROPIC_") || key.starts_with("CLAUDE_CODE_"))
+                    && key != "ANTHROPIC_BASE_URL"
+                {
+                    assert!(unset.contains(key), "login unset list is missing `{key}`");
+                }
+            }
+        }
+    }
 }
