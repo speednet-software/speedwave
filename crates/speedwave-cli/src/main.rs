@@ -390,6 +390,18 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
+/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
+/// re-exports the proxy base URL, then execs `claude` so `/login` runs OAuth.
+fn build_login_exec_cmd(flags: &[String], base_url: &str, unset_keys: &[&str]) -> Vec<String> {
+    let script = format!(
+        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} {}",
+        unset_keys.join(" "),
+        consts::CLAUDE_BINARY,
+        flags.join(" ")
+    );
+    vec!["sh".to_string(), "-lc".to_string(), script]
+}
+
 /// Printed by `speedwave --help` / `-h` / `help`. Must not require the
 /// runtime or any I/O so users can discover commands before Desktop is
 /// running (or while troubleshooting a broken setup).
@@ -967,11 +979,14 @@ fn main() -> anyhow::Result<()> {
     // flags. The user types /login; Claude writes credentials to the mount.
     if let CliAction::Login(_) = action {
         err!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend(resolved.flags.iter().map(String::as_str));
-        let status = runtime
-            .container_exec(&container_name, &exec_cmd)
-            .status()?;
+        // Unset any non-Anthropic provider env so `/login` runs Anthropic OAuth.
+        let cmd = build_login_exec_cmd(
+            &resolved.flags,
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
         std::process::exit(
             status
                 .code()
@@ -1505,6 +1520,60 @@ mod tests {
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
         exec_cmd.extend_from_slice(&["--flag"]);
         assert_eq!(exec_cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn build_login_exec_cmd_unsets_and_execs_claude() {
+        let flags = vec!["--resume".to_string(), "abc".to_string()];
+        let cmd = build_login_exec_cmd(
+            &flags,
+            "http://proxy:4000",
+            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
+        );
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-lc");
+        let script = &cmd[2];
+        assert!(
+            script.contains("unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL"),
+            "{script}"
+        );
+        assert!(
+            script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "{script}"
+        );
+        let exec_pos = script.find("exec ").expect("exec present");
+        let unset_pos = script.find("unset ").unwrap();
+        assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
+        assert!(
+            script.contains(consts::CLAUDE_BINARY),
+            "claude bin: {script}"
+        );
+        assert!(script.contains("--resume abc"), "flags preserved: {script}");
+    }
+
+    #[test]
+    fn build_login_exec_cmd_empty_flags_execs_bare_claude() {
+        let cmd = build_login_exec_cmd(&[], "http://proxy:4000", &["ANTHROPIC_AUTH_TOKEN"]);
+        let script = &cmd[2];
+        // No flags → `exec <claude> ` with a trailing space; sh tolerates it.
+        assert!(
+            script.trim_end().ends_with(consts::CLAUDE_BINARY),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn build_login_exec_cmd_uses_runtime_ssot_unset_list() {
+        let cmd = build_login_exec_cmd(
+            &[],
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let script = &cmd[2];
+        for key in compose::anthropic_login_unset_keys() {
+            assert!(script.contains(key), "unset list missing `{key}`: {script}");
+        }
+        assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
     }
 
     #[test]
