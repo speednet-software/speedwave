@@ -709,10 +709,7 @@ export class LlmProviderComponent implements OnInit {
   /** Loaded anthropic model — preserved when another provider is active. */
   private loadedAnthropicModel: string | null = null;
 
-  /**
-   * Per-provider default base URL cache (via `get_default_base_url`) keeping
-   * `isDefaultBaseUrl` sync. SSOT: `speedwave_runtime::compose::default_base_url`.
-   */
+  /** Per-provider default base URL cache (via `get_default_base_url`). */
   private defaultBaseUrlsByProvider: Record<string, string> = {};
 
   readonly providerChange = output<string>();
@@ -1476,17 +1473,6 @@ export class LlmProviderComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  /**
-   * True when `url` matches the backend-authoritative default for `provider`
-   * (cache via `get_default_base_url`). Gates startup auto-probe (SSRF mitigation).
-   * @param provider The selected provider (e.g. `ollama`, `lmstudio`, `llamacpp`).
-   * @param url The base URL to check against the provider's cached default.
-   */
-  private isDefaultBaseUrl(provider: string, url: string): boolean {
-    const def = this.defaultBaseUrlsByProvider[provider];
-    return !!def && url === def;
-  }
-
   private async loadConfig(): Promise<void> {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
@@ -1512,7 +1498,6 @@ export class LlmProviderComponent implements OnInit {
       this.hasApiKey.set(!!config.has_api_key);
       this.hasCustomHeaders.set(!!config.has_custom_headers);
       this.lastKnownProvider = provider;
-      // Seed the cache with the backend-authoritative default for isDefaultBaseUrl.
       if (provider !== 'anthropic' && defaultBaseUrl) {
         this.defaultBaseUrlsByProvider[provider] = defaultBaseUrl;
       }

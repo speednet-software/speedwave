@@ -1303,6 +1303,20 @@ describe('ProjectStateService', () => {
       await service.restartContainers();
       expect(order).toEqual(['begin', 'restart']);
     });
+
+    it('a rejecting onRestartBegin callback does not block the restart', async () => {
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        throw new Error('hook failed');
+      });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('restart');
+        return undefined;
+      };
+      (service as unknown as { activeProject: string }).activeProject = 'p';
+      await service.restartContainers();
+      expect(order).toEqual(['restart']); // restart still ran despite the rejecting hook
+    });
   });
 
   describe('unhealthySummary', () => {
