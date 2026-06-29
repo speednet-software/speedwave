@@ -108,6 +108,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
   private unsubRestart: (() => void) | null = null;
+  private unsubRestartBegin: (() => void) | null = null;
 
   /** Read-only aliases over the UI-state signals; the template binds these. */
   get showHistory(): boolean {
@@ -174,6 +175,12 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (this.projectState.status === 'auth_required') {
         this.router.navigate(['/settings']);
       }
+    });
+
+    // Interrupt a streaming turn before a container restart so the session
+    // stops cleanly and the resume path can take over.
+    this.unsubRestartBegin = this.projectState.onRestartBegin(async () => {
+      if (this.chat.isStreaming) await this.chat.stopConversation();
     });
 
     // A container restart kills the live session; resume it so the next message
@@ -518,6 +525,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.unsubRestart) {
       this.unsubRestart();
       this.unsubRestart = null;
+    }
+    if (this.unsubRestartBegin) {
+      this.unsubRestartBegin();
+      this.unsubRestartBegin = null;
     }
     // Dismiss any pending context-overflow dialog.
     this.contextOverflowResolve?.('fresh');

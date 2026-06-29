@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
+  mapContextOverflowError,
   messageBlocksToState,
   stateBlocksToMessageBlocks,
 } from './chat-state.service';
@@ -2777,6 +2778,73 @@ describe('ChatStateService', () => {
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 0;
       expect(internal.resolveContextWindow(undefined, undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+  });
+
+  // ── mapContextOverflowError ────────────────────────────────────────────────
+
+  describe('mapContextOverflowError', () => {
+    it('maps llama.cpp context-overflow to a friendly message; passes others through', () => {
+      expect(mapContextOverflowError('exceeds the available context size (8192 tokens)')).toContain(
+        'larger than the selected model'
+      );
+      expect(mapContextOverflowError('some unrelated error')).toBeNull();
+    });
+
+    it('maps "context length exceeded" variant', () => {
+      expect(mapContextOverflowError('context length exceeded')).toContain(
+        'larger than the selected model'
+      );
+    });
+
+    it('is case-insensitive', () => {
+      expect(
+        mapContextOverflowError('Exceeds The Available Context Size (8192 tokens)')
+      ).not.toBeNull();
+      expect(mapContextOverflowError('Context Length Exceeded')).not.toBeNull();
+    });
+
+    it('returns null for unknown errors', () => {
+      expect(mapContextOverflowError('')).toBeNull();
+      expect(mapContextOverflowError('out of memory')).toBeNull();
+    });
+  });
+
+  // ── handleStreamChunk Error — context-overflow mapping ────────────────────
+
+  describe('handleStreamChunk Error — context-overflow mapping', () => {
+    it('replaces a known context-overflow error with the friendly message', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'exceeds the available context size (8192 tokens)' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toContain('larger than the selected model');
+      }
+    });
+
+    it('keeps unknown errors verbatim', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'some unrelated error' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toBe('some unrelated error');
+      }
     });
   });
 });

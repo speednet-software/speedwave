@@ -1179,6 +1179,75 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── interrupt on restart-begin ─────────────────────────────────────────────
+
+  /**
+   * Fires the restart-begin notification and flushes microtasks.
+   * @param ps - ProjectStateService instance to notify.
+   */
+  async function fireRestartBegin(ps: ProjectStateService): Promise<void> {
+    await (ps as unknown as { notifyRestartBegin: () => Promise<void> }).notifyRestartBegin();
+  }
+
+  describe('interrupt on restart-begin', () => {
+    it('interrupts a streaming turn on restart-begin', async () => {
+      await component.ngOnInit();
+      const interruptSpy = vi
+        .spyOn(component['chat'], 'stopConversation')
+        .mockResolvedValue(undefined);
+      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(true);
+      await fireRestartBegin(projectState);
+      expect(interruptSpy).toHaveBeenCalled();
+    });
+
+    it('does not interrupt when not streaming', async () => {
+      await component.ngOnInit();
+      const interruptSpy = vi
+        .spyOn(component['chat'], 'stopConversation')
+        .mockResolvedValue(undefined);
+      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(false);
+      await fireRestartBegin(projectState);
+      expect(interruptSpy).not.toHaveBeenCalled();
+    });
+
+    it('unsubscribes on destroy so a later restart-begin does not call stopConversation', async () => {
+      await component.ngOnInit();
+      const interruptSpy = vi
+        .spyOn(component['chat'], 'stopConversation')
+        .mockResolvedValue(undefined);
+      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(true);
+      component.ngOnDestroy();
+      await fireRestartBegin(projectState);
+      expect(interruptSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── fork guard: adopts a changed session_id after resume ──────────────────
+
+  describe('fork guard', () => {
+    it('adopts a new session_id if a post-resume Result returns a different one', () => {
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 'old';
+      // Drive the effect's reactive source via the public API so the signal changes.
+      chatState._setState({
+        sessionStats: {
+          session_id: 'new',
+          total_cost: null,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      // Angular effects are synchronous in zoneless when the signal changes in the
+      // same microtask; call TestBed.flushEffects() if available, else detectChanges.
+      if (typeof (fixture as unknown as { ngZone: unknown }).ngZone === 'undefined') {
+        fixture.detectChanges();
+      }
+      fixture.detectChanges();
+      expect((component as unknown as { lastKnownSessionId: string }).lastKnownSessionId).toBe(
+        'new'
+      );
+    });
+  });
+
   // ── isLastAssistant: O(1) cached lookup ────────────────────────────────────
 
   describe('isLastAssistant', () => {

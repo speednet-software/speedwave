@@ -59,6 +59,17 @@ const SESSION_START_TIMEOUT_MS = 30_000;
 /** Polling interval while waiting for a session to start. */
 const SESSION_START_POLL_MS = 500;
 
+/**
+ * Best-effort: friendly message for a known context-overflow error, else null.
+ * @param raw - Raw error string from the backend.
+ */
+export function mapContextOverflowError(raw: string): string | null {
+  if (/exceeds the available context size/i.test(raw) || /context length exceeded/i.test(raw)) {
+    return 'This conversation’s history is larger than the selected model’s context window. Pick a model with a bigger window, or start a new conversation.';
+  }
+  return null;
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -737,11 +748,9 @@ export class ChatStateService {
         break;
       }
 
-      case 'Error':
-        this._currentBlocks = [
-          ...this._currentBlocks,
-          { type: 'error', content: chunk.data.content },
-        ];
+      case 'Error': {
+        const errContent = mapContextOverflowError(chunk.data.content) ?? chunk.data.content;
+        this._currentBlocks = [...this._currentBlocks, { type: 'error', content: errContent }];
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -749,6 +758,7 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         break;
+      }
 
       case 'QueueDrained': {
         // ADR-045: backend sent the queued payload to stdin; mirror to local state.
