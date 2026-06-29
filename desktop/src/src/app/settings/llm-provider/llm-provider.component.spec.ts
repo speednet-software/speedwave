@@ -690,10 +690,32 @@ describe('LlmProviderComponent', () => {
     expect(btn.disabled).toBe(false);
   });
 
-  it('enables_save_for_anthropic_without_model', () => {
+  it('enables_save_for_authenticated_anthropic_without_model', () => {
+    // Anthropic needs no model, but DOES need credentials (oauth or api key).
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.model.set('');
+    component.oauthAuthenticated.set(true);
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('disables_save_for_unconfigured_anthropic', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
+    component.oauthAuthenticated.set(false);
+    component.apiKeyConfigured.set(false);
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('enables_save_for_anthropic_with_api_key', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.apiKeyConfigured.set(true);
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);

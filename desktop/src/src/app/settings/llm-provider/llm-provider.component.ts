@@ -1298,7 +1298,8 @@ export class LlmProviderComponent implements OnInit {
   /** Save is allowed only when the active non-anthropic provider has a model. */
   protected readonly canSave = computed<boolean>(() => {
     const target = this.effectiveTarget();
-    if (target === 'anthropic') return true;
+    // Anthropic needs no model but DOES need credentials (oauth or api key).
+    if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) return !!extra.model.trim();
     return !!this.model().trim();
