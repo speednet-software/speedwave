@@ -429,13 +429,11 @@ describe('LlmProviderComponent', () => {
     });
 
     it('resolves local-provider context_tokens from the discovery payload', async () => {
-      const cmp = component as unknown as {
-        discoveryState: { kind: 'ready'; models: { id: string; context_tokens?: number }[] };
-      };
-      cmp.discoveryState = {
+      component.discoveryState.set({
         kind: 'ready',
+        url: 'http://localhost:11434',
         models: [{ id: 'llama3.3', context_tokens: 32_768 }],
-      };
+      });
       component.provider = 'ollama';
       component.model = 'llama3.3';
       component.baseUrl = 'http://localhost:11434';
@@ -448,10 +446,9 @@ describe('LlmProviderComponent', () => {
       // a previously-discovered context window, the user saves without
       // clicking "Refresh models" — we must not wipe the persisted value.
       const cmp = component as unknown as {
-        discoveryState: { kind: string };
         loadedLocalContextTokens: number | null;
       };
-      cmp.discoveryState = { kind: 'idle' };
+      component.discoveryState.set({ kind: 'idle' });
       cmp.loadedLocalContextTokens = 16_384;
       component.provider = 'ollama';
       component.model = 'llama3.3';
@@ -906,7 +903,7 @@ describe('LlmProviderComponent', () => {
     // No free-text fallback — the model field is hidden on failure (Task 2).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).toBeNull();
-    expect(component.discoveryState.kind).toBe('failed');
+    expect(component.discoveryState().kind).toBe('failed');
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
@@ -1012,10 +1009,11 @@ describe('LlmProviderComponent', () => {
     resolveFirst(['model-from-first']);
     await firstCall;
     await fixture.whenStable();
-    expect(component.discoveryState.kind).toBe('ready');
-    if (component.discoveryState.kind === 'ready') {
-      expect(component.discoveryState.models).toEqual([{ id: 'model-from-second' }]);
-      expect(component.discoveryState.url).toBe('http://b.invalid');
+    const st = component.discoveryState();
+    expect(st.kind).toBe('ready');
+    if (st.kind === 'ready') {
+      expect(st.models).toEqual([{ id: 'model-from-second' }]);
+      expect(st.url).toBe('http://b.invalid');
     }
   });
 
@@ -1029,11 +1027,11 @@ describe('LlmProviderComponent', () => {
     // Explicit discovery to reach a `ready` state.
     component.baseUrl = 'http://host.docker.internal:11434';
     await component.discoverModels(true);
-    expect(component.discoveryState.kind).toBe('ready');
+    expect(component.discoveryState().kind).toBe('ready');
     // Switching provider resets state to idle — no auto-probe on switch.
     component.provider = 'lmstudio';
     await component.onProviderChange();
-    expect(component.discoveryState.kind).toBe('idle');
+    expect(component.discoveryState().kind).toBe('idle');
   });
 
   it('preserves_legacy_model_spoza_listy', async () => {
@@ -1050,7 +1048,7 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
 
     expect(component.model).toBe('legacy');
-    expect(component.discoveryState.kind).toBe('idle');
+    expect(component.discoveryState().kind).toBe('idle');
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).not.toBeNull();
     expect(el.tagName).toBe('SELECT');
@@ -1105,7 +1103,7 @@ describe('LlmProviderComponent', () => {
     await component.discoverModels(true);
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    expect(component.discoveryState.kind).toBe('failed');
+    expect(component.discoveryState().kind).toBe('failed');
     expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
     const err = fixture.nativeElement.querySelector('[data-testid="settings-llm-discovery-error"]');
     expect(err.textContent).toContain('API key');
@@ -1154,7 +1152,7 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
 
     expect(discoverCalls.length).toBe(0);
-    expect(component.discoveryState.kind).toBe('idle');
+    expect(component.discoveryState().kind).toBe('idle');
     // No saved model + no discovery → no model field (no free-text fallback).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).toBeNull();
@@ -1176,7 +1174,7 @@ describe('LlmProviderComponent', () => {
 
     await component.discoverModels(true);
     expect(discoverCalls.length).toBe(1);
-    expect(component.discoveryState.kind).toBe('failed');
+    expect(component.discoveryState().kind).toBe('failed');
   });
 
   it('skips_auto_probe_for_persisted_non_default_url', async () => {
@@ -1194,7 +1192,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
 
     expect(discoverCalls.length).toBe(0);
-    expect(component.discoveryState.kind).toBe('idle');
+    expect(component.discoveryState().kind).toBe('idle');
   });
 
   it('onProviderChange_increments_counter_before_state_reset', async () => {
@@ -1206,11 +1204,11 @@ describe('LlmProviderComponent', () => {
     (component as unknown as Record<string, number>)['discoveryCounter'] = 5;
     component.provider = 'ollama';
     // Plant a stale in-flight state with the current (pre-bump) id.
-    component.discoveryState = {
+    component.discoveryState.set({
       kind: 'in-flight',
       url: 'http://prev',
       id: 5, // matches seeded counter — will be stale after bump
-    };
+    });
     component.provider = 'lmstudio';
     await component.onProviderChange();
 
@@ -1221,8 +1219,9 @@ describe('LlmProviderComponent', () => {
 
     // If a discoverModels probe is in-flight, its id must also be > 5,
     // confirming the stale id=5 response would be rejected on arrival.
-    if (component.discoveryState.kind === 'in-flight') {
-      expect(component.discoveryState.id).toBeGreaterThan(5);
+    const stInflight = component.discoveryState();
+    if (stInflight.kind === 'in-flight') {
+      expect(stInflight.id).toBeGreaterThan(5);
     }
   });
 
@@ -1242,22 +1241,23 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://localhost:11434';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('unsupported');
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('unsupported');
     }
     const unsupportedMsg = component.discoveryFailureMessage();
     expect(unsupportedMsg.length).toBeGreaterThan(0);
     // Must differ from the offline message produced by reason='offline'.
     const offlineMsg = (() => {
-      const saved = component.discoveryState;
-      component.discoveryState = {
+      const saved = component.discoveryState();
+      component.discoveryState.set({
         kind: 'failed',
         url: 'http://localhost:11434',
         reason: 'offline',
-      };
+      });
       const m = component.discoveryFailureMessage();
-      component.discoveryState = saved;
+      component.discoveryState.set(saved);
       return m;
     })();
     expect(unsupportedMsg).not.toBe(offlineMsg);
@@ -1276,22 +1276,23 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://localhost:11434';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('other');
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('other');
     }
     const otherMsg = component.discoveryFailureMessage();
     expect(otherMsg.length).toBeGreaterThan(0);
     // Must differ from the offline message.
     const offlineMsg = (() => {
-      const saved = component.discoveryState;
-      component.discoveryState = {
+      const saved = component.discoveryState();
+      component.discoveryState.set({
         kind: 'failed',
         url: 'http://localhost:11434',
         reason: 'offline',
-      };
+      });
       const m = component.discoveryFailureMessage();
-      component.discoveryState = saved;
+      component.discoveryState.set(saved);
       return m;
     })();
     expect(otherMsg).not.toBe(offlineMsg);
@@ -1301,10 +1302,10 @@ describe('LlmProviderComponent', () => {
 
   // Helper: the message reason='offline' would produce, for not-equal asserts.
   const offlineMessageFor = (url: string): string => {
-    const saved = component.discoveryState;
-    component.discoveryState = { kind: 'failed', url, reason: 'offline' };
+    const saved = component.discoveryState();
+    component.discoveryState.set({ kind: 'failed', url, reason: 'offline' });
     const m = component.discoveryFailureMessage();
-    component.discoveryState = saved;
+    component.discoveryState.set(saved);
     return m;
   };
 
@@ -1320,9 +1321,10 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://host.docker.internal:8888';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('auth');
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('auth');
     }
     const msg = component.discoveryFailureMessage();
     expect(msg).toContain('API key');
@@ -1341,10 +1343,11 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://host.docker.internal:8888';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('server-error');
-      expect(component.discoveryState.status).toBe(500);
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('server-error');
+      expect(fs.status).toBe(500);
     }
     const msg = component.discoveryFailureMessage();
     expect(msg).toContain('500');
@@ -1362,10 +1365,11 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://host.docker.internal:8888';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('server-error');
-      expect(component.discoveryState.status).toBeUndefined();
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('server-error');
+      expect(fs.status).toBeUndefined();
     }
     expect(component.discoveryFailureMessage().length).toBeGreaterThan(0);
   });
@@ -1382,9 +1386,10 @@ describe('LlmProviderComponent', () => {
     component.baseUrl = 'http://host.docker.internal:8888';
     await component.discoverModels(false);
 
-    expect(component.discoveryState.kind).toBe('failed');
-    if (component.discoveryState.kind === 'failed') {
-      expect(component.discoveryState.reason).toBe('offline');
+    expect(component.discoveryState().kind).toBe('failed');
+    const fs = component.discoveryState();
+    if (fs.kind === 'failed') {
+      expect(fs.reason).toBe('offline');
     }
     expect(component.discoveryFailureMessage()).toContain('not reachable');
   });

@@ -383,19 +383,19 @@ function classifyDiscoveryFailure(msg: string): {
               type="button"
               data-testid="settings-llm-refresh"
               class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
-              [disabled]="discoveryState.kind === 'in-flight'"
+              [disabled]="discoveryState().kind === 'in-flight'"
               (click)="discoverModels(true)"
               appTooltip="Fetch the list of models from the server"
               placement="top"
             >
-              @if (discoveryState.kind === 'in-flight') {
+              @if (discoveryState().kind === 'in-flight') {
                 &#8635; discovering...
               } @else {
                 &#8635; discover models
               }
             </button>
 
-            @if (discoveryState.kind === 'failed') {
+            @if (discoveryState().kind === 'failed') {
               <p
                 class="mono mt-1 text-[11px] text-[var(--amber)]"
                 data-testid="settings-llm-discovery-error"
@@ -403,16 +403,17 @@ function classifyDiscoveryFailure(msg: string): {
                 {{ discoveryFailureMessage() }}
               </p>
             }
-            @if (discoveryState.kind === 'in-flight') {
+            @let inflight = discoveryState();
+            @if (inflight.kind === 'in-flight') {
               <p
                 class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
                 data-testid="settings-llm-discovering"
               >
-                Probing {{ discoveryState.url }}...
+                Probing {{ inflight.url }}...
               </p>
             }
 
-            @if (messagesEndpointOk === false) {
+            @if (messagesEndpointOk() === false) {
               <div
                 class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
                 data-testid="settings-llm-messages-endpoint-warning"
@@ -423,14 +424,15 @@ function classifyDiscoveryFailure(msg: string): {
               </div>
             }
 
-            @if (discoveryState.kind === 'ready' || hasSavedModel()) {
+            @if (discoveryState().kind === 'ready' || hasSavedModel()) {
               <div class="mt-3">
                 <label
                   class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   for="llm-model"
                   >default_model</label
                 >
-                @if (discoveryState.kind === 'ready') {
+                @let ds = discoveryState();
+                @if (ds.kind === 'ready') {
                   <select
                     id="llm-model"
                     (change)="onLocalModelChange($any($event.target).value)"
@@ -440,7 +442,7 @@ function classifyDiscoveryFailure(msg: string): {
                     @if (model && !discoveredModelIds().includes(model)) {
                       <option [value]="model" [selected]="true">{{ model }} (not on server)</option>
                     }
-                    @for (m of discoveryState.models; track m.id) {
+                    @for (m of ds.models; track m.id) {
                       <option [value]="m.id" [selected]="m.id === model">
                         {{ formatLocalModelLabel(m) }}
                       </option>
@@ -628,7 +630,7 @@ export class LlmProviderComponent implements OnInit {
   hasCustomHeaders = false;
 
   /** Result of the latest discovery probe — populated for `provider==="local"`. */
-  messagesEndpointOk: boolean | null = null;
+  messagesEndpointOk = signal<boolean | null>(null);
 
   /** Active project — drives the auth-status load and the OAuth terminal. */
   readonly activeProject = input<string | null>(null);
@@ -677,7 +679,7 @@ export class LlmProviderComponent implements OnInit {
   /** Cards rendered at the top of the section (mockup-aligned). */
 
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
-  discoveryState: DiscoveryState = { kind: 'idle' };
+  discoveryState = signal<DiscoveryState>({ kind: 'idle' });
 
   /**
    * Monotonic counter bumped per discovery trigger; a response whose `id`
@@ -781,12 +783,13 @@ export class LlmProviderComponent implements OnInit {
 
   /** Ids of every model returned by the most recent discovery probe. */
   protected discoveredModelIds(): string[] {
-    return this.discoveryState.kind === 'ready' ? this.discoveryState.models.map((m) => m.id) : [];
+    const s = this.discoveryState();
+    return s.kind === 'ready' ? s.models.map((m) => m.id) : [];
   }
 
   /** True when a non-empty model should render while discovery is idle. */
   protected hasSavedModel(): boolean {
-    return this.discoveryState.kind === 'idle' && !!this.model;
+    return this.discoveryState().kind === 'idle' && !!this.model;
   }
 
   /**
@@ -825,8 +828,9 @@ export class LlmProviderComponent implements OnInit {
     if (this.provider === 'anthropic') {
       return this.anthropicCatalog().find((m) => m.id === this.model)?.context_tokens ?? null;
     }
-    if (this.discoveryState.kind === 'ready') {
-      const picked = this.discoveryState.models.find((m) => m.id === this.model);
+    const s = this.discoveryState();
+    if (s.kind === 'ready') {
+      const picked = s.models.find((m) => m.id === this.model);
       return picked?.context_tokens ?? null;
     }
     return this.loadedLocalContextTokens;
@@ -988,16 +992,17 @@ export class LlmProviderComponent implements OnInit {
    * to explain the fallback to a free-text input.
    */
   discoveryFailureMessage(): string {
-    if (this.discoveryState.kind !== 'failed') return '';
-    const url = this.discoveryState.url;
+    const s = this.discoveryState();
+    if (s.kind !== 'failed') return '';
+    const url = s.url;
     const label = this.providerDisplayLabel();
-    switch (this.discoveryState.reason) {
+    switch (s.reason) {
       case 'offline':
         return `${label} server not reachable at ${url}. Make sure it's running and the local server is enabled.`;
       case 'auth':
         return `Authentication failed — check the API key.`;
       case 'server-error': {
-        const code = this.discoveryState.status;
+        const code = s.status;
         return code
           ? `${label} at ${url} is reachable but returned HTTP ${code}.`
           : `${label} at ${url} is reachable but returned an unexpected (non-JSON) response.`;
@@ -1039,7 +1044,7 @@ export class LlmProviderComponent implements OnInit {
       this.provider === 'anthropic'
         ? (this.loadedAnthropicModel ?? '')
         : (this.loadedLocalEntry?.model ?? '');
-    this.discoveryState = { kind: 'idle' };
+    this.discoveryState.set({ kind: 'idle' });
     this.providerChange.emit(this.provider);
     this.cdr.markForCheck();
     // Fetch backend-authoritative default if not cached (compose.rs is SSOT).
@@ -1074,17 +1079,13 @@ export class LlmProviderComponent implements OnInit {
     if (!effectiveUrl) return;
 
     // Dedupe: skip same-URL non-refresh triggers while a probe is in-flight.
-    if (
-      !isRefresh &&
-      this.discoveryState.kind === 'in-flight' &&
-      this.discoveryState.url === effectiveUrl
-    ) {
+    const current = this.discoveryState();
+    if (!isRefresh && current.kind === 'in-flight' && current.url === effectiveUrl) {
       return;
     }
 
     const id = ++this.discoveryCounter;
-    this.discoveryState = { kind: 'in-flight', url: effectiveUrl, id };
-    this.cdr.markForCheck();
+    this.discoveryState.set({ kind: 'in-flight', url: effectiveUrl, id });
 
     try {
       // Tri-state via `LlmConfigUpdate.api_key` (see types.rs).
@@ -1104,26 +1105,24 @@ export class LlmProviderComponent implements OnInit {
         args,
       });
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
-      if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
+      const live = this.discoveryState();
+      if (live.kind !== 'in-flight' || live.id !== id) return;
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
       // so a resolved Ok always carries a non-empty array.
-      this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
-      this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
+      this.discoveryState.set({ kind: 'ready', url: effectiveUrl, models: result.models });
+      this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
       // Auto-select only when blank (a3): a restored-but-unlisted model is a
       // deliberate choice — keep it (the template offers a "not on server" option).
       if (!this.model && result.models[0]?.id) {
         this.model = result.models[0].id;
       }
     } catch (e: unknown) {
-      if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
+      const live = this.discoveryState();
+      if (live.kind !== 'in-flight' || live.id !== id) return;
       const msg = e instanceof Error ? e.message : String(e);
       const { reason, status } = classifyDiscoveryFailure(msg);
-      this.discoveryState = { kind: 'failed', url: effectiveUrl, reason, status };
-      // No errorOccurred.emit — discovery failure is silent degradation
-      // (UI falls back to the free-text input).
-    } finally {
-      // Always mark for check, even when early-returning via stale-discard.
-      this.cdr.markForCheck();
+      this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason, status });
+      // No errorOccurred.emit — discovery failure is silent degradation.
     }
   }
 
