@@ -654,6 +654,27 @@ describe('LlmProviderComponent', () => {
     expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
   });
 
+  it('openrouter_discover_disabled_without_key', () => {
+    // Discover button is disabled when the API key is empty (gate).
+    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    expect(row).toBeTruthy();
+    component.selectExtraProvider(row!);
+    component.onExtraKeyInput(row!, '');
+    fixture.detectChanges();
+    const sel = '[data-testid="settings-llm-extra-refresh-openrouter"]';
+    expect(fixture.nativeElement.querySelector(sel).disabled).toBe(true);
+  });
+
+  it('openrouter_discover_enabled_with_key', () => {
+    // Key present at first render → button enabled (no OnPush mutation timing).
+    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    component.selectExtraProvider(row!);
+    component.onExtraKeyInput(row!, 'sk-or-x');
+    fixture.detectChanges();
+    const sel = '[data-testid="settings-llm-extra-refresh-openrouter"]';
+    expect(fixture.nativeElement.querySelector(sel).disabled).toBe(false);
+  });
+
   it('disables_save_for_local_without_model', () => {
     component.provider = 'local';
     component.selectedTarget = 'local';
@@ -1626,10 +1647,13 @@ describe('LlmProviderComponent', () => {
     };
 
     component.toggleExtraExpanded(component.extraProviders[0]);
+    // Explicit discovery (gated on key) — no auto-discover on expand.
+    component.extraProviders[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
-    expect(discoverArgs).toEqual([{ provider: 'openrouter', baseUrl: '' }]);
+    expect(discoverArgs).toEqual([{ provider: 'openrouter', baseUrl: '', apiKey: 'sk-or-x' }]);
     const select = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-extra-model-openrouter"]'
     ) as HTMLSelectElement;
@@ -1672,7 +1696,9 @@ describe('LlmProviderComponent', () => {
     };
 
     component.toggleExtraExpanded(component.extraProviders[0]);
+    component.extraProviders[0].keyInput = 'sk-or-x';
     component.extraProviders[0].model = 'deepseek/deepseek-v4-flash';
+    await component.discoverExtraModels(component.extraProviders[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1692,7 +1718,9 @@ describe('LlmProviderComponent', () => {
     };
 
     component.toggleExtraExpanded(component.extraProviders[0]);
+    component.extraProviders[0].keyInput = 'sk-or-x';
     component.extraProviders[0].model = 'vendor/retired-model';
+    await component.discoverExtraModels(component.extraProviders[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1714,6 +1742,8 @@ describe('LlmProviderComponent', () => {
     };
 
     component.toggleExtraExpanded(component.extraProviders[0]);
+    component.extraProviders[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders[0]);
     await flushMicrotasks();
     component.onExtraModelSelect(component.extraProviders[0], 'qwen/qwen3-coder');
     await component.saveConfig();

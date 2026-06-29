@@ -544,8 +544,8 @@ function classifyDiscoveryFailure(msg: string): {
                   </select>
                   <button
                     type="button"
-                    class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                    [disabled]="entry.discovering"
+                    class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-40"
+                    [disabled]="entry.discovering || !canDiscoverExtra(entry)"
                     (click)="discoverExtraModels(entry)"
                     [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
                   >
@@ -569,8 +569,8 @@ function classifyDiscoveryFailure(msg: string): {
                   @if (entry.kind === 'open_router') {
                     <button
                       type="button"
-                      class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                      [disabled]="entry.discovering"
+                      class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-40"
+                      [disabled]="entry.discovering || !canDiscoverExtra(entry)"
                       (click)="discoverExtraModels(entry)"
                       [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
                     >
@@ -891,7 +891,7 @@ export class LlmProviderComponent implements OnInit {
     }
     this.selectedTarget = entry.id;
     this.expandedExtraId = entry.id;
-    this.maybeDiscover(entry);
+    // No auto-discover on expand — discovery is explicit and gated on the key.
   }
 
   /**
@@ -900,20 +900,19 @@ export class LlmProviderComponent implements OnInit {
    */
   toggleExtraExpanded(entry: ExtraProviderEdit): void {
     this.expandedExtraId = this.expandedExtraId === entry.id ? null : entry.id;
-    if (this.expandedExtraId === entry.id) {
-      this.maybeDiscover(entry);
-    }
-  }
-
-  private maybeDiscover(entry: ExtraProviderEdit): void {
-    if (entry.kind === 'open_router' && entry.models === null && !entry.discovering) {
-      void this.discoverExtraModels(entry);
-    }
   }
 
   /**
-   * Fetches the OpenRouter catalog (host-side, tool-capable models). Failure
-   * keeps the free-text input — the catalog is a convenience, not a gate.
+   * OpenRouter discovery is gated on a non-empty API key.
+   * @param entry - The remote provider row.
+   */
+  protected canDiscoverExtra(entry: ExtraProviderEdit): boolean {
+    return entry.kind === 'open_router' && !!entry.keyInput.trim();
+  }
+
+  /**
+   * Fetches the OpenRouter catalog (host-side, tool-capable models), sending
+   * the transient key so the catalog probe authenticates.
    * @param entry - The openrouter row to populate.
    */
   async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
@@ -923,8 +922,9 @@ export class LlmProviderComponent implements OnInit {
     entry.discovering = true;
     this.cdr.markForCheck();
     try {
+      const apiKey = entry.keyInput.trim() ? entry.keyInput.trim() : undefined;
       const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-        args: { provider: 'openrouter', baseUrl: '' },
+        args: { provider: 'openrouter', baseUrl: '', apiKey },
       });
       const models = res?.models ?? [];
       const row = this.extraProviders.find((p) => p.id === entry.id);
