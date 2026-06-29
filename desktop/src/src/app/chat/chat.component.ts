@@ -104,6 +104,9 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   private optimisticSessionId: string | null = null;
 
+  /** Durable session id — survives container restart, cleared on project/conversation reset. */
+  private lastKnownSessionId: string | null = null;
+
   /**
    * Active live-chat session id — backend value when present, otherwise the
    *  optimistic stamp set on resume.
@@ -124,6 +127,12 @@ export class ChatComponent implements OnInit, OnDestroy {
       wasStreaming = streaming;
       this.cdr.markForCheck();
       // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
+    });
+
+    // Track the displayed session id durably so a restart can resume it.
+    effect(() => {
+      const id = this.chat.sessionStatsFromState()?.session_id;
+      if (id) this.lastKnownSessionId = id;
     });
 
     // Decouple toggle from data load so keyboard shortcut works like button.
@@ -150,11 +159,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     // A container restart kills the live session; resume it so the next message
     // keeps context instead of starting fresh.
     this.unsubRestart = this.projectState.onRestartComplete(() => {
-      const sessionId = this.chat.sessionStats?.session_id;
-      if (sessionId) void this.resumeConversation(sessionId);
+      if (this.lastKnownSessionId) void this.resumeConversation(this.lastKnownSessionId);
     });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+      this.lastKnownSessionId = null;
       const wasHistoryOpen = this.showHistory;
       const wasMemoryOpen = this.showMemory;
       this.conversations = [];
@@ -334,6 +343,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     const endStartingSession = this.chat.beginStartingSession();
     // Stamp session id optimistically so drawer accent follows click without flicker.
     this.optimisticSessionId = sessionId;
+    this.lastKnownSessionId = sessionId;
     this.ui.closeSidebar();
     this.cdr.markForCheck();
 
@@ -398,6 +408,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke('delete_conversation', { project, sessionId });
       this.conversations = this.conversations.filter((c) => c.session_id !== sessionId);
+      if (sessionId === this.lastKnownSessionId) this.lastKnownSessionId = null;
       if (wasActive) {
         this.optimisticSessionId = null;
         this.chat.resetForNewConversation();
@@ -416,6 +427,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.ui.closeSidebar();
     this.ui.closeMemory();
     this.optimisticSessionId = null;
+    this.lastKnownSessionId = null;
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();

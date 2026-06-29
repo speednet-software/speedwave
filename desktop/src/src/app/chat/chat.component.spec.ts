@@ -428,7 +428,6 @@ describe('ChatComponent', () => {
   describe('auto-resume after a container restart', () => {
     it('resumes the active session (not a fresh start_chat) when a restart completes', async () => {
       projectState.activeProject = 'test';
-      // An active session exists (a model switch will restart the container).
       chatState._setState({
         messages: [],
         currentBlocks: [],
@@ -440,6 +439,9 @@ describe('ChatComponent', () => {
         },
       });
       await component.ngOnInit();
+      // Seed durable id as the effect would after change detection.
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId =
+        'live-session-1';
 
       const invokeCalls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -471,6 +473,43 @@ describe('ChatComponent', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(invokeCalls).not.toContain('resume_conversation');
+    });
+  });
+
+  // ── durable lastKnownSessionId — survives restart ───────────────────────────
+
+  /**
+   * Triggers a restart-complete notification and flushes microtasks.
+   * @param ps - ProjectStateService instance to notify.
+   */
+  async function fireRestartComplete(ps: ProjectStateService): Promise<void> {
+    ps.notifyRestartComplete();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  describe('durable lastKnownSessionId', () => {
+    it('resumes from lastKnownSessionId on restart even when sessionStats was reset', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') return { session_id: 'sess-1', messages: [] };
+        return undefined;
+      };
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 'sess-1';
+      // sessionStats is null (restart cleared it)
+      vi.spyOn(component['chat'], 'sessionStats', 'get').mockReturnValue(null);
+      await fireRestartComplete(projectState);
+      expect(resumeSpy).toHaveBeenCalledWith('sess-1');
+    });
+
+    it('does not resume when no session is known', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      (component as unknown as { lastKnownSessionId: string | null }).lastKnownSessionId = null;
+      await fireRestartComplete(projectState);
+      expect(resumeSpy).not.toHaveBeenCalled();
     });
   });
 
