@@ -129,12 +129,12 @@ function classifyDiscoveryFailure(msg: string): {
         providers the built-in aliases map to that provider's model.
       </p>
 
-      @if (legacyMigrationProvider) {
+      @if (legacyMigrationProvider()) {
         <div
           class="mono mt-3 rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] text-[var(--accent)]"
           data-testid="settings-llm-legacy-migration-banner"
         >
-          Provider name <code>{{ legacyMigrationProvider }}</code> is legacy and will be saved as
+          Provider name <code>{{ legacyMigrationProvider() }}</code> is legacy and will be saved as
           <code>local</code> on next Save. Same behavior, unified naming.
         </div>
       }
@@ -143,7 +143,7 @@ function classifyDiscoveryFailure(msg: string): {
       <div
         class="mt-4 rounded border"
         [class]="
-          selectedTarget === 'anthropic'
+          selectedTarget() === 'anthropic'
             ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
             : 'border-[var(--line)] bg-[var(--bg-1)]'
         "
@@ -151,23 +151,23 @@ function classifyDiscoveryFailure(msg: string): {
         <button
           type="button"
           role="radio"
-          [attr.aria-checked]="selectedTarget === 'anthropic'"
+          [attr.aria-checked]="selectedTarget() === 'anthropic'"
           class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
           [class]="
-            selectedTarget === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+            selectedTarget() === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
           "
           data-testid="settings-llm-provider-anthropic"
           (click)="selectProvider('anthropic')"
         >
           <span>
-            {{ selectedTarget === 'anthropic' ? '● ' : '○ ' }}anthropic
+            {{ selectedTarget() === 'anthropic' ? '● ' : '○ ' }}anthropic
             <span class="text-[10px] text-[var(--ink-mute)]"> · cloud</span>
           </span>
           <span class="flex items-center gap-2" data-testid="auth-status-row">
-            @if (apiKeyConfigured || oauthAuthenticated) {
+            @if (apiKeyConfigured() || oauthAuthenticated()) {
               <span class="pill green" data-testid="auth-status-value">● connected</span>
               <span class="pill green" data-testid="auth-status-method">{{
-                apiKeyConfigured ? 'api key' : 'oauth'
+                apiKeyConfigured() ? 'api key' : 'oauth'
               }}</span>
             } @else {
               <span class="pill amber" data-testid="auth-status-value">not configured</span>
@@ -175,7 +175,7 @@ function classifyDiscoveryFailure(msg: string): {
           </span>
         </button>
 
-        @if (selectedTarget === 'anthropic') {
+        @if (selectedTarget() === 'anthropic') {
           <div class="border-t border-[var(--line)] px-3 py-3">
             <!-- Auth method: subscription (oauth) vs raw API key -->
             <div
@@ -186,36 +186,36 @@ function classifyDiscoveryFailure(msg: string): {
               <button
                 type="button"
                 role="radio"
-                [attr.aria-checked]="authMethod === 'oauth'"
+                [attr.aria-checked]="authMethod() === 'oauth'"
                 class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
                 [class]="
-                  authMethod === 'oauth'
+                  authMethod() === 'oauth'
                     ? 'bg-[var(--bg-2)] text-[var(--ink)]'
                     : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
                 "
                 data-testid="settings-auth-method-oauth"
-                (click)="authMethod = 'oauth'"
+                (click)="authMethod.set('oauth')"
               >
                 subscription (oauth · claude.ai)
               </button>
               <button
                 type="button"
                 role="radio"
-                [attr.aria-checked]="authMethod === 'api_key'"
+                [attr.aria-checked]="authMethod() === 'api_key'"
                 class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
                 [class]="
-                  authMethod === 'api_key'
+                  authMethod() === 'api_key'
                     ? 'bg-[var(--bg-2)] text-[var(--ink)]'
                     : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
                 "
                 data-testid="settings-auth-method-api-key"
-                (click)="authMethod = 'api_key'"
+                (click)="authMethod.set('api_key')"
               >
                 api key
               </button>
             </div>
 
-            @if (authMethod === 'api_key') {
+            @if (authMethod() === 'api_key') {
               <div class="mt-3">
                 <label
                   class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
@@ -227,8 +227,8 @@ function classifyDiscoveryFailure(msg: string): {
                   type="password"
                   autocomplete="off"
                   spellcheck="false"
-                  [value]="anthropicApiKeyInput"
-                  (input)="anthropicApiKeyInput = $any($event.target).value"
+                  [value]="anthropicApiKeyInput()"
+                  (input)="anthropicApiKeyInput.set($any($event.target).value)"
                   placeholder="sk-ant-..."
                   class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                   data-testid="settings-api-key"
@@ -240,25 +240,25 @@ function classifyDiscoveryFailure(msg: string): {
                   class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                   data-testid="settings-api-key-save"
                   (click)="saveAnthropicApiKey()"
-                  [disabled]="anthropicApiKeySaving || !anthropicApiKeyInput"
+                  [disabled]="anthropicApiKeySaving() || !anthropicApiKeyInput()"
                 >
-                  {{ anthropicApiKeySaving ? 'saving...' : 'save key' }}
+                  {{ anthropicApiKeySaving() ? 'saving...' : 'save key' }}
                 </button>
                 <button
                   type="button"
                   class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
                   data-testid="settings-api-key-remove"
                   (click)="deleteAnthropicApiKey()"
-                  [disabled]="!apiKeyConfigured"
+                  [disabled]="!apiKeyConfigured()"
                 >
                   remove key
                 </button>
-                @if (anthropicApiKeySaved) {
+                @if (anthropicApiKeySaved()) {
                   <span class="mono text-[11px] text-[var(--green)]">saved!</span>
                 }
               </div>
             }
-            @if (authMethod === 'oauth' && activeProject(); as project) {
+            @if (authMethod() === 'oauth' && activeProject(); as project) {
               <div class="mt-3">
                 <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
               </div>
@@ -273,8 +273,8 @@ function classifyDiscoveryFailure(msg: string): {
               >
               <select
                 id="llm-model"
-                [value]="model"
-                (change)="model = $any($event.target).value"
+                [value]="model()"
+                (change)="model.set($any($event.target).value)"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
@@ -295,8 +295,8 @@ function classifyDiscoveryFailure(msg: string): {
                     }
                   </optgroup>
                 }
-                @if (model && !modelInCatalog(model)) {
-                  <option [value]="model">{{ model }} (not in catalog)</option>
+                @if (model() && !modelInCatalog(model())) {
+                  <option [value]="model()">{{ model() }} (not in catalog)</option>
                 }
               </select>
             </div>
@@ -308,7 +308,7 @@ function classifyDiscoveryFailure(msg: string): {
       <div
         class="mt-2 rounded border"
         [class]="
-          selectedTarget === 'local'
+          selectedTarget() === 'local'
             ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
             : 'border-[var(--line)] bg-[var(--bg-1)]'
         "
@@ -316,24 +316,24 @@ function classifyDiscoveryFailure(msg: string): {
         <button
           type="button"
           role="radio"
-          [attr.aria-checked]="selectedTarget === 'local'"
+          [attr.aria-checked]="selectedTarget() === 'local'"
           class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
-          [class]="selectedTarget === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+          [class]="selectedTarget() === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
           data-testid="settings-llm-provider-local"
           (click)="selectProvider('local')"
         >
           <span>
-            {{ selectedTarget === 'local' ? '● ' : '○ ' }}local
+            {{ selectedTarget() === 'local' ? '● ' : '○ ' }}local
             <span class="text-[10px] text-[var(--ink-mute)]"> · own server</span>
           </span>
-          @if (selectedTarget !== 'local' && baseUrlByProviderView()) {
+          @if (selectedTarget() !== 'local' && baseUrlByProviderView()) {
             <span class="mono text-[10px] text-[var(--ink-mute)]">{{
               baseUrlByProviderView()
             }}</span>
           }
         </button>
 
-        @if (selectedTarget === 'local') {
+        @if (selectedTarget() === 'local') {
           <div class="border-t border-[var(--line)] px-3 py-3">
             <!-- Order: base_url → api_key → discover → model (only after a
                  successful discover or a saved model) → advanced. -->
@@ -346,9 +346,9 @@ function classifyDiscoveryFailure(msg: string): {
               <input
                 id="llm-base-url"
                 type="text"
-                [value]="baseUrl"
-                (input)="baseUrl = $any($event.target).value"
-                [placeholder]="defaultBaseUrl"
+                [value]="baseUrl()"
+                (input)="baseUrl.set($any($event.target).value)"
+                [placeholder]="defaultBaseUrl()"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-base-url"
               />
@@ -367,10 +367,10 @@ function classifyDiscoveryFailure(msg: string): {
                 type="password"
                 autocomplete="off"
                 spellcheck="false"
-                [value]="apiKey"
+                [value]="apiKey()"
                 (input)="onApiKeyInput($any($event.target).value)"
                 [placeholder]="
-                  hasApiKey
+                  hasApiKey()
                     ? '••••• (key saved — type to replace, clear to remove)'
                     : 'Bearer token (e.g. sk-…)'
                 "
@@ -439,11 +439,13 @@ function classifyDiscoveryFailure(msg: string): {
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     data-testid="settings-llm-model"
                   >
-                    @if (model && !discoveredModelIds().includes(model)) {
-                      <option [value]="model" [selected]="true">{{ model }} (not on server)</option>
+                    @if (model() && !discoveredModelIds().includes(model())) {
+                      <option [value]="model()" [selected]="true">
+                        {{ model() }} (not on server)
+                      </option>
                     }
                     @for (m of ds.models; track m.id) {
-                      <option [value]="m.id" [selected]="m.id === model">
+                      <option [value]="m.id" [selected]="m.id === model()">
                         {{ formatLocalModelLabel(m) }}
                       </option>
                     }
@@ -456,7 +458,7 @@ function classifyDiscoveryFailure(msg: string): {
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     data-testid="settings-llm-model"
                   >
-                    <option [value]="model" [selected]="true">{{ model }}</option>
+                    <option [value]="model()" [selected]="true">{{ model() }}</option>
                   </select>
                 }
               </div>
@@ -478,10 +480,10 @@ function classifyDiscoveryFailure(msg: string): {
                   id="llm-custom-headers"
                   rows="3"
                   spellcheck="false"
-                  [value]="customHeaders"
+                  [value]="customHeaders()"
                   (input)="onCustomHeadersInput($any($event.target).value)"
                   [placeholder]="
-                    hasCustomHeaders
+                    hasCustomHeaders()
                       ? '••••• (saved — type to replace, clear to remove)'
                       : 'X-Tenant-ID: foo'
                   "
@@ -499,11 +501,11 @@ function classifyDiscoveryFailure(msg: string): {
       </div>
 
       <!-- ── remote provider rows (ADR-073) ────────────────────────────── -->
-      @for (entry of extraProviders; track entry.id) {
+      @for (entry of extraProviders(); track entry.id) {
         <div
           class="mt-2 rounded border"
           [class]="
-            selectedTarget === entry.id
+            selectedTarget() === entry.id
               ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
               : 'border-[var(--line)] bg-[var(--bg-1)]'
           "
@@ -512,13 +514,15 @@ function classifyDiscoveryFailure(msg: string): {
           <button
             type="button"
             role="radio"
-            [attr.aria-checked]="selectedTarget === entry.id"
+            [attr.aria-checked]="selectedTarget() === entry.id"
             class="mono flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium"
-            [class]="selectedTarget === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+            [class]="
+              selectedTarget() === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+            "
             [attr.data-testid]="'settings-llm-extra-select-' + entry.id"
             (click)="onExtraHeaderClick(entry)"
           >
-            {{ selectedTarget === entry.id ? '●' : '○' }} {{ entry.id }}
+            {{ selectedTarget() === entry.id ? '●' : '○' }} {{ entry.id }}
             <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
           </button>
           @if (expandedExtraId === entry.id) {
@@ -592,11 +596,11 @@ function classifyDiscoveryFailure(msg: string): {
           class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="settings-llm-save"
           (click)="saveConfig()"
-          [disabled]="saving || !canSave()"
+          [disabled]="saving() || !canSave()"
         >
-          {{ saving ? 'saving...' : 'save' }}
+          {{ saving() ? 'saving...' : 'save' }}
         </button>
-        @if (saved) {
+        @if (saved()) {
           <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
             >saved!</span
           >
@@ -606,28 +610,28 @@ function classifyDiscoveryFailure(msg: string): {
   `,
 })
 export class LlmProviderComponent implements OnInit {
-  provider = 'anthropic';
-  model = '';
-  baseUrl = '';
-  defaultBaseUrl = '';
-  saving = false;
-  saved = false;
+  provider = signal('anthropic');
+  model = signal('');
+  baseUrl = signal('');
+  defaultBaseUrl = signal('');
+  saving = signal(false);
+  saved = signal(false);
 
   /**
    * Local-LLM API key (Bearer), form-only — backend stores it per-project and
    * exposes only `has_api_key`. `apiKeyTouched` gates the unchanged/empty/value tri-state.
    */
-  apiKey = '';
-  apiKeyTouched = false;
-  hasApiKey = false;
+  apiKey = signal('');
+  apiKeyTouched = signal(false);
+  hasApiKey = signal(false);
 
   /**
    * Optional custom HTTP headers (Azure APIM, corporate gateways). Same
    * touched-flag pattern as apiKey. Format: one `Name: Value` per line.
    */
-  customHeaders = '';
-  customHeadersTouched = false;
-  hasCustomHeaders = false;
+  customHeaders = signal('');
+  customHeadersTouched = signal(false);
+  hasCustomHeaders = signal(false);
 
   /** Result of the latest discovery probe — populated for `provider==="local"`. */
   messagesEndpointOk = signal<boolean | null>(null);
@@ -639,24 +643,24 @@ export class LlmProviderComponent implements OnInit {
    * Anthropic auth — OAuth default, api-key tab one click away. The key VALUE
    * goes via `save_api_key` to `secrets/<project>/anthropic_api_key`, never LlmConfig.
    */
-  authMethod: 'oauth' | 'api_key' = 'oauth';
-  anthropicApiKeyInput = '';
-  anthropicApiKeySaving = false;
-  anthropicApiKeySaved = false;
-  apiKeyConfigured = false;
-  oauthAuthenticated = false;
+  authMethod = signal<'oauth' | 'api_key'>('oauth');
+  anthropicApiKeyInput = signal('');
+  anthropicApiKeySaving = signal(false);
+  anthropicApiKeySaved = signal(false);
+  apiKeyConfigured = signal(false);
+  oauthAuthenticated = signal(false);
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
    * list on load (anthropic/local stay on cards); Save sends the full set.
    */
-  extraProviders: ExtraProviderEdit[] = fixedExtraRows();
+  extraProviders = signal<ExtraProviderEdit[]>(fixedExtraRows());
 
   /**
    * Which target is active: `'anthropic'`, `'local'`, or an extra provider
    * id. The cards and the extra rows share this one radio state.
    */
-  selectedTarget = 'anthropic';
+  selectedTarget = signal('anthropic');
 
   /**
    * `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot
@@ -668,7 +672,7 @@ export class LlmProviderComponent implements OnInit {
    * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config,
    * else `null`. Drives the migration banner; rewrite to `local` waits for Save.
    */
-  legacyMigrationProvider: string | null = null;
+  legacyMigrationProvider = signal<string | null>(null);
 
   /**
    * Persisted `context_tokens`, seeded on load. Fallback for
@@ -782,15 +786,15 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /** Ids of every model returned by the most recent discovery probe. */
-  protected discoveredModelIds(): string[] {
+  protected readonly discoveredModelIds = computed<string[]>(() => {
     const s = this.discoveryState();
     return s.kind === 'ready' ? s.models.map((m) => m.id) : [];
-  }
+  });
 
   /** True when a non-empty model should render while discovery is idle. */
-  protected hasSavedModel(): boolean {
-    return this.discoveryState().kind === 'idle' && !!this.model;
-  }
+  protected readonly hasSavedModel = computed<boolean>(
+    () => this.discoveryState().kind === 'idle' && !!this.model()
+  );
 
   /**
    * Local-model `<select>` change handler. `context_tokens` are derived on
@@ -798,7 +802,7 @@ export class LlmProviderComponent implements OnInit {
    * @param id - Model id from the dropdown's value attribute.
    */
   protected onLocalModelChange(id: string): void {
-    this.model = id;
+    this.model.set(id);
   }
 
   /**
@@ -806,8 +810,8 @@ export class LlmProviderComponent implements OnInit {
    * @param value - New value typed by the user.
    */
   protected onApiKeyInput(value: string): void {
-    this.apiKey = value;
-    this.apiKeyTouched = true;
+    this.apiKey.set(value);
+    this.apiKeyTouched.set(true);
   }
 
   /**
@@ -815,8 +819,8 @@ export class LlmProviderComponent implements OnInit {
    * @param value - New value typed by the user (multi-line `Name: Value`).
    */
   protected onCustomHeadersInput(value: string): void {
-    this.customHeaders = value;
-    this.customHeadersTouched = true;
+    this.customHeaders.set(value);
+    this.customHeadersTouched.set(true);
   }
 
   /**
@@ -824,13 +828,14 @@ export class LlmProviderComponent implements OnInit {
    * model's window; local pre-discovery→loaded config value; else `null`.
    */
   private resolveContextTokensForSave(): number | null {
-    if (!this.model) return null;
-    if (this.provider === 'anthropic') {
-      return this.anthropicCatalog().find((m) => m.id === this.model)?.context_tokens ?? null;
+    const model = this.model();
+    if (!model) return null;
+    if (this.provider() === 'anthropic') {
+      return this.anthropicCatalog().find((m) => m.id === model)?.context_tokens ?? null;
     }
     const s = this.discoveryState();
     if (s.kind === 'ready') {
-      const picked = s.models.find((m) => m.id === this.model);
+      const picked = s.models.find((m) => m.id === model);
       return picked?.context_tokens ?? null;
     }
     return this.loadedLocalContextTokens;
@@ -849,9 +854,9 @@ export class LlmProviderComponent implements OnInit {
    * @param id - Card-class provider id (`anthropic` | `local`).
    */
   async selectProvider(id: 'anthropic' | 'local'): Promise<void> {
-    this.selectedTarget = id;
-    if (this.provider === id) return;
-    this.provider = id;
+    this.selectedTarget.set(id);
+    if (this.provider() === id) return;
+    this.provider.set(id);
     await this.onProviderChange();
   }
 
@@ -864,7 +869,7 @@ export class LlmProviderComponent implements OnInit {
    * @param entry - The clicked row.
    */
   onExtraHeaderClick(entry: ExtraProviderEdit): void {
-    if (this.selectedTarget !== entry.id) {
+    if (this.selectedTarget() !== entry.id) {
       this.selectExtraProvider(entry);
     } else {
       this.toggleExtraExpanded(entry);
@@ -878,10 +883,11 @@ export class LlmProviderComponent implements OnInit {
   selectExtraProvider(entry: ExtraProviderEdit): void {
     // Snapshot a freshly-edited anthropic-card model before leaving the card,
     // so a later Save doesn't fall back to a stale snapshot (F2/a1).
-    if (this.effectiveTarget() === 'anthropic' && this.model && !this.isForeignModel(this.model)) {
-      this.loadedAnthropicModel = this.model;
+    const model = this.model();
+    if (this.effectiveTarget() === 'anthropic' && model && !this.isForeignModel(model)) {
+      this.loadedAnthropicModel = model;
     }
-    this.selectedTarget = entry.id;
+    this.selectedTarget.set(entry.id);
     this.expandedExtraId = entry.id;
     // No auto-discover on expand — discovery is explicit and gated on the key.
   }
@@ -912,6 +918,7 @@ export class LlmProviderComponent implements OnInit {
       return;
     }
     entry.discovering = true;
+    this.extraProviders.set([...this.extraProviders()]);
     this.cdr.markForCheck();
     try {
       const apiKey = entry.keyInput.trim() ? entry.keyInput.trim() : undefined;
@@ -919,7 +926,7 @@ export class LlmProviderComponent implements OnInit {
         args: { provider: 'openrouter', baseUrl: '', apiKey },
       });
       const models = res?.models ?? [];
-      const row = this.extraProviders.find((p) => p.id === entry.id);
+      const row = this.extraProviders().find((p) => p.id === entry.id);
       if (row && models.length > 0) {
         row.models = models;
         if (row.model) {
@@ -933,6 +940,7 @@ export class LlmProviderComponent implements OnInit {
       );
     } finally {
       entry.discovering = false;
+      this.extraProviders.set([...this.extraProviders()]);
       this.cdr.markForCheck();
     }
   }
@@ -946,6 +954,7 @@ export class LlmProviderComponent implements OnInit {
   onExtraModelSelect(entry: ExtraProviderEdit, modelId: string): void {
     entry.model = modelId;
     entry.contextTokens = entry.models?.find((m) => m.id === modelId)?.context_tokens ?? null;
+    this.extraProviders.set([...this.extraProviders()]);
   }
 
   /**
@@ -974,18 +983,19 @@ export class LlmProviderComponent implements OnInit {
   onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
     entry.keyInput = value;
     entry.keyTouched = true;
+    this.extraProviders.set([...this.extraProviders()]);
   }
 
   /**
    * Placeholder model name per provider. Anthropic derives it from the SSOT
    * catalog (latest everyday Sonnet); empty while loading to avoid a stale id.
    */
-  modelPlaceholder(): string {
-    if (this.provider === 'anthropic') {
+  readonly modelPlaceholder = computed<string>(() => {
+    if (this.provider() === 'anthropic') {
       return this.anthropicModels.latestEverydayModelId() ?? '';
     }
     return 'llama3.3';
-  }
+  });
 
   /**
    * Human-readable reason discovery failed, shown inline under the Model field
@@ -1015,56 +1025,61 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /** Returns the UI-friendly label for the current provider. */
-  private providerDisplayLabel(): string {
-    return this.provider === 'local' ? 'Local LLM server' : 'Provider';
-  }
+  private readonly providerDisplayLabel = computed<string>(() =>
+    this.provider() === 'local' ? 'Local LLM server' : 'Provider'
+  );
 
   /**
    * Provider-dropdown change. Resets baseUrl (per-provider default ports),
    * re-probes against the new default, and bumps the counter to drop stale probes.
    */
   async onProviderChange(): Promise<void> {
-    if (this.provider === this.lastKnownProvider) {
+    const provider = this.provider();
+    if (provider === this.lastKnownProvider) {
       // Guard against redundant ngModelChange fires — no-op.
       return;
     }
     // Cache the URL per provider to restore on switch back in the same session.
     const previousProvider = this.lastKnownProvider;
-    if (previousProvider !== 'anthropic' && this.baseUrl) {
-      this.baseUrlByProvider[previousProvider] = this.baseUrl;
+    const previousBaseUrl = this.baseUrl();
+    if (previousProvider !== 'anthropic' && previousBaseUrl) {
+      this.baseUrlByProvider[previousProvider] = previousBaseUrl;
     }
     // Snapshot the anthropic model when leaving the card so it is restored below.
-    if (previousProvider === 'anthropic' && this.model) {
-      this.loadedAnthropicModel = this.model;
+    const previousModel = this.model();
+    if (previousProvider === 'anthropic' && previousModel) {
+      this.loadedAnthropicModel = previousModel;
     }
-    this.lastKnownProvider = this.provider;
+    this.lastKnownProvider = provider;
     this.discoveryCounter++;
     // Clear state now; model is provider-specific and restored from snapshot.
-    this.model =
-      this.provider === 'anthropic'
+    this.model.set(
+      provider === 'anthropic'
         ? (this.loadedAnthropicModel ?? '')
-        : (this.loadedLocalEntry?.model ?? '');
+        : (this.loadedLocalEntry?.model ?? '')
+    );
     this.discoveryState.set({ kind: 'idle' });
-    this.providerChange.emit(this.provider);
+    this.providerChange.emit(provider);
     this.cdr.markForCheck();
     // Fetch backend-authoritative default if not cached (compose.rs is SSOT).
-    if (this.provider !== 'anthropic' && !this.defaultBaseUrlsByProvider[this.provider]) {
+    if (provider !== 'anthropic' && !this.defaultBaseUrlsByProvider[provider]) {
       try {
         const freshDefault = await this.tauri.invoke<string | null>('get_default_base_url', {
-          provider: this.provider,
+          provider,
         });
         if (freshDefault) {
-          this.defaultBaseUrlsByProvider[this.provider] = freshDefault;
+          this.defaultBaseUrlsByProvider[provider] = freshDefault;
         }
       } catch {
         // Not in Tauri or unknown provider — cache stays empty for this provider.
       }
     }
-    this.defaultBaseUrl = this.defaultBaseUrlsByProvider[this.provider] ?? '';
+    const defaultBaseUrl = this.defaultBaseUrlsByProvider[provider] ?? '';
+    this.defaultBaseUrl.set(defaultBaseUrl);
     // Restore the cached URL for this provider if we have one; otherwise fall
     // back to the provider's backend-authoritative default. Anthropic has no baseUrl.
-    const cached = this.baseUrlByProvider[this.provider];
-    this.baseUrl = this.provider === 'anthropic' ? '' : cached || this.defaultBaseUrl;
+    const cached = this.baseUrlByProvider[provider];
+    this.baseUrl.set(provider === 'anthropic' ? '' : cached || defaultBaseUrl);
     // No auto-probe on switch — discovery is explicit (the discover button only).
   }
 
@@ -1074,8 +1089,9 @@ export class LlmProviderComponent implements OnInit {
    * @param isRefresh When true, bypass the same-URL dedupe to force a re-probe.
    */
   async discoverModels(isRefresh: boolean): Promise<void> {
-    if (this.provider === 'anthropic') return;
-    const effectiveUrl = this.baseUrl || this.defaultBaseUrl;
+    const provider = this.provider();
+    if (provider === 'anthropic') return;
+    const effectiveUrl = this.baseUrl() || this.defaultBaseUrl();
     if (!effectiveUrl) return;
 
     // Dedupe: skip same-URL non-refresh triggers while a probe is in-flight.
@@ -1094,12 +1110,12 @@ export class LlmProviderComponent implements OnInit {
         baseUrl: string;
         apiKey?: string | null;
         customHeaders?: string | null;
-      } = { provider: this.provider, baseUrl: effectiveUrl };
-      if (this.apiKeyTouched) {
-        args.apiKey = nullIfEmpty(this.apiKey);
+      } = { provider, baseUrl: effectiveUrl };
+      if (this.apiKeyTouched()) {
+        args.apiKey = nullIfEmpty(this.apiKey());
       }
-      if (this.customHeadersTouched) {
-        args.customHeaders = nullIfEmpty(this.customHeaders);
+      if (this.customHeadersTouched()) {
+        args.customHeaders = nullIfEmpty(this.customHeaders());
       }
       const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
         args,
@@ -1113,8 +1129,8 @@ export class LlmProviderComponent implements OnInit {
       this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
       // Auto-select only when blank (a3): a restored-but-unlisted model is a
       // deliberate choice — keep it (the template offers a "not on server" option).
-      if (!this.model && result.models[0]?.id) {
-        this.model = result.models[0].id;
+      if (!this.model() && result.models[0]?.id) {
+        this.model.set(result.models[0].id);
       }
     } catch (e: unknown) {
       const live = this.discoveryState();
@@ -1127,9 +1143,9 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /** Collapsed-row summary of the local server URL. */
-  baseUrlByProviderView(): string {
-    return this.baseUrl || this.baseUrlByProvider['local'] || '';
-  }
+  readonly baseUrlByProviderView = computed<string>(
+    () => this.baseUrl() || this.baseUrlByProvider['local'] || ''
+  );
 
   /** Loads the current Anthropic authentication status from the backend. */
   async loadAuthStatus(): Promise<void> {
@@ -1137,8 +1153,8 @@ export class LlmProviderComponent implements OnInit {
     if (!project) return;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      this.apiKeyConfigured = status.api_key_configured;
-      this.oauthAuthenticated = status.oauth_authenticated;
+      this.apiKeyConfigured.set(status.api_key_configured);
+      this.oauthAuthenticated.set(status.oauth_authenticated);
       this.projectState.applyAuthStatus(status);
     } catch {
       // Auth status check failed — container may not be running.
@@ -1149,26 +1165,27 @@ export class LlmProviderComponent implements OnInit {
   /** Saves the Anthropic API key to the project's secrets directory. */
   async saveAnthropicApiKey(): Promise<void> {
     const project = this.activeProject();
-    if (!project || !this.anthropicApiKeyInput) return;
-    this.anthropicApiKeySaving = true;
-    this.anthropicApiKeySaved = false;
+    const apiKey = this.anthropicApiKeyInput();
+    if (!project || !apiKey) return;
+    this.anthropicApiKeySaving.set(true);
+    this.anthropicApiKeySaved.set(false);
     this.errorOccurred.emit('');
     try {
       await this.tauri.invoke('save_api_key', {
         project,
-        apiKey: this.anthropicApiKeyInput,
+        apiKey,
       });
-      this.anthropicApiKeySaved = true;
-      this.anthropicApiKeyInput = '';
+      this.anthropicApiKeySaved.set(true);
+      this.anthropicApiKeyInput.set('');
       await this.loadAuthStatus();
       setTimeout(() => {
-        this.anthropicApiKeySaved = false;
+        this.anthropicApiKeySaved.set(false);
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-    this.anthropicApiKeySaving = false;
+    this.anthropicApiKeySaving.set(false);
     this.cdr.markForCheck();
   }
 
@@ -1203,9 +1220,10 @@ export class LlmProviderComponent implements OnInit {
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
     // Resolve the active target once — it's stable for this invocation.
     const target = this.effectiveTarget();
+    const model = this.model();
     // Anthropic card active → `this.model`; else the load-time snapshot, so
     // an explicit Anthropic model survives activating another provider.
-    const anthropicModel = target === 'anthropic' ? this.model : this.loadedAnthropicModel;
+    const anthropicModel = target === 'anthropic' ? model : this.loadedAnthropicModel;
     const providers: LlmProviderEntry[] = [
       {
         id: 'anthropic',
@@ -1221,23 +1239,23 @@ export class LlmProviderComponent implements OnInit {
       providers.push({ ...this.loadedLocalEntry });
     } else {
       const localUrl = editingLocal
-        ? this.baseUrl || this.defaultBaseUrl
+        ? this.baseUrl() || this.defaultBaseUrl()
         : this.baseUrlByProvider['local'] || '';
       if (localUrl) {
         providers.push({
           id: 'local',
           kind: 'local',
           base_url: localUrl,
-          model: (editingLocal ? this.model : this.loadedLocalEntry?.model) || null,
-          has_api_key: this.hasApiKey || (this.apiKeyTouched && this.apiKey.trim() !== ''),
+          model: (editingLocal ? model : this.loadedLocalEntry?.model) || null,
+          has_api_key: this.hasApiKey() || (this.apiKeyTouched() && this.apiKey().trim() !== ''),
           has_custom_headers:
-            this.hasCustomHeaders ||
-            (this.customHeadersTouched && this.customHeaders.trim() !== ''),
+            this.hasCustomHeaders() ||
+            (this.customHeadersTouched() && this.customHeaders().trim() !== ''),
           context_tokens: this.resolveContextTokensForSave(),
         });
       }
     }
-    for (const extra of this.extraProviders) {
+    for (const extra of this.extraProviders()) {
       // Only configured rows persist; hasKey drops when the field is cleared.
       const hasKey = extra.keyTouched ? extra.keyInput.trim() !== '' : extra.hasKey;
       const configured = hasKey || extra.model.trim() !== '';
@@ -1260,21 +1278,22 @@ export class LlmProviderComponent implements OnInit {
    * Resolves the radio state to a concrete target id. With no matching extra
    * row, the cards win — `provider` decides (covers programmatic mutation).
    */
-  private effectiveTarget(): string {
-    if (this.extraProviders.some((p) => p.id === this.selectedTarget)) {
-      return this.selectedTarget;
+  private readonly effectiveTarget = computed<string>(() => {
+    const selectedTarget = this.selectedTarget();
+    if (this.extraProviders().some((p) => p.id === selectedTarget)) {
+      return selectedTarget;
     }
-    return this.provider === 'anthropic' ? 'anthropic' : 'local';
-  }
+    return this.provider() === 'anthropic' ? 'anthropic' : 'local';
+  });
 
   /** Save is allowed only when the active non-anthropic provider has a model. */
-  protected canSave(): boolean {
+  protected readonly canSave = computed<boolean>(() => {
     const target = this.effectiveTarget();
     if (target === 'anthropic') return true;
-    const extra = this.extraProviders.find((p) => p.id === target);
+    const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) return !!extra.model.trim();
-    return !!this.model.trim();
-  }
+    return !!this.model().trim();
+  });
 
   /**
    * Finds a permanent remote row by exact id, falling back to kind so legacy
@@ -1284,10 +1303,8 @@ export class LlmProviderComponent implements OnInit {
    * @returns The matching row, or undefined.
    */
   private findExtraRow(id: string, kind?: LlmProviderKind): ExtraProviderEdit | undefined {
-    return (
-      this.extraProviders.find((r) => r.id === id) ??
-      (kind ? this.extraProviders.find((r) => r.kind === kind) : undefined)
-    );
+    const rows = this.extraProviders();
+    return rows.find((r) => r.id === id) ?? (kind ? rows.find((r) => r.kind === kind) : undefined);
   }
 
   /**
@@ -1303,13 +1320,13 @@ export class LlmProviderComponent implements OnInit {
   /** The active selection Save will persist, derived from the radio state. */
   private buildActive(): LlmActive {
     const target = this.effectiveTarget();
-    const extra = this.extraProviders.find((p) => p.id === target);
+    const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) {
       return { provider_id: extra.id, model: extra.model || null };
     }
     return {
       provider_id: target,
-      model: this.model || null,
+      model: this.model() || null,
     };
   }
 
@@ -1336,30 +1353,31 @@ export class LlmProviderComponent implements OnInit {
   async saveConfig(): Promise<void> {
     // Surface the model-required error at Save time; compose::apply_llm_config
     // also rejects it but only at container start (no immediate feedback).
+    const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
-    if (this.provider !== 'anthropic' && !this.model && localIsActive) {
+    if (provider !== 'anthropic' && !this.model() && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
       return;
     }
-    const activeExtra = this.extraProviders.find((p) => p.id === this.effectiveTarget());
+    const activeExtra = this.extraProviders().find((p) => p.id === this.effectiveTarget());
     if (activeExtra && !activeExtra.model.trim()) {
       this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a model name`);
       return;
     }
-    this.saving = true;
-    this.saved = false;
+    this.saving.set(true);
+    this.saved.set(false);
     try {
       const active = this.buildActive();
       // Fall back to provider default if baseUrl blank; compose injects ANTHROPIC_BASE_URL.
       const effectiveBaseUrl =
-        active.provider_id === 'local' ? this.baseUrl || this.defaultBaseUrl || null : null;
+        active.provider_id === 'local' ? this.baseUrl() || this.defaultBaseUrl() || null : null;
       // Input signal — the single project source (drives the restart below).
       const project = this.activeProject();
       // Reuse the cached auth state (loadAuthStatus) — no redundant round-trip.
-      const anthropicHasApiKey = this.apiKeyConfigured;
+      const anthropicHasApiKey = this.apiKeyConfigured();
       // Flat fields mirror v2 providers/active for backend routing; remote row active = remote id.
-      const activeIsRemote = this.extraProviders.some((p) => p.id === active.provider_id);
-      const flatProvider = activeIsRemote ? active.provider_id : this.provider;
+      const activeIsRemote = this.extraProviders().some((p) => p.id === active.provider_id);
+      const flatProvider = activeIsRemote ? active.provider_id : provider;
       const update: {
         provider: string;
         model: string | null;
@@ -1377,14 +1395,14 @@ export class LlmProviderComponent implements OnInit {
         providers: this.buildProviderSet(anthropicHasApiKey),
         active,
       };
-      if (this.apiKeyTouched) {
-        update.api_key = nullIfEmpty(this.apiKey);
+      if (this.apiKeyTouched()) {
+        update.api_key = nullIfEmpty(this.apiKey());
       }
-      if (this.customHeadersTouched) {
-        update.custom_headers = nullIfEmpty(this.customHeaders);
+      if (this.customHeadersTouched()) {
+        update.custom_headers = nullIfEmpty(this.customHeaders());
       }
       // Write keys before config so a failure prevents the config commit (ADR-073).
-      const touchedExtras = this.extraProviders.filter((e) => e.keyTouched);
+      const touchedExtras = this.extraProviders().filter((e) => e.keyTouched);
       for (const extra of touchedExtras) {
         await this.tauri.invoke('set_llm_provider_key', {
           providerId: extra.id,
@@ -1401,21 +1419,22 @@ export class LlmProviderComponent implements OnInit {
         extra.keyInput = '';
         extra.keyTouched = false;
       }
-      this.saved = true;
+      this.extraProviders.set([...this.extraProviders()]);
+      this.saved.set(true);
       // Reset touched flags; update the has_* flags from persisted values.
-      if (this.apiKeyTouched) {
-        this.hasApiKey = !!update.api_key;
-        this.apiKey = '';
-        this.apiKeyTouched = false;
+      if (this.apiKeyTouched()) {
+        this.hasApiKey.set(!!update.api_key);
+        this.apiKey.set('');
+        this.apiKeyTouched.set(false);
       }
-      if (this.customHeadersTouched) {
-        this.hasCustomHeaders = !!update.custom_headers;
-        this.customHeaders = '';
-        this.customHeadersTouched = false;
+      if (this.customHeadersTouched()) {
+        this.hasCustomHeaders.set(!!update.custom_headers);
+        this.customHeaders.set('');
+        this.customHeadersTouched.set(false);
       }
       // Push context tokens so the chat footer updates immediately.
       void this.chatState.refreshLlmConfigCache();
-      this.providerChange.emit(this.provider);
+      this.providerChange.emit(provider);
       // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
       // need a full restart; proxy-path-only changes (base_url) = proxy reload.
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
@@ -1435,13 +1454,13 @@ export class LlmProviderComponent implements OnInit {
       }
       this.loadedActiveKey = activeKey;
       setTimeout(() => {
-        this.saved = false;
+        this.saved.set(false);
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-    this.saving = false;
+    this.saving.set(false);
     this.cdr.markForCheck();
   }
 
@@ -1463,28 +1482,31 @@ export class LlmProviderComponent implements OnInit {
       // Legacy provider names (`ollama`/`lmstudio`/`llamacpp`) show the `local`
       // card + banner; persisted value rewritten only on next Save (downgrade-safe).
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
-        this.legacyMigrationProvider = persistedProvider;
-        this.provider = 'local';
+        this.legacyMigrationProvider.set(persistedProvider);
+        this.provider.set('local');
       } else {
-        this.legacyMigrationProvider = null;
-        this.provider = persistedProvider;
+        this.legacyMigrationProvider.set(null);
+        this.provider.set(persistedProvider);
       }
-      this.model = config.model || '';
-      this.baseUrl = config.base_url || '';
-      this.defaultBaseUrl = config.default_base_url || '';
+      const provider = this.provider();
+      const baseUrl = config.base_url || '';
+      const defaultBaseUrl = config.default_base_url || '';
+      this.model.set(config.model || '');
+      this.baseUrl.set(baseUrl);
+      this.defaultBaseUrl.set(defaultBaseUrl);
       // Seed the context cache so a save preserves the persisted value without discovery.
       this.loadedLocalContextTokens =
-        this.provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
-      this.hasApiKey = !!config.has_api_key;
-      this.hasCustomHeaders = !!config.has_custom_headers;
-      this.lastKnownProvider = this.provider;
+        provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
+      this.hasApiKey.set(!!config.has_api_key);
+      this.hasCustomHeaders.set(!!config.has_custom_headers);
+      this.lastKnownProvider = provider;
       // Seed the cache with the backend-authoritative default for isDefaultBaseUrl.
-      if (this.provider !== 'anthropic' && this.defaultBaseUrl) {
-        this.defaultBaseUrlsByProvider[this.provider] = this.defaultBaseUrl;
+      if (provider !== 'anthropic' && defaultBaseUrl) {
+        this.defaultBaseUrlsByProvider[provider] = defaultBaseUrl;
       }
       // Seed the URL cache so switching away and back preserves the user's URL.
-      if (this.provider !== 'anthropic' && this.baseUrl) {
-        this.baseUrlByProvider[this.provider] = this.baseUrl;
+      if (provider !== 'anthropic' && baseUrl) {
+        this.baseUrlByProvider[provider] = baseUrl;
       }
 
       // v2 provider list: anthropic/local on cards, the rest become remote rows (ADR-073).
@@ -1499,14 +1521,14 @@ export class LlmProviderComponent implements OnInit {
         anthropicEntry?.model ??
         (config.active?.provider_id === 'anthropic' ? (config.active?.model ?? null) : null) ??
         // Legacy/v1 response with no providers[]: fall back to the flat model.
-        (this.provider === 'anthropic' ? this.model || null : null);
+        (provider === 'anthropic' ? this.model() || null : null);
       this.loadedAnthropicModel = candidate && !this.isForeignModel(candidate) ? candidate : null;
-      if (this.provider === 'anthropic') {
-        this.model = this.loadedAnthropicModel ?? '';
+      if (provider === 'anthropic') {
+        this.model.set(this.loadedAnthropicModel ?? '');
       }
       // Overlay persisted entries onto the two permanent rows (id first,
       // then kind so entries saved under older generated ids still land).
-      this.extraProviders = fixedExtraRows();
+      this.extraProviders.set(fixedExtraRows());
       for (const p of config.providers ?? []) {
         if (p.kind !== 'open_router') {
           continue;
@@ -1524,7 +1546,7 @@ export class LlmProviderComponent implements OnInit {
       const activeEntry = (config.providers ?? []).find((p) => p.id === activeId);
       const activeRow = activeId ? this.findExtraRow(activeId, activeEntry?.kind) : undefined;
       if (activeRow) {
-        this.selectedTarget = activeRow.id;
+        this.selectedTarget.set(activeRow.id);
         this.expandedExtraId = activeRow.id;
         // Entry wins (mirror Rust effective_active_model): the row already
         // carries the entry model; use active.model only as a fallback.
@@ -1533,15 +1555,17 @@ export class LlmProviderComponent implements OnInit {
           void this.discoverExtraModels(activeRow);
         }
       } else {
-        this.selectedTarget = this.provider === 'anthropic' ? 'anthropic' : 'local';
+        this.selectedTarget.set(provider === 'anthropic' ? 'anthropic' : 'local');
       }
-      const loadedProviderId = config.active?.provider_id ?? this.selectedTarget;
+      // Publish the row mutations applied above into the signal.
+      this.extraProviders.set([...this.extraProviders()]);
+      const loadedProviderId = config.active?.provider_id ?? this.selectedTarget();
       this.loadedActiveKey = this.computeActiveKey(
         loadedProviderId,
         config.active?.model ?? config.model ?? null,
         config.providers ?? []
       );
-      this.providerChange.emit(this.provider);
+      this.providerChange.emit(provider);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       // Silently ignore the common "not in Tauri" case (browser dev mode).

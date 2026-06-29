@@ -136,11 +136,11 @@ describe('LlmProviderComponent', () => {
   });
 
   it('has correct default values', () => {
-    expect(component.provider).toBe('anthropic');
-    expect(component.model).toBe('');
-    expect(component.baseUrl).toBe('');
-    expect(component.saving).toBe(false);
-    expect(component.saved).toBe(false);
+    expect(component.provider()).toBe('anthropic');
+    expect(component.model()).toBe('');
+    expect(component.baseUrl()).toBe('');
+    expect(component.saving()).toBe(false);
+    expect(component.saved()).toBe(false);
   });
 
   it('loads config on init (legacy `ollama` auto-migrates to `local` with banner)', async () => {
@@ -163,12 +163,12 @@ describe('LlmProviderComponent', () => {
 
     // Legacy provider name auto-migrated to `local` for the UI; the
     // legacyMigrationProvider flag drives the migration banner.
-    expect(component.provider).toBe('local');
-    expect(component.legacyMigrationProvider).toBe('ollama');
-    expect(component.provider).not.toBe('ollama');
-    expect(component.model).toBe('llama3.3');
-    expect(component.baseUrl).toBe('http://localhost:11434');
-    expect(component.defaultBaseUrl).toBe('http://host.docker.internal:11434');
+    expect(component.provider()).toBe('local');
+    expect(component.legacyMigrationProvider()).toBe('ollama');
+    expect(component.provider()).not.toBe('ollama');
+    expect(component.model()).toBe('llama3.3');
+    expect(component.baseUrl()).toBe('http://localhost:11434');
+    expect(component.defaultBaseUrl()).toBe('http://host.docker.internal:11434');
   });
 
   it('emits providerChange on load', async () => {
@@ -211,7 +211,7 @@ describe('LlmProviderComponent', () => {
     const spy = vi.fn();
     component.providerChange.subscribe(spy);
 
-    component.provider = 'ollama';
+    component.provider.set('ollama');
     await component.onProviderChange();
 
     expect(spy).toHaveBeenCalledWith('ollama');
@@ -219,7 +219,7 @@ describe('LlmProviderComponent', () => {
 
   it('returns an empty Anthropic placeholder while the SSOT catalog is loading', () => {
     // No catalog yet (reset in beforeEach) — placeholder is blank until the SSOT loads.
-    component.provider = 'anthropic';
+    component.provider.set('anthropic');
     expect(component.modelPlaceholder()).toBe('');
   });
 
@@ -227,19 +227,19 @@ describe('LlmProviderComponent', () => {
     // Once the catalog loads, the placeholder is the latest non-Opus (Sonnet)
     // model id, not a hard-coded literal.
     await TestBed.inject(AnthropicModelsService).list();
-    component.provider = 'anthropic';
+    component.provider.set('anthropic');
     expect(component.modelPlaceholder()).toBe('claude-sonnet-4-6');
   });
 
   it('returns the local placeholder for non-Anthropic providers', () => {
-    component.provider = 'local';
+    component.provider.set('local');
     expect(component.modelPlaceholder()).toBe('llama3.3');
   });
 
   it('saves config and sets saved flag', async () => {
-    component.provider = 'ollama';
-    component.model = 'llama3.3';
-    component.baseUrl = 'http://localhost:11434';
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     let invokedArgs: Record<string, unknown> = {};
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -256,8 +256,8 @@ describe('LlmProviderComponent', () => {
     expect(update['provider']).toBe('ollama');
     expect(update['model']).toBe('llama3.3');
     expect(update['base_url']).toBe('http://localhost:11434');
-    expect(component.saved).toBe(true);
-    expect(component.saving).toBe(false);
+    expect(component.saved()).toBe(true);
+    expect(component.saving()).toBe(false);
   });
 
   it('emits error on save failure', async () => {
@@ -274,15 +274,15 @@ describe('LlmProviderComponent', () => {
     await component.saveConfig();
 
     expect(errorSpy).toHaveBeenCalledWith('save failed');
-    expect(component.saving).toBe(false);
-    expect(component.saved).toBe(false);
+    expect(component.saving()).toBe(false);
+    expect(component.saved()).toBe(false);
   });
 
   it('emits providerChange on successful save', async () => {
     const spy = vi.fn();
     component.providerChange.subscribe(spy);
-    component.provider = 'ollama';
-    component.model = 'llama3.3';
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
 
     await component.saveConfig();
 
@@ -292,8 +292,8 @@ describe('LlmProviderComponent', () => {
   it('requests container restart on successful save', async () => {
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
-    component.provider = 'ollama';
-    component.model = 'llama3.3';
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
 
     await component.saveConfig();
 
@@ -325,9 +325,9 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'anthropic';
-    component.model = '';
-    component.baseUrl = '';
+    component.provider.set('anthropic');
+    component.model.set('');
+    component.baseUrl.set('');
 
     await component.saveConfig();
 
@@ -352,8 +352,8 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'anthropic';
-    component.model = '';
+    component.provider.set('anthropic');
+    component.model.set('');
     // Make the active selection unchanged so the hot-reload branch fires —
     // derive the key the same way saveConfig will (R6: kind/headers-aware).
     component['loadedActiveKey'] = component['computeActiveKey'](
@@ -383,7 +383,7 @@ describe('LlmProviderComponent', () => {
     };
 
     // Configure the openrouter row with a touched key so the loop runs.
-    const row = component.extraProviders.find((r) => r.id === 'openrouter');
+    const row = component.extraProviders().find((r) => r.id === 'openrouter');
     expect(row).toBeDefined();
     row!.keyInput = 'sk-or-test';
     row!.keyTouched = true;
@@ -393,7 +393,7 @@ describe('LlmProviderComponent', () => {
     expect(calls).toContain('set_llm_provider_key');
     expect(calls).not.toContain('update_llm_config');
     expect(errorSpy).toHaveBeenCalledWith('key write failed');
-    expect(component.saved).toBe(false);
+    expect(component.saved()).toBe(false);
     // The failed key stays editable (not optimistically cleared).
     expect(row!.keyTouched).toBe(true);
     expect(row!.keyInput).toBe('sk-or-test');
@@ -422,8 +422,8 @@ describe('LlmProviderComponent', () => {
         anthropicCatalog: { set: (v: AnthropicModel[]) => void };
       };
       cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
-      component.provider = 'anthropic';
-      component.model = 'claude-opus-4-7';
+      component.provider.set('anthropic');
+      component.model.set('claude-opus-4-7');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBe(1_000_000);
     });
@@ -434,9 +434,9 @@ describe('LlmProviderComponent', () => {
         url: 'http://localhost:11434',
         models: [{ id: 'llama3.3', context_tokens: 32_768 }],
       });
-      component.provider = 'ollama';
-      component.model = 'llama3.3';
-      component.baseUrl = 'http://localhost:11434';
+      component.provider.set('ollama');
+      component.model.set('llama3.3');
+      component.baseUrl.set('http://localhost:11434');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBe(32_768);
     });
@@ -450,16 +450,16 @@ describe('LlmProviderComponent', () => {
       };
       component.discoveryState.set({ kind: 'idle' });
       cmp.loadedLocalContextTokens = 16_384;
-      component.provider = 'ollama';
-      component.model = 'llama3.3';
-      component.baseUrl = 'http://localhost:11434';
+      component.provider.set('ollama');
+      component.model.set('llama3.3');
+      component.baseUrl.set('http://localhost:11434');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBe(16_384);
     });
 
     it('sends null context_tokens when the model is empty', async () => {
-      component.provider = 'anthropic';
-      component.model = '';
+      component.provider.set('anthropic');
+      component.model.set('');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBeNull();
     });
@@ -469,8 +469,8 @@ describe('LlmProviderComponent', () => {
         anthropicCatalog: { set: (v: AnthropicModel[]) => void };
       };
       cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
-      component.provider = 'anthropic';
-      component.model = 'claude-fictional-9-9';
+      component.provider.set('anthropic');
+      component.model.set('claude-fictional-9-9');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBeNull();
     });
@@ -481,9 +481,9 @@ describe('LlmProviderComponent', () => {
     // context window until the next session starts.
     const chatState = TestBed.inject(ChatStateService);
     const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
-    component.provider = 'ollama';
-    component.model = 'llama3.3';
-    component.baseUrl = 'http://localhost:11434';
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
     await component.saveConfig();
     expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
@@ -495,8 +495,8 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'update_llm_config') throw new Error('save failed');
       return undefined;
     };
-    component.provider = 'ollama';
-    component.model = 'llama3.3';
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
     await component.saveConfig();
     expect(refreshSpy).not.toHaveBeenCalled();
   });
@@ -515,7 +515,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('marks the active provider card with aria-checked=true', async () => {
-    component.provider = 'anthropic';
+    component.provider.set('anthropic');
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
@@ -530,8 +530,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('shows a backend-served model dropdown for anthropic (no base_url field)', async () => {
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
     component.ngOnInit();
     await fixture.whenStable();
     fixture.changeDetectorRef.markForCheck();
@@ -653,7 +653,7 @@ describe('LlmProviderComponent', () => {
 
   it('openrouter_discover_disabled_without_key', () => {
     // Discover button is disabled when the API key is empty (gate).
-    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    const row = component.extraProviders().find((p) => p.id === 'openrouter');
     expect(row).toBeTruthy();
     component.selectExtraProvider(row!);
     component.onExtraKeyInput(row!, '');
@@ -664,7 +664,7 @@ describe('LlmProviderComponent', () => {
 
   it('openrouter_discover_enabled_with_key', () => {
     // Key present at first render → button enabled (no OnPush mutation timing).
-    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    const row = component.extraProviders().find((p) => p.id === 'openrouter');
     component.selectExtraProvider(row!);
     component.onExtraKeyInput(row!, 'sk-or-x');
     fixture.detectChanges();
@@ -673,35 +673,35 @@ describe('LlmProviderComponent', () => {
   });
 
   it('disables_save_for_local_without_model', () => {
-    component.provider = 'local';
-    component.selectedTarget = 'local';
-    component.model = '';
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+    component.model.set('');
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(true);
   });
 
   it('enables_save_for_local_with_model', () => {
-    component.provider = 'local';
-    component.selectedTarget = 'local';
-    component.model = 'gemma';
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+    component.model.set('gemma');
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);
   });
 
   it('enables_save_for_anthropic_without_model', () => {
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
-    component.model = '';
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);
   });
 
   it('renders_local_fields_in_order_url_key_discover', () => {
-    component.provider = 'local';
-    component.selectedTarget = 'local';
+    component.provider.set('local');
+    component.selectedTarget.set('local');
     fixture.detectChanges();
     const html = fixture.nativeElement.innerHTML as string;
     const url = html.indexOf('settings-llm-base-url');
@@ -713,9 +713,9 @@ describe('LlmProviderComponent', () => {
   });
 
   it('shows base URL field for ollama provider; model field hidden until discovery', async () => {
-    component.provider = 'ollama';
-    component.selectedTarget = 'local';
-    component.model = '';
+    component.provider.set('ollama');
+    component.selectedTarget.set('local');
+    component.model.set('');
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
@@ -729,8 +729,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('shows model and base URL fields for lmstudio provider', async () => {
-    component.provider = 'lmstudio';
-    component.selectedTarget = 'local';
+    component.provider.set('lmstudio');
+    component.selectedTarget.set('local');
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
@@ -741,8 +741,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('shows model and base URL fields for llamacpp provider', async () => {
-    component.provider = 'llamacpp';
-    component.selectedTarget = 'local';
+    component.provider.set('llamacpp');
+    component.selectedTarget.set('local');
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
@@ -753,9 +753,9 @@ describe('LlmProviderComponent', () => {
   });
 
   it('uses default_base_url from backend as placeholder', async () => {
-    component.provider = 'ollama';
-    component.selectedTarget = 'local';
-    component.defaultBaseUrl = 'http://host.docker.internal:11434';
+    component.provider.set('ollama');
+    component.selectedTarget.set('local');
+    component.defaultBaseUrl.set('http://host.docker.internal:11434');
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
@@ -776,7 +776,7 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'ollama';
+    component.provider.set('ollama');
     await component.saveConfig();
 
     expect(Object.keys(invokedArgs)).not.toContain('apiKeyEnv');
@@ -848,7 +848,7 @@ describe('LlmProviderComponent', () => {
     component.ngOnInit();
     await flushMicrotasks();
     // Discovery is explicit now — no auto-probe on load.
-    component.baseUrl = 'http://host.docker.internal:11434';
+    component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     fixture.detectChanges();
 
@@ -871,11 +871,11 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
-    component.baseUrl = 'http://host.docker.internal:11434';
+    component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     fixture.detectChanges();
 
-    expect(component.model).toBe('llama3.3');
+    expect(component.model()).toBe('llama3.3');
     const select = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-model"]'
     ) as HTMLSelectElement;
@@ -895,8 +895,8 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
-    component.baseUrl = 'http://host.docker.internal:11434';
-    component.model = '';
+    component.baseUrl.set('http://host.docker.internal:11434');
+    component.model.set('');
     await component.discoverModels(true);
     fixture.detectChanges();
 
@@ -925,7 +925,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     expect(discoverCalls.length).toBe(0);
     // Only the explicit button probes.
-    component.baseUrl = 'http://host.docker.internal:11434';
+    component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     expect(discoverCalls.length).toBe(1);
   });
@@ -952,13 +952,13 @@ describe('LlmProviderComponent', () => {
     await component.ngOnInit();
     await fixture.whenStable();
     // A restored model the server no longer lists must survive discovery.
-    component.model = 'restored-not-on-server';
+    component.model.set('restored-not-on-server');
     await component.discoverModels(true);
-    expect(component.model).toBe('restored-not-on-server');
+    expect(component.model()).toBe('restored-not-on-server');
     // But a blank model still auto-selects the first discovered one.
-    component.model = '';
+    component.model.set('');
     await component.discoverModels(true);
-    expect(component.model).toBe('m1');
+    expect(component.model()).toBe('m1');
   });
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
@@ -972,8 +972,8 @@ describe('LlmProviderComponent', () => {
       discover: async () => await hanging,
     });
     // Bypass ngOnInit — set state directly so we can control timing.
-    component.provider = 'ollama';
-    component.baseUrl = 'http://localhost:11434';
+    component.provider.set('ollama');
+    component.baseUrl.set('http://localhost:11434');
     const firstCall = component.discoverModels(false);
     // Same URL, while first is pending → must dedupe.
     await component.discoverModels(false);
@@ -997,13 +997,13 @@ describe('LlmProviderComponent', () => {
       }
       return undefined;
     };
-    component.provider = 'ollama';
-    component.baseUrl = 'http://a.invalid';
+    component.provider.set('ollama');
+    component.baseUrl.set('http://a.invalid');
     const firstCall = component.discoverModels(false);
     // Flush the first invoke so its await on `slow` is reached before we
     // mutate baseUrl (otherwise a change-detection flush may conflate them).
     await Promise.resolve();
-    component.baseUrl = 'http://b.invalid';
+    component.baseUrl.set('http://b.invalid');
     await component.discoverModels(false);
     // Now let the first probe finish with a stale result.
     resolveFirst(['model-from-first']);
@@ -1025,11 +1025,11 @@ describe('LlmProviderComponent', () => {
     component.ngOnInit();
     await flushMicrotasks();
     // Explicit discovery to reach a `ready` state.
-    component.baseUrl = 'http://host.docker.internal:11434';
+    component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     expect(component.discoveryState().kind).toBe('ready');
     // Switching provider resets state to idle — no auto-probe on switch.
-    component.provider = 'lmstudio';
+    component.provider.set('lmstudio');
     await component.onProviderChange();
     expect(component.discoveryState().kind).toBe('idle');
   });
@@ -1047,7 +1047,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(component.model).toBe('legacy');
+    expect(component.model()).toBe('legacy');
     expect(component.discoveryState().kind).toBe('idle');
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).not.toBeNull();
@@ -1083,7 +1083,7 @@ describe('LlmProviderComponent', () => {
     await component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(component.model).toBe('gemma');
+    expect(component.model()).toBe('gemma');
     const field = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(field).toBeTruthy();
     expect(field.tagName).toBe('SELECT');
@@ -1096,10 +1096,10 @@ describe('LlmProviderComponent', () => {
         throw new Error('auth');
       },
     });
-    component.provider = 'local';
-    component.selectedTarget = 'local';
-    component.model = '';
-    component.baseUrl = 'http://host.docker.internal:8888';
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+    component.model.set('');
+    component.baseUrl.set('http://host.docker.internal:8888');
     await component.discoverModels(true);
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
@@ -1124,7 +1124,7 @@ describe('LlmProviderComponent', () => {
     await component.discoverModels(true);
     fixture.detectChanges();
 
-    expect(component.model).toBe('legacy');
+    expect(component.model()).toBe('legacy');
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(select).not.toBeNull();
     expect(select.tagName).toBe('SELECT');
@@ -1202,14 +1202,14 @@ describe('LlmProviderComponent', () => {
     setupDiscoveryMock(mockTauri, { provider: 'ollama' });
     // Seed the counter at a known value via a private-field cast.
     (component as unknown as Record<string, number>)['discoveryCounter'] = 5;
-    component.provider = 'ollama';
+    component.provider.set('ollama');
     // Plant a stale in-flight state with the current (pre-bump) id.
     component.discoveryState.set({
       kind: 'in-flight',
       url: 'http://prev',
       id: 5, // matches seeded counter — will be stale after bump
     });
-    component.provider = 'lmstudio';
+    component.provider.set('lmstudio');
     await component.onProviderChange();
 
     // Counter must have grown beyond 5 (bumped at least once in onProviderChange,
@@ -1237,8 +1237,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('unsupported');
       },
     });
-    component.provider = 'ollama';
-    component.baseUrl = 'http://localhost:11434';
+    component.provider.set('ollama');
+    component.baseUrl.set('http://localhost:11434');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1272,8 +1272,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('empty');
       },
     });
-    component.provider = 'ollama';
-    component.baseUrl = 'http://localhost:11434';
+    component.provider.set('ollama');
+    component.baseUrl.set('http://localhost:11434');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1317,8 +1317,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('auth');
       },
     });
-    component.provider = 'local';
-    component.baseUrl = 'http://host.docker.internal:8888';
+    component.provider.set('local');
+    component.baseUrl.set('http://host.docker.internal:8888');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1339,8 +1339,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('LLM server returned HTTP 500');
       },
     });
-    component.provider = 'local';
-    component.baseUrl = 'http://host.docker.internal:8888';
+    component.provider.set('local');
+    component.baseUrl.set('http://host.docker.internal:8888');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1361,8 +1361,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('LLM server returned an HTML response');
       },
     });
-    component.provider = 'local';
-    component.baseUrl = 'http://host.docker.internal:8888';
+    component.provider.set('local');
+    component.baseUrl.set('http://host.docker.internal:8888');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1382,8 +1382,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('LLM model discovery: request failed: error sending request');
       },
     });
-    component.provider = 'local';
-    component.baseUrl = 'http://host.docker.internal:8888';
+    component.provider.set('local');
+    component.baseUrl.set('http://host.docker.internal:8888');
     await component.discoverModels(false);
 
     expect(component.discoveryState().kind).toBe('failed');
@@ -1409,10 +1409,10 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'ollama';
-    component.baseUrl = '';
-    component.defaultBaseUrl = 'http://host.docker.internal:11434';
-    component.model = 'llama3.3';
+    component.provider.set('ollama');
+    component.baseUrl.set('');
+    component.defaultBaseUrl.set('http://host.docker.internal:11434');
+    component.model.set('llama3.3');
 
     await component.saveConfig();
 
@@ -1439,9 +1439,9 @@ describe('LlmProviderComponent', () => {
       emittedError = msg;
     });
 
-    component.provider = 'ollama';
-    component.baseUrl = 'http://localhost:11434';
-    component.model = '';
+    component.provider.set('ollama');
+    component.baseUrl.set('http://localhost:11434');
+    component.model.set('');
 
     await component.saveConfig();
 
@@ -1460,9 +1460,9 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'anthropic';
-    component.baseUrl = '';
-    component.model = '';
+    component.provider.set('anthropic');
+    component.baseUrl.set('');
+    component.model.set('');
 
     await component.saveConfig();
 
@@ -1472,7 +1472,7 @@ describe('LlmProviderComponent', () => {
   // ── Remote providers (ADR-073) ──────────────────────────────────────────
 
   it('renders the openrouter permanent remote row with no add or remove controls', () => {
-    expect(component.extraProviders.map((p) => p.id)).toEqual(['openrouter']);
+    expect(component.extraProviders().map((p) => p.id)).toEqual(['openrouter']);
     fixture.detectChanges();
 
     const el: HTMLElement = fixture.nativeElement;
@@ -1489,8 +1489,8 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
     await component.saveConfig();
 
     const ids = (captured!['providers'] as Array<Record<string, unknown>>).map((p) => p['id']);
@@ -1498,25 +1498,25 @@ describe('LlmProviderComponent', () => {
   });
 
   it('toggles a row open and closed without changing the active provider', () => {
-    const entry = component.extraProviders[0];
-    const activeBefore = component.selectedTarget;
+    const entry = component.extraProviders()[0];
+    const activeBefore = component.selectedTarget();
 
     component.toggleExtraExpanded(entry);
     expect(component.expandedExtraId).toBe(entry.id);
     component.toggleExtraExpanded(entry);
     expect(component.expandedExtraId).toBeNull();
-    expect(component.selectedTarget).toBe(activeBefore);
+    expect(component.selectedTarget()).toBe(activeBefore);
   });
 
   it('whole-bar click activates a row; second click toggles its panel', () => {
-    const entry = component.extraProviders[0];
+    const entry = component.extraProviders()[0];
 
     component.onExtraHeaderClick(entry);
-    expect(component.selectedTarget).toBe('openrouter');
+    expect(component.selectedTarget()).toBe('openrouter');
     expect(component.expandedExtraId).toBe('openrouter');
 
     component.onExtraHeaderClick(entry);
-    expect(component.selectedTarget).toBe('openrouter');
+    expect(component.selectedTarget()).toBe('openrouter');
     expect(component.expandedExtraId).toBeNull();
 
     component.onExtraHeaderClick(entry);
@@ -1598,8 +1598,8 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     await component.selectProvider('local');
 
-    expect(component.baseUrl).toBe('http://host.docker.internal:9000');
-    expect(component.model).toBe('unsloth/Qwen3.6-35B-A3B');
+    expect(component.baseUrl()).toBe('http://host.docker.internal:9000');
+    expect(component.model()).toBe('unsloth/Qwen3.6-35B-A3B');
   });
 
   it('saves an api key on a non-active row without requiring a model', async () => {
@@ -1612,10 +1612,10 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.onExtraKeyInput(component.extraProviders[0], 'sk-or-v1-fresh');
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-v1-fresh');
 
     await component.saveConfig();
 
@@ -1634,8 +1634,8 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    const extra = component.extraProviders[0];
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    const extra = component.extraProviders()[0];
     extra.model = 'qwen/qwen3-coder';
     component.onExtraKeyInput(extra, 'sk-or-v1-test');
     component.selectExtraProvider(extra);
@@ -1673,10 +1673,10 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
     // Explicit discovery (gated on key) — no auto-discover on expand.
-    component.extraProviders[0].keyInput = 'sk-or-x';
-    await component.discoverExtraModels(component.extraProviders[0]);
+    component.extraProviders()[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1687,9 +1687,9 @@ describe('LlmProviderComponent', () => {
     expect(select.tagName).toBe('SELECT');
     expect(select.textContent).toContain('deepseek/deepseek-v3.2 (164k)');
 
-    component.onExtraModelSelect(component.extraProviders[0], 'qwen/qwen3-coder');
-    expect(component.extraProviders[0].model).toBe('qwen/qwen3-coder');
-    expect(component.extraProviders[0].contextTokens).toBe(262144);
+    component.onExtraModelSelect(component.extraProviders()[0], 'qwen/qwen3-coder');
+    expect(component.extraProviders()[0].model).toBe('qwen/qwen3-coder');
+    expect(component.extraProviders()[0].contextTokens).toBe(262144);
   });
 
   it('openrouter catalog failure hides the model field (no fallback)', async () => {
@@ -1698,9 +1698,9 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.extraProviders[0].keyInput = 'sk-or-x';
-    await component.discoverExtraModels(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.extraProviders()[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1708,7 +1708,7 @@ describe('LlmProviderComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
     ).toBeNull();
-    expect(component.extraProviders[0].models).toBeNull();
+    expect(component.extraProviders()[0].models).toBeNull();
   });
 
   it('marks the saved model selected once the async catalog renders', async () => {
@@ -1724,10 +1724,10 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.extraProviders[0].keyInput = 'sk-or-x';
-    component.extraProviders[0].model = 'deepseek/deepseek-v4-flash';
-    await component.discoverExtraModels(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.extraProviders()[0].keyInput = 'sk-or-x';
+    component.extraProviders()[0].model = 'deepseek/deepseek-v4-flash';
+    await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1746,10 +1746,10 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.extraProviders[0].keyInput = 'sk-or-x';
-    component.extraProviders[0].model = 'vendor/retired-model';
-    await component.discoverExtraModels(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.extraProviders()[0].keyInput = 'sk-or-x';
+    component.extraProviders()[0].model = 'vendor/retired-model';
+    await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
@@ -1770,11 +1770,11 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.extraProviders[0].keyInput = 'sk-or-x';
-    await component.discoverExtraModels(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.extraProviders()[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
-    component.onExtraModelSelect(component.extraProviders[0], 'qwen/qwen3-coder');
+    component.onExtraModelSelect(component.extraProviders()[0], 'qwen/qwen3-coder');
     await component.saveConfig();
 
     const providers = captured!['providers'] as Array<Record<string, unknown>>;
@@ -1791,8 +1791,8 @@ describe('LlmProviderComponent', () => {
     let emitted = '';
     component.errorOccurred.subscribe((msg: string) => (emitted = msg));
 
-    component.toggleExtraExpanded(component.extraProviders[0]);
-    component.selectExtraProvider(component.extraProviders[0]);
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.selectExtraProvider(component.extraProviders()[0]);
     await component.saveConfig();
 
     expect(invoked).toBe(false);
@@ -1827,14 +1827,14 @@ describe('LlmProviderComponent', () => {
     await flushMicrotasks();
 
     expect(component['loadedAnthropicModel']).toBeNull();
-    expect(component.model).toBe('');
+    expect(component.model()).toBe('');
   });
 
   it('selectExtraProvider snapshots a freshly-edited anthropic model (F2/a1)', () => {
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
-    component.model = 'claude-opus-4-8';
-    component.selectExtraProvider(component.extraProviders[0]);
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('claude-opus-4-8');
+    component.selectExtraProvider(component.extraProviders()[0]);
     // The fresh card model is captured so a later Save won't lose it.
     expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
   });
@@ -1871,8 +1871,8 @@ describe('LlmProviderComponent', () => {
 
     expect(component['loadedAnthropicModel']).toBeNull();
     // Switching to anthropic + building the provider set keeps the entry clean.
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
     const built = component['buildProviderSet'](false);
     const anthropic = built.find((p) => p.id === 'anthropic');
     expect(anthropic?.model ?? null).toBeNull();
@@ -1907,7 +1907,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     await flushMicrotasks();
 
-    const row = component.extraProviders.find((p) => p.id === 'openrouter');
+    const row = component.extraProviders().find((p) => p.id === 'openrouter');
     expect(row?.model).toBe('z-ai/glm-5.2');
   });
 
@@ -1924,8 +1924,8 @@ describe('LlmProviderComponent', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
 
     // Anthropic card active, default model — same as the loaded snapshot.
-    component.provider = 'anthropic';
-    component.selectedTarget = 'anthropic';
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
     component['loadedActiveKey'] = component['computeActiveKey'](
       'anthropic',
       null,
@@ -1938,7 +1938,7 @@ describe('LlmProviderComponent', () => {
 
     // Changing the model flips to the full restart.
     calls.length = 0;
-    component.model = 'claude-opus-4-8';
+    component.model.set('claude-opus-4-8');
     await component.saveConfig();
     expect(calls).not.toContain('restart_llm_proxy');
     expect(restartSpy).toHaveBeenCalled();
@@ -1989,7 +1989,7 @@ describe('LlmProviderComponent', () => {
     await flushMicrotasks();
     fixture.detectChanges();
 
-    expect(component.oauthAuthenticated).toBe(true);
+    expect(component.oauthAuthenticated()).toBe(true);
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
       'connected'
@@ -2007,14 +2007,14 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    component.anthropicApiKeyInput = 'sk-ant-test';
+    component.anthropicApiKeyInput.set('sk-ant-test');
 
     await component.saveAnthropicApiKey();
     expect(calls.some(([c, a]) => c === 'save_api_key' && a?.['apiKey'] === 'sk-ant-test')).toBe(
       true
     );
-    expect(component.anthropicApiKeyInput).toBe('');
-    expect(component.apiKeyConfigured).toBe(true);
+    expect(component.anthropicApiKeyInput()).toBe('');
+    expect(component.apiKeyConfigured()).toBe(true);
 
     await component.deleteAnthropicApiKey();
     expect(calls.some(([c]) => c === 'delete_api_key')).toBe(true);
@@ -2033,7 +2033,7 @@ describe('LlmProviderComponent', () => {
 
     await component.onOAuthDone(true);
     expect(statusCalls).toBeGreaterThan(0);
-    expect(component.oauthAuthenticated).toBe(true);
+    expect(component.oauthAuthenticated()).toBe(true);
   });
 
   it('renders the not-configured pill when neither auth method is set up', async () => {
@@ -2062,7 +2062,7 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
     fixture.componentRef.setInput('activeProject', null);
-    component.anthropicApiKeyInput = 'sk-ant-test';
+    component.anthropicApiKeyInput.set('sk-ant-test');
 
     await component.saveAnthropicApiKey();
     await component.deleteAnthropicApiKey();
@@ -2080,7 +2080,7 @@ describe('LlmProviderComponent', () => {
     const errors: string[] = [];
     component.errorOccurred.subscribe((m: string) => errors.push(m));
     fixture.componentRef.setInput('activeProject', 'proj');
-    component.anthropicApiKeyInput = 'sk-ant-test';
+    component.anthropicApiKeyInput.set('sk-ant-test');
 
     await component.saveAnthropicApiKey();
     expect(errors).toContain('keychain locked');
