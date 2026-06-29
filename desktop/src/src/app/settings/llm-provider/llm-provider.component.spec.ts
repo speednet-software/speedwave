@@ -654,6 +654,33 @@ describe('LlmProviderComponent', () => {
     expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
   });
 
+  it('disables_save_for_local_without_model', () => {
+    component.provider = 'local';
+    component.selectedTarget = 'local';
+    component.model = '';
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('enables_save_for_local_with_model', () => {
+    component.provider = 'local';
+    component.selectedTarget = 'local';
+    component.model = 'gemma';
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('enables_save_for_anthropic_without_model', () => {
+    component.provider = 'anthropic';
+    component.selectedTarget = 'anthropic';
+    component.model = '';
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(false);
+  });
+
   it('renders_local_fields_in_order_url_key_discover', () => {
     component.provider = 'local';
     component.selectedTarget = 'local';

@@ -602,7 +602,7 @@ function classifyDiscoveryFailure(msg: string): {
           class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="settings-llm-save"
           (click)="saveConfig()"
-          [disabled]="saving"
+          [disabled]="saving || !canSave()"
         >
           {{ saving ? 'saving...' : 'save' }}
         </button>
@@ -1278,6 +1278,15 @@ export class LlmProviderComponent implements OnInit {
       return this.selectedTarget;
     }
     return this.provider === 'anthropic' ? 'anthropic' : 'local';
+  }
+
+  /** Save is allowed only when the active non-anthropic provider has a model. */
+  protected canSave(): boolean {
+    const target = this.effectiveTarget();
+    if (target === 'anthropic') return true;
+    const extra = this.extraProviders.find((p) => p.id === target);
+    if (extra) return !!extra.model.trim();
+    return !!this.model.trim();
   }
 
   /**
