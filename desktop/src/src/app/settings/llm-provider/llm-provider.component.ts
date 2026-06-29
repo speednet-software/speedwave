@@ -382,7 +382,7 @@ function classifyDiscoveryFailure(msg: string): {
             <button
               type="button"
               data-testid="settings-llm-refresh"
-              class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+              class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               [disabled]="discoveryState().kind === 'in-flight'"
               (click)="discoverModels(true)"
               appTooltip="Fetch the list of models from the server"
@@ -550,7 +550,7 @@ function classifyDiscoveryFailure(msg: string): {
 
               <button
                 type="button"
-                class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+                class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                 [disabled]="entry.discovering || !canDiscoverExtra(entry)"
                 (click)="discoverExtraModels(entry)"
                 [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
