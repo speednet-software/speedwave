@@ -30,6 +30,20 @@ import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+
+/**
+ * True when history fits the target window, or either value is unknown.
+ * @param historyTokens - Approx history size (last successful input_tokens).
+ * @param windowTokens - Target model context window.
+ */
+export function historyFitsTarget(
+  historyTokens: number | null,
+  windowTokens: number | null
+): boolean {
+  if (historyTokens == null || windowTokens == null) return true;
+  return historyTokens < windowTokens;
+}
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -43,6 +57,7 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
     SessionStatsComponent,
     MemoryPanelComponent,
     ConversationsSidebarComponent,
+    ModalOverlayComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
@@ -74,6 +89,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     return -1;
   });
   private resumeInProgress = false;
+
+  /** Controls the context-overflow confirm dialog visibility. */
+  readonly contextOverflowOpen = signal(false);
+  /** Resolves the pending `promptResumeOrFresh` promise when a button is chosen. */
+  private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
   /** Composer reference used to refocus the textarea after parent-driven state resets. */
   @ViewChild('composer') private composer?: { focusInput: () => void };
@@ -159,7 +179,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     // A container restart kills the live session; resume it so the next message
     // keeps context instead of starting fresh.
     this.unsubRestart = this.projectState.onRestartComplete(() => {
-      if (this.lastKnownSessionId) void this.resumeConversation(this.lastKnownSessionId);
+      const id = this.lastKnownSessionId;
+      if (!id) return;
+      if (historyFitsTarget(this.chat.lastSuccessfulInputTokens, this.chat.activeContextTokens)) {
+        void this.resumeConversation(id);
+        return;
+      }
+      void this.promptResumeOrFresh().then((choice) => {
+        if (choice === 'resume') void this.resumeConversation(id);
+        // 'fresh' → leave the new empty session; the displayed transcript stays on screen.
+      });
     });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -490,6 +519,39 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.unsubRestart();
       this.unsubRestart = null;
     }
+    // Dismiss any pending context-overflow dialog.
+    this.contextOverflowResolve?.('fresh');
+    this.contextOverflowResolve = null;
+    this.contextOverflowOpen.set(false);
+  }
+
+  /**
+   * Shows a confirm dialog when history exceeds the target window; resolves with
+   * the user's choice or `'resume'` on programmatic close (destroy or Esc).
+   */
+  promptResumeOrFresh(): Promise<'resume' | 'fresh'> {
+    this.contextOverflowResolve?.('fresh');
+    return new Promise<'resume' | 'fresh'>((resolve) => {
+      this.contextOverflowResolve = resolve;
+      this.contextOverflowOpen.set(true);
+      this.cdr.markForCheck();
+    });
+  }
+
+  /** Called when the user chooses "Resume anyway" in the context-overflow dialog. */
+  onContextOverflowResume(): void {
+    this.contextOverflowOpen.set(false);
+    const resolve = this.contextOverflowResolve;
+    this.contextOverflowResolve = null;
+    resolve?.('resume');
+  }
+
+  /** Called when the user chooses "Start fresh" in the context-overflow dialog. */
+  onContextOverflowFresh(): void {
+    this.contextOverflowOpen.set(false);
+    const resolve = this.contextOverflowResolve;
+    this.contextOverflowResolve = null;
+    resolve?.('fresh');
   }
 }
 

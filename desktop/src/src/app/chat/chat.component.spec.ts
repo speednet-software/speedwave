@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
-import { ChatComponent } from './chat.component';
+import { ChatComponent, historyFitsTarget } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -1097,6 +1097,69 @@ describe('ChatComponent', () => {
       chatState.isStreaming = true;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── historyFitsTarget pure predicate ───────────────────────────────────────
+
+  describe('historyFitsTarget', () => {
+    it('historyFitsTarget: fits, exceeds, and unknown', () => {
+      expect(historyFitsTarget(8000, 131072)).toBe(true);
+      expect(historyFitsTarget(25229, 8192)).toBe(false);
+      expect(historyFitsTarget(null, 8192)).toBe(true); // unknown size → allow
+      expect(historyFitsTarget(25229, null)).toBe(true); // unknown window → allow
+    });
+  });
+
+  // ── pre-flight context check on restart ────────────────────────────────────
+
+  describe('pre-flight context check on restart', () => {
+    it('on restart: shows choice when history exceeds target window', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh').mockResolvedValue('fresh');
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
+      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(25229);
+      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
+      await fireRestartComplete(projectState);
+      expect(choiceSpy).toHaveBeenCalled();
+      expect(resumeSpy).not.toHaveBeenCalled(); // 'fresh' → no resume
+    });
+
+    it('on restart: resumes silently when history fits', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
+      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(4000);
+      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(131072);
+      await fireRestartComplete(projectState);
+      expect(resumeSpy).toHaveBeenCalledWith('s1');
+    });
+
+    it('on restart: resumes when choice is resume', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh').mockResolvedValue('resume');
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
+      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(25229);
+      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
+      await fireRestartComplete(projectState);
+      expect(choiceSpy).toHaveBeenCalled();
+      expect(resumeSpy).toHaveBeenCalledWith('s1');
+    });
+
+    it('on restart: resumes silently when history is unknown (null)', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
+      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(null);
+      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
+      await fireRestartComplete(projectState);
+      expect(resumeSpy).toHaveBeenCalledWith('s1');
     });
   });
 

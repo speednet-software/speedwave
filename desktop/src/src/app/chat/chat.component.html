@@ -1,3 +1,20 @@
+@if (contextOverflowOpen()) {
+  <app-modal-overlay
+    [open]="contextOverflowOpen()"
+    kicker="⚠ context window"
+    kickerColor="amber"
+    modalTitle="History exceeds model window"
+    body="This conversation's history is larger than the selected model's window. Resume anyway, or start fresh on this model?"
+    primaryLabel="Resume anyway"
+    secondaryLabel="Start fresh"
+    testId="context-overflow-overlay"
+    primaryTestId="context-overflow-resume"
+    secondaryTestId="context-overflow-fresh"
+    (primary)="onContextOverflowResume()"
+    (secondary)="onContextOverflowFresh()"
+    (closed)="onContextOverflowFresh()"
+  />
+}
 @if (projectState.status === 'ready') {
   <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
     <!-- Left overlay drawer: conversations history. Mounts as a singleton and

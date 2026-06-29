@@ -97,6 +97,11 @@ export class ChatStateService {
     return this._lastSuccessfulInputTokens;
   }
 
+  /** Context window for the active provider from `get_llm_config()`; `null` until populated. */
+  get activeContextTokens(): number | null {
+    return this._persistedContextTokens;
+  }
+
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
