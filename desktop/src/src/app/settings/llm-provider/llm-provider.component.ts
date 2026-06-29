@@ -433,28 +433,28 @@ function classifyDiscoveryFailure(msg: string): {
                 @if (discoveryState.kind === 'ready') {
                   <select
                     id="llm-model"
-                    [value]="model"
                     (change)="onLocalModelChange($any($event.target).value)"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     data-testid="settings-llm-model"
                   >
                     @if (model && !discoveredModelIds().includes(model)) {
-                      <option [value]="model">{{ model }} (not on server)</option>
+                      <option [value]="model" [selected]="true">{{ model }} (not on server)</option>
                     }
                     @for (m of discoveryState.models; track m.id) {
-                      <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
+                      <option [value]="m.id" [selected]="m.id === model">
+                        {{ formatLocalModelLabel(m) }}
+                      </option>
                     }
                   </select>
                 } @else {
                   <!-- Saved config: show the model without re-probing. -->
                   <select
                     id="llm-model"
-                    [value]="model"
                     (change)="onLocalModelChange($any($event.target).value)"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     data-testid="settings-llm-model"
                   >
-                    <option [value]="model">{{ model }}</option>
+                    <option [value]="model" [selected]="true">{{ model }}</option>
                   </select>
                 }
               </div>
@@ -520,13 +520,48 @@ function classifyDiscoveryFailure(msg: string): {
             <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
           </button>
           @if (expandedExtraId === entry.id) {
-            <div
-              class="grid grid-cols-1 gap-2 border-t border-[var(--line)] px-3 py-3 md:grid-cols-2"
-            >
+            <!-- Order: api_key → discover → model (only after catalog loads),
+                 matching the local card. -->
+            <div class="border-t border-[var(--line)] px-3 py-3">
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                [attr.for]="'extra-key-' + entry.id"
+                >api_key</label
+              >
+              <input
+                [id]="'extra-key-' + entry.id"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                [value]="entry.keyInput"
+                (input)="onExtraKeyInput(entry, $any($event.target).value)"
+                [placeholder]="
+                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
+                "
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
+              />
+
+              <button
+                type="button"
+                class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+                [disabled]="entry.discovering || !canDiscoverExtra(entry)"
+                (click)="discoverExtraModels(entry)"
+                [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
+              >
+                {{ entry.discovering ? '↻ discovering...' : '↻ discover models' }}
+              </button>
+
               @if (entry.models && entry.models.length > 0) {
-                <div class="flex items-center gap-2">
+                <div class="mt-3">
+                  <label
+                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    [attr.for]="'extra-model-' + entry.id"
+                    >default_model</label
+                  >
                   <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
                   <select
+                    [id]="'extra-model-' + entry.id"
                     (change)="onExtraModelSelect(entry, $any($event.target).value)"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
@@ -542,55 +577,8 @@ function classifyDiscoveryFailure(msg: string): {
                       </option>
                     }
                   </select>
-                  <button
-                    type="button"
-                    class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-40"
-                    [disabled]="entry.discovering || !canDiscoverExtra(entry)"
-                    (click)="discoverExtraModels(entry)"
-                    [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
-                  >
-                    {{ entry.discovering ? '…' : '↻' }}
-                  </button>
-                </div>
-              } @else {
-                <div class="flex items-center gap-2">
-                  <input
-                    type="text"
-                    [value]="entry.model"
-                    (input)="entry.model = $any($event.target).value"
-                    [placeholder]="
-                      entry.kind === 'open_router'
-                        ? 'model (e.g. qwen/qwen3-coder)'
-                        : 'model (e.g. gpt-5.2)'
-                    "
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
-                  />
-                  @if (entry.kind === 'open_router') {
-                    <button
-                      type="button"
-                      class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-40"
-                      [disabled]="entry.discovering || !canDiscoverExtra(entry)"
-                      (click)="discoverExtraModels(entry)"
-                      [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
-                    >
-                      {{ entry.discovering ? '…' : '↻' }}
-                    </button>
-                  }
                 </div>
               }
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                [value]="entry.keyInput"
-                (input)="onExtraKeyInput(entry, $any($event.target).value)"
-                [placeholder]="
-                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
-                "
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
-              />
             </div>
           }
         </div>

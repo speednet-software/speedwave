@@ -865,6 +865,28 @@ describe('LlmProviderComponent', () => {
     expect(opts).toContain('qwen2.5');
   });
 
+  it('selects_the_auto_chosen_model_in_the_dropdown', async () => {
+    // After discovery the first model is auto-selected; the <select> must show
+    // it (the rendered option must be marked selected, not left blank).
+    setupDiscoveryMock(mockTauri, {
+      provider: 'ollama',
+      discover: async () => ['llama3.3', 'qwen2.5'],
+    });
+    component.ngOnInit();
+    await flushMicrotasks();
+    component.baseUrl = 'http://host.docker.internal:11434';
+    await component.discoverModels(true);
+    fixture.detectChanges();
+
+    expect(component.model).toBe('llama3.3');
+    const select = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-model"]'
+    ) as HTMLSelectElement;
+    expect(select.value).toBe('llama3.3');
+    const selectedOption = select.querySelector('option:checked') as HTMLOptionElement | null;
+    expect(selectedOption?.value).toBe('llama3.3');
+  });
+
   it('keeps_input_on_offline_failure', async () => {
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
@@ -1665,20 +1687,22 @@ describe('LlmProviderComponent', () => {
     expect(component.extraProviders[0].contextTokens).toBe(262144);
   });
 
-  it('openrouter catalog failure keeps the free-text model input', async () => {
+  it('openrouter catalog failure hides the model field (no fallback)', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'discover_llm_models') throw new Error('empty');
       return undefined;
     };
 
     component.toggleExtraExpanded(component.extraProviders[0]);
+    component.extraProviders[0].keyInput = 'sk-or-x';
+    await component.discoverExtraModels(component.extraProviders[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
-    const input = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-extra-model-openrouter"]'
-    ) as HTMLInputElement;
-    expect(input.tagName).toBe('INPUT');
+    // No catalog → no model field (model select appears only after success).
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
+    ).toBeNull();
     expect(component.extraProviders[0].models).toBeNull();
   });
 
