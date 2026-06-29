@@ -1236,12 +1236,8 @@ describe('ChatComponent', () => {
           total_output_tokens: 0,
         },
       });
-      // Angular effects are synchronous in zoneless when the signal changes in the
-      // same microtask; call TestBed.flushEffects() if available, else detectChanges.
-      if (typeof (fixture as unknown as { ngZone: unknown }).ngZone === 'undefined') {
-        fixture.detectChanges();
-      }
-      fixture.detectChanges();
+      // Flush all pending signal effects registered in the constructor.
+      TestBed.flushEffects();
       expect((component as unknown as { lastKnownSessionId: string }).lastKnownSessionId).toBe(
         'new'
       );
