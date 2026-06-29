@@ -92,6 +92,12 @@ it carries `extra_hosts` for local backends) but not from the Desktop host
 process. Host-side probes call `http_util::rewrite_container_alias_to_loopback`.
 SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
+A saved local `base_url` is canonicalized to `HOST_GATEWAY_ALIAS` on save
+(`compose::canonicalize_local_base_url`): a loopback host (`127.0.0.0/8`,
+`localhost`, `::1`) becomes `host.docker.internal` so the persisted value is the
+one the proxy container can reach — discovery reverses it host-side via
+`rewrite_container_alias_to_loopback`.
+
 ## Authentication bypass
 
 `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only

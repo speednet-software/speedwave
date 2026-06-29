@@ -276,6 +276,29 @@ pub fn strip_trailing_v1(url: &str) -> String {
     }
 }
 
+/// Rewrites a loopback host (127.0.0.0/8, `localhost`, ::1) to
+/// `HOST_GATEWAY_ALIAS`; non-loopback hosts and bad input pass through.
+pub fn canonicalize_local_base_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
+        Some(url::Host::Ipv6(v6)) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback())
+        }
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if !is_loopback {
+        return url.to_string();
+    }
+    if parsed.set_host(Some(consts::HOST_GATEWAY_ALIAS)).is_err() {
+        return url.to_string();
+    }
+    parsed.as_str().to_string()
+}
+
 /// Returns the default base URL for a known local model provider.
 /// `"local"` defaults to the Ollama port.
 pub fn default_base_url(provider: &str) -> Option<String> {

@@ -59,8 +59,8 @@ pub(crate) use llm::apply_llm_config_in;
 #[cfg(test)]
 use llm::provider_display_label;
 pub use llm::{
-    default_base_url, read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1,
-    validate_base_url,
+    canonicalize_local_base_url, default_base_url, read_local_llm_token_opt,
+    read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
 // Plugin compose injection.
@@ -4104,6 +4104,95 @@ services:
         // Regression: trailing slash without /v1 must be stripped too, else double-slash request paths.
         assert_eq!(strip_trailing_v1("http://x:8080/"), "http://x:8080");
         assert_eq!(strip_trailing_v1("http://x:8080///"), "http://x:8080");
+    }
+
+    // `url::Url` adds a trailing `/` to a host-only authority; the save path's
+    // later `strip_trailing_v1` removes it. Tests assert the exact returned form.
+    #[test]
+    fn canonicalize_rewrites_loopback_hosts_to_gateway_alias() {
+        let alias = crate::consts::HOST_GATEWAY_ALIAS;
+        // Happy: the common loopback forms a user types for a local LLM.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1:1234"),
+            format!("http://{alias}:1234/")
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://localhost:11434"),
+            format!("http://{alias}:11434/")
+        );
+        // Case-insensitive localhost (mirrors validate_url).
+        assert_eq!(
+            canonicalize_local_base_url("http://LocalHost:8080"),
+            format!("http://{alias}:8080/")
+        );
+        // Whole 127.0.0.0/8 loopback range, not just 127.0.0.1.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.5:1234"),
+            format!("http://{alias}:1234/")
+        );
+        // IPv6 loopback and IPv6-mapped IPv4 loopback.
+        assert_eq!(
+            canonicalize_local_base_url("http://[::1]:1234"),
+            format!("http://{alias}:1234/")
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://[::ffff:127.0.0.1]:1234"),
+            format!("http://{alias}:1234/")
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_scheme_port_path_and_is_idempotent() {
+        let alias = crate::consts::HOST_GATEWAY_ALIAS;
+        // Path preserved (the /v1 strip is a separate step).
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1:1234/v1"),
+            format!("http://{alias}:1234/v1")
+        );
+        // Scheme preserved.
+        assert_eq!(
+            canonicalize_local_base_url("https://127.0.0.1:1234"),
+            format!("https://{alias}:1234/")
+        );
+        // No port — the host swaps, nothing else.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1"),
+            format!("http://{alias}/")
+        );
+        // Already canonical → unchanged (idempotent).
+        let already = format!("http://{alias}:1234/");
+        assert_eq!(canonicalize_local_base_url(&already), already);
+    }
+
+    #[test]
+    fn canonicalize_leaves_non_loopback_hosts_untouched() {
+        // Non-loopback hosts are returned verbatim (no re-serialization), so a
+        // real remote server's exact string is preserved.
+        assert_eq!(
+            canonicalize_local_base_url("http://192.168.5.10:1234"),
+            "http://192.168.5.10:1234"
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://10.0.0.4:8080"),
+            "http://10.0.0.4:8080"
+        );
+        // Public domain — untouched.
+        assert_eq!(
+            canonicalize_local_base_url("https://api.example.com/"),
+            "https://api.example.com/"
+        );
+        // 0.0.0.0 is not a loopback the user would target — untouched.
+        assert_eq!(
+            canonicalize_local_base_url("http://0.0.0.0:1234"),
+            "http://0.0.0.0:1234"
+        );
+    }
+
+    #[test]
+    fn canonicalize_returns_input_unchanged_on_parse_failure() {
+        // Malformed input is returned verbatim — validation runs separately.
+        assert_eq!(canonicalize_local_base_url("not-a-url"), "not-a-url");
+        assert_eq!(canonicalize_local_base_url(""), "");
     }
 
     #[test]

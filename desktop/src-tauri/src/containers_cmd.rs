@@ -947,7 +947,17 @@ fn apply_llm_config(
 /// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
 /// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
-pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
+pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
+    // Canonicalize loopback hosts before validation so the persisted base_url
+    // is the one the proxy container can reach.
+    if config::is_local_provider(update.provider.as_deref()) {
+        if let Some(url) = update.base_url.as_deref() {
+            update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+        }
+    }
+    if let Some(ref mut providers) = update.providers {
+        canonicalize_provider_base_urls(providers);
+    }
     log::info!(
         "update_llm_config: provider={:?} model={:?} context_tokens={:?} \
          api_key_change={} custom_headers_change={}",
@@ -1120,6 +1130,19 @@ fn validate_active_selection(
 
 /// Validates a v2 provider list before save (ADR-073): slug ids, no
 /// duplicates, SSRF-clean base URLs where the kind requires one.
+/// Rewrites local entries' loopback base_url to the gateway alias; non-local
+/// and non-loopback entries are left untouched.
+fn canonicalize_provider_base_urls(providers: &mut [speedwave_runtime::config::LlmProviderEntry]) {
+    use speedwave_runtime::config::LlmProviderKind;
+    for entry in providers {
+        if entry.kind == LlmProviderKind::Local {
+            if let Some(url) = entry.base_url.as_deref() {
+                entry.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+            }
+        }
+    }
+}
+
 fn validate_provider_entries(
     providers: &[speedwave_runtime::config::LlmProviderEntry],
 ) -> Result<(), String> {
@@ -1709,6 +1732,49 @@ mod tests {
             context_tokens: None,
             has_custom_headers: false,
         }
+    }
+
+    #[test]
+    fn canonicalize_provider_base_urls_rewrites_only_local_loopback() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let mut providers = vec![
+            // Local loopback → rewritten to the gateway alias.
+            v2_entry("local", K::Local, Some("http://127.0.0.1:1234")),
+            // Local localhost → rewritten.
+            v2_entry("local2", K::Local, Some("http://localhost:11434")),
+            // Local non-loopback (real LAN box) → untouched.
+            v2_entry("remote", K::Local, Some("http://192.168.5.10:1234")),
+            // Non-local kinds → never touched, even with a base_url present.
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+        ];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(
+            providers[0].base_url.as_deref(),
+            Some(format!("http://{alias}:1234/").as_str())
+        );
+        assert_eq!(
+            providers[1].base_url.as_deref(),
+            Some(format!("http://{alias}:11434/").as_str())
+        );
+        assert_eq!(
+            providers[2].base_url.as_deref(),
+            Some("http://192.168.5.10:1234"),
+            "real LAN server must not be rewritten"
+        );
+        assert_eq!(providers[3].base_url, None);
+        assert_eq!(providers[4].base_url, None);
+    }
+
+    #[test]
+    fn canonicalize_provider_base_urls_is_idempotent() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let canonical = format!("http://{alias}:1234/");
+        let mut providers = vec![v2_entry("local", K::Local, Some(&canonical))];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(providers[0].base_url.as_deref(), Some(canonical.as_str()));
     }
 
     #[test]
