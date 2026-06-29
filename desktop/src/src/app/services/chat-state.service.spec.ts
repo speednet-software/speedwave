@@ -2053,6 +2053,18 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('lastSuccessfulInputTokens', () => {
+    it('exposes input_tokens from the last successful Result and survives reset', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 's1', usage: { input_tokens: 24771, output_tokens: 20 } },
+      });
+      expect(service.lastSuccessfulInputTokens).toBe(24771);
+      (service as unknown as { resetCoreStreamState(): void }).resetCoreStreamState();
+      expect(service.lastSuccessfulInputTokens).toBe(24771); // durable across reset
+    });
+  });
+
   describe('copyMessage', () => {
     let copySpy: ReturnType<typeof vi.fn>;
 

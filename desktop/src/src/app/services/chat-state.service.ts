@@ -92,9 +92,15 @@ export class ChatStateService {
   /** Read-only signal mirror so OnPush components re-render on stats changes. */
   readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
+  /** input_tokens from the most recent successful Result; survives stream reset. */
+  get lastSuccessfulInputTokens(): number | null {
+    return this._lastSuccessfulInputTokens;
+  }
+
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
+  private _lastSuccessfulInputTokens: number | null = null;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -699,6 +705,9 @@ export class ChatStateService {
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
+        if (typeof chunk.data.usage?.input_tokens === 'number') {
+          this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
+        }
         // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
