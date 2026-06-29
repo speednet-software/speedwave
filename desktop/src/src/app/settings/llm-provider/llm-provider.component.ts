@@ -335,102 +335,24 @@ function classifyDiscoveryFailure(msg: string): {
 
         @if (selectedTarget === 'local') {
           <div class="border-t border-[var(--line)] px-3 py-3">
-            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-base-url"
-                  >base_url</label
-                >
-                <input
-                  id="llm-base-url"
-                  type="text"
-                  [value]="baseUrl"
-                  (input)="baseUrl = $any($event.target).value"
-                  [placeholder]="defaultBaseUrl"
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  data-testid="settings-llm-base-url"
-                />
-              </div>
-              <div>
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-model"
-                  >default_model</label
-                >
-                @if (discoveryState.kind === 'ready') {
-                  <select
-                    id="llm-model"
-                    [value]="model"
-                    (change)="onLocalModelChange($any($event.target).value)"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  >
-                    @if (model && !discoveredModelIds().includes(model)) {
-                      <option [value]="model">{{ model }} (not on server)</option>
-                    }
-                    @for (m of discoveryState.models; track m.id) {
-                      <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
-                    }
-                  </select>
-                } @else if (hasSavedModel()) {
-                  <!-- Saved config: show the model without re-probing. No free-text
-                       fallback — the field exists only with a real model. -->
-                  <select
-                    id="llm-model"
-                    [value]="model"
-                    (change)="onLocalModelChange($any($event.target).value)"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  >
-                    <option [value]="model">{{ model }}</option>
-                  </select>
-                }
-                @if (discoveryState.kind === 'failed') {
-                  <p
-                    class="mono mt-1 text-[11px] text-[var(--amber)]"
-                    data-testid="settings-llm-discovery-error"
-                  >
-                    {{ discoveryFailureMessage() }}
-                  </p>
-                }
-                @if (discoveryState.kind === 'in-flight') {
-                  <p
-                    class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                    data-testid="settings-llm-discovering"
-                  >
-                    Probing {{ discoveryState.url }}...
-                  </p>
-                }
-              </div>
-            </div>
-
-            <button
-              type="button"
-              data-testid="settings-llm-refresh"
-              class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
-              [disabled]="discoveryState.kind === 'in-flight'"
-              (click)="discoverModels(true)"
-              appTooltip="Fetch the list of models from the server"
-              placement="top"
-            >
-              @if (discoveryState.kind === 'in-flight') {
-                &#8635; discovering...
-              } @else {
-                &#8635; discover models
-              }
-            </button>
-
-            @if (messagesEndpointOk === false) {
-              <div
-                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
-                data-testid="settings-llm-messages-endpoint-warning"
+            <!-- Order: base_url → api_key → discover → model (only after a
+                 successful discover or a saved model) → advanced. -->
+            <div>
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                for="llm-base-url"
+                >base_url</label
               >
-                <strong>Warning:</strong> the server returned a model list but did not respond to
-                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
-                will fail.
-              </div>
-            }
+              <input
+                id="llm-base-url"
+                type="text"
+                [value]="baseUrl"
+                (input)="baseUrl = $any($event.target).value"
+                [placeholder]="defaultBaseUrl"
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-base-url"
+              />
+            </div>
 
             <!-- Bearer for servers requiring auth; on a load-balanced cluster
                  a unique per-user value also pins session stickiness. -->
@@ -456,6 +378,87 @@ function classifyDiscoveryFailure(msg: string): {
                 data-testid="settings-llm-api-key"
               />
             </div>
+
+            <button
+              type="button"
+              data-testid="settings-llm-refresh"
+              class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+              [disabled]="discoveryState.kind === 'in-flight'"
+              (click)="discoverModels(true)"
+              appTooltip="Fetch the list of models from the server"
+              placement="top"
+            >
+              @if (discoveryState.kind === 'in-flight') {
+                &#8635; discovering...
+              } @else {
+                &#8635; discover models
+              }
+            </button>
+
+            @if (discoveryState.kind === 'failed') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-discovery-error"
+              >
+                {{ discoveryFailureMessage() }}
+              </p>
+            }
+            @if (discoveryState.kind === 'in-flight') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-llm-discovering"
+              >
+                Probing {{ discoveryState.url }}...
+              </p>
+            }
+
+            @if (messagesEndpointOk === false) {
+              <div
+                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-messages-endpoint-warning"
+              >
+                <strong>Warning:</strong> the server returned a model list but did not respond to
+                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
+                will fail.
+              </div>
+            }
+
+            @if (discoveryState.kind === 'ready' || hasSavedModel()) {
+              <div class="mt-3">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-model"
+                  >default_model</label
+                >
+                @if (discoveryState.kind === 'ready') {
+                  <select
+                    id="llm-model"
+                    [value]="model"
+                    (change)="onLocalModelChange($any($event.target).value)"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-llm-model"
+                  >
+                    @if (model && !discoveredModelIds().includes(model)) {
+                      <option [value]="model">{{ model }} (not on server)</option>
+                    }
+                    @for (m of discoveryState.models; track m.id) {
+                      <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
+                    }
+                  </select>
+                } @else {
+                  <!-- Saved config: show the model without re-probing. -->
+                  <select
+                    id="llm-model"
+                    [value]="model"
+                    (change)="onLocalModelChange($any($event.target).value)"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-llm-model"
+                  >
+                    <option [value]="model">{{ model }}</option>
+                  </select>
+                }
+              </div>
+            }
 
             <details class="mt-3">
               <summary

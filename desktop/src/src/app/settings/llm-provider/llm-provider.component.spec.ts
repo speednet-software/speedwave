@@ -654,6 +654,19 @@ describe('LlmProviderComponent', () => {
     expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
   });
 
+  it('renders_local_fields_in_order_url_key_discover', () => {
+    component.provider = 'local';
+    component.selectedTarget = 'local';
+    fixture.detectChanges();
+    const html = fixture.nativeElement.innerHTML as string;
+    const url = html.indexOf('settings-llm-base-url');
+    const key = html.indexOf('settings-llm-api-key');
+    const disc = html.indexOf('settings-llm-refresh');
+    expect(url).toBeGreaterThan(-1);
+    expect(url).toBeLessThan(key);
+    expect(key).toBeLessThan(disc);
+  });
+
   it('shows base URL field for ollama provider; model field hidden until discovery', async () => {
     component.provider = 'ollama';
     component.selectedTarget = 'local';
