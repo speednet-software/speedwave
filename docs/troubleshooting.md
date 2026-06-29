@@ -1,5 +1,28 @@
 # Troubleshooting
 
+## Local LLM: models discover but chat fails silently
+
+**Symptom:** A local provider (LM Studio / Ollama / llama.cpp) lists models in
+Settings, but a chat with that model never answers.
+
+**Cause:** A `base_url` with a loopback host (`http://127.0.0.1:<port>`,
+`localhost`) reaches the LLM during host-side discovery but not during a session:
+sessions originate inside the proxy container, where `127.0.0.1` is the
+container itself, not the host running the LLM.
+
+**Recovery:** Re-save the provider in Settings → LLM providers. Loopback hosts
+are now canonicalized to `http://host.docker.internal:<port>`, which the proxy
+container can reach. New saves are fixed automatically.
+
+**Note:** The provider form discovers models only when you click **discover
+models** (after entering the base URL and any API key) — it no longer probes
+automatically. The model field and Save appear only after a successful
+discovery (or a previously saved model). A discovery failure shows a specific
+reason (authentication failed → check the API key; reachable but HTTP error;
+not reachable → server down).
+
+---
+
 ## Chat session ends immediately ("ended unexpectedly") on a managed enterprise account
 
 **Symptom:** Every Desktop chat turn or CLI session exits right after start with
