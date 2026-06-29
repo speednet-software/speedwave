@@ -862,6 +862,35 @@ describe('LlmProviderComponent', () => {
     expect(opts).toContain('qwen2.5');
   });
 
+  it('editing_base_url_resets_discovery_and_model', async () => {
+    // Configured (model + ready list), then the user edits the URL → the stale
+    // list and model must clear so Save is disabled until a fresh discover.
+    setupDiscoveryMock(mockTauri, { provider: 'ollama', discover: async () => ['m1', 'm2'] });
+    component.ngOnInit();
+    await flushMicrotasks();
+    component.baseUrl.set('http://host.docker.internal:11434');
+    await component.discoverModels(true);
+    expect(component.discoveryState().kind).toBe('ready');
+    expect(component.model()).toBe('m1');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
+      false
+    );
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-base-url"]'
+    ) as HTMLInputElement;
+    input.value = 'http://host.docker.internal:1234';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+
+    expect(component.baseUrl()).toBe('http://host.docker.internal:1234');
+    expect(component.discoveryState().kind).toBe('idle');
+    expect(component.model()).toBe('');
+    const saveBtn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(saveBtn.disabled).toBe(true);
+  });
+
   it('selects_the_auto_chosen_model_in_the_dropdown', async () => {
     // After discovery the first model is auto-selected; the <select> must show
     // it (the rendered option must be marked selected, not left blank).

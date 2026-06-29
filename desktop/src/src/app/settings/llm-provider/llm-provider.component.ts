@@ -347,7 +347,7 @@ function classifyDiscoveryFailure(msg: string): {
                 id="llm-base-url"
                 type="text"
                 [value]="baseUrl()"
-                (input)="baseUrl.set($any($event.target).value)"
+                (input)="onBaseUrlInput($any($event.target).value)"
                 [placeholder]="defaultBaseUrl()"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-base-url"
@@ -803,6 +803,18 @@ export class LlmProviderComponent implements OnInit {
    */
   protected onLocalModelChange(id: string): void {
     this.model.set(id);
+  }
+
+  /**
+   * Base-URL edit resets stale discovery + model, so Save re-gates on a fresh
+   * discover against the new server.
+   * @param value - New base URL typed by the user.
+   */
+  protected onBaseUrlInput(value: string): void {
+    this.baseUrl.set(value);
+    this.discoveryState.set({ kind: 'idle' });
+    this.model.set('');
+    this.messagesEndpointOk.set(null);
   }
 
   /**
