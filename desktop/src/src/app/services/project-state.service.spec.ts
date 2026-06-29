@@ -1287,6 +1287,22 @@ describe('ProjectStateService', () => {
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
     });
+
+    it('awaits onRestartBegin callbacks before restarting containers', async () => {
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        await Promise.resolve();
+        order.push('begin');
+      });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('restart');
+        return undefined;
+      };
+      // activeProject must be set for restartContainers to proceed.
+      (service as unknown as { activeProject: string }).activeProject = 'p';
+      await service.restartContainers();
+      expect(order).toEqual(['begin', 'restart']);
+    });
   });
 
   describe('unhealthySummary', () => {

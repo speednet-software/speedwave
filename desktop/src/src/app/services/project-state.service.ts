@@ -89,6 +89,7 @@ export class ProjectStateService {
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
   private restartListeners: Array<() => void> = [];
+  private restartBeginListeners: Array<() => Promise<void>> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -129,6 +130,28 @@ export class ProjectStateService {
   /** Fires the restart-complete listeners (test seam + restart path). */
   notifyRestartComplete(): void {
     for (const cb of this.restartListeners) cb();
+  }
+
+  /**
+   * Subscribe to fire (and be awaited) BEFORE a container restart begins.
+   * @param cb - The callback to invoke before restart; returning a rejected promise does not block.
+   */
+  onRestartBegin(cb: () => Promise<void>): () => void {
+    this.restartBeginListeners.push(cb);
+    return () => {
+      this.restartBeginListeners = this.restartBeginListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Awaits all begin-callbacks; a failing pre-restart hook must not block the restart. */
+  private async notifyRestartBegin(): Promise<void> {
+    for (const cb of this.restartBeginListeners) {
+      try {
+        await cb();
+      } catch {
+        /* intentional: see method doc */
+      }
+    }
   }
 
   /**
@@ -428,6 +451,7 @@ export class ProjectStateService {
 
     let restartedOk = false;
     try {
+      await this.notifyRestartBegin();
       await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;
