@@ -1108,6 +1108,7 @@ describe('ChatComponent', () => {
       expect(historyFitsTarget(25229, 8192)).toBe(false);
       expect(historyFitsTarget(null, 8192)).toBe(true); // unknown size → allow
       expect(historyFitsTarget(25229, null)).toBe(true); // unknown window → allow
+      expect(historyFitsTarget(8192, 8192)).toBe(false); // equal → does NOT fit → dialog
     });
   });
 
@@ -1131,11 +1132,13 @@ describe('ChatComponent', () => {
       projectState.activeProject = 'test';
       await component.ngOnInit();
       const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
       (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
       vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(4000);
       vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(131072);
       await fireRestartComplete(projectState);
       expect(resumeSpy).toHaveBeenCalledWith('s1');
+      expect(choiceSpy).not.toHaveBeenCalled();
     });
 
     it('on restart: resumes when choice is resume', async () => {
@@ -1155,11 +1158,24 @@ describe('ChatComponent', () => {
       projectState.activeProject = 'test';
       await component.ngOnInit();
       const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
       (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
       vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(null);
       vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
       await fireRestartComplete(projectState);
       expect(resumeSpy).toHaveBeenCalledWith('s1');
+      expect(choiceSpy).not.toHaveBeenCalled();
+    });
+
+    it('on restart: does nothing when lastKnownSessionId is null', async () => {
+      projectState.activeProject = 'test';
+      await component.ngOnInit();
+      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
+      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
+      (component as unknown as { lastKnownSessionId: string | null }).lastKnownSessionId = null;
+      await fireRestartComplete(projectState);
+      expect(resumeSpy).not.toHaveBeenCalled();
+      expect(choiceSpy).not.toHaveBeenCalled();
     });
   });
 

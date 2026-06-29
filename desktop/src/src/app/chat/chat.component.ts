@@ -527,7 +527,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /**
    * Shows a confirm dialog when history exceeds the target window; resolves with
-   * the user's choice or `'resume'` on programmatic close (destroy or Esc).
+   * the user's choice or `'fresh'` on programmatic close (destroy or Esc).
    */
   promptResumeOrFresh(): Promise<'resume' | 'fresh'> {
     this.contextOverflowResolve?.('fresh');
