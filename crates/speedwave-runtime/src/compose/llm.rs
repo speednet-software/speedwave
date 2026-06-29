@@ -322,8 +322,8 @@ pub(crate) fn provider_display_label(provider: &str) -> &'static str {
     }
 }
 
-/// Env keys a `speedwave login` session must clear so Claude Code runs the
-/// Anthropic OAuth `/login` instead of a non-Anthropic provider's route.
+/// Env keys `speedwave login` clears so Anthropic OAuth runs unshadowed by a
+/// non-Anthropic provider. Excludes re-exported BASE_URL + cache-only ATTRIBUTION_HEADER.
 pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
     &[
         "ANTHROPIC_AUTH_TOKEN",
@@ -396,8 +396,9 @@ mod tests {
 
     #[test]
     fn login_unset_keys_cover_local_proxy_env() {
-        // Render the local proxy env and confirm every model/aux key it sets
-        // (except ANTHROPIC_BASE_URL) is in the login unset list.
+        // BASE_URL is re-exported by login; ATTRIBUTION_HEADER is OAuth-neutral
+        // (prompt-cache only) — both deliberately stay off the unset list.
+        const OAUTH_NEUTRAL: &[&str] = &["ANTHROPIC_BASE_URL", "CLAUDE_CODE_ATTRIBUTION_HEADER"];
         let cfg = crate::config::LlmConfig {
             providers: vec![crate::config::LlmProviderEntry {
                 id: "local".into(),
@@ -415,7 +416,8 @@ mod tests {
             proxy_enabled: Some(true),
             ..Default::default()
         };
-        let rendered = apply_llm_config_proxy("services: {}", &cfg).unwrap();
+        let rendered =
+            apply_llm_config_proxy("services:\n  claude:\n    environment: []\n", &cfg).unwrap();
         let unset: std::collections::HashSet<&str> =
             anthropic_login_unset_keys().iter().copied().collect();
         for line in rendered.lines() {
@@ -423,7 +425,7 @@ mod tests {
             if let Some((key, _)) = t.split_once('=') {
                 let key = key.trim();
                 if (key.starts_with("ANTHROPIC_") || key.starts_with("CLAUDE_CODE_"))
-                    && key != "ANTHROPIC_BASE_URL"
+                    && !OAUTH_NEUTRAL.contains(&key)
                 {
                     assert!(unset.contains(key), "login unset list is missing `{key}`");
                 }
