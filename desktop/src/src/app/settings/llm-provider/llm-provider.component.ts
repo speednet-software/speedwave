@@ -84,11 +84,35 @@ function nullIfEmpty(value: string): string | null {
  * Discovery state for the LLM model listing (discriminated union). `in-flight.id`
  * matches the monotonic counter; non-latest responses are discarded as stale.
  */
+type DiscoveryFailureReason = 'offline' | 'unsupported' | 'other' | 'auth' | 'server-error';
+
 type DiscoveryState =
   | { kind: 'idle' }
   | { kind: 'in-flight'; url: string; id: number }
   | { kind: 'ready'; url: string; models: DiscoveredModel[] }
-  | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
+  | { kind: 'failed'; url: string; reason: DiscoveryFailureReason; status?: number };
+
+/** Backend Err-string prefix (discovery.rs) for a non-auth HTTP status. */
+const HTTP_STATUS_ERR_PREFIX = 'LLM server returned HTTP ';
+
+/**
+ * Maps a discovery Err string to a reason + status (contract: discovery.rs).
+ * @param msg - Backend Err string from `discover_llm_models`.
+ */
+function classifyDiscoveryFailure(msg: string): {
+  reason: DiscoveryFailureReason;
+  status?: number;
+} {
+  if (msg === 'unsupported') return { reason: 'unsupported' };
+  if (msg === 'empty') return { reason: 'other' };
+  if (msg === 'auth') return { reason: 'auth' };
+  if (msg === 'LLM server returned an HTML response') return { reason: 'server-error' };
+  if (msg.startsWith(HTTP_STATUS_ERR_PREFIX)) {
+    const n = parseInt(msg.slice(HTTP_STATUS_ERR_PREFIX.length), 10);
+    return Number.isNaN(n) ? { reason: 'server-error' } : { reason: 'server-error', status: n };
+  }
+  return { reason: 'offline' };
+}
 
 /** Manages LLM provider selection and configuration. */
 @Component({
@@ -324,7 +348,6 @@ type DiscoveryState =
                   [value]="baseUrl"
                   (input)="baseUrl = $any($event.target).value"
                   [placeholder]="defaultBaseUrl"
-                  (blur)="discoverModels(false)"
                   class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                   data-testid="settings-llm-base-url"
                 />
@@ -973,6 +996,14 @@ export class LlmProviderComponent implements OnInit {
     switch (this.discoveryState.reason) {
       case 'offline':
         return `${label} server not reachable at ${url}. Make sure it's running and the local server is enabled.`;
+      case 'auth':
+        return `Authentication failed — check the API key.`;
+      case 'server-error': {
+        const code = this.discoveryState.status;
+        return code
+          ? `${label} at ${url} is reachable but returned HTTP ${code}.`
+          : `${label} at ${url} is reachable but returned an unexpected (non-JSON) response.`;
+      }
       case 'unsupported':
         return `${label} does not support model discovery — type the model name manually.`;
       case 'other':
@@ -1031,10 +1062,7 @@ export class LlmProviderComponent implements OnInit {
     // back to the provider's backend-authoritative default. Anthropic has no baseUrl.
     const cached = this.baseUrlByProvider[this.provider];
     this.baseUrl = this.provider === 'anthropic' ? '' : cached || this.defaultBaseUrl;
-    // discoverModels self-gates on anthropic and empty URL — no outer guard needed.
-    if (this.baseUrl) {
-      await this.discoverModels(false);
-    }
+    // No auto-probe on switch — discovery is explicit (the discover button only).
   }
 
   /**
@@ -1091,13 +1119,8 @@ export class LlmProviderComponent implements OnInit {
     } catch (e: unknown) {
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
       const msg = e instanceof Error ? e.message : String(e);
-      let reason: 'offline' | 'unsupported' | 'other' = 'offline';
-      if (msg === 'unsupported') {
-        reason = 'unsupported';
-      } else if (msg === 'empty') {
-        reason = 'other';
-      }
-      this.discoveryState = { kind: 'failed', url: effectiveUrl, reason };
+      const { reason, status } = classifyDiscoveryFailure(msg);
+      this.discoveryState = { kind: 'failed', url: effectiveUrl, reason, status };
       // No errorOccurred.emit — discovery failure is silent degradation
       // (UI falls back to the free-text input).
     } finally {
@@ -1522,14 +1545,6 @@ export class LlmProviderComponent implements OnInit {
       }
     }
     this.cdr.markForCheck();
-    // Auto-probe only defaults; user-supplied URLs need an explicit trigger (SSRF mitigation).
-    const effectiveUrl = this.baseUrl || this.defaultBaseUrl;
-    const isSafeToAutoProbe =
-      this.provider !== 'anthropic' &&
-      !!effectiveUrl &&
-      (this.baseUrl === '' || this.isDefaultBaseUrl(this.provider, this.baseUrl));
-    if (isSafeToAutoProbe) {
-      await this.discoverModels(false);
-    }
+    // No auto-probe on load — a saved model renders from config; discovery is explicit.
   }
 }

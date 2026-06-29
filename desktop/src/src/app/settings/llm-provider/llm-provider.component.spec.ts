@@ -787,9 +787,10 @@ describe('LlmProviderComponent', () => {
       discover: async () => ['llama3.3', 'qwen2.5'],
     });
     component.ngOnInit();
-    // loadConfig is fire-and-forget inside ngOnInit; flush all queued micro-
-    // tasks (loadConfig → auto-probe discoverModels) before assertions.
     await flushMicrotasks();
+    // Discovery is explicit now — no auto-probe on load.
+    component.baseUrl = 'http://host.docker.internal:11434';
+    await component.discoverModels(true);
     fixture.detectChanges();
 
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
@@ -813,11 +814,14 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
+    component.baseUrl = 'http://host.docker.internal:11434';
+    component.model = '';
+    await component.discoverModels(true);
     fixture.detectChanges();
 
+    // No free-text fallback — the model field is hidden on failure (Task 2).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(el).not.toBeNull();
-    expect(el.tagName).toBe('INPUT');
+    expect(el).toBeNull();
     expect(component.discoveryState.kind).toBe('failed');
     expect(errorSpy).not.toHaveBeenCalled();
   });
@@ -829,7 +833,8 @@ describe('LlmProviderComponent', () => {
     expect(discoverCalls.length).toBe(0);
   });
 
-  it('blur_retriggers_discovery', async () => {
+  it('does_not_probe_on_load_or_switch', async () => {
+    // Explicit-discovery: neither init/load nor a provider switch probes.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       defaultBaseUrl: 'http://host.docker.internal:11434',
@@ -837,10 +842,11 @@ describe('LlmProviderComponent', () => {
     });
     await component.ngOnInit();
     await fixture.whenStable();
-    const callsAfterInit = discoverCalls.length;
-    component.baseUrl = 'http://localhost:1234';
-    await component.discoverModels(false);
-    expect(discoverCalls.length).toBeGreaterThan(callsAfterInit);
+    expect(discoverCalls.length).toBe(0);
+    // Only the explicit button probes.
+    component.baseUrl = 'http://host.docker.internal:11434';
+    await component.discoverModels(true);
+    expect(discoverCalls.length).toBe(1);
   });
 
   it('refresh_button_invokes_discovery_bypassing_dedupe', async () => {
@@ -936,15 +942,14 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
+    // Explicit discovery to reach a `ready` state.
+    component.baseUrl = 'http://host.docker.internal:11434';
+    await component.discoverModels(true);
     expect(component.discoveryState.kind).toBe('ready');
-    // Switching provider resets state synchronously. The new provider has a
-    // known defaultBaseUrl so the new discovery probe fires immediately,
-    // moving state to `in-flight` — either way the stale `ready` is cleared.
+    // Switching provider resets state to idle — no auto-probe on switch.
     component.provider = 'lmstudio';
-    const p = component.onProviderChange();
-    expect(['idle', 'in-flight']).toContain(component.discoveryState.kind);
-    expect(component.discoveryState.kind).not.toBe('ready');
-    await p;
+    await component.onProviderChange();
+    expect(component.discoveryState.kind).toBe('idle');
   });
 
   it('preserves_legacy_model_spoza_listy', async () => {
@@ -971,11 +976,9 @@ describe('LlmProviderComponent', () => {
     expect(el.tagName).toBe('INPUT');
   });
 
-  it('preserves_legacy_model_when_default_url_auto_probed', async () => {
-    // When baseUrl is empty (falls back to default), auto-probe fires and
-    // discovery returns a list. If the persisted model is in the list, it is
-    // kept; if not, the first discovered model is auto-selected. Either way
-    // the model <select> is rendered with all discovered options.
+  it('explicit_discovery_renders_all_options_and_keeps_listed_model', async () => {
+    // No auto-probe on load. After an explicit discover the model <select>
+    // renders all options; a persisted model present in the list is kept.
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       model: 'legacy',
@@ -985,6 +988,7 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
+    await component.discoverModels(true);
     fixture.detectChanges();
 
     expect(component.model).toBe('legacy');
@@ -1155,6 +1159,98 @@ describe('LlmProviderComponent', () => {
       return m;
     })();
     expect(otherMsg).not.toBe(offlineMsg);
+  });
+
+  // ── DiscoveryState.reason: auth / server-error categories ────────────
+
+  // Helper: the message reason='offline' would produce, for not-equal asserts.
+  const offlineMessageFor = (url: string): string => {
+    const saved = component.discoveryState;
+    component.discoveryState = { kind: 'failed', url, reason: 'offline' };
+    const m = component.discoveryFailureMessage();
+    component.discoveryState = saved;
+    return m;
+  };
+
+  it('maps_auth_error_to_auth_reason', async () => {
+    // Backend returns Err("auth") for HTTP 401/403 — bad or missing API key.
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('auth');
+      },
+    });
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(false);
+
+    expect(component.discoveryState.kind).toBe('failed');
+    if (component.discoveryState.kind === 'failed') {
+      expect(component.discoveryState.reason).toBe('auth');
+    }
+    const msg = component.discoveryFailureMessage();
+    expect(msg).toContain('API key');
+    // The core bug: 401 must NOT be reported as offline/not reachable.
+    expect(msg).not.toBe(offlineMessageFor('http://host.docker.internal:8888'));
+  });
+
+  it('maps_http_status_error_to_server_error_reason', async () => {
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('LLM server returned HTTP 500');
+      },
+    });
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(false);
+
+    expect(component.discoveryState.kind).toBe('failed');
+    if (component.discoveryState.kind === 'failed') {
+      expect(component.discoveryState.reason).toBe('server-error');
+      expect(component.discoveryState.status).toBe(500);
+    }
+    const msg = component.discoveryFailureMessage();
+    expect(msg).toContain('500');
+    expect(msg).not.toBe(offlineMessageFor('http://host.docker.internal:8888'));
+  });
+
+  it('maps_html_response_to_server_error_without_status', async () => {
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('LLM server returned an HTML response');
+      },
+    });
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(false);
+
+    expect(component.discoveryState.kind).toBe('failed');
+    if (component.discoveryState.kind === 'failed') {
+      expect(component.discoveryState.reason).toBe('server-error');
+      expect(component.discoveryState.status).toBeUndefined();
+    }
+    expect(component.discoveryFailureMessage().length).toBeGreaterThan(0);
+  });
+
+  it('keeps_connect_failure_as_offline', async () => {
+    // A true connection failure must stay offline — regression guard.
+    setupDiscoveryMock(mockTauri, {
+      provider: 'local',
+      discover: async () => {
+        throw new Error('LLM model discovery: request failed: error sending request');
+      },
+    });
+    component.provider = 'local';
+    component.baseUrl = 'http://host.docker.internal:8888';
+    await component.discoverModels(false);
+
+    expect(component.discoveryState.kind).toBe('failed');
+    if (component.discoveryState.kind === 'failed') {
+      expect(component.discoveryState.reason).toBe('offline');
+    }
+    expect(component.discoveryFailureMessage()).toContain('not reachable');
   });
 
   // ── saveConfig: effectiveBaseUrl fallback for local providers ─────────
