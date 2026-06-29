@@ -23,6 +23,18 @@ not reachable → server down).
 
 ---
 
+## Switching LLM provider keeps the conversation
+
+**Behavior:** Changing the active LLM provider (Settings → LLM providers) keeps
+the conversation you're viewing — the new model resumes it with full history.
+A streaming turn is interrupted first, then the session resumes after the
+container restart.
+
+**If the history is too large for the new model:** you're asked to **Resume
+anyway** or **Start fresh on this model** before the switch, instead of hitting
+a silent context-overflow. Pick a larger-window model, or start fresh, if the
+history doesn't fit. Switching on an empty conversation just starts clean.
+
 ## Chat session ends immediately ("ended unexpectedly") on a managed enterprise account
 
 **Symptom:** Every Desktop chat turn or CLI session exits right after start with
