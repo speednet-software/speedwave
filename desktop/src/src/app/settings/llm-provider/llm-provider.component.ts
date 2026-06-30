@@ -689,6 +689,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private loadedActiveKey = '';
 
   /**
+   * Whole-form fingerprint on load, gating `canSave` (see `computeFormSnapshot`).
+   * A signal so `isDirty`'s `computed()` invalidates on every reassignment.
+   */
+  private loadedFormSnapshot = signal('');
+
+  /** Join state for the initial load race — see `maybeSnapshotInitialLoad`. */
+  private initialConfigLoaded = false;
+  private initialAuthStatusLoaded = false;
+
+  /**
    * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config,
    * else `null`. Drives the migration banner; rewrite to `local` waits for Save.
    */
@@ -743,7 +753,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   constructor() {
     effect(() => {
       if (this.activeProject()) {
-        void this.loadAuthStatus();
+        // Only the first firing races loadConfig() (ngOnInit); join it into the
+        // initial-load snapshot. Later firings (project switch) are refreshes —
+        // re-snapshotting there would mask real dirty state (see saveAnthropicApiKey
+        // and friends below, which never join either).
+        const isInitialLoad = !this.initialAuthStatusLoaded;
+        void this.loadAuthStatus().then(() => {
+          if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
+        });
         this.startOauthCompletionPoll();
       }
     });
@@ -1425,8 +1442,62 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return this.provider() === 'anthropic' ? 'anthropic' : 'local';
   });
 
-  /** Save is allowed only when the active non-anthropic provider has a model. */
+  /**
+   * Whole-form fingerprint of every dirty-relevant live value, compared
+   * against `loadedFormSnapshot` to gate `canSave`. String-concat mirrors
+   * the existing `computeActiveKey` idiom rather than a deep-equal dependency.
+   */
+  private computeFormSnapshot(): string {
+    const extras = this.extraProviders()
+      .map((e) => `${e.id}:${e.model}:${e.keyTouched}`)
+      .join(',');
+    return [
+      this.selectedTarget(),
+      this.provider(),
+      this.authMethod(),
+      this.apiKeyConfigured(),
+      this.model(),
+      this.oauthAuthenticated(),
+      this.baseUrl(),
+      this.apiKeyTouched(),
+      this.customHeadersTouched(),
+      extras,
+    ].join('|');
+  }
+
+  /**
+   * Marks one half of the initial-load join done and snapshots once both
+   * `loadConfig()` and the first `loadAuthStatus()` have settled — whichever
+   * finishes second triggers it, so neither a half-seeded form nor a stale
+   * auth flag gets frozen into `loadedFormSnapshot`. With no active project
+   * the constructor effect never calls `loadAuthStatus()` at all, so that
+   * half is satisfied vacuously rather than left waiting on a call that will
+   * never fire.
+   * @param half - Which load leg just completed.
+   */
+  private maybeSnapshotInitialLoad(half: 'config' | 'authStatus'): void {
+    if (half === 'config') {
+      this.initialConfigLoaded = true;
+    } else {
+      this.initialAuthStatusLoaded = true;
+    }
+    const authHalfDone = this.initialAuthStatusLoaded || !this.activeProject();
+    if (this.initialConfigLoaded && authHalfDone) {
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
+    }
+  }
+
+  /** True once the live form differs from the snapshot captured at load/save. */
+  protected readonly isDirty = computed<boolean>(
+    () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
+  );
+
+  /**
+   * Save is allowed only when the active non-anthropic provider has a model
+   * AND the user has actually changed something since load/last save.
+   */
   protected readonly canSave = computed<boolean>(() => {
+    if (!this.isDirty()) return false;
     const target = this.effectiveTarget();
     // Anthropic needs no model but DOES need credentials (oauth or api key).
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
@@ -1602,6 +1673,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.projectState.requestRestart();
       }
       this.loadedActiveKey = activeKey;
+      // Touched flags are already cleared above, so this reflects the saved state.
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
       setTimeout(() => {
         this.saved.set(false);
         this.cdr.markForCheck();
@@ -1711,6 +1784,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.log.error(`loadConfig: unexpected error loading LLM config: ${msg}`);
       }
     }
+    // Always mark this half done, even on error — else the join hangs forever
+    // and isDirty()/canSave() get stuck wrong (see maybeSnapshotInitialLoad).
+    this.maybeSnapshotInitialLoad('config');
     this.cdr.markForCheck();
     // No auto-probe on load — a saved model renders from config; discovery is explicit.
   }
