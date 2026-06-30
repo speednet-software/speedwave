@@ -7,5 +7,5 @@ import { ProjectStateService } from '../services/project-state.service';
 export const authRequiredGuard: CanActivateFn = () => {
   const router = inject(Router);
   const projectState = inject(ProjectStateService);
-  return projectState.status === 'auth_required' ? router.createUrlTree(['/settings']) : true;
+  return projectState.status() === 'auth_required' ? router.createUrlTree(['/settings']) : true;
 };

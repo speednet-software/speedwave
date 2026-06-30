@@ -172,7 +172,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
-      if (this.projectState.status === 'auth_required') {
+      if (this.projectState.status() === 'auth_required') {
         this.router.navigate(['/settings']);
       }
     });

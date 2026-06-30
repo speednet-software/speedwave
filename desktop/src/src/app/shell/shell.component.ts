@@ -44,8 +44,8 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
     <div
       class="flex h-screen flex-col border-t border-[var(--line)] bg-[var(--bg)] text-[var(--ink)]"
     >
-      @if (projectState.status !== 'ready' && projectState.status !== 'auth_required') {
-        @if (projectState.status === 'check_failed') {
+      @if (projectState.status() !== 'ready' && projectState.status() !== 'auth_required') {
+        @if (projectState.status() === 'check_failed') {
           <div
             class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[var(--bg)]"
             data-testid="blocking-check-failed"
@@ -65,7 +65,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
               Retry
             </button>
           </div>
-        } @else if (projectState.status === 'error') {
+        } @else if (projectState.status() === 'error') {
           <div
             class="mono flex items-center justify-between border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-[13px] text-red-300"
             data-testid="blocking-error"
@@ -103,7 +103,7 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
       }
       @if (
         projectState.needsRestart &&
-        (projectState.status === 'ready' || projectState.status === 'auth_required')
+        (projectState.status() === 'ready' || projectState.status() === 'auth_required')
       ) {
         @if (projectState.restarting) {
           <div
@@ -232,7 +232,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   ];
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
-  private readonly statusSignal = signal(this.projectState.status);
+  private readonly statusSignal = signal(this.projectState.status());
 
   /** Nav entries to render: chat always visible; meeting-transcription beta-gated (ADR-058/056). */
   readonly visibleEntries = computed(() =>
@@ -252,7 +252,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Human-readable copy for the blocking overlay, keyed off projectState.status. */
   get statusMessage(): string {
-    switch (this.projectState.status) {
+    switch (this.projectState.status()) {
       case 'loading':
         return 'Loading...';
       case 'system_check':
@@ -274,7 +274,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
-      this.statusSignal.set(this.projectState.status);
+      this.statusSignal.set(this.projectState.status());
       this.cdr.markForCheck();
     });
     this.routerSub = this.router.events

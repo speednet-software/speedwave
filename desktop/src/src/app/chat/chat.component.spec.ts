@@ -147,7 +147,7 @@ describe('ChatComponent', () => {
   describe('shell composition', () => {
     it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
       projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       await component.ngOnInit();
       fixture.detectChanges();
 
@@ -324,7 +324,7 @@ describe('ChatComponent', () => {
   // ── composer integration ─────────────────────────────────────────────────
   describe('composer integration', () => {
     it('mounts app-composer when a live session is active', async () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
@@ -991,12 +991,12 @@ describe('ChatComponent', () => {
       const router = TestBed.inject(Router);
       const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
 
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       await component.ngOnInit();
       fixture.detectChanges();
 
       // Simulate auth expiry via notifyChange
-      projectState.status = 'auth_required';
+      projectState.status.set('auth_required');
       projectState['notifyChange']();
 
       expect(navigateSpy).toHaveBeenCalledWith(['/settings']);
@@ -1007,7 +1007,7 @@ describe('ChatComponent', () => {
   describe('Stop button and ESC handler', () => {
     it('shows Stop button when streaming, hides it when idle', () => {
       // Send button lives in <app-composer>; chat.component owns only the Stop button.
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       chatState.isStreaming = false;
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeNull();
@@ -1021,7 +1021,7 @@ describe('ChatComponent', () => {
     });
 
     it('clicking Stop calls stopConversation', () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
       // isStreamingFromState() refreshes only after notifyChange rebuilds the tree.
@@ -1069,7 +1069,7 @@ describe('ChatComponent', () => {
     });
 
     it('Stop button still stops when an unanswered ask_user block is active', () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
       chatState._setState({

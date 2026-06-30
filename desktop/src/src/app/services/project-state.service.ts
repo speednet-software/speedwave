@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import type {
@@ -61,7 +61,7 @@ export class ProjectStateService {
   targetProject: string | null = null;
   /** All configured projects from `~/.speedwave/config.json`. */
   projects: ProjectEntry[] = [];
-  status: ProjectStatus = 'loading';
+  readonly status = signal<ProjectStatus>('loading');
   error = '';
   needsRestart = false;
   restarting = false;
@@ -191,7 +191,7 @@ export class ProjectStateService {
         'get_bundle_reconcile_state'
       );
       if (bundleStatus.in_progress) {
-        this.status = 'rebuilding';
+        this.status.set('rebuilding');
         this.notifyChange();
       } else {
         await this.ensureContainersRunning();
@@ -204,7 +204,7 @@ export class ProjectStateService {
       // Inside Tauri the initial project/reconcile lookup genuinely failed;
       // surface it instead of leaving the UI stuck on the loading overlay.
       const msg = err instanceof Error ? err.message : String(err);
-      this.status = 'error';
+      this.status.set('error');
       this.error = msg;
       this.log.error(`[ProjectStateService] init failed: ${msg}`);
       this.notifyChange();
@@ -225,42 +225,42 @@ export class ProjectStateService {
   /** Checks OS prereqs, then verifies containers are running, starting them if not. */
   async ensureContainersRunning(): Promise<void> {
     if (
-      this.status === 'system_check' ||
-      this.status === 'checking' ||
-      this.status === 'starting' ||
-      this.status === 'auth_required'
+      this.status() === 'system_check' ||
+      this.status() === 'checking' ||
+      this.status() === 'starting' ||
+      this.status() === 'auth_required'
     ) {
       return; // guard: already in progress
     }
     if (!this.activeProject) {
-      this.status = 'error';
+      this.status.set('error');
       this.error = 'No active project selected.';
       this.notifyChange();
       return;
     }
 
     // Phase 1: OS prerequisite check
-    this.status = 'system_check';
+    this.status.set('system_check');
     this.error = '';
     this.notifyChange();
     try {
       await this.tauri.invoke('run_system_check');
     } catch (err) {
-      this.status = 'check_failed';
+      this.status.set('check_failed');
       this.error = String(err);
       this.notifyChange();
       return;
     }
 
     // Phase 2: check/start containers (includes SecurityCheck in backend)
-    this.status = 'checking';
+    this.status.set('checking');
     this.notifyChange();
     try {
       const running = await this.tauri.invoke<boolean>('check_containers_running', {
         project: this.activeProject,
       });
       if (!running) {
-        this.status = 'starting';
+        this.status.set('starting');
         this.notifyChange();
         // Backend ensure_images_ready() blocks up to 600s (RECONCILE_WAIT_TIMEOUT in containers_cmd.rs).
         // The 'starting' overlay stays visible for the duration.
@@ -273,19 +273,19 @@ export class ProjectStateService {
       if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
-        this.status = 'ready';
+        this.status.set('ready');
       } else {
-        this.status = 'auth_required';
+        this.status.set('auth_required');
       }
     } catch (err) {
       const msg = String(err);
       // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
       if (msg.startsWith('System check failed:')) {
-        this.status = 'check_failed';
+        this.status.set('check_failed');
         this.errorKind = undefined;
       } else if (msg.startsWith(CLOUDSTORAGE_TCC_PREFIX)) {
         // CloudStorage TCC denial — parse "{stable_id}|{dir}" from the prefix.
-        this.status = 'error';
+        this.status.set('error');
         this.errorKind = 'cloudstorage_tcc_required';
         const body = msg.slice(CLOUDSTORAGE_TCC_PREFIX.length);
         const pipeIdx = body.indexOf('|');
@@ -294,19 +294,19 @@ export class ProjectStateService {
           this.failureProjectDir = body.slice(pipeIdx + 1);
         }
       } else {
-        this.status = 'error';
+        this.status.set('error');
         this.errorKind = undefined;
       }
       this.error = msg;
     }
     this.notifyChange();
-    if (this.status === 'ready') {
+    if (this.status() === 'ready') {
       this.notifyReady();
       this.notifySettled();
-    } else if (this.status === 'error' || this.status === 'check_failed') {
+    } else if (this.status() === 'error' || this.status() === 'check_failed') {
       this.notifyFailed(this.error);
       this.notifySettled();
-    } else if (this.status === 'auth_required') {
+    } else if (this.status() === 'auth_required') {
       this.notifySettled();
     }
   }
@@ -349,19 +349,19 @@ export class ProjectStateService {
       });
       if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
         await this.waitForSystemHealthy();
-        this.status = 'ready';
+        this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       } else {
-        this.status = 'auth_required';
+        this.status.set('auth_required');
         this.notifyChange();
       }
     } catch (err) {
       // Auth check failed (transient IPC) — not "unauthenticated", so surface a
       // retryable error instead of falling through to auth_required.
       const msg = err instanceof Error ? err.message : String(err);
-      this.status = 'error';
+      this.status.set('error');
       this.error = msg;
       this.log.error(`[ProjectStateService] retryAuth check failed: ${msg}`);
       this.notifyChange();
@@ -376,14 +376,14 @@ export class ProjectStateService {
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
     if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
-      if (this.status === 'auth_required') {
-        this.status = 'ready';
+      if (this.status() === 'auth_required') {
+        this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       }
     } else {
-      this.status = 'auth_required';
+      this.status.set('auth_required');
       this.notifyChange();
     }
   }
@@ -397,7 +397,7 @@ export class ProjectStateService {
     this.failureProvider = undefined;
     this.failureProjectDir = undefined;
     this.error = '';
-    this.status = 'loading';
+    this.status.set('loading');
     this.notifyChange();
     await this.ensureContainersRunning();
   }
@@ -409,13 +409,13 @@ export class ProjectStateService {
         project: this.activeProject,
       });
       if (running) {
-        this.status = 'ready';
+        this.status.set('ready');
         this.error = '';
       } else {
         this.error = 'Containers are not running. Click Retry to start them.';
       }
     } catch {
-      this.status = 'ready';
+      this.status.set('ready');
       this.error = '';
     }
     this.notifyChange();
@@ -473,6 +473,9 @@ export class ProjectStateService {
     this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
+      // Re-check auth: a provider switch may have cleared the need for it, so a
+      // stale auth_required must not survive the restart.
+      if (this.status() === 'auth_required') await this.retryAuth();
       this.notifyReady();
       this.notifySettled();
       // Distinct from a plain ready: the chat layer resumes the live session so
@@ -519,7 +522,7 @@ export class ProjectStateService {
     try {
       await this.tauri.listen<{ project: string }>('project_switch_started', (event) => {
         this.targetProject = event.payload.project;
-        this.status = 'switching';
+        this.status.set('switching');
         this.error = '';
         this.errorKind = undefined;
         this.failureProvider = undefined;
@@ -533,7 +536,7 @@ export class ProjectStateService {
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
         this.activeProject = event.payload.project;
         this.targetProject = null;
-        this.status = 'ready';
+        this.status.set('ready');
         this.error = '';
         this.notifyChange();
         this.notifyReady();
@@ -546,7 +549,7 @@ export class ProjectStateService {
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
         this.activeProject = event.payload.project;
         this.targetProject = null;
-        this.status = 'error';
+        this.status.set('error');
         this.error = event.payload.error;
         this.errorKind = event.payload.error_kind;
         this.failureProvider = event.payload.provider;
@@ -560,24 +563,24 @@ export class ProjectStateService {
         // Ignore reconcile events during active operations — backend
         // ensure_images_ready() already blocks those operations.
         if (
-          this.status === 'switching' ||
-          this.status === 'starting' ||
-          this.status === 'checking' ||
-          this.status === 'auth_required'
+          this.status() === 'switching' ||
+          this.status() === 'starting' ||
+          this.status() === 'checking' ||
+          this.status() === 'auth_required'
         ) {
           return;
         }
         if (event.payload.in_progress) {
-          this.status = 'rebuilding';
+          this.status.set('rebuilding');
           this.error = '';
           this.notifyChange();
         } else if (event.payload.last_error) {
-          this.status = 'error';
+          this.status.set('error');
           this.error = event.payload.last_error;
           this.notifyChange();
         } else {
           // Reconcile done — if we were rebuilding, check containers
-          if (this.status === 'rebuilding') {
+          if (this.status() === 'rebuilding') {
             this.ensureContainersRunning();
           }
         }

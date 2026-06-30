@@ -771,7 +771,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     const project = this.projectState.activeProject;
     if (!project) {
       // Project transiently null during shell boot — quiet loading, no banner.
-      if (this.projectState.status === 'loading') {
+      if (this.projectState.status() === 'loading') {
         if (!silent) this.loading.set(true);
         this.error.set('');
       } else if (!silent) {

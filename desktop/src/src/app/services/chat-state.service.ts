@@ -264,7 +264,7 @@ export class ChatStateService {
       this.initialized = true;
       // Start session in background (UI stays responsive); sendMessage
       // auto-retries on "no active session" if a message races start_chat.
-      if (this.projectState.status === 'ready') {
+      if (this.projectState.status() === 'ready') {
         this.startChatSession();
       } else {
         const unsub = this.projectState.onProjectReady(() => {
@@ -293,13 +293,13 @@ export class ChatStateService {
         }
         const msg = String(err);
         if (msg.includes('not authenticated')) {
-          this.projectState.status = 'auth_required';
+          this.projectState.status.set('auth_required');
           this.notifyChange();
         } else {
           // Non-auth start failure is fatal — surface it in project state so
           // the UI shows an error instead of a silently dead chat.
           this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
-          this.projectState.status = 'error';
+          this.projectState.status.set('error');
           this.projectState.error = `Failed to start chat session: ${msg}`;
           this.notifyChange();
         }
@@ -440,7 +440,7 @@ export class ChatStateService {
         } catch (retryErr) {
           const retryMsg = String(retryErr);
           if (retryMsg.includes('not authenticated')) {
-            this.projectState.status = 'auth_required';
+            this.projectState.status.set('auth_required');
             this.isStreaming = false;
             this.notifyChange();
             return;
@@ -962,12 +962,12 @@ export class ChatStateService {
    */
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
-      if (this.projectState.status === 'switching') {
+      if (this.projectState.status() === 'switching') {
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
         this.notifyChange();
-      } else if (this.projectState.status === 'ready') {
+      } else if (this.projectState.status() === 'ready') {
         // Project just settled — re-pull the persisted context tokens so
         // the chat footer reflects whatever the user picked in Settings.
         void this.refreshLlmConfigCache();
@@ -1113,7 +1113,7 @@ export class ChatStateService {
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {
         this.log.error(`[chat-state] Failed to set up stream listener: ${String(err)}`);
-        this.projectState.status = 'error';
+        this.projectState.status.set('error');
         this.projectState.error = `Failed to set up stream listener: ${err}`;
       }
     }

@@ -68,7 +68,7 @@ describe('ProjectStateService', () => {
       await service.init();
 
       expect(service.activeProject).toBe('test');
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('is idempotent — second call is no-op', async () => {
@@ -86,7 +86,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('loading');
+      expect(service.status()).toBe('loading');
     });
 
     it('registers listeners even when invoke fails', async () => {
@@ -98,7 +98,7 @@ describe('ProjectStateService', () => {
 
       // Listeners should still work
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
     });
 
     it('sets status=error and logs when invoke fails INSIDE Tauri', async () => {
@@ -109,7 +109,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('list_projects boom');
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('init failed: list_projects boom')
@@ -124,7 +124,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('loading');
+      expect(service.status()).toBe('loading');
       expect(mockLogger.error).not.toHaveBeenCalled();
     });
   });
@@ -133,12 +133,12 @@ describe('ProjectStateService', () => {
     it('sets checking then ready when containers already running', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
       expect(statuses).toContain('checking');
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('reaches ready for a non-anthropic provider with no anthropic auth (needs_anthropic_auth=false)', async () => {
@@ -169,7 +169,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('still requires anthropic auth when needs_anthropic_auth=true and neither credential present', async () => {
@@ -198,7 +198,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
     });
 
     it('sets checking then starting then ready when containers not running', async () => {
@@ -225,16 +225,16 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      service.status = 'ready' as const;
+      service.status.set('ready');
 
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
       expect(statuses).toContain('checking');
       expect(statuses).toContain('starting');
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('sets error on failure', async () => {
@@ -247,7 +247,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('connection refused');
     });
 
@@ -256,7 +256,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('No active project');
     });
 
@@ -289,7 +289,7 @@ describe('ProjectStateService', () => {
       service.healthGatePollMs = 1;
       await service.init();
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(healthCalls).toBe(3);
     });
 
@@ -324,7 +324,7 @@ describe('ProjectStateService', () => {
       service.healthGateTimeoutMs = 5;
       await service.init();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('System did not become healthy');
       expect(service.error).toContain('VM not running');
     });
@@ -333,7 +333,7 @@ describe('ProjectStateService', () => {
       // Default handler returns undefined for get_health — gate must not block.
       await service.init();
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('seeds the shared health store with the gate snapshot', async () => {
@@ -363,7 +363,7 @@ describe('ProjectStateService', () => {
       };
       await service.init();
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(TestBed.inject(HealthStoreService).health()).toEqual(healthy);
     });
 
@@ -397,14 +397,14 @@ describe('ProjectStateService', () => {
       service.healthGatePollMs = 1;
       await service.init();
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(healthCalls).toBe(2);
     });
 
     it('sets system_check status during prereq phase', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
@@ -420,26 +420,26 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('check_failed');
+      expect(service.status()).toBe('check_failed');
       expect(service.error).toContain('WSL2 is not available');
     });
 
     it('guard prevents reentry when status is system_check', async () => {
       await service.init();
-      service.status = 'system_check';
+      service.status.set('system_check');
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
 
       await service.ensureContainersRunning();
 
       expect(spy.mock.calls.length).toBe(callsBefore);
-      expect(service.status).toBe('system_check');
+      expect(service.status()).toBe('system_check');
     });
 
     it('proceeds to checking after successful system check', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
@@ -459,7 +459,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('check_failed');
+      expect(service.status()).toBe('check_failed');
       expect(service.error).toContain('System check failed:');
     });
 
@@ -473,7 +473,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('network timeout');
     });
   });
@@ -481,7 +481,7 @@ describe('ProjectStateService', () => {
   describe('reconcile status', () => {
     it('sets rebuilding when reconcile in_progress', async () => {
       await service.init();
-      service.status = 'ready';
+      service.status.set('ready');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -491,12 +491,12 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('rebuilding');
+      expect(service.status()).toBe('rebuilding');
     });
 
     it('sets error when reconcile has last_error', async () => {
       await service.init();
-      service.status = 'ready';
+      service.status.set('ready');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -506,13 +506,13 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toBe('Image rebuild failed');
     });
 
     it('triggers ensureContainersRunning when reconcile completes from rebuilding', async () => {
       await service.init();
-      service.status = 'rebuilding';
+      service.status.set('rebuilding');
 
       const spy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
 
@@ -531,7 +531,7 @@ describe('ProjectStateService', () => {
     it('ignores reconcile events during switching', async () => {
       await service.init();
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -541,7 +541,7 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
     });
 
     it('starts in rebuilding when init sees in_progress reconcile', async () => {
@@ -564,7 +564,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('rebuilding');
+      expect(service.status()).toBe('rebuilding');
     });
   });
 
@@ -576,7 +576,7 @@ describe('ProjectStateService', () => {
     it('project_switch_started sets switching state', () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'new-project' });
 
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
       expect(service.targetProject).toBe('new-project');
       expect(service.error).toBe('');
     });
@@ -585,7 +585,7 @@ describe('ProjectStateService', () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'new-project' });
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'new-project' });
 
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(service.activeProject).toBe('new-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('');
@@ -598,7 +598,7 @@ describe('ProjectStateService', () => {
         error: 'container crash',
       });
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.activeProject).toBe('old-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('container crash');
@@ -610,7 +610,7 @@ describe('ProjectStateService', () => {
         error: 'no previous project',
       });
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.activeProject).toBeNull();
     });
   });
@@ -696,10 +696,10 @@ describe('ProjectStateService', () => {
 
   describe('dismissError', () => {
     it('sets ready when containers are running', async () => {
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'some error';
       await service.dismissError();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(service.error).toBe('');
     });
 
@@ -708,7 +708,7 @@ describe('ProjectStateService', () => {
         if (cmd === 'check_containers_running') return false;
         return undefined;
       };
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'old error';
       service.activeProject = 'test';
       await service.dismissError();
@@ -720,10 +720,10 @@ describe('ProjectStateService', () => {
         if (cmd === 'check_containers_running') throw new Error('timeout');
         return undefined;
       };
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'some error';
       await service.dismissError();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(service.error).toBe('');
     });
   });
@@ -731,7 +731,7 @@ describe('ProjectStateService', () => {
   describe('ensureContainersRunning error handling', () => {
     it('catches errors from ensureContainersRunning after reconcile done', async () => {
       await service.init();
-      service.status = 'rebuilding';
+      service.status.set('rebuilding');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'run_system_check') return undefined;
@@ -749,7 +749,7 @@ describe('ProjectStateService', () => {
 
       // Wait for the async error handling
       await new Promise((r) => setTimeout(r, 20));
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('check failed');
     });
 
@@ -757,7 +757,7 @@ describe('ProjectStateService', () => {
       service.activeProject = 'test';
       service.error = 'previous error';
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
       await service.ensureContainersRunning();
       expect(service.error).toBe('');
       expect(statuses[0]).toBe('system_check');
@@ -803,7 +803,7 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
     });
 
     it('transitions to ready when OAuth is authenticated', async () => {
@@ -828,7 +828,7 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('transitions to ready when API key is configured', async () => {
@@ -853,7 +853,7 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('sets error when get_auth_status throws', async () => {
@@ -874,7 +874,7 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
     });
 
     it('retryAuth transitions to ready when auth succeeds', async () => {
@@ -900,16 +900,16 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
 
       authed = true;
       await service.retryAuth();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('retryAuth sets error (NOT auth_required) and logs when the auth check throws', async () => {
       service.activeProject = 'test';
-      service.status = 'auth_required';
+      service.status.set('auth_required');
       const failed = vi.fn();
       const settled = vi.fn();
       service.onProjectFailed(failed);
@@ -923,7 +923,7 @@ describe('ProjectStateService', () => {
       await service.retryAuth();
 
       // A failed check must not masquerade as "not authenticated".
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('connection refused');
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('retryAuth check failed: connection refused')
@@ -946,34 +946,34 @@ describe('ProjectStateService', () => {
         }
       };
       service.activeProject = 'test';
-      service.status = 'ready';
+      service.status.set('ready');
 
       await service.retryAuth();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
     });
 
     it('applyAuthStatus sets ready when auth is valid', () => {
-      service.status = 'auth_required';
+      service.status.set('auth_required');
       service.applyAuthStatus({
         api_key_configured: true,
         oauth_authenticated: false,
         needs_anthropic_auth: true,
       });
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('applyAuthStatus sets auth_required when no auth', () => {
-      service.status = 'ready';
+      service.status.set('ready');
       service.applyAuthStatus({
         api_key_configured: false,
         oauth_authenticated: false,
         needs_anthropic_auth: true,
       });
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
     });
 
     it('applyAuthStatus does not downgrade ready to ready', () => {
-      service.status = 'ready';
+      service.status.set('ready');
       const cb = vi.fn();
       service.onChange(cb);
       service.applyAuthStatus({
@@ -981,7 +981,7 @@ describe('ProjectStateService', () => {
         oauth_authenticated: false,
         needs_anthropic_auth: true,
       });
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(cb).not.toHaveBeenCalled();
     });
 
@@ -1009,7 +1009,7 @@ describe('ProjectStateService', () => {
       const cb = vi.fn();
       service.onProjectReady(cb);
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
       expect(cb).not.toHaveBeenCalled();
     });
   });
@@ -1051,6 +1051,25 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
+    });
+
+    it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {
+      // Repro: logged out (auth_required) → switch to local + restart. Backend
+      // now reports no auth needed, so the stale auth_required must clear.
+      service.status.set('auth_required');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status')
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+          };
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      expect(service.status()).toBe('ready');
     });
 
     it('restartContainers logs (not console) when invalidate_slash_cache fails but still succeeds', async () => {

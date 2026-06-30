@@ -97,7 +97,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       // A non-auth start_chat failure surfaces in the UI.
-      expect(projectState.status).toBe('error');
+      expect(projectState.status()).toBe('error');
       expect(projectState.error).toContain('chat backend crashed');
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to start chat session: Error: chat backend crashed')
@@ -130,7 +130,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       // The superseded failure must NOT clobber the resumed session's state.
-      expect(projectState.status).not.toBe('error');
+      expect(projectState.status()).not.toBe('error');
       expect(mockLogger.error).not.toHaveBeenCalledWith(
         expect.stringContaining('Failed to start chat session')
       );
@@ -152,7 +152,7 @@ describe('ChatStateService', () => {
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
 
-      expect(projectState.status).toBe('auth_required');
+      expect(projectState.status()).toBe('auth_required');
       expect(mockLogger.error).not.toHaveBeenCalled();
     });
 
@@ -181,7 +181,7 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      expect(projectState.status).toBe('error');
+      expect(projectState.status()).toBe('error');
       expect(projectState.error).toContain('Failed to set up stream listener');
     });
 
@@ -1619,7 +1619,7 @@ describe('ChatStateService', () => {
       const projectState = TestBed.inject(ProjectStateService);
       // Bypass normal init — set ready directly so startChatSession fires
       projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.status.set('ready');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat')
@@ -1630,13 +1630,13 @@ describe('ChatStateService', () => {
       await service.init();
       // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
-      expect(projectState.status).toBe('auth_required');
+      expect(projectState.status()).toBe('auth_required');
     });
 
     it('routes auth error in sendMessage retry to auth_required', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.status.set('ready');
 
       let callCount = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1654,7 +1654,7 @@ describe('ChatStateService', () => {
 
       await service.init();
       await service.sendMessage('hello');
-      expect(projectState.status).toBe('auth_required');
+      expect(projectState.status()).toBe('auth_required');
     });
   });
 
