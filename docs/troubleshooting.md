@@ -35,6 +35,19 @@ anyway** or **Start fresh on this model** before the switch, instead of hitting
 a silent context-overflow. Pick a larger-window model, or start fresh, if the
 history doesn't fit. Switching on an empty conversation just starts clean.
 
+## Logging in to Anthropic while a local/OpenRouter provider is active
+
+**Behavior:** "Open terminal and log in" (Desktop) and `speedwave login` (CLI)
+always run Claude Code's Anthropic OAuth `/login`, even when the active provider
+is a local model or OpenRouter. The login session clears that provider's
+injected environment first, so you reach Anthropic's sign-in rather than a chat
+against the local model.
+
+**After logging in:** the Anthropic card shows **connected**, and **Save**
+becomes enabled. Select **anthropic** and **Save** to route chats to Anthropic.
+Your previously configured local/OpenRouter provider stays in the list — switch
+back any time without re-entering its credentials.
+
 ## Chat session ends immediately ("ended unexpectedly") on a managed enterprise account
 
 **Symptom:** Every Desktop chat turn or CLI session exits right after start with
