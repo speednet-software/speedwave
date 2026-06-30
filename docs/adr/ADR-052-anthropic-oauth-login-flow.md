@@ -4,6 +4,16 @@
 
 **Date:** 2026-05-06
 
+> **Update (2026-06-30):** `speedwave login` now execs `claude auth login --claudeai`
+> directly instead of dropping the user at an interactive prompt to type `/login`.
+> The subcommand starts OAuth at once (prints the URL + paste-back prompt, the same
+> fallback the localhost callback already required), so the "one extra keypress"
+> noted under Negative is gone — without the brittle stdout parser that alternative
+> implied. The login exec also unsets non-Anthropic provider env first (the
+> anthropic-login-env-unset change) so OAuth runs against Anthropic regardless of
+> the active provider. The credential-lifecycle and clipboard-bridge decisions below
+> are unchanged.
+
 > **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^1]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
 
 ## Context
@@ -87,7 +97,7 @@ Render the login flow as an in-app pseudo-terminal panel. **Rejected** — adds 
 
 ### Negative
 
-- The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.
+- ~~The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.~~ Resolved by the 2026-06-30 update: `claude auth login` starts OAuth automatically, with no stdout parser.
 - Per-project credentials (one `CLAUDE_HOME` per project) means logging into project A does not authenticate project B. A user with N projects logs in N times. Acceptable: tokens are valid one year[^1], and project isolation is a load-bearing security property.
 
 ### Addendum: clipboard bridge for the "press `c` to copy URL" hint

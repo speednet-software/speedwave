@@ -391,13 +391,13 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 }
 
 /// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
-/// re-exports the proxy base URL, then execs `claude` so `/login` runs OAuth.
-fn build_login_exec_cmd(flags: &[String], base_url: &str, unset_keys: &[&str]) -> Vec<String> {
+/// re-exports the proxy base URL, then execs `claude auth login` so the OAuth
+/// flow starts directly (no interactive prompt, no MCP session).
+fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     let script = format!(
-        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} {}",
+        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
         unset_keys.join(" "),
         consts::CLAUDE_BINARY,
-        flags.join(" ")
     );
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
@@ -414,7 +414,7 @@ USAGE:
     speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
     speedwave check                   Run security + OS prerequisite checks
     speedwave init [name]             Register the current directory as a project
-    speedwave login   [--project <p>] Run Anthropic OAuth login (type /login at Claude's prompt)
+    speedwave login   [--project <p>] Run Anthropic OAuth login (sign-in starts automatically)
     speedwave logout  [--project <p>] Delete Claude Code credentials for the project
     speedwave update                  Rebuild container images for the active project
     speedwave self-update             Download the latest speedwave CLI binary
@@ -975,13 +975,12 @@ fn main() -> anyhow::Result<()> {
     // before the login branch so image paste works in `login` sessions too.
     let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
-    // Handle `speedwave login` — runs `claude` interactively with the resolved
-    // flags. The user types /login; Claude writes credentials to the mount.
+    // Handle `speedwave login` — runs `claude auth login` directly so the
+    // Anthropic OAuth flow starts at once. Claude Code writes credentials to the mount.
     if let CliAction::Login(_) = action {
-        err!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
-        // Unset any non-Anthropic provider env so `/login` runs Anthropic OAuth.
+        err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
+        // Unset any non-Anthropic provider env so OAuth runs against Anthropic.
         let cmd = build_login_exec_cmd(
-            &resolved.flags,
             compose::PROXY_BASE_URL,
             compose::anthropic_login_unset_keys(),
         );
@@ -1523,10 +1522,8 @@ mod tests {
     }
 
     #[test]
-    fn build_login_exec_cmd_unsets_and_execs_claude() {
-        let flags = vec!["--resume".to_string(), "abc".to_string()];
+    fn build_login_exec_cmd_unsets_and_execs_auth_login() {
         let cmd = build_login_exec_cmd(
-            &flags,
             "http://proxy:4000",
             &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
         );
@@ -1541,31 +1538,19 @@ mod tests {
             script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
             "{script}"
         );
+        // `auth login --claudeai` runs OAuth directly — no interactive prompt.
         let exec_pos = script.find("exec ").expect("exec present");
         let unset_pos = script.find("unset ").unwrap();
         assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
         assert!(
-            script.contains(consts::CLAUDE_BINARY),
-            "claude bin: {script}"
-        );
-        assert!(script.contains("--resume abc"), "flags preserved: {script}");
-    }
-
-    #[test]
-    fn build_login_exec_cmd_empty_flags_execs_bare_claude() {
-        let cmd = build_login_exec_cmd(&[], "http://proxy:4000", &["ANTHROPIC_AUTH_TOKEN"]);
-        let script = &cmd[2];
-        // No flags → `exec <claude> ` with a trailing space; sh tolerates it.
-        assert!(
-            script.trim_end().ends_with(consts::CLAUDE_BINARY),
-            "{script}"
+            script.contains(&format!("{} auth login --claudeai", consts::CLAUDE_BINARY)),
+            "auth login subcommand: {script}"
         );
     }
 
     #[test]
     fn build_login_exec_cmd_uses_runtime_ssot_unset_list() {
         let cmd = build_login_exec_cmd(
-            &[],
             compose::PROXY_BASE_URL,
             compose::anthropic_login_unset_keys(),
         );

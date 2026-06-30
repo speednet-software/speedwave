@@ -411,7 +411,7 @@ chat access. Enforced at two layers:
   - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
     host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
     Windows) running `speedwave login`,
-    so the user types `/login` at Claude Code's prompt. The command string
+    which starts the Anthropic OAuth flow automatically via `claude auth login`. The command string
     handed to the terminal is built by `build_auth_command_for_platform` (same
     renderer as the copy-paste fallback), and every component that flows into it
     is constrained: the project name passes `validate_project_name` and is
