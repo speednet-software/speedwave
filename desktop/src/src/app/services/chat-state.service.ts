@@ -109,11 +109,6 @@ export class ChatStateService {
     return this._lastSuccessfulInputTokens;
   }
 
-  /** Context window for the active provider from `get_llm_config()`; `null` until populated. */
-  get activeContextTokens(): number | null {
-    return this._persistedContextTokens;
-  }
-
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
@@ -1043,11 +1038,22 @@ export class ChatStateService {
       if (this._resumeDecider) {
         void this._resumeDecider().then((choice) => {
           if (choice === 'resume') void this.resumeConversation(id);
+          else void this.startFreshSession();
         });
       } else {
         void this.resumeConversation(id);
       }
     });
+  }
+
+  /**
+   * Clears the live conversation and starts a brand-new session (the "fresh"
+   * choice on a context-overflow restart). Resets tracking so the start isn't
+   * gated by the lingering durable id.
+   */
+  private async startFreshSession(): Promise<void> {
+    this.resetForNewConversation();
+    await this.startChatSession();
   }
 
   /**

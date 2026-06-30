@@ -445,14 +445,16 @@ EOF
 # onboarding completes only when logged in (ADR-052).
 # ---------------------------------------------------------------------------
 
-@test "pre-accepts /workspace trust but skips onboarding when credentials are absent" {
+@test "pre-accepts /workspace trust+project-onboarding but skips login onboarding when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude.json" ]
     [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ -f "${TEST_HOME}/.claude.json" ]
+    # Per-workspace flags are always-on (independent of login).
     grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
-    # No credentials → onboarding NOT completed → claude still shows the login prompt.
+    grep -q '"hasCompletedProjectOnboarding": true' "${TEST_HOME}/.claude.json"
+    # No credentials → top-level login onboarding NOT completed → claude still shows the login prompt.
     ! grep -q '"hasCompletedOnboarding"' "${TEST_HOME}/.claude.json"
 }
 
@@ -478,12 +480,48 @@ EOF
     python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
 }
 
-@test "does not overwrite an existing ~/.claude.json (even with credentials)" {
-    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+@test "preserves existing ~/.claude.json keys when no credentials (no merge)" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
+    # Without credentials the merge does not run; the file is left untouched.
     [ "$(cat "${TEST_HOME}/.claude.json")" = '{"my":"existing-state"}' ]
+}
+
+@test "merges onboarding+trust into an existing ~/.claude.json when credentials exist" {
+    # Headless Desktop login leaves oauthAccount but no hasCompletedOnboarding;
+    # the CLI TUI would re-onboard unless the entrypoint backfills it.
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    printf '{"oauthAccount":{"userID":"u1"}}' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json; json.load(open('${TEST_HOME}/.claude.json'))"
+    grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    # Existing oauthAccount is preserved (not clobbered).
+    grep -q '"userID": "u1"' "${TEST_HOME}/.claude.json"
+}
+
+@test "merge is idempotent when onboarding fields already present" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    printf '{"hasCompletedOnboarding":true,"installMethod":"native","projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Already complete → no rewrite; assert by value (format-agnostic), not grep.
+    python3 -c "import json; assert json.load(open('${TEST_HOME}/.claude.json'))['hasCompletedOnboarding'] is True"
+}
+
+@test "onboarding merge degrades gracefully on corrupt credentialed .claude.json" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    # File exists, has credentials, but is NOT valid JSON → node parse fails.
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    # Best-effort: entrypoint still exits 0, file left intact, no stale tmp.
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
+    [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
 }
 
 # ---------------------------------------------------------------------------

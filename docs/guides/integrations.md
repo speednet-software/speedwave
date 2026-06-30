@@ -676,12 +676,12 @@ Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) every se
 
 Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
 
-| Kind                    | What it is                                                                                                          | Key needed                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                                                              | No (managed by Claude Code login) |
-| **Anthropic (API key)** | Anthropic via a raw API key                                                                                         | Yes                               |
-| **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, gateways) | Only if the server requires one   |
-| **OpenRouter**          | OpenRouter's model catalog                                                                                          | Yes                               |
+| Kind                    | What it is                                                                                                                | Key needed                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                                                                    | No (managed by Claude Code login) |
+| **Anthropic (API key)** | Anthropic via a raw API key                                                                                               | Yes                               |
+| **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, gateways) | Only if the server requires one   |
+| **OpenRouter**          | OpenRouter's model catalog                                                                                                | Yes                               |
 
 Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
 
@@ -697,6 +697,7 @@ The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streami
 | **Ollama**     | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
 | **LM Studio**  | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
 | **Unsloth**    | Serves via `llama-server`; same Anthropic Messages endpoint as llama.cpp       |
+| **vLLM**       | A build exposing `/v1/messages`; use the **Local** row (local or remote URL)   |
 | **OpenRouter** | Remote; exposes the Anthropic Messages API natively                            |
 
 A stock OpenAI-only server (TGI, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
@@ -736,7 +737,7 @@ If your LLM server is at a non-standard address (e.g. another machine on your LA
 
 ### Servers requiring authentication
 
-When the local server requires a Bearer token (LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY` for a user-operated LiteLLM gateway — not Speedwave's own stack, corporate gateways):
+When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY` for a user-operated LiteLLM gateway — not Speedwave's own stack, corporate gateways):
 
 1. In Settings → LLM Provider, enter the token in the **api_key** field. The value is stored in `~/.speedwave/tokens/<project>/local-llm/api_key` (chmod 0600) — the on-disk config never contains the secret.
 2. Click **Discover models** to verify connectivity (the probe sends an `Authorization: Bearer <token>` header and a 1-token `/v1/messages` sanity request).
@@ -753,9 +754,9 @@ For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscript
 2. Click **Discover models** to pull OpenRouter's catalog (the dropdown lists tool-capable models); pick one.
 3. Set the row active. No base URL is needed — OpenRouter is a fixed endpoint.
 
-### Remote / custom-URL servers (gateways)
+### Remote / custom-URL servers (vLLM, gateways)
 
-The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). llama.cpp, LM Studio, and Ollama all do; a stock OpenAI-only server (TGI, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
+The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). llama.cpp, LM Studio, Ollama, and a vLLM build with `/v1/messages` all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
 1. In Settings → LLM Provider, open the **Local** row (it serves both local and remote custom-URL backends that speak the Anthropic Messages API).
 2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). A trailing `/v1` is fine — it's normalized away, and the forwarder appends `/v1/messages` itself.

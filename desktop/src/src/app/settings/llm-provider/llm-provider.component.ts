@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   computed,
   effect,
@@ -444,13 +445,13 @@ function classifyDiscoveryFailure(msg: string): {
                   >default_model</label
                 >
                 @let ds = discoveryState();
-                @if (ds.kind === 'ready') {
-                  <select
-                    id="llm-model"
-                    (change)="onLocalModelChange($any($event.target).value)"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  >
+                <select
+                  id="llm-model"
+                  (change)="onLocalModelChange($any($event.target).value)"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-model"
+                >
+                  @if (ds.kind === 'ready') {
                     @if (model() && !discoveredModelIds().includes(model())) {
                       <option [value]="model()" [selected]="true">
                         {{ model() }} (not on server)
@@ -461,18 +462,11 @@ function classifyDiscoveryFailure(msg: string): {
                         {{ formatLocalModelLabel(m) }}
                       </option>
                     }
-                  </select>
-                } @else {
-                  <!-- Saved config: show the model without re-probing. -->
-                  <select
-                    id="llm-model"
-                    (change)="onLocalModelChange($any($event.target).value)"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  >
+                  } @else {
+                    <!-- Saved config: show the model without re-probing. -->
                     <option [value]="model()" [selected]="true">{{ model() }}</option>
-                  </select>
-                }
+                  }
+                </select>
               </div>
             }
 
@@ -621,7 +615,7 @@ function classifyDiscoveryFailure(msg: string): {
     </section>
   `,
 })
-export class LlmProviderComponent implements OnInit {
+export class LlmProviderComponent implements OnInit, OnDestroy {
   provider = signal('anthropic');
   model = signal('');
   baseUrl = signal('');
@@ -662,6 +656,13 @@ export class LlmProviderComponent implements OnInit {
   apiKeyConfigured = signal(false);
   oauthAuthenticated = signal(false);
   loggingOut = signal(false);
+
+  /** Poll that detects an external-terminal OAuth login (no frontend callback). */
+  private oauthCompletionPoll: ReturnType<typeof setInterval> | null = null;
+  /** True while a poll tick's autosave is running; blocks overlapping ticks. */
+  private autosaveInFlight = false;
+  /** Poll cadence; get_auth_status also nudges container readiness, so not too tight. */
+  private static readonly OAUTH_POLL_MS = 1500;
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
@@ -737,8 +738,61 @@ export class LlmProviderComponent implements OnInit {
     effect(() => {
       if (this.activeProject()) {
         void this.loadAuthStatus();
+        this.startOauthCompletionPoll();
       }
     });
+  }
+
+  /**
+   * Polls until an external-terminal OAuth login completes, then runs the same
+   * autosave as the embedded terminal. The external login has no frontend callback.
+   * Restarts on every call so a project switch gets a fresh poll, not a stale one.
+   */
+  private startOauthCompletionPoll(): void {
+    this.stopOauthCompletionPoll();
+    this.oauthCompletionPoll = setInterval(() => {
+      if (this.oauthAuthenticated()) {
+        this.stopOauthCompletionPoll();
+        return;
+      }
+      // Only probe while on the Anthropic card — no IPC when configuring local/OpenRouter.
+      if (this.effectiveTarget() !== 'anthropic') return;
+      void this.detectExternalLoginAndAutosave();
+    }, LlmProviderComponent.OAUTH_POLL_MS);
+  }
+
+  /** Stops the external-login completion poll. */
+  private stopOauthCompletionPoll(): void {
+    if (this.oauthCompletionPoll !== null) {
+      clearInterval(this.oauthCompletionPoll);
+      this.oauthCompletionPoll = null;
+    }
+  }
+
+  /**
+   * One poll tick: if credentials just appeared (false→true), run the autosave.
+   * Edge-guarded so it fires once and never double-saves with the embedded path.
+   */
+  private async detectExternalLoginAndAutosave(): Promise<void> {
+    const project = this.activeProject();
+    // In-flight guard: a slow get_auth_status would otherwise let the next tick
+    // pass the same false→true edge and fire a second onOAuthDone/restart.
+    if (!project || this.autosaveInFlight) return;
+    this.autosaveInFlight = true;
+    try {
+      const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
+      // Drop a stale probe: the active project changed while we were awaiting,
+      // so this result belongs to a project the user already left.
+      if (this.activeProject() !== project) return;
+      if (status.oauth_authenticated && !this.oauthAuthenticated()) {
+        this.stopOauthCompletionPoll();
+        await this.onOAuthDone(true);
+      }
+    } catch {
+      // Container not running yet — keep polling.
+    } finally {
+      this.autosaveInFlight = false;
+    }
   }
   private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
@@ -764,6 +818,11 @@ export class LlmProviderComponent implements OnInit {
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
+  }
+
+  /** Tears down the external-login completion poll. */
+  ngOnDestroy(): void {
+    this.stopOauthCompletionPoll();
   }
 
   /**
@@ -1258,6 +1317,9 @@ export class LlmProviderComponent implements OnInit {
       await this.tauri.invoke<void>('anthropic_logout', { project });
       await this.tauri.invoke<void>('clear_active_llm_provider');
       await this.loadAuthStatus();
+      // The poll self-stopped while authenticated; restart it so a subsequent
+      // external-terminal re-login on this same project is detected again.
+      this.startOauthCompletionPoll();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.error(`anthropic_logout failed: ${msg}`);

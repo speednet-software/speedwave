@@ -44,20 +44,6 @@ pub enum MessageBlock {
     Error { content: String },
 }
 
-/// Per-message token usage; mirrors the TS `TurnUsage`. JSONL field names are
-/// remapped to these on parse (`cache_read_input_tokens` → `cache_read_tokens`).
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-pub struct MessageUsage {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-    #[serde(default)]
-    pub cache_read_tokens: u64,
-    #[serde(default)]
-    pub cache_write_tokens: u64,
-}
-
 /// A single message extracted from a JSONL session.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationMessage {
@@ -75,9 +61,9 @@ pub struct ConversationMessage {
     /// Per-message model id (assistant turns only); restores the resumed footer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Per-message token usage (assistant turns only).
+    /// Per-message token usage (assistant turns only). Reuses the chat SSOT.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<MessageUsage>,
+    pub usage: Option<crate::chat::TurnUsage>,
 }
 
 /// Full transcript of a conversation.
@@ -400,9 +386,10 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     };
 
     let model = message["model"].as_str().map(String::from);
+    // JSONL field names differ from TurnUsage; remap on parse.
     let usage = message.get("usage").map(|u| {
         let read = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
-        MessageUsage {
+        crate::chat::TurnUsage {
             input_tokens: read("input_tokens"),
             output_tokens: read("output_tokens"),
             cache_read_tokens: read("cache_read_input_tokens"),

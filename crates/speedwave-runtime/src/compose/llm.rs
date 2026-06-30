@@ -14,9 +14,9 @@ pub(crate) fn apply_llm_config_in(
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
-    // A configured project that was explicitly emptied (logout) must not fall
-    // through to the Anthropic default — guide the user to pick a provider.
-    if llm.is_explicitly_unconfigured() {
+    // Logout (active cleared) must not fall through to the Anthropic default —
+    // guide the user to pick a provider. Dangling active falls back (not a logout).
+    if llm.is_logged_out() {
         anyhow::bail!(
             "No LLM provider selected. Run `speedwave login` to use your Anthropic \
              subscription, or choose a provider in Desktop Settings → LLM providers."
@@ -42,8 +42,8 @@ pub(crate) fn apply_llm_config_in(
             );
         }
     } else if llm.active.is_some() {
-        // Kill-switch + dangling active (points at no entry): legacy path falls
-        // back to the Anthropic account default. Heal normally repairs this.
+        // Kill-switch + dangling active: not a logout, so render did not bail —
+        // fall back to the Anthropic account default rather than failing the start.
         log::warn!(
             "llm: kill-switch with a dangling active selection — using the direct default path"
         );
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_unconfigured_bails_on_both_proxy_modes() {
+    fn logged_out_bails_on_both_proxy_modes() {
         let tmp = tempfile::tempdir().unwrap();
         for proxy in [Some(true), Some(false), None] {
             let err = apply_llm_config_in(tmp.path(), "services: {}", &emptied_v2(proxy), "proj")
@@ -469,6 +469,36 @@ mod tests {
             assert!(
                 err.contains("No LLM provider selected"),
                 "proxy={proxy:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_active_renders_legacy_default_not_a_bail() {
+        // Dangling active is NOT a logout: render falls back to the legacy
+        // Anthropic default instead of bailing (kill-switch regression guard).
+        let tmp = tempfile::tempdir().unwrap();
+        for proxy in [Some(true), Some(false), None] {
+            let llm = crate::config::LlmConfig {
+                schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+                providers: vec![],
+                active: Some(crate::config::LlmActive {
+                    provider_id: "ghost".into(),
+                    model: None,
+                }),
+                proxy_enabled: proxy,
+                ..Default::default()
+            };
+            let rendered = apply_llm_config_in(
+                tmp.path(),
+                "services:\n  claude:\n    environment: []\n",
+                &llm,
+                "proj",
+            )
+            .unwrap_or_else(|e| panic!("proxy={proxy:?}: dangling active must render, got: {e}"));
+            assert!(
+                rendered.contains("ANTHROPIC_"),
+                "proxy={proxy:?}: anthropic default injected: {rendered}"
             );
         }
     }

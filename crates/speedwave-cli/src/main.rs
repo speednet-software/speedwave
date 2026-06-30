@@ -825,11 +825,14 @@ fn main() -> anyhow::Result<()> {
     // Login must select Anthropic BEFORE render_compose, else the no-provider
     // guard bails and the terminal closes before `claude auth login` runs.
     if matches!(action, CliAction::Login(_)) {
+        // Fatal on failure: continuing would hit that very guard and print a
+        // misleading "Run `speedwave login`" while the real cause stays hidden.
         if let Err(e) = select_anthropic_after_login(&project_name) {
             err!(
-                "warning: could not set Anthropic active: {}",
+                "Login failed: could not select Anthropic: {}",
                 redact_err(&e)
             );
+            std::process::exit(1);
         }
         user_config = config::load_user_config().unwrap_or_else(|e| {
             err!("Failed to load config: {err}", err = redact_err(&e));
@@ -1617,6 +1620,25 @@ mod tests {
         assert!(
             gate_idx < select_idx && select_idx < render_idx,
             "select must sit inside the Login gate, before render_compose"
+        );
+    }
+
+    /// A select failure on the login path must be fatal — warn-and-continue would
+    /// fall into the no-provider guard and print a misleading "Run `speedwave login`".
+    #[test]
+    fn login_select_failure_is_fatal_not_a_warning() {
+        let source = include_str!("main.rs");
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("login gate must exist");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("render_compose must exist");
+        let block = &source[gate_idx..render_idx];
+        assert!(
+            block.contains("Login failed: could not select Anthropic")
+                && block.contains("std::process::exit(1)"),
+            "login select failure must exit non-zero, not warn-and-continue"
         );
     }
 

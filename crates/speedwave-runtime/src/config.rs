@@ -123,10 +123,31 @@ impl LlmConfig {
         self.providers.iter().find(|p| p.id == active.provider_id)
     }
 
-    /// A configured v2 project whose active selection was explicitly cleared
-    /// (logout) — distinct from fresh/legacy, where defaulting to Anthropic is wanted.
+    /// Whether this is a v2-shaped config (vs. fresh/legacy-v1). Shared by the
+    /// two predicates below so routing (CLI) and the Desktop badge never diverge.
+    fn is_v2_shaped(&self) -> bool {
+        self.schema_version.is_some() || !self.providers.is_empty() || self.active.is_some()
+    }
+
+    /// A v2 config with no resolvable active provider (logout/dangling). Drives the
+    /// Desktop badge and auth-bypass (R7); render bails via [`is_logged_out`](Self::is_logged_out) (dangling falls back).
     pub fn is_explicitly_unconfigured(&self) -> bool {
-        self.schema_version.is_some() && !self.providers.is_empty() && self.active.is_none()
+        self.is_v2_shaped() && self.active_provider().is_none()
+    }
+
+    /// A v2 config whose `active` was explicitly cleared (logout) — render bails here.
+    /// A dangling active (missing entry) is excluded: it renders the legacy default.
+    pub fn is_logged_out(&self) -> bool {
+        self.is_v2_shaped() && self.active.is_none()
+    }
+
+    /// True when a provider is actively selected: v2 `active` pointing at a real
+    /// entry, or legacy v1 `provider`. Fresh/empty/dangling → false (Desktop only).
+    pub fn has_active_provider(&self) -> bool {
+        if self.is_v2_shaped() {
+            return self.active_provider().is_some();
+        }
+        self.provider.is_some()
     }
 
     /// Selects an Anthropic provider as active (after a CLI OAuth login), adding
@@ -1069,14 +1090,14 @@ mod tests {
         };
         assert!(!llm.is_explicitly_unconfigured());
 
-        // v2 with empty providers (mid-onboarding) → false.
+        // v2-shaped (schema set) but empty providers → unconfigured (nothing to route).
         let llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![],
             active: None,
             ..Default::default()
         };
-        assert!(!llm.is_explicitly_unconfigured());
+        assert!(llm.is_explicitly_unconfigured());
 
         // v2 with an active selection → false.
         let llm = LlmConfig {
@@ -1089,6 +1110,110 @@ mod tests {
             ..Default::default()
         };
         assert!(!llm.is_explicitly_unconfigured());
+    }
+
+    #[test]
+    fn is_logged_out_excludes_dangling_active_so_render_falls_back() {
+        // Logout (active cleared, providers still listed) → true: render bails.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.is_logged_out());
+        assert!(llm.is_explicitly_unconfigured());
+
+        // Dangling active (points at a missing entry) → is_logged_out false even
+        // though is_explicitly_unconfigured is true: render must NOT bail, it falls
+        // back to the legacy Anthropic default (regression for the kill-switch case).
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![],
+            active: Some(LlmActive {
+                provider_id: "ghost".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!llm.is_logged_out());
+        assert!(llm.is_explicitly_unconfigured());
+
+        // Fresh/legacy (schema None, no active) → neither: legacy path renders.
+        assert!(!LlmConfig::default().is_logged_out());
+
+        // Configured v2 (active points at a real entry) → not logged out.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!llm.is_logged_out());
+    }
+
+    #[test]
+    fn unconfigured_and_has_active_agree_on_unhealed_config() {
+        // Regression: a not-yet-healed config (no schema, but providers + no active)
+        // must be classified the same by both predicates so routing and the badge
+        // never diverge. is_v2_shaped() (shared) makes both treat it as v2.
+        let llm = LlmConfig {
+            schema_version: None,
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.is_explicitly_unconfigured());
+        assert!(!llm.has_active_provider());
+    }
+
+    #[test]
+    fn has_active_provider_covers_fresh_logout_legacy_and_configured() {
+        // Fresh (LlmConfig::default — schema None, no providers/active/provider) → false.
+        assert!(!LlmConfig::default().has_active_provider());
+
+        // Legacy v1 with a provider set → true (existing v1 users stay usable).
+        let llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        assert!(llm.has_active_provider());
+
+        // Logout-emptied v2 (schema + providers, active cleared) → false.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(!llm.has_active_provider());
+
+        // Configured v2 (active points at a real entry) → true.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(llm.has_active_provider());
+
+        // Dangling active (points at a non-existent entry) → false.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "ghost".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!llm.has_active_provider());
     }
 
     #[test]

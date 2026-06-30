@@ -2931,7 +2931,8 @@ describe('ChatStateService', () => {
       expect(calls).toContain('resume_conversation');
     });
 
-    it('prompts (no resume) when a decider returns "fresh" and history does not fit', async () => {
+    it('starts a fresh session (not resume) when a decider returns "fresh" and history does not fit', async () => {
+      projectState.status.set('ready');
       service.seedResumedSession('sess-3');
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
@@ -2944,7 +2945,10 @@ describe('ChatStateService', () => {
 
       await fireRestart(projectState);
 
+      // 'fresh' must NOT resume, MUST start a clean session, and clear the durable id.
       expect(calls).not.toContain('resume_conversation');
+      expect(calls).toContain('start_chat');
+      expect(service.lastKnownSessionId).toBeNull();
     });
 
     it('resumes when the decider returns "resume" and history does not fit', async () => {

@@ -236,7 +236,6 @@ export class ShellComponent implements OnInit, OnDestroy {
   ];
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
-  private readonly statusSignal = signal(this.projectState.status());
 
   /** Nav entries to render: chat always visible; meeting-transcription beta-gated (ADR-058/056). */
   readonly visibleEntries = computed(() =>
@@ -276,11 +275,10 @@ export class ShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Bootstraps project state, mirrors status into a signal, and tracks the current URL. */
+  /** Bootstraps project state and tracks the current URL. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
-      this.statusSignal.set(this.projectState.status());
       this.cdr.markForCheck();
     });
     this.routerSub = this.router.events

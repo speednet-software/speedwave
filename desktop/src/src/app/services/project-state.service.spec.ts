@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ProjectStateService, unhealthySummary } from './project-state.service';
+import {
+  ProjectStateService,
+  unhealthySummary,
+  authStatusToProjectStatus,
+  type AuthStatusResponse,
+} from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -1029,8 +1034,8 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('ready');
     });
 
-    it('applyAuthStatus sets auth_required when no auth', () => {
-      service.status.set('ready');
+    it('applyAuthStatus sets auth_required when no auth (from a pre-ready state)', () => {
+      service.status.set('starting');
       service.applyAuthStatus({
         api_key_configured: false,
         oauth_authenticated: false,
@@ -1038,6 +1043,34 @@ describe('ProjectStateService', () => {
         provider_configured: true,
       });
       expect(service.status()).toBe('auth_required');
+    });
+
+    it('applyAuthStatus never downgrades a live ready session', () => {
+      // Opening Settings probes auth; a false negative (no_provider / auth_required)
+      // must not blank a running chat. Both pre-ready outcomes are ignored when ready.
+      for (const auth of [
+        // → no_provider
+        {
+          api_key_configured: true,
+          oauth_authenticated: true,
+          needs_anthropic_auth: false,
+          provider_configured: false,
+        },
+        // → auth_required
+        {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        },
+      ]) {
+        service.status.set('ready');
+        const cb = vi.fn();
+        service.onChange(cb);
+        service.applyAuthStatus(auth);
+        expect(service.status()).toBe('ready');
+        expect(cb).not.toHaveBeenCalled();
+      }
     });
 
     it('applyAuthStatus does not downgrade ready to ready', () => {
@@ -1483,6 +1516,37 @@ describe('ProjectStateService', () => {
 
     it('falls back to unknown reason when subsystems look fine', () => {
       expect(unhealthySummary(makeHealth({ overall_healthy: false }))).toContain('unknown reason');
+    });
+  });
+
+  describe('authStatusToProjectStatus', () => {
+    const auth = (o: Partial<AuthStatusResponse>): AuthStatusResponse => ({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      ...o,
+    });
+
+    it('no_provider wins first, regardless of credential flags', () => {
+      expect(
+        authStatusToProjectStatus(
+          auth({ provider_configured: false, oauth_authenticated: true, api_key_configured: true })
+        )
+      ).toBe('no_provider');
+    });
+
+    it('ready when not needing anthropic auth', () => {
+      expect(authStatusToProjectStatus(auth({ needs_anthropic_auth: false }))).toBe('ready');
+    });
+
+    it('ready when oauth or api key present', () => {
+      expect(authStatusToProjectStatus(auth({ oauth_authenticated: true }))).toBe('ready');
+      expect(authStatusToProjectStatus(auth({ api_key_configured: true }))).toBe('ready');
+    });
+
+    it('auth_required when anthropic auth needed and no credentials', () => {
+      expect(authStatusToProjectStatus(auth({}))).toBe('auth_required');
     });
   });
 });

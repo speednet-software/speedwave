@@ -57,6 +57,21 @@ export interface AuthStatusResponse {
   provider_configured: boolean;
 }
 
+/**
+ * Collapses the four auth flags into the terminal project status (SSOT for the
+ * gate ordering). no_provider wins first; then credentials decide ready vs auth.
+ * @param auth - Backend auth status.
+ */
+export function authStatusToProjectStatus(
+  auth: AuthStatusResponse
+): 'no_provider' | 'ready' | 'auth_required' {
+  if (!auth.provider_configured) return 'no_provider';
+  if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+    return 'ready';
+  }
+  return 'auth_required';
+}
+
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
 @Injectable({ providedIn: 'root' })
 export class ProjectStateService {
@@ -273,19 +288,12 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (!auth.provider_configured) {
-        this.status.set('no_provider');
-      } else if (
-        !auth.needs_anthropic_auth ||
-        auth.api_key_configured ||
-        auth.oauth_authenticated
-      ) {
+      const next = authStatusToProjectStatus(auth);
+      if (next === 'ready') {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
-        this.status.set('ready');
-      } else {
-        this.status.set('auth_required');
       }
+      this.status.set(next);
     } catch (err) {
       const msg = String(err);
       // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
@@ -356,21 +364,15 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (!auth.provider_configured) {
-        this.status.set('no_provider');
-        this.notifyChange();
-      } else if (
-        !auth.needs_anthropic_auth ||
-        auth.api_key_configured ||
-        auth.oauth_authenticated
-      ) {
+      const next = authStatusToProjectStatus(auth);
+      if (next === 'ready') {
         await this.waitForSystemHealthy();
         this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       } else {
-        this.status.set('auth_required');
+        this.status.set(next);
         this.notifyChange();
       }
     } catch (err) {
@@ -391,20 +393,23 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
-    if (!auth.provider_configured) {
-      this.status.set('no_provider');
-      this.notifyChange();
-    } else if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+    const next = authStatusToProjectStatus(auth);
+    if (next === 'ready') {
+      // Only promote from a terminal pre-ready state; don't re-notify a live session.
       if (this.status() === 'auth_required' || this.status() === 'no_provider') {
         this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       }
-    } else {
-      this.status.set('auth_required');
-      this.notifyChange();
+      return;
     }
+    // next is a pre-ready state (no_provider | auth_required). Never downgrade a
+    // live session: opening Settings must not blank a running chat on a transient
+    // or false negative (e.g. a dangling-active config reading provider_configured=false).
+    if (this.status() === 'ready') return;
+    this.status.set(next);
+    this.notifyChange();
   }
 
   /**

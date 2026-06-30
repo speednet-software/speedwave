@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { LlmProviderComponent } from './llm-provider.component';
 import { TauriService } from '../../services/tauri.service';
-import { ProjectStateService } from '../../services/project-state.service';
+import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
@@ -129,6 +129,12 @@ describe('LlmProviderComponent', () => {
 
     fixture = TestBed.createComponent(LlmProviderComponent);
     component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    // Runs ngOnDestroy so the OAuth completion setInterval is cleared — without
+    // this each test that sets activeProject leaks a 1500ms timer into later tests.
+    fixture?.destroy();
   });
 
   it('should create', () => {
@@ -831,6 +837,155 @@ describe('LlmProviderComponent', () => {
     expect(restartSpy).toHaveBeenCalled();
     expect(projectState.needsRestart).toBe(true);
     expect(calls).not.toContain('restart_llm_proxy');
+  });
+
+  it('external-terminal login (poll detects oauth false→true) auto-saves Anthropic', async () => {
+    // The external "Open terminal and log in" path has no frontend callback, so a
+    // poll detects the credentials flip and runs the same autosave as the embedded one.
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      if (cmd === 'update_llm_config') return undefined;
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    // Fresh project: not yet authenticated; the external terminal just completed.
+    component.oauthAuthenticated.set(false);
+
+    await (
+      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
+    ).detectExternalLoginAndAutosave();
+
+    expect(component.selectedTarget()).toBe('anthropic');
+    expect(calls).toContain('update_llm_config');
+  });
+
+  it('poll does not auto-save when already authenticated (no double-save)', async () => {
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    // Already authenticated (e.g. embedded path handled it) → no false→true edge.
+    component.oauthAuthenticated.set(true);
+
+    await (
+      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
+    ).detectExternalLoginAndAutosave();
+
+    expect(calls).not.toContain('update_llm_config');
+  });
+
+  it('overlapping poll ticks autosave only once (in-flight guard)', async () => {
+    // A slow get_auth_status must not let a second tick pass the same false→true
+    // edge and fire a duplicate onOAuthDone/saveConfig (double container restart).
+    const authed = {
+      api_key_configured: false,
+      oauth_authenticated: true,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+    let updateCalls = 0;
+    let firstStatusSeen = false;
+    let releaseStatus: (v: AuthStatusResponse) => void = () => {};
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_auth_status') {
+        // Only the first probe (the racing tick) hangs; later reloads resolve.
+        if (!firstStatusSeen) {
+          firstStatusSeen = true;
+          return new Promise<AuthStatusResponse>((resolve) => {
+            releaseStatus = resolve;
+          });
+        }
+        return authed;
+      }
+      if (cmd === 'update_llm_config') {
+        updateCalls++;
+        return undefined;
+      }
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    await flushMicrotasks();
+    component.oauthAuthenticated.set(false);
+
+    const detect = () =>
+      (
+        component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
+      ).detectExternalLoginAndAutosave();
+    const first = detect();
+    // Second tick fires while the first's get_auth_status is still pending.
+    const second = detect();
+    releaseStatus(authed);
+    await Promise.all([first, second]);
+    await flushMicrotasks();
+
+    expect(updateCalls).toBe(1);
+  });
+
+  it('logout restarts the completion poll so a later external re-login is detected', async () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    const internals = component as unknown as {
+      oauthCompletionPoll: ReturnType<typeof setInterval> | null;
+    };
+    // Authenticated state stops the poll on its next tick / via detect.
+    component.oauthAuthenticated.set(true);
+    (component as unknown as { stopOauthCompletionPoll(): void }).stopOauthCompletionPoll();
+    expect(internals.oauthCompletionPoll).toBeNull();
+
+    await component.anthropicLogout('proj');
+
+    // A fresh poll is running again after logout.
+    expect(internals.oauthCompletionPoll).not.toBeNull();
+  });
+
+  it('a tick whose project changes mid-probe does not autosave (stale drop)', async () => {
+    // The probe captures the project before awaiting get_auth_status; if the user
+    // switches projects while it is in flight, the result is dropped (no autosave).
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status') {
+        // Simulate the user switching projects while this probe is in flight.
+        fixture.componentRef.setInput('activeProject', 'proj-b');
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      }
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj-a');
+    await flushMicrotasks();
+    component.oauthAuthenticated.set(false);
+
+    await (
+      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
+    ).detectExternalLoginAndAutosave();
+
+    // Probe ran, but the result was for proj-a after the switch to proj-b → dropped.
+    expect(calls).not.toContain('update_llm_config');
   });
 
   it('onOAuthDone_failure_does_not_save', async () => {
