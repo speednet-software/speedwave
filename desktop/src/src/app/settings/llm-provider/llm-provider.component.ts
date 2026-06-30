@@ -123,11 +123,6 @@ function classifyDiscoveryFailure(msg: string): {
   template: `
     <section id="section-llm-provider">
       <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
-      <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        One active provider per project — every session routes through the local proxy.
-        <code>/model</code> switches models of the active provider in-session; on non-Anthropic
-        providers the built-in aliases map to that provider's model.
-      </p>
 
       @if (legacyMigrationProvider()) {
         <div
@@ -259,9 +254,26 @@ function classifyDiscoveryFailure(msg: string): {
               </div>
             }
             @if (authMethod() === 'oauth' && activeProject(); as project) {
-              <div class="mt-3">
-                <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
-              </div>
+              @if (oauthAuthenticated()) {
+                <div class="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    data-testid="settings-oauth-logout"
+                    [disabled]="loggingOut()"
+                    (click)="anthropicLogout(project)"
+                  >
+                    {{ loggingOut() ? 'logging out...' : 'log out' }}
+                  </button>
+                  <span class="text-[11.5px] text-[var(--ink-dim)]"
+                    >Removes this project's Anthropic credentials.</span
+                  >
+                </div>
+              } @else {
+                <div class="mt-3">
+                  <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
+                </div>
+              }
             }
 
             <!-- Default model -->
@@ -649,6 +661,7 @@ export class LlmProviderComponent implements OnInit {
   anthropicApiKeySaved = signal(false);
   apiKeyConfigured = signal(false);
   oauthAuthenticated = signal(false);
+  loggingOut = signal(false);
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
@@ -1219,6 +1232,24 @@ export class LlmProviderComponent implements OnInit {
   async onOAuthDone(_success: boolean): Promise<void> {
     await this.loadAuthStatus();
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Removes the project's Anthropic credentials, then refreshes the status.
+   * @param project - the project to log out of.
+   */
+  async anthropicLogout(project: string): Promise<void> {
+    this.loggingOut.set(true);
+    try {
+      await this.tauri.invoke<void>('anthropic_logout', { project });
+      await this.loadAuthStatus();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.error(`anthropic_logout failed: ${msg}`);
+    } finally {
+      this.loggingOut.set(false);
+      this.cdr.markForCheck();
+    }
   }
 
   /**

@@ -1129,6 +1129,7 @@ fn main() {
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
             auth_commands::get_auth_status,
+            auth_commands::anthropic_logout,
             oauth_login_cmd::start_oauth_login,
             // URL opener
             url_validation::open_url,

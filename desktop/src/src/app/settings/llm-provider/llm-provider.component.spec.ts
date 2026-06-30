@@ -701,6 +701,59 @@ describe('LlmProviderComponent', () => {
     expect(btn.disabled).toBe(false);
   });
 
+  it('shows_logout_not_login_when_oauth_authenticated', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.authMethod.set('oauth');
+    component.oauthAuthenticated.set(true);
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
+    ).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeFalsy();
+  });
+
+  it('shows_login_not_logout_when_not_authenticated', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.authMethod.set('oauth');
+    component.oauthAuthenticated.set(false);
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
+    ).toBeFalsy();
+    expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
+  });
+
+  it('logout_button_invokes_anthropic_logout_and_reloads_status', async () => {
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'anthropic_logout') return undefined;
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+        };
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.authMethod.set('oauth');
+    component.oauthAuthenticated.set(true);
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]');
+    btn.click();
+    await fixture.whenStable();
+    expect(calls).toContain('anthropic_logout');
+    expect(calls).toContain('get_auth_status');
+  });
+
   it('disables_save_for_unconfigured_anthropic', () => {
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');

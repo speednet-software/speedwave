@@ -42,6 +42,25 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn anthropic_logout(project: String) -> Result<(), String> {
+    check_project(&project)?;
+    tokio::task::spawn_blocking(move || {
+        log::info!("anthropic_logout: project={project}");
+        speedwave_runtime::claude_home::remove_claude_credentials(
+            speedwave_runtime::consts::data_dir().as_path(),
+            &project,
+        )
+        .map(|_| ())
+        .map_err(|e| {
+            log::error!("anthropic_logout: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
@@ -289,6 +308,29 @@ mod tests {
         assert!(
             fn_body.contains("needs_anthropic_auth,"),
             "get_auth_status must return the needs_anthropic_auth field"
+        );
+    }
+
+    // -- anthropic_logout --
+
+    #[test]
+    fn anthropic_logout_calls_credentials_ssot_with_check_project() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn anthropic_logout(")
+            .expect("anthropic_logout Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("check_project"),
+            "anthropic_logout must validate the project"
+        );
+        assert!(
+            fn_body.contains("remove_claude_credentials"),
+            "anthropic_logout must clear credentials via the runtime SSOT, not reimplement deletion"
         );
     }
 
