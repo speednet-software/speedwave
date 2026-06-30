@@ -76,10 +76,19 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        // False when the project was explicitly emptied (logout) — drives the
+        // "choose a provider" surface, distinct from auth_required.
+        let provider_configured = user_config
+            .find_project(&project)
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .map(|llm| !llm.is_explicitly_unconfigured())
+            .unwrap_or(true);
         Ok(AuthStatusResponse {
             api_key_configured,
             oauth_authenticated,
             needs_anthropic_auth,
+            provider_configured,
         })
     })
     .await
@@ -308,6 +317,29 @@ mod tests {
         assert!(
             fn_body.contains("needs_anthropic_auth,"),
             "get_auth_status must return the needs_anthropic_auth field"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_derives_provider_configured_from_unconfigured_predicate() {
+        // provider_configured must come from is_explicitly_unconfigured (logout =>
+        // no provider), not be hardcoded — else the no_provider surface never shows.
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("is_explicitly_unconfigured"),
+            "get_auth_status must derive provider_configured from the predicate"
+        );
+        assert!(
+            fn_body.contains("provider_configured,"),
+            "get_auth_status must return the provider_configured field"
         );
     }
 
@@ -839,10 +871,12 @@ mod tests {
             api_key_configured: true,
             oauth_authenticated: false,
             needs_anthropic_auth: true,
+            provider_configured: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
         assert_eq!(json["needs_anthropic_auth"], true);
+        assert_eq!(json["provider_configured"], false);
     }
 }

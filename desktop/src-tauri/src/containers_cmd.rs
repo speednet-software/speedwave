@@ -1253,6 +1253,29 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
+/// Clears the active LLM provider (logout → no provider). `update_llm_config`
+/// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
+#[tauri::command]
+pub fn clear_active_llm_provider() -> Result<(), String> {
+    log::info!("clear_active_llm_provider");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            llm.active = None;
+        }
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
 /// Re-renders compose and recreates ONLY the proxy service (ADR-073 hot
 /// reload); claude keeps running. Full restart when the claude env changes.
 #[tauri::command]
@@ -1854,6 +1877,23 @@ mod tests {
             err.contains("ghost") && err.contains("not in the provider list"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
+        // Structural: the command must clear active (not merge-preserve it like
+        // update_llm_config) and persist through the standard lock/save path.
+        let src = include_str!("containers_cmd.rs");
+        let start = src
+            .find("pub fn clear_active_llm_provider(")
+            .expect("clear_active_llm_provider command must exist");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        assert!(body.contains("llm.active = None"), "must clear active");
+        assert!(
+            body.contains("with_config_lock"),
+            "must use the config lock"
+        );
+        assert!(body.contains("save_user_config"), "must persist");
     }
 
     #[test]

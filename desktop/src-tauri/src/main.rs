@@ -1119,6 +1119,7 @@ fn main() {
             containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
             containers_cmd::set_llm_provider_key,
+            containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
             llm_cmd::discover_llm_models,
             llm_cmd::get_llm_usage,

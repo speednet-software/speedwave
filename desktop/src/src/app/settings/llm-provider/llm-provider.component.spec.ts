@@ -727,17 +727,20 @@ describe('LlmProviderComponent', () => {
     expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
   });
 
-  it('logout_button_invokes_anthropic_logout_and_reloads_status', async () => {
+  it('logout_button_invokes_anthropic_logout_clears_provider_and_reloads_status', async () => {
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
       if (cmd === 'anthropic_logout') return undefined;
+      if (cmd === 'clear_active_llm_provider') return undefined;
       if (cmd === 'get_auth_status')
         return {
+          // Logout leaves the project with no active provider.
           api_key_configured: false,
           oauth_authenticated: false,
           needs_anthropic_auth: true,
+          provider_configured: false,
         };
       return prev(cmd, args);
     };
@@ -747,11 +750,23 @@ describe('LlmProviderComponent', () => {
     component.authMethod.set('oauth');
     component.oauthAuthenticated.set(true);
     fixture.detectChanges();
+    await fixture.whenStable();
+    // Discard the initial render's auth-status probe; assert only the logout sequence.
+    calls.length = 0;
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]');
     btn.click();
     await fixture.whenStable();
+    // Logout must clear credentials AND the active provider (no-provider state),
+    // then reload status so the UI reflects the cleared selection.
     expect(calls).toContain('anthropic_logout');
+    expect(calls).toContain('clear_active_llm_provider');
     expect(calls).toContain('get_auth_status');
+    expect(calls.indexOf('anthropic_logout')).toBeLessThan(
+      calls.indexOf('clear_active_llm_provider')
+    );
+    expect(calls.indexOf('clear_active_llm_provider')).toBeLessThan(
+      calls.indexOf('get_auth_status')
+    );
   });
 
   it('onOAuthDone_success_selects_anthropic_and_saves', async () => {
@@ -764,6 +779,7 @@ describe('LlmProviderComponent', () => {
           api_key_configured: false,
           oauth_authenticated: true,
           needs_anthropic_auth: true,
+          provider_configured: true,
         };
       if (cmd === 'update_llm_config') return undefined;
       return prev(cmd, args);
@@ -779,6 +795,44 @@ describe('LlmProviderComponent', () => {
     expect(calls).toContain('update_llm_config');
   });
 
+  it('onOAuthDone_saves_and_forces_full_restart_even_when_already_on_anthropic_card', async () => {
+    // Regression: previously guarded by effectiveTarget() !== 'anthropic', so a
+    // login from the (default) Anthropic card never auto-saved — the container
+    // kept routing to the prior provider. Login must always commit active=anthropic
+    // AND force a full restart (the proxy-reload discriminator can't see that the
+    // running container drifted from the already-'anthropic' saved active).
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.needsRestart = false;
+    const restartSpy = vi.spyOn(projectState, 'requestRestart');
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      if (cmd === 'update_llm_config') return undefined;
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    // User is already on the Anthropic card when they log in (the common path).
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+
+    await component.onOAuthDone(true);
+
+    expect(component.selectedTarget()).toBe('anthropic');
+    expect(calls).toContain('update_llm_config');
+    // Full restart, not a light proxy reload — this is the self-heal.
+    expect(restartSpy).toHaveBeenCalled();
+    expect(projectState.needsRestart).toBe(true);
+    expect(calls).not.toContain('restart_llm_proxy');
+  });
+
   it('onOAuthDone_failure_does_not_save', async () => {
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
@@ -789,6 +843,7 @@ describe('LlmProviderComponent', () => {
           api_key_configured: false,
           oauth_authenticated: false,
           needs_anthropic_auth: true,
+          provider_configured: true,
         };
       return prev(cmd, args);
     };
@@ -1637,7 +1692,8 @@ describe('LlmProviderComponent', () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       return undefined;
     };
 
@@ -1702,7 +1758,8 @@ describe('LlmProviderComponent', () => {
         };
       }
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       if (cmd === 'discover_llm_models') throw new Error('offline');
       return undefined;
     };
@@ -1760,7 +1817,8 @@ describe('LlmProviderComponent', () => {
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       return undefined;
     };
 
@@ -1782,7 +1840,8 @@ describe('LlmProviderComponent', () => {
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       return undefined;
     };
 
@@ -1915,7 +1974,8 @@ describe('LlmProviderComponent', () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       if (cmd === 'discover_llm_models') {
         return { models: [{ id: 'qwen/qwen3-coder', context_tokens: 262144 }] };
       }
@@ -2067,7 +2127,8 @@ describe('LlmProviderComponent', () => {
     const calls: string[] = [];
     mockTauri.invokeHandler = async (cmd: string) => {
       calls.push(cmd);
-      if (cmd === 'get_auth_status') return { api_key_configured: false };
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
       return undefined;
     };
     const projectState = TestBed.inject(ProjectStateService);
@@ -2132,7 +2193,7 @@ describe('LlmProviderComponent', () => {
   it('loads auth status and renders the connected pills', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') {
-        return { api_key_configured: false, oauth_authenticated: true };
+        return { api_key_configured: false, oauth_authenticated: true, provider_configured: true };
       }
       return undefined;
     };
@@ -2154,7 +2215,7 @@ describe('LlmProviderComponent', () => {
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push([cmd, args]);
       if (cmd === 'get_auth_status') {
-        return { api_key_configured: true, oauth_authenticated: false };
+        return { api_key_configured: true, oauth_authenticated: false, provider_configured: true };
       }
       return undefined;
     };
@@ -2177,7 +2238,7 @@ describe('LlmProviderComponent', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') {
         statusCalls += 1;
-        return { api_key_configured: false, oauth_authenticated: true };
+        return { api_key_configured: false, oauth_authenticated: true, provider_configured: true };
       }
       return undefined;
     };
@@ -2191,7 +2252,7 @@ describe('LlmProviderComponent', () => {
   it('renders the not-configured pill when neither auth method is set up', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') {
-        return { api_key_configured: false, oauth_authenticated: false };
+        return { api_key_configured: false, oauth_authenticated: false, provider_configured: true };
       }
       return undefined;
     };

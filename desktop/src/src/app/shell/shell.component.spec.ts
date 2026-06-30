@@ -153,6 +153,21 @@ describe('ShellComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="blocking-error"]')).toBeNull();
   });
 
+  it('does not overlay no_provider (chat renders its own choose-provider surface)', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status.set('no_provider');
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
+  });
+
+  it('statusMessage returns the no-provider copy', () => {
+    projectState.status.set('no_provider');
+    expect(component.statusMessage).toBe('No LLM provider selected.');
+  });
+
   it('cleans up subscription on destroy', async () => {
     await projectState.init();
     await fixture.whenStable();

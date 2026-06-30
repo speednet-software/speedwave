@@ -14,6 +14,14 @@ pub(crate) fn apply_llm_config_in(
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
+    // A configured project that was explicitly emptied (logout) must not fall
+    // through to the Anthropic default — guide the user to pick a provider.
+    if llm.is_explicitly_unconfigured() {
+        anyhow::bail!(
+            "No LLM provider selected. Run `speedwave login` to use your Anthropic \
+             subscription, or choose a provider in Desktop Settings → LLM providers."
+        );
+    }
     if llm.proxy_enabled.unwrap_or(true) {
         if let Some(entry) = llm.active_provider() {
             // Local custom headers are unsupported by the proxy — stay on direct path.
@@ -431,5 +439,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn emptied_v2(proxy_enabled: Option<bool>) -> crate::config::LlmConfig {
+        crate::config::LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".into(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            proxy_enabled,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explicitly_unconfigured_bails_on_both_proxy_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        for proxy in [Some(true), Some(false), None] {
+            let err = apply_llm_config_in(tmp.path(), "services: {}", &emptied_v2(proxy), "proj")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("No LLM provider selected"),
+                "proxy={proxy:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_legacy_config_still_defaults_to_anthropic() {
+        // schema_version None → not "explicitly unconfigured"; legacy path renders.
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig::default();
+        let rendered = apply_llm_config_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .expect("fresh config must render (anthropic default)");
+        assert!(
+            rendered.contains("ANTHROPIC_"),
+            "anthropic env injected: {rendered}"
+        );
     }
 }

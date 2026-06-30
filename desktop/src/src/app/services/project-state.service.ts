@@ -39,6 +39,7 @@ export type ProjectStatus =
   | 'starting'
   | 'rebuilding'
   | 'auth_required'
+  | 'no_provider'
   | 'ready'
   | 'switching'
   | 'error';
@@ -52,6 +53,8 @@ export interface AuthStatusResponse {
    * non-anthropic providers, so the gate must not block on the credential flags.
    */
   needs_anthropic_auth: boolean;
+  /** False when the project has no active provider (logout) → "choose a provider". */
+  provider_configured: boolean;
 }
 
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
@@ -270,7 +273,13 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.provider_configured) {
+        this.status.set('no_provider');
+      } else if (
+        !auth.needs_anthropic_auth ||
+        auth.api_key_configured ||
+        auth.oauth_authenticated
+      ) {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
         this.status.set('ready');
@@ -347,7 +356,14 @@ export class ProjectStateService {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
         project: this.activeProject,
       });
-      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+      if (!auth.provider_configured) {
+        this.status.set('no_provider');
+        this.notifyChange();
+      } else if (
+        !auth.needs_anthropic_auth ||
+        auth.api_key_configured ||
+        auth.oauth_authenticated
+      ) {
         await this.waitForSystemHealthy();
         this.status.set('ready');
         this.notifyChange();
@@ -375,8 +391,11 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
-    if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
-      if (this.status() === 'auth_required') {
+    if (!auth.provider_configured) {
+      this.status.set('no_provider');
+      this.notifyChange();
+    } else if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+      if (this.status() === 'auth_required' || this.status() === 'no_provider') {
         this.status.set('ready');
         this.notifyChange();
         this.notifyReady();

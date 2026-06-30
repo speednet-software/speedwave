@@ -47,6 +47,7 @@ describe('ProjectStateService', () => {
             api_key_configured: false,
             oauth_authenticated: true,
             needs_anthropic_auth: true,
+            provider_configured: true,
           };
         default:
           return undefined;
@@ -160,6 +161,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: false,
               needs_anthropic_auth: false,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -170,6 +172,38 @@ describe('ProjectStateService', () => {
       await service.ensureContainersRunning();
 
       expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning sets no_provider when provider_configured=false (logout)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              // Stale Anthropic creds present, but the project was emptied:
+              // no-provider wins so the user is routed to pick a provider.
+              api_key_configured: true,
+              oauth_authenticated: true,
+              needs_anthropic_auth: false,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status()).toBe('no_provider');
     });
 
     it('still requires anthropic auth when needs_anthropic_auth=true and neither credential present', async () => {
@@ -189,6 +223,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: false,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -219,6 +254,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -278,6 +314,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           case 'get_health':
             healthCalls += 1;
@@ -310,6 +347,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           case 'get_health':
             return makeHealth({
@@ -354,6 +392,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           case 'get_health':
             return healthy;
@@ -385,6 +424,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           case 'get_health':
             healthCalls += 1;
@@ -797,6 +837,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: false,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -822,6 +863,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: true,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -847,6 +889,7 @@ describe('ProjectStateService', () => {
               api_key_configured: true,
               oauth_authenticated: false,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -894,6 +937,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: authed,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -940,6 +984,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: false,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -952,12 +997,34 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('auth_required');
     });
 
+    it('retryAuth sets no_provider when provider_configured=false', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      service.activeProject = 'test';
+      service.status.set('ready');
+
+      await service.retryAuth();
+      expect(service.status()).toBe('no_provider');
+    });
+
     it('applyAuthStatus sets ready when auth is valid', () => {
       service.status.set('auth_required');
       service.applyAuthStatus({
         api_key_configured: true,
         oauth_authenticated: false,
         needs_anthropic_auth: true,
+        provider_configured: true,
       });
       expect(service.status()).toBe('ready');
     });
@@ -968,6 +1035,7 @@ describe('ProjectStateService', () => {
         api_key_configured: false,
         oauth_authenticated: false,
         needs_anthropic_auth: true,
+        provider_configured: true,
       });
       expect(service.status()).toBe('auth_required');
     });
@@ -980,9 +1048,33 @@ describe('ProjectStateService', () => {
         api_key_configured: true,
         oauth_authenticated: false,
         needs_anthropic_auth: true,
+        provider_configured: true,
       });
       expect(service.status()).toBe('ready');
       expect(cb).not.toHaveBeenCalled();
+    });
+
+    it('applyAuthStatus sets no_provider when provider_configured=false', () => {
+      service.status.set('starting');
+      service.applyAuthStatus({
+        // Auth flags are irrelevant: no-provider is checked first.
+        api_key_configured: true,
+        oauth_authenticated: true,
+        needs_anthropic_auth: false,
+        provider_configured: false,
+      });
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('applyAuthStatus recovers no_provider to ready once a provider is configured', () => {
+      service.status.set('no_provider');
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
     });
 
     it('does not fire onProjectReady for auth_required', async () => {
@@ -1001,6 +1093,7 @@ describe('ProjectStateService', () => {
               api_key_configured: false,
               oauth_authenticated: false,
               needs_anthropic_auth: true,
+              provider_configured: true,
             };
           default:
             return undefined;
@@ -1053,6 +1146,31 @@ describe('ProjectStateService', () => {
       expect(service.restartError).toBe('');
     });
 
+    it('restartContainers fires onRestartBegin before the Tauri invoke, and ready before restart-complete', async () => {
+      // Ordering invariant the chat resume relies on: the id snapshot happens at
+      // begin (before the invoke), and ready (which nulls the live id) precedes
+      // restart-complete (which reads the snapshot). A reorder breaks resume.
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        order.push('begin');
+      });
+      service.onProjectReady(() => {
+        order.push('ready');
+      });
+      service.onRestartComplete(() => {
+        order.push('complete');
+      });
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('invoke');
+        return undefined as unknown as never;
+      });
+
+      await service.restartContainers();
+
+      expect(order.indexOf('begin')).toBeLessThan(order.indexOf('invoke'));
+      expect(order.indexOf('ready')).toBeLessThan(order.indexOf('complete'));
+    });
+
     it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {
       // Repro: logged out (auth_required) → switch to local + restart. Backend
       // now reports no auth needed, so the stale auth_required must clear.
@@ -1063,6 +1181,7 @@ describe('ProjectStateService', () => {
             api_key_configured: false,
             oauth_authenticated: false,
             needs_anthropic_auth: false,
+            provider_configured: true,
           };
         return undefined;
       };

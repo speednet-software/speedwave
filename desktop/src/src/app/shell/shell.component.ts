@@ -44,7 +44,11 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
     <div
       class="flex h-screen flex-col border-t border-[var(--line)] bg-[var(--bg)] text-[var(--ink)]"
     >
-      @if (projectState.status() !== 'ready' && projectState.status() !== 'auth_required') {
+      @if (
+        projectState.status() !== 'ready' &&
+        projectState.status() !== 'auth_required' &&
+        projectState.status() !== 'no_provider'
+      ) {
         @if (projectState.status() === 'check_failed') {
           <div
             class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[var(--bg)]"
@@ -265,6 +269,8 @@ export class ShellComponent implements OnInit, OnDestroy {
         return 'Switching project...';
       case 'rebuilding':
         return 'Rebuilding container images...';
+      case 'no_provider':
+        return 'No LLM provider selected.';
       default:
         return '';
     }

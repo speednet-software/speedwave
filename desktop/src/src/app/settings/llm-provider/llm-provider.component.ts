@@ -1227,27 +1227,36 @@ export class LlmProviderComponent implements OnInit {
 
   /**
    * OAuth terminal completion — refresh status, then auto-select + save Anthropic
-   * so the user isn't stranded not knowing to click Save (a restart prompt follows).
+   * so the user isn't stranded not knowing to click Save. Saves unconditionally
+   * once authenticated (even when already on the Anthropic card): the prior active
+   * may be another provider whose routing is still live, so saveConfig must run to
+   * commit `active=anthropic` and reload the container; computeActiveKey then picks
+   * full-restart vs. proxy-reload, and a no-op key change only triggers a light reload.
    * @param _success - login hint; the reloaded auth state is authoritative.
    */
   async onOAuthDone(_success: boolean): Promise<void> {
     await this.loadAuthStatus();
-    if (this.oauthAuthenticated() && this.effectiveTarget() !== 'anthropic') {
+    if (this.oauthAuthenticated()) {
       this.selectedTarget.set('anthropic');
       this.provider.set('anthropic');
-      await this.saveConfig();
+      // Force a full restart: the saved `active` may already read 'anthropic'
+      // while the running container still routes to a stale provider, so the
+      // proxy-reload discriminator would otherwise skip the needed claude restart.
+      await this.saveConfig(true);
     }
     this.cdr.markForCheck();
   }
 
   /**
-   * Removes the project's Anthropic credentials, then refreshes the status.
+   * Removes the project's Anthropic credentials and clears the active provider,
+   * leaving the user with no provider, then refreshes the status.
    * @param project - the project to log out of.
    */
   async anthropicLogout(project: string): Promise<void> {
     this.loggingOut.set(true);
     try {
       await this.tauri.invoke<void>('anthropic_logout', { project });
+      await this.tauri.invoke<void>('clear_active_llm_provider');
       await this.loadAuthStatus();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1396,8 +1405,14 @@ export class LlmProviderComponent implements OnInit {
     return `${providerId}|${model ?? ''}|${kind}|${customHeaders}`;
   }
 
-  /** Persists the LLM provider configuration to the backend. */
-  async saveConfig(): Promise<void> {
+  /**
+   * Persists the LLM provider configuration to the backend.
+   * @param forceRestart - Skip the proxy-reload-vs-restart discriminator and always
+   *   request a full restart. Used by the OAuth-login path to self-heal a config
+   *   whose `active` already matched but whose running container still routed to a
+   *   stale provider (the pre-fix auto-save gap left this drift on disk).
+   */
+  async saveConfig(forceRestart = false): Promise<void> {
     // Surface the model-required error at Save time; compose::apply_llm_config
     // also rejects it but only at container start (no immediate feedback).
     const provider = this.provider();
@@ -1485,7 +1500,10 @@ export class LlmProviderComponent implements OnInit {
       // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
       // need a full restart; proxy-path-only changes (base_url) = proxy reload.
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      if (activeKey === this.loadedActiveKey && project) {
+      if (forceRestart) {
+        // Login self-heal: the discriminator can't see container drift, so force it.
+        this.projectState.requestRestart();
+      } else if (activeKey === this.loadedActiveKey && project) {
         try {
           await this.tauri.invoke('restart_llm_proxy', { project });
         } catch (e: unknown) {

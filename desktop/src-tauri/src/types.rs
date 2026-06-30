@@ -61,6 +61,10 @@ pub(crate) struct AuthStatusResponse {
     /// Whether the active provider needs Anthropic auth at all (R7); `false`
     /// for non-anthropic kinds, so the UI gate never blocks on the two flags.
     pub(crate) needs_anthropic_auth: bool,
+    /// False when the project has no active LLM provider (logout) — the UI shows
+    /// "choose a provider" instead of a fake-ready chat.
+    #[serde(default)]
+    pub(crate) provider_configured: bool,
 }
 
 /// Update DTO for the LLM settings save path. Mirrors `LlmConfig` plus two

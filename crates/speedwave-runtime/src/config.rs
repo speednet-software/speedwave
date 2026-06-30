@@ -123,6 +123,41 @@ impl LlmConfig {
         self.providers.iter().find(|p| p.id == active.provider_id)
     }
 
+    /// A configured v2 project whose active selection was explicitly cleared
+    /// (logout) — distinct from fresh/legacy, where defaulting to Anthropic is wanted.
+    pub fn is_explicitly_unconfigured(&self) -> bool {
+        self.schema_version.is_some() && !self.providers.is_empty() && self.active.is_none()
+    }
+
+    /// Selects an Anthropic provider as active (after a CLI OAuth login), adding
+    /// an `anthropic` OAuth entry if none exists. Returns true when state changed.
+    pub fn set_active_to_anthropic(&mut self) -> bool {
+        let id = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
+            Some(entry) => entry.id.clone(),
+            None => {
+                self.providers.push(LlmProviderEntry {
+                    id: "anthropic".to_string(),
+                    kind: LlmProviderKind::AnthropicOauth,
+                    base_url: None,
+                    model: None,
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                });
+                self.schema_version = Some(LLM_SCHEMA_VERSION);
+                "anthropic".to_string()
+            }
+        };
+        if self.active.as_ref().map(|a| &a.provider_id) == Some(&id) {
+            return false;
+        }
+        self.active = Some(LlmActive {
+            provider_id: id,
+            model: None,
+        });
+        true
+    }
+
     /// Routing model for the active provider, enforcing provenance (ADR-073):
     /// the entry's `model` wins over a disagreeing `active.model`.
     pub fn effective_active_model(&self) -> Option<String> {
@@ -1001,6 +1036,112 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn anthropic_entry() -> LlmProviderEntry {
+        LlmProviderEntry {
+            id: "anthropic".into(),
+            kind: LlmProviderKind::AnthropicOauth,
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
+    }
+
+    #[test]
+    fn is_explicitly_unconfigured_only_for_emptied_v2() {
+        // Emptied v2 (logout): schema + providers + no active → true.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.is_explicitly_unconfigured());
+
+        // Fresh/legacy (schema None) → false even with no active.
+        let llm = LlmConfig {
+            schema_version: None,
+            providers: vec![],
+            active: None,
+            ..Default::default()
+        };
+        assert!(!llm.is_explicitly_unconfigured());
+
+        // v2 with empty providers (mid-onboarding) → false.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![],
+            active: None,
+            ..Default::default()
+        };
+        assert!(!llm.is_explicitly_unconfigured());
+
+        // v2 with an active selection → false.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!llm.is_explicitly_unconfigured());
+    }
+
+    #[test]
+    fn set_active_to_anthropic_selects_existing_entry() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
+        assert_eq!(llm.providers.len(), 1, "no duplicate entry added");
+        assert!(!llm.is_explicitly_unconfigured());
+    }
+
+    #[test]
+    fn set_active_to_anthropic_adds_entry_when_absent() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: Some("qwen".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
+        assert!(llm.providers.iter().any(|p| p.kind.is_anthropic()));
+    }
+
+    #[test]
+    fn set_active_to_anthropic_noop_when_already_active() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !llm.set_active_to_anthropic(),
+            "no change when already active"
+        );
+    }
 
     // ---- LlmProviderKind Rust↔TS mirror (ADR-073) ---------------------------
 

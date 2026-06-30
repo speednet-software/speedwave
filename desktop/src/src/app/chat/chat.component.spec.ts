@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
-import { ChatComponent, historyFitsTarget } from './chat.component';
+import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -153,6 +153,22 @@ describe('ChatComponent', () => {
 
       expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeTruthy();
+    });
+
+    it('renders the choose-a-provider surface when status is no_provider', async () => {
+      projectState.activeProject = 'test';
+      projectState.status.set('no_provider');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const view = fixture.nativeElement.querySelector('[data-testid="chat-view-no-provider"]');
+      expect(view).toBeTruthy();
+      expect(view.textContent).toContain('No LLM provider selected');
+      const link = view.querySelector('a');
+      expect(link).toBeTruthy();
+      expect(link.getAttribute('href')).toBe('/settings');
+      // No composer/header in this state — only the choose-provider prompt.
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
     });
   });
 
@@ -423,93 +439,22 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── restart auto-resume ─────────────────────────────────────────────────────
+  // ── resume decider lifecycle (ngOnInit / ngOnDestroy) ──────────────────────
 
-  describe('auto-resume after a container restart', () => {
-    it('resumes the active session (not a fresh start_chat) when a restart completes', async () => {
-      projectState.activeProject = 'test';
-      chatState._setState({
-        messages: [],
-        currentBlocks: [],
-        sessionStats: {
-          session_id: 'live-session-1',
-          total_cost: 0,
-          context_window_size: null,
-          total_output_tokens: 0,
-        },
-      });
+  describe('resume decider lifecycle', () => {
+    it('ngOnInit registers a resume decider function on the service', async () => {
+      const setSpy = vi.spyOn(chatState, 'setResumeDecider');
       await component.ngOnInit();
-      // Seed durable id as the effect would after change detection.
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId =
-        'live-session-1';
-
-      const invokeCalls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        invokeCalls.push(cmd);
-        if (cmd === 'get_conversation') return { session_id: 'live-session-1', messages: [] };
-        return undefined;
-      };
-
-      // Container restart finished (model switch path).
-      projectState.notifyRestartComplete();
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(invokeCalls).toContain('resume_conversation');
-      expect(invokeCalls).not.toContain('start_chat');
+      // A mounted component opts into the overflow prompt via a callback.
+      const last = setSpy.mock.calls[setSpy.mock.calls.length - 1]?.[0];
+      expect(typeof last).toBe('function');
     });
 
-    it('does nothing on restart when there is no active session', async () => {
-      projectState.activeProject = 'test';
-      chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
+    it('ngOnDestroy clears the resume decider so the service auto-resumes while unmounted', async () => {
       await component.ngOnInit();
-
-      const invokeCalls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        invokeCalls.push(cmd);
-        return undefined;
-      };
-
-      projectState.notifyRestartComplete();
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(invokeCalls).not.toContain('resume_conversation');
-    });
-  });
-
-  // ── durable lastKnownSessionId — survives restart ───────────────────────────
-
-  /**
-   * Triggers a restart-complete notification and flushes microtasks.
-   * @param ps - ProjectStateService instance to notify.
-   */
-  async function fireRestartComplete(ps: ProjectStateService): Promise<void> {
-    ps.notifyRestartComplete();
-    await new Promise((r) => setTimeout(r, 0));
-  }
-
-  describe('durable lastKnownSessionId', () => {
-    it('resumes from lastKnownSessionId on restart even when sessionStats was reset', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_conversation') return { session_id: 'sess-1', messages: [] };
-        return undefined;
-      };
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 'sess-1';
-      // sessionStats is null (restart cleared it)
-      vi.spyOn(component['chat'], 'sessionStats', 'get').mockReturnValue(null);
-      await fireRestartComplete(projectState);
-      expect(resumeSpy).toHaveBeenCalledWith('sess-1');
-    });
-
-    it('does not resume when no session is known', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      (component as unknown as { lastKnownSessionId: string | null }).lastKnownSessionId = null;
-      await fireRestartComplete(projectState);
-      expect(resumeSpy).not.toHaveBeenCalled();
+      const setSpy = vi.spyOn(chatState, 'setResumeDecider');
+      component.ngOnDestroy();
+      expect(setSpy).toHaveBeenCalledWith(null);
     });
   });
 
@@ -1100,147 +1045,42 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── historyFitsTarget pure predicate ───────────────────────────────────────
+  // ── context-overflow dialog ─────────────────────────────────────────────────
 
-  describe('historyFitsTarget', () => {
-    it('historyFitsTarget: fits, exceeds, and unknown', () => {
-      expect(historyFitsTarget(8000, 131072)).toBe(true);
-      expect(historyFitsTarget(25229, 8192)).toBe(false);
-      expect(historyFitsTarget(null, 8192)).toBe(true); // unknown size → allow
-      expect(historyFitsTarget(25229, null)).toBe(true); // unknown window → allow
-      expect(historyFitsTarget(8192, 8192)).toBe(false); // equal → does NOT fit → dialog
-    });
-  });
-
-  // ── pre-flight context check on restart ────────────────────────────────────
-
-  describe('pre-flight context check on restart', () => {
-    it('on restart: shows choice when history exceeds target window', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh').mockResolvedValue('fresh');
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
-      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(25229);
-      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
-      await fireRestartComplete(projectState);
-      expect(choiceSpy).toHaveBeenCalled();
-      expect(resumeSpy).not.toHaveBeenCalled(); // 'fresh' → no resume
+  describe('context-overflow dialog', () => {
+    it('promptResumeOrFresh opens the dialog and resolves "resume" on confirm', async () => {
+      const choice = component.promptResumeOrFresh();
+      expect(component.contextOverflowOpen()).toBe(true);
+      component.onContextOverflowResume();
+      expect(component.contextOverflowOpen()).toBe(false);
+      await expect(choice).resolves.toBe('resume');
     });
 
-    it('on restart: resumes silently when history fits', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
-      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(4000);
-      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(131072);
-      await fireRestartComplete(projectState);
-      expect(resumeSpy).toHaveBeenCalledWith('s1');
-      expect(choiceSpy).not.toHaveBeenCalled();
+    it('promptResumeOrFresh resolves "fresh" when the user starts fresh', async () => {
+      const choice = component.promptResumeOrFresh();
+      component.onContextOverflowFresh();
+      expect(component.contextOverflowOpen()).toBe(false);
+      await expect(choice).resolves.toBe('fresh');
     });
 
-    it('on restart: resumes when choice is resume', async () => {
-      projectState.activeProject = 'test';
+    it('renders the confirm dialog HTML while open and hides it when closed', async () => {
+      // The overlay renders into a CDK Dialog container on document.body, not
+      // into fixture.nativeElement — query the document.
+      projectState.status.set('ready');
       await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh').mockResolvedValue('resume');
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
-      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(25229);
-      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
-      await fireRestartComplete(projectState);
-      expect(choiceSpy).toHaveBeenCalled();
-      expect(resumeSpy).toHaveBeenCalledWith('s1');
+      component.promptResumeOrFresh();
+      fixture.detectChanges();
+      expect(document.querySelector('[data-testid="context-overflow-overlay"]')).toBeTruthy();
+
+      component.onContextOverflowFresh();
+      fixture.detectChanges();
+      expect(document.querySelector('[data-testid="context-overflow-overlay"]')).toBeNull();
     });
 
-    it('on restart: resumes silently when history is unknown (null)', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 's1';
-      vi.spyOn(component['chat'], 'lastSuccessfulInputTokens', 'get').mockReturnValue(null);
-      vi.spyOn(component['chat'], 'activeContextTokens', 'get').mockReturnValue(8192);
-      await fireRestartComplete(projectState);
-      expect(resumeSpy).toHaveBeenCalledWith('s1');
-      expect(choiceSpy).not.toHaveBeenCalled();
-    });
-
-    it('on restart: does nothing when lastKnownSessionId is null', async () => {
-      projectState.activeProject = 'test';
-      await component.ngOnInit();
-      const resumeSpy = vi.spyOn(component, 'resumeConversation').mockResolvedValue(undefined);
-      const choiceSpy = vi.spyOn(component, 'promptResumeOrFresh');
-      (component as unknown as { lastKnownSessionId: string | null }).lastKnownSessionId = null;
-      await fireRestartComplete(projectState);
-      expect(resumeSpy).not.toHaveBeenCalled();
-      expect(choiceSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  // ── interrupt on restart-begin ─────────────────────────────────────────────
-
-  /**
-   * Fires the restart-begin notification and flushes microtasks.
-   * @param ps - ProjectStateService instance to notify.
-   */
-  async function fireRestartBegin(ps: ProjectStateService): Promise<void> {
-    await (ps as unknown as { notifyRestartBegin: () => Promise<void> }).notifyRestartBegin();
-  }
-
-  describe('interrupt on restart-begin', () => {
-    it('interrupts a streaming turn on restart-begin', async () => {
-      await component.ngOnInit();
-      const interruptSpy = vi
-        .spyOn(component['chat'], 'stopConversation')
-        .mockResolvedValue(undefined);
-      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(true);
-      await fireRestartBegin(projectState);
-      expect(interruptSpy).toHaveBeenCalled();
-    });
-
-    it('does not interrupt when not streaming', async () => {
-      await component.ngOnInit();
-      const interruptSpy = vi
-        .spyOn(component['chat'], 'stopConversation')
-        .mockResolvedValue(undefined);
-      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(false);
-      await fireRestartBegin(projectState);
-      expect(interruptSpy).not.toHaveBeenCalled();
-    });
-
-    it('unsubscribes on destroy so a later restart-begin does not call stopConversation', async () => {
-      await component.ngOnInit();
-      const interruptSpy = vi
-        .spyOn(component['chat'], 'stopConversation')
-        .mockResolvedValue(undefined);
-      vi.spyOn(component['chat'], 'isStreaming', 'get').mockReturnValue(true);
+    it('ngOnDestroy resolves a pending dialog as "fresh" (no leak)', async () => {
+      const choice = component.promptResumeOrFresh();
       component.ngOnDestroy();
-      await fireRestartBegin(projectState);
-      expect(interruptSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  // ── fork guard: adopts a changed session_id after resume ──────────────────
-
-  describe('fork guard', () => {
-    it('adopts a new session_id if a post-resume Result returns a different one', () => {
-      (component as unknown as { lastKnownSessionId: string }).lastKnownSessionId = 'old';
-      // Drive the effect's reactive source via the public API so the signal changes.
-      chatState._setState({
-        sessionStats: {
-          session_id: 'new',
-          total_cost: null,
-          context_window_size: null,
-          total_output_tokens: 0,
-        },
-      });
-      // Flush all pending signal effects registered in the constructor.
-      TestBed.flushEffects();
-      expect((component as unknown as { lastKnownSessionId: string }).lastKnownSessionId).toBe(
-        'new'
-      );
+      await expect(choice).resolves.toBe('fresh');
     });
   });
 

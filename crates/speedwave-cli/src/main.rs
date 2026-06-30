@@ -402,6 +402,24 @@ fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
 
+/// After a successful `speedwave login`, makes Anthropic active so a
+/// logout-emptied config is usable again. No-op when there's no v2 llm config.
+fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        if let Some(llm) = user_config
+            .find_project_mut(project)
+            .and_then(|p| p.claude.as_mut())
+            .and_then(|c| c.llm.as_mut())
+        {
+            if llm.set_active_to_anthropic() {
+                config::save_user_config(&user_config)?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Printed by `speedwave --help` / `-h` / `help`. Must not require the
 /// runtime or any I/O so users can discover commands before Desktop is
 /// running (or while troubleshooting a broken setup).
@@ -794,7 +812,7 @@ fn main() -> anyhow::Result<()> {
     speedwave_runtime::provision::ensure_nerdctl_version();
 
     // Load config once — used for both project resolution and compose rendering
-    let user_config = config::load_user_config().unwrap_or_else(|e| {
+    let mut user_config = config::load_user_config().unwrap_or_else(|e| {
         err!("Failed to load config: {err}", err = redact_err(&e));
         std::process::exit(1);
     });
@@ -803,6 +821,21 @@ fn main() -> anyhow::Result<()> {
 
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Login must select Anthropic BEFORE render_compose, else the no-provider
+    // guard bails and the terminal closes before `claude auth login` runs.
+    if matches!(action, CliAction::Login(_)) {
+        if let Err(e) = select_anthropic_after_login(&project_name) {
+            err!(
+                "warning: could not set Anthropic active: {}",
+                redact_err(&e)
+            );
+        }
+        user_config = config::load_user_config().unwrap_or_else(|e| {
+            err!("Failed to load config: {err}", err = redact_err(&e));
+            std::process::exit(1);
+        });
+    }
 
     // Project dir comes from config (authoritative); an unresolved name is a
     // hard error, never a working-directory fallback.
@@ -1559,6 +1592,32 @@ mod tests {
             assert!(script.contains(key), "unset list missing `{key}`: {script}");
         }
         assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
+    }
+
+    /// Login must select Anthropic active BEFORE render_compose, so a
+    /// logout-emptied project escapes the no-provider guard (avoids the dead-loop
+    /// where the login terminal closes before `claude auth login` runs).
+    #[test]
+    fn login_selects_anthropic_before_render_compose() {
+        let source = include_str!("main.rs");
+        let select_idx = source
+            .find("select_anthropic_after_login(&project_name)")
+            .expect("main() must select Anthropic on the login path");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("the CLI must call render_compose in main()");
+        assert!(
+            select_idx < render_idx,
+            "select_anthropic_after_login must run before render_compose"
+        );
+        // It must be gated on the Login action (not run for plain `speedwave`).
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("the Anthropic-select must be gated on the Login action");
+        assert!(
+            gate_idx < select_idx && select_idx < render_idx,
+            "select must sit inside the Login gate, before render_compose"
+        );
     }
 
     #[test]

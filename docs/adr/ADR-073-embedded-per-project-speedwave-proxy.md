@@ -58,6 +58,8 @@ The forwarder is dramatically lighter than the LiteLLM container it replaces: me
 
 **Session granularity:** the provider class is fixed per session. Within a session `/model` switches freely across models of the configured providers; built-in aliases are remapped via `ANTHROPIC_DEFAULT_*_MODEL` so they do not 404 on a non-anthropic provider. Mixing the subscription with non-Anthropic providers in one session is impossible because passthrough forwards the OAuth `Authorization` only to api.anthropic.com. Content-based dynamic routing is explicitly out of scope (future ADR).
 
+**No-provider state (logout):** `active = None` on a populated v3 config (`schema_version` set, `providers` non-empty) is a first-class _"no provider selected"_ state, not a silent fall-through to the Anthropic default. The discriminator is `LlmConfig::is_explicitly_unconfigured()`; it is reachable only by an explicit clear (the Desktop Anthropic logout calls `clear_active_llm_provider`, which `update_llm_config` could not do because it merges `active.or(stored.active)`). The render guard in `apply_llm_config_in` bails with a choose-a-provider error before the proxy/legacy branching, and Desktop surfaces a `no_provider` status (chat shows "choose a provider", auth gate skips the OAuth wall per R7). Fresh (`schema_version = None`) and legacy-v1 configs are exempt, so onboarding's Anthropic default is preserved. `speedwave login` re-selects Anthropic (`set_active_to_anthropic`) on success so a logged-out project escapes the guard.
+
 **Limitation:** a `local` provider with custom headers falls back to the direct path — headers are addressed to the LLM server and the proxy would consume them.
 
 ## No translation

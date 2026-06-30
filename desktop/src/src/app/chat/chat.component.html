@@ -104,4 +104,17 @@
       >
     </div>
   </section>
+} @else if (projectState.status() === 'no_provider') {
+  <section
+    class="flex h-full flex-col items-center justify-center bg-[var(--bg)] p-8"
+    data-testid="chat-view-no-provider"
+  >
+    <div class="mono max-w-md text-center text-[12.5px] text-[var(--ink-dim)]">
+      <p class="text-[var(--amber)]">⚠ no LLM provider</p>
+      <p class="mt-2">No LLM provider selected. Choose a provider to start chatting.</p>
+      <a routerLink="/settings" class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
+        >open settings →</a
+      >
+    </div>
+  </section>
 }
