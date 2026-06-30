@@ -1226,11 +1226,17 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * OAuth terminal completion — refresh the status pills.
-   * @param _success - whether the login succeeded (status reload decides).
+   * OAuth terminal completion — refresh status, then auto-select + save Anthropic
+   * so the user isn't stranded not knowing to click Save (a restart prompt follows).
+   * @param _success - login hint; the reloaded auth state is authoritative.
    */
   async onOAuthDone(_success: boolean): Promise<void> {
     await this.loadAuthStatus();
+    if (this.oauthAuthenticated() && this.effectiveTarget() !== 'anthropic') {
+      this.selectedTarget.set('anthropic');
+      this.provider.set('anthropic');
+      await this.saveConfig();
+    }
     this.cdr.markForCheck();
   }
 

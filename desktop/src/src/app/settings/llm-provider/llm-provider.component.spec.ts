@@ -754,6 +754,54 @@ describe('LlmProviderComponent', () => {
     expect(calls).toContain('get_auth_status');
   });
 
+  it('onOAuthDone_success_selects_anthropic_and_saves', async () => {
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+        };
+      if (cmd === 'update_llm_config') return undefined;
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    // Local is the active provider before the user logs in to Anthropic.
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+
+    await component.onOAuthDone(true);
+
+    expect(component.selectedTarget()).toBe('anthropic');
+    expect(calls).toContain('update_llm_config');
+  });
+
+  it('onOAuthDone_failure_does_not_save', async () => {
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+        };
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+
+    await component.onOAuthDone(false);
+
+    expect(component.selectedTarget()).toBe('local');
+    expect(calls).not.toContain('update_llm_config');
+  });
+
   it('disables_save_for_unconfigured_anthropic', () => {
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
