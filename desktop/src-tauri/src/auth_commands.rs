@@ -76,14 +76,14 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
-        // False for fresh (no claude/llm), logout-emptied, or dangling active —
-        // all drive the "choose a provider" surface, distinct from auth_required.
+        // False ONLY for an explicit v2 logout/dangling ("choose a provider").
+        // Fresh/missing/legacy is exempt → true (ADR-073: Anthropic default).
         let provider_configured = user_config
             .find_project(&project)
             .and_then(|p| p.claude.as_ref())
             .and_then(|c| c.llm.as_ref())
-            .map(|llm| llm.has_active_provider())
-            .unwrap_or(false);
+            .map(|llm| !llm.is_explicitly_unconfigured())
+            .unwrap_or(true);
         Ok(AuthStatusResponse {
             api_key_configured,
             oauth_authenticated,
@@ -321,9 +321,9 @@ mod tests {
     }
 
     #[test]
-    fn get_auth_status_derives_provider_configured_from_has_active_provider() {
-        // provider_configured must come from has_active_provider, defaulting to
-        // false when there is no claude/llm (fresh project) — else no_provider never shows.
+    fn get_auth_status_derives_provider_configured_from_explicitly_unconfigured() {
+        // provider_configured from is_explicitly_unconfigured, defaulting to TRUE
+        // for fresh/missing — ADR-073: fresh/legacy is exempt (Anthropic default).
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
@@ -334,12 +334,12 @@ mod tests {
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
-            fn_body.contains("has_active_provider"),
-            "get_auth_status must derive provider_configured from has_active_provider"
+            fn_body.contains("is_explicitly_unconfigured"),
+            "get_auth_status must derive provider_configured from is_explicitly_unconfigured"
         );
         assert!(
-            fn_body.contains(".unwrap_or(false)"),
-            "fresh project (no claude/llm) must default provider_configured to false"
+            fn_body.contains(".unwrap_or(true)"),
+            "fresh/missing project must default provider_configured to true (ADR-073 exempt)"
         );
         assert!(
             fn_body.contains("provider_configured,"),

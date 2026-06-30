@@ -689,21 +689,22 @@ describe('ChatStateService', () => {
       expect(spy).not.toHaveBeenCalledWith('get_conversation_cost', expect.anything());
     });
 
-    it('reconcile overwrites the per-message meta.cost from the proxy SSOT', async () => {
+    it('reconcile hides the per-message cost when the proxy SSOT is free/null', async () => {
       TestBed.inject(ProjectStateService).activeProject = 'proj';
       vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
-        if (cmd === 'get_usage_for_response') return { cost_usd: 0, cost_source: 'free' };
+        // Local is free → null cost (rendered "—"), never $0.00.
+        if (cmd === 'get_usage_for_response') return { cost_usd: null, cost_source: 'free' };
         return undefined;
       });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        // CC reports a non-zero turn_cost (local estimate); proxy says $0.
+        // CC reports a non-zero turn_cost (local estimate); proxy says free/null.
         data: { session_id: 'abc', assistant_uuid: 'msg_1', turn_cost: 0.046 },
       });
       await new Promise((r) => setTimeout(r, 0));
       const entry = service.messages.find((m) => m.uuid === 'msg_1');
-      expect(entry?.meta?.cost).toBe(0);
+      expect(entry?.meta?.cost).toBeUndefined();
     });
 
     it('subscription (null aggregator total) yields null footer ("—"), not CC estimate', async () => {
@@ -725,6 +726,23 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
       // Subscription is unpriced → null (rendered "—"), replacing CC's $0.42 estimate.
       expect(service.sessionStats?.total_cost).toBeNull();
+    });
+
+    it('local provider suppresses the live CC cost preview (no $0.00x flicker)', async () => {
+      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      // Simulate an active local provider (no real cost).
+      (service as unknown as { _currentProvider: string | null })._currentProvider = 'local';
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        // CC still emits an estimate for the local model; it must be ignored.
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.002, turn_cost: 0.002 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.sessionStats?.total_cost).toBeNull();
+      const entry = service.messages.find((m) => m.uuid === 'msg_1');
+      expect(entry?.meta?.cost).toBeUndefined();
     });
 
     it('re-reconciles a deferred OpenRouter cost once /generation prices it later', async () => {

@@ -659,10 +659,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Poll that detects an external-terminal OAuth login (no frontend callback). */
   private oauthCompletionPoll: ReturnType<typeof setInterval> | null = null;
+  /** Remaining ticks before the poll self-expires (bounds the IPC/log churn). */
+  private oauthPollTicksLeft = 0;
   /** True while a poll tick's autosave is running; blocks overlapping ticks. */
   private autosaveInFlight = false;
   /** Poll cadence; get_auth_status also nudges container readiness, so not too tight. */
   private static readonly OAUTH_POLL_MS = 1500;
+  /** Cap the poll lifetime (~5 min): a login not done by then needs a re-open. */
+  private static readonly OAUTH_POLL_MAX_TICKS = 200;
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
@@ -745,13 +749,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Polls until an external-terminal OAuth login completes, then runs the same
-   * autosave as the embedded terminal. The external login has no frontend callback.
-   * Restarts on every call so a project switch gets a fresh poll, not a stale one.
+   * autosave as the embedded terminal. Self-expires after OAUTH_POLL_MAX_TICKS so
+   * an idle Settings page does not probe forever; restarts on switch/logout.
    */
   private startOauthCompletionPoll(): void {
     this.stopOauthCompletionPoll();
+    this.oauthPollTicksLeft = LlmProviderComponent.OAUTH_POLL_MAX_TICKS;
     this.oauthCompletionPoll = setInterval(() => {
-      if (this.oauthAuthenticated()) {
+      if (this.oauthAuthenticated() || this.oauthPollTicksLeft-- <= 0) {
         this.stopOauthCompletionPoll();
         return;
       }

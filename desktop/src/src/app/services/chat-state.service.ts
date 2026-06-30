@@ -721,7 +721,12 @@ export class ChatStateService {
           }
         }
         const resolvedModel = chunk.data.model ?? (this._model || undefined);
-        const meta = buildEntryMeta(chunk.data, resolvedModel);
+        // Suppress the live cost preview for local (no real cost; reconcile confirms null).
+        const meta = buildEntryMeta(
+          chunk.data,
+          resolvedModel,
+          isLocalProvider(this._currentProvider)
+        );
         if (this._currentBlocks.length > 0) {
           const assistantUuid = chunk.data.assistant_uuid;
           const assistantEntry: ChatMessage = {
@@ -745,8 +750,12 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
+        // Local has no real cost; Claude Code's estimate is meaningless → null
+        // (no $0.00x flicker before reconcile confirms the free/null SSOT value).
         const livePreviewCost =
-          typeof chunk.data.total_cost === 'number' && Number.isFinite(chunk.data.total_cost)
+          !isLocalProvider(this._currentProvider) &&
+          typeof chunk.data.total_cost === 'number' &&
+          Number.isFinite(chunk.data.total_cost)
             ? chunk.data.total_cost
             : null;
         this._sessionStats.set({
@@ -1332,6 +1341,7 @@ function findRetryAnchorIn(
  * @param data.turn_cost - Cost (USD) for the turn.
  * @param data.model - Model id from the payload, if present.
  * @param resolvedModel - Model id already resolved by the reducer.
+ * @param suppressCost - Skip the cost preview (local has no real cost).
  */
 function buildEntryMeta(
   data: {
@@ -1339,7 +1349,8 @@ function buildEntryMeta(
     turn_cost?: number;
     model?: string;
   },
-  resolvedModel: string | undefined
+  resolvedModel: string | undefined,
+  suppressCost = false
 ): EntryMeta | undefined {
   const { turn_usage, turn_cost } = data;
   const model = data.model ?? resolvedModel;
@@ -1352,7 +1363,7 @@ function buildEntryMeta(
 
   // Cost preview = backend turn_cost only; reconcileFooterCost replaces it with
   // the proxy SSOT. No frontend pricing — undefined hides the segment.
-  if (turn_cost !== undefined && Number.isFinite(turn_cost)) {
+  if (!suppressCost && turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
   }
   return meta;

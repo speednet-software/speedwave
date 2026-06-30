@@ -988,6 +988,25 @@ describe('LlmProviderComponent', () => {
     expect(calls).not.toContain('update_llm_config');
   });
 
+  it('the completion poll self-expires after the tick cap (no infinite IPC)', () => {
+    vi.useFakeTimers();
+    try {
+      const internals = component as unknown as {
+        oauthCompletionPoll: ReturnType<typeof setInterval> | null;
+        startOauthCompletionPoll(): void;
+      };
+      // Stay unauthenticated so only the tick cap can stop the poll.
+      component.oauthAuthenticated.set(false);
+      internals.startOauthCompletionPoll();
+      expect(internals.oauthCompletionPoll).not.toBeNull();
+      // Advance past the cap (200 ticks * 1500ms) → poll clears itself.
+      vi.advanceTimersByTime(201 * 1500);
+      expect(internals.oauthCompletionPoll).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('onOAuthDone_failure_does_not_save', async () => {
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;

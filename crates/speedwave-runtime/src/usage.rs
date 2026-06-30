@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_keeps_unknown_vs_zero() {
+    fn aggregation_local_and_subscription_are_unpriced() {
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -623,13 +623,12 @@ mod tests {
                 r#"{"ts":"2026-06-12T10:01:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_oauth","provider_kind":"anthropic_oauth"}"#,
             ],
         );
-        // Sidecar: local priced 0.0 (free), oauth unpriced (subscription).
+        // Both local (free) and oauth (subscription) are unpriced → total stays None.
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let s = read_usage_summary_in(dir.path(), "proj");
-        assert_eq!(
-            s.totals.cost_usd,
-            Some(0.0),
-            "free 0.0 must not vanish into None"
+        assert!(
+            s.totals.cost_usd.is_none(),
+            "local + subscription are both unpriced → None, never 0.0"
         );
     }
 
@@ -805,8 +804,8 @@ mod tests {
     }
 
     #[test]
-    fn session_cost_free_zero_does_not_vanish() {
-        // A purely-free session is priced 0.0, not unpriced None.
+    fn session_cost_local_is_unpriced_none() {
+        // A purely-local (free) session is unpriced → None (rendered `—`), not 0.0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -816,7 +815,7 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        assert_eq!(session_cost_in(dir.path(), "proj"), Some(0.0));
+        assert!(session_cost_in(dir.path(), "proj").is_none());
     }
 
     #[test]
@@ -894,8 +893,8 @@ mod tests {
     }
 
     #[test]
-    fn conversation_cost_free_zero_does_not_vanish() {
-        // A free/local conversation is priced 0.0, not unpriced None.
+    fn conversation_cost_local_is_unpriced_none() {
+        // A local conversation is unpriced → None (rendered `—`), not 0.0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -905,10 +904,7 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        assert_eq!(
-            conversation_cost_in(dir.path(), "proj", &["msg_local".to_string()]),
-            Some(0.0)
-        );
+        assert!(conversation_cost_in(dir.path(), "proj", &["msg_local".to_string()]).is_none());
     }
 
     #[test]
@@ -942,6 +938,24 @@ mod tests {
             u.cost_source, "",
             "no cost yet → non-terminal so the footer retries"
         );
+    }
+
+    #[test]
+    fn get_usage_for_response_local_is_terminal_free_null_after_enrich() {
+        // Regression: a local turn must reconcile to a TERMINAL free/null entry, else
+        // the footer keeps Claude Code's live-preview cost forever (invariant 6).
+        let dir = tempfile::tempdir().unwrap();
+        write_usage(
+            dir.path(),
+            "proj",
+            &[
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/q","response_id":"msg_1","provider_kind":"local","prompt_tokens":5}"#,
+            ],
+        );
+        crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
+        let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
+        assert_eq!(u.cost_source, "free", "local is terminal free, not retried");
+        assert!(u.cost_usd.is_none(), "local cost is null, never $0.00");
     }
 
     #[test]
@@ -1032,9 +1046,9 @@ mod tests {
         std::fs::write(
             &cache,
             concat!(
-                r#"{"response_id":"msg_keep","cost_usd":0.0,"cost_source":"free"}"#,
+                r#"{"response_id":"msg_keep","cost_usd":null,"cost_source":"free"}"#,
                 "\n",
-                r#"{"response_id":"msg_keep","cost_usd":0.0,"cost_source":"free"}"#,
+                r#"{"response_id":"msg_keep","cost_usd":null,"cost_source":"free"}"#,
                 "\n",
                 r#"{"response_id":"msg_orphan","cost_usd":1.0,"cost_source":"catalog"}"#,
                 "\n",
@@ -1149,7 +1163,7 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"local/q","response_id":"msg_live","provider_kind":"local"}"#,
+                r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_live","provider_kind":"anthropic_apikey","prompt_tokens":1000,"completion_tokens":0}"#,
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
@@ -1171,7 +1185,7 @@ mod tests {
             .totals
             .cost_usd
             .unwrap();
-        assert_eq!(footer, 0.0, "only the in-window free line counts");
+        assert!(footer > 0.0, "only the in-window priced line counts");
         assert!(
             (footer - dashboard).abs() < 1e-9,
             "footer must equal dashboard"
