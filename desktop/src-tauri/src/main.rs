@@ -136,7 +136,10 @@ pub(crate) const MSG_NOT_AUTHENTICATED: &str =
 
 use diagnostics::export_diagnostics;
 use window::should_debounce;
-use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
+use window::{
+    hide_main_window, should_emit_focus_event, should_prevent_close, should_run_cleanup,
+    show_main_window,
+};
 
 // ---------------------------------------------------------------------------
 // Extracted subsystem starters (reused by setup() and ensure_*_running())
@@ -1259,6 +1262,12 @@ fn main() {
                     // Do NOT join here (would deadlock the event loop); stash the handle for `RunEvent::Exit`.
                     if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_window) {
                         stash_cleanup_handle(&exit_cleanup_handle_window, handle);
+                    }
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    if should_emit_focus_event(window.label(), *focused) {
+                        use tauri::Emitter;
+                        let _ = window.emit("window_focused", ());
                     }
                 }
                 _ => {}

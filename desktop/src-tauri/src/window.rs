@@ -21,6 +21,12 @@ pub(crate) fn should_run_cleanup(window_label: &str) -> bool {
     window_label == MAIN_WINDOW_LABEL
 }
 
+/// Whether a `Focused` event should notify the frontend: main window regaining
+/// focus only — lets a throttled poll (e.g. OAuth completion) catch up.
+pub(crate) fn should_emit_focus_event(window_label: &str, focused: bool) -> bool {
+    window_label == MAIN_WINDOW_LABEL && focused
+}
+
 /// Shows the main window and restores the macOS activation policy to Regular
 /// so the app reappears in the Dock and Cmd+Tab after being hidden.
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
@@ -172,5 +178,27 @@ mod tests {
         // "main2" or "main-dialog" should not trigger cleanup.
         assert!(!should_run_cleanup("main2"));
         assert!(!should_run_cleanup("main-dialog"));
+    }
+
+    // -- Focused event gating --
+
+    #[test]
+    fn focus_event_emitted_for_main_window_gaining_focus() {
+        assert!(should_emit_focus_event(MAIN_WINDOW_LABEL, true));
+    }
+
+    #[test]
+    fn focus_event_skipped_for_main_window_losing_focus() {
+        assert!(!should_emit_focus_event(MAIN_WINDOW_LABEL, false));
+    }
+
+    #[test]
+    fn focus_event_skipped_for_dialog_window_gaining_focus() {
+        assert!(!should_emit_focus_event("dialog", true));
+    }
+
+    #[test]
+    fn focus_event_skipped_for_empty_label() {
+        assert!(!should_emit_focus_event("", true));
     }
 }

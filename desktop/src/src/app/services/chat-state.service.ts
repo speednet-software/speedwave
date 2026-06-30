@@ -71,6 +71,18 @@ export function mapContextOverflowError(raw: string): string | null {
   return null;
 }
 
+/**
+ * Best-effort: friendly message for Claude Code's own "not logged in" error,
+ * pointing at Speedwave Settings instead of its `/login` slash command.
+ * @param raw - Raw error string from the backend.
+ */
+export function mapNotLoggedInError(raw: string): string | null {
+  if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
+    return 'Not logged in. Go to Settings and choose an LLM provider.';
+  }
+  return null;
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -797,7 +809,10 @@ export class ChatStateService {
       }
 
       case 'Error': {
-        const errContent = mapContextOverflowError(chunk.data.content) ?? chunk.data.content;
+        const errContent =
+          mapContextOverflowError(chunk.data.content) ??
+          mapNotLoggedInError(chunk.data.content) ??
+          chunk.data.content;
         this._currentBlocks = [...this._currentBlocks, { type: 'error', content: errContent }];
         this._messages = [
           ...this._messages,

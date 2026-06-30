@@ -775,6 +775,30 @@ describe('LlmProviderComponent', () => {
     );
   });
 
+  it('logout forces no_provider even from a live ready chat session', async () => {
+    // Reproduces the bug: a deliberate logout while status is already 'ready'
+    // must blank the chat view, not silently stay on 'ready'.
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'anthropic_logout') return undefined;
+      if (cmd === 'clear_active_llm_provider') return undefined;
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: false,
+        };
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.status.set('ready');
+
+    await component.anthropicLogout('proj');
+
+    expect(projectState.status()).toBe('no_provider');
+  });
+
   it('onOAuthDone_success_selects_anthropic_and_saves', async () => {
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
@@ -1005,6 +1029,46 @@ describe('LlmProviderComponent', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('window regaining focus forces an immediate auth check (past poll throttling)', async () => {
+    // The OS/webview throttles setInterval in an unfocused window, so a window
+    // focus event must trigger the same check independent of the poll cadence.
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      if (cmd === 'update_llm_config') return undefined;
+      return prev(cmd, args);
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.oauthAuthenticated.set(false);
+    component.ngOnInit();
+    await flushMicrotasks();
+
+    mockTauri.dispatchEvent('window_focused', undefined);
+    await flushMicrotasks();
+
+    expect(calls).toContain('get_auth_status');
+    expect(calls).toContain('update_llm_config');
+  });
+
+  it('ngOnDestroy clears the focus listener', async () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await flushMicrotasks();
+    expect(mockTauri.listenHandlers['window_focused']).toBeDefined();
+
+    component.ngOnDestroy();
+
+    expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
   });
 
   it('onOAuthDone_failure_does_not_save', async () => {

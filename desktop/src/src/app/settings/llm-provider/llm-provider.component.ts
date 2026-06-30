@@ -659,6 +659,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Poll that detects an external-terminal OAuth login (no frontend callback). */
   private oauthCompletionPoll: ReturnType<typeof setInterval> | null = null;
+  /** Unsubscribes the window-focus listener (forces a check past poll throttling). */
+  private unlistenFocus: (() => void) | null = null;
   /** Remaining ticks before the poll self-expires (bounds the IPC/log churn). */
   private oauthPollTicksLeft = 0;
   /** True while a poll tick's autosave is running; blocks overlapping ticks. */
@@ -823,11 +825,23 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
+    this.tauri
+      .listen('window_focused', () => void this.detectExternalLoginAndAutosave())
+      .then((unlisten) => {
+        this.unlistenFocus = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
+      });
   }
 
-  /** Tears down the external-login completion poll. */
+  /** Tears down the external-login completion poll and the focus listener. */
   ngOnDestroy(): void {
     this.stopOauthCompletionPoll();
+    if (this.unlistenFocus) {
+      this.unlistenFocus();
+      this.unlistenFocus = null;
+    }
   }
 
   /**
@@ -1321,6 +1335,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke<void>('anthropic_logout', { project });
       await this.tauri.invoke<void>('clear_active_llm_provider');
+      // Deliberate action — bypass applyAuthStatus's never-downgrade guard so
+      // a live chat view blanks to the no_provider screen.
+      this.projectState.forceUnconfigured();
       await this.loadAuthStatus();
       // The poll self-stopped while authenticated; restart it so a subsequent
       // external-terminal re-login on this same project is detected again.

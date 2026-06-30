@@ -1110,6 +1110,34 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('ready');
     });
 
+    it('forceUnconfigured downgrades a live ready session (deliberate logout)', () => {
+      // Unlike applyAuthStatus, a user-initiated logout is not a false
+      // negative — the chat view must blank to the no_provider screen.
+      service.status.set('ready');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.forceUnconfigured();
+      expect(service.status()).toBe('no_provider');
+      expect(cb).toHaveBeenCalled();
+    });
+
+    it('forceUnconfigured sets no_provider from any pre-ready status', () => {
+      for (const status of ['auth_required', 'starting', 'checking'] as const) {
+        service.status.set(status);
+        service.forceUnconfigured();
+        expect(service.status()).toBe('no_provider');
+      }
+    });
+
+    it('forceUnconfigured is idempotent (no_provider to no_provider still notifies)', () => {
+      service.status.set('no_provider');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.forceUnconfigured();
+      expect(service.status()).toBe('no_provider');
+      expect(cb).toHaveBeenCalled();
+    });
+
     it('does not fire onProjectReady for auth_required', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {

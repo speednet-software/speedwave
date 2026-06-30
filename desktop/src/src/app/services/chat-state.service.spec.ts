@@ -4,6 +4,7 @@ import {
   ChatStateService,
   historyFitsTarget,
   mapContextOverflowError,
+  mapNotLoggedInError,
   messageBlocksToState,
   stateBlocksToMessageBlocks,
   toChatMessages,
@@ -2835,6 +2836,28 @@ describe('ChatStateService', () => {
     });
   });
 
+  // ── mapNotLoggedInError ─────────────────────────────────────────────────────
+
+  describe('mapNotLoggedInError', () => {
+    it('maps Claude Code\'s "not logged in" error to a Settings-pointing message', () => {
+      expect(mapNotLoggedInError('Not logged in · Please run /login')).toContain('Settings');
+      expect(mapNotLoggedInError('some unrelated error')).toBeNull();
+    });
+
+    it('matches "not authenticated" wording variants', () => {
+      expect(mapNotLoggedInError('Not authenticated')).not.toBeNull();
+    });
+
+    it('is case-insensitive', () => {
+      expect(mapNotLoggedInError('NOT LOGGED IN')).not.toBeNull();
+    });
+
+    it('returns null for unknown errors', () => {
+      expect(mapNotLoggedInError('')).toBeNull();
+      expect(mapNotLoggedInError('rate limit exceeded')).toBeNull();
+    });
+  });
+
   // ── handleStreamChunk Error — context-overflow mapping ────────────────────
 
   describe('handleStreamChunk Error — context-overflow mapping', () => {
@@ -2869,6 +2892,27 @@ describe('ChatStateService', () => {
       expect(errBlock).toBeDefined();
       if (errBlock?.type === 'error') {
         expect(errBlock.content).toBe('some unrelated error');
+      }
+    });
+  });
+
+  // ── handleStreamChunk Error — not-logged-in mapping ────────────────────────
+
+  describe('handleStreamChunk Error — not-logged-in mapping', () => {
+    it('replaces Claude Code\'s "not logged in" error with a Settings-pointing message', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'Not logged in · Please run /login' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toContain('Settings');
       }
     });
   });

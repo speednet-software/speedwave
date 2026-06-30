@@ -413,6 +413,15 @@ export class ProjectStateService {
   }
 
   /**
+   * Forces the no_provider status, bypassing applyAuthStatus's never-downgrade
+   * guard — for a deliberate user action (e.g. logout), not a passive probe.
+   */
+  forceUnconfigured(): void {
+    this.status.set('no_provider');
+    this.notifyChange();
+  }
+
+  /**
    * Retries container startup after a CloudStorage TCC (or other transient) error.
    * Resets error state and re-runs `ensureContainersRunning`.
    */

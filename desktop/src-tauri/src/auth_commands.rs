@@ -76,14 +76,14 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
-        // False ONLY for an explicit v2 logout/dangling ("choose a provider").
-        // Fresh/missing/legacy is exempt → true (ADR-073: Anthropic default).
+        // False for an explicit v2 logout/dangling AND for a fresh project with
+        // no llm override at all ("choose a provider" in both cases).
         let provider_configured = user_config
             .find_project(&project)
             .and_then(|p| p.claude.as_ref())
             .and_then(|c| c.llm.as_ref())
             .map(|llm| !llm.is_explicitly_unconfigured())
-            .unwrap_or(true);
+            .unwrap_or(false);
         Ok(AuthStatusResponse {
             api_key_configured,
             oauth_authenticated,
@@ -322,8 +322,8 @@ mod tests {
 
     #[test]
     fn get_auth_status_derives_provider_configured_from_explicitly_unconfigured() {
-        // provider_configured from is_explicitly_unconfigured, defaulting to TRUE
-        // for fresh/missing — ADR-073: fresh/legacy is exempt (Anthropic default).
+        // provider_configured defaults to FALSE for fresh/missing (no provider
+        // chosen yet), same as an explicit v2 logout.
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
@@ -338,8 +338,8 @@ mod tests {
             "get_auth_status must derive provider_configured from is_explicitly_unconfigured"
         );
         assert!(
-            fn_body.contains(".unwrap_or(true)"),
-            "fresh/missing project must default provider_configured to true (ADR-073 exempt)"
+            fn_body.contains(".unwrap_or(false)"),
+            "fresh/missing project must default provider_configured to false — no provider was ever chosen"
         );
         assert!(
             fn_body.contains("provider_configured,"),
