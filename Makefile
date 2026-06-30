@@ -217,6 +217,7 @@ clean:
 	cargo clean
 	rm -rf desktop/src/dist desktop/src/node_modules/.cache
 	cd mcp-servers && rm -rf node_modules/*/dist */dist
+	rm -rf native/macos/*/.build
 	@echo "✅ Clean"
 
 # ── Install dependencies (alias for setup-dev) ──────────────────────────────
