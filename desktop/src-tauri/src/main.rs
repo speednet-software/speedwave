@@ -645,9 +645,8 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Logs a sanitized panic message via `log_fn`, falling back to `eprintln!`
-/// if `log_fn` itself panics — a panic during unwind is an unconditional
-/// process abort, so the fern/tauri-plugin-log sink (which can panic on a
-/// broken stdout pipe) must never run un-isolated from the panic hook.
+/// if `log_fn` itself panics — a panic during unwind aborts the process, so
+/// the (pipe-fragile) log sink must run isolated from the panic hook.
 fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
         // Sanctioned panic-hook stderr fallback (logging.md) — the log

@@ -31,7 +31,7 @@ A streaming turn is interrupted first, then the session resumes after the
 container restart.
 
 **If the history is too large for the new model:** you're asked to **Resume
-anyway** or **Start fresh on this model** before the switch, instead of hitting
+anyway** or **Start fresh** before the switch, instead of hitting
 a silent context-overflow. Pick a larger-window model, or start fresh, if the
 history doesn't fit. Switching on an empty conversation just starts clean.
 

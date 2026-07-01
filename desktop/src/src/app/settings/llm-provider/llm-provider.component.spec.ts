@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { LlmProviderComponent } from './llm-provider.component';
+import { OauthCompletionWatcher } from './oauth-completion-watcher';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
@@ -1108,9 +1109,9 @@ describe('LlmProviderComponent', () => {
     expect(calls).not.toContain('restart_llm_proxy');
   });
 
-  it('external-terminal login (poll detects oauth false→true) auto-saves Anthropic', async () => {
-    // The external "Open terminal and log in" path has no frontend callback, so a
-    // poll detects the credentials flip and runs the same autosave as the embedded one.
+  it('external-terminal login (watcher detects oauth false→true) auto-saves Anthropic', async () => {
+    // The external "Open terminal and log in" path has no frontend callback, so
+    // the watcher detects the credentials flip and runs the embedded autosave.
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -1129,15 +1130,13 @@ describe('LlmProviderComponent', () => {
     // Fresh project: not yet authenticated; the external terminal just completed.
     component.oauthAuthenticated.set(false);
 
-    await (
-      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
-    ).detectExternalLoginAndAutosave();
+    await fixture.debugElement.injector.get(OauthCompletionWatcher).checkNow();
 
     expect(component.selectedTarget()).toBe('anthropic');
     expect(calls).toContain('update_llm_config');
   });
 
-  it('poll does not auto-save when already authenticated (no double-save)', async () => {
+  it('watcher probe does not auto-save when already authenticated (no double-save)', async () => {
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -1155,122 +1154,48 @@ describe('LlmProviderComponent', () => {
     // Already authenticated (e.g. embedded path handled it) → no false→true edge.
     component.oauthAuthenticated.set(true);
 
-    await (
-      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
-    ).detectExternalLoginAndAutosave();
+    await fixture.debugElement.injector.get(OauthCompletionWatcher).checkNow();
 
     expect(calls).not.toContain('update_llm_config');
-  });
-
-  it('overlapping poll ticks autosave only once (in-flight guard)', async () => {
-    // A slow get_auth_status must not let a second tick pass the same false→true
-    // edge and fire a duplicate onOAuthDone/saveConfig (double container restart).
-    const authed = {
-      api_key_configured: false,
-      oauth_authenticated: true,
-      needs_anthropic_auth: true,
-      provider_configured: true,
-    };
-    let updateCalls = 0;
-    let firstStatusSeen = false;
-    let releaseStatus: (v: AuthStatusResponse) => void = () => {};
-    const prev = mockTauri.invokeHandler;
-    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === 'get_auth_status') {
-        // Only the first probe (the racing tick) hangs; later reloads resolve.
-        if (!firstStatusSeen) {
-          firstStatusSeen = true;
-          return new Promise<AuthStatusResponse>((resolve) => {
-            releaseStatus = resolve;
-          });
-        }
-        return authed;
-      }
-      if (cmd === 'update_llm_config') {
-        updateCalls++;
-        return undefined;
-      }
-      return prev(cmd, args);
-    };
-    fixture.componentRef.setInput('activeProject', 'proj');
-    await flushMicrotasks();
-    component.oauthAuthenticated.set(false);
-
-    const detect = () =>
-      (
-        component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
-      ).detectExternalLoginAndAutosave();
-    const first = detect();
-    // Second tick fires while the first's get_auth_status is still pending.
-    const second = detect();
-    releaseStatus(authed);
-    await Promise.all([first, second]);
-    await flushMicrotasks();
-
-    expect(updateCalls).toBe(1);
   });
 
   it('logout restarts the completion poll so a later external re-login is detected', async () => {
     fixture.componentRef.setInput('activeProject', 'proj');
-    const internals = component as unknown as {
-      oauthCompletionPoll: ReturnType<typeof setInterval> | null;
-    };
-    // Authenticated state stops the poll on its next tick / via detect.
+    const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
+    // Authenticated state stops the poll on its next tick / via the probe.
     component.oauthAuthenticated.set(true);
-    (component as unknown as { stopOauthCompletionPoll(): void }).stopOauthCompletionPoll();
-    expect(internals.oauthCompletionPoll).toBeNull();
+    watcher.stopPoll();
+    expect(watcher.isPolling()).toBe(false);
 
     await component.anthropicLogout('proj');
 
     // A fresh poll is running again after logout.
-    expect(internals.oauthCompletionPoll).not.toBeNull();
+    expect(watcher.isPolling()).toBe(true);
   });
 
-  it('a tick whose project changes mid-probe does not autosave (stale drop)', async () => {
-    // The probe captures the project before awaiting get_auth_status; if the user
-    // switches projects while it is in flight, the result is dropped (no autosave).
-    const calls: string[] = [];
-    const prev = mockTauri.invokeHandler;
-    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-      calls.push(cmd);
-      if (cmd === 'get_auth_status') {
-        // Simulate the user switching projects while this probe is in flight.
-        fixture.componentRef.setInput('activeProject', 'proj-b');
-        return {
-          api_key_configured: false,
-          oauth_authenticated: true,
-          needs_anthropic_auth: true,
-          provider_configured: true,
-        };
-      }
-      return prev(cmd, args);
-    };
-    fixture.componentRef.setInput('activeProject', 'proj-a');
-    await flushMicrotasks();
-    component.oauthAuthenticated.set(false);
-
-    await (
-      component as unknown as { detectExternalLoginAndAutosave(): Promise<void> }
-    ).detectExternalLoginAndAutosave();
-
-    // Probe ran, but the result was for proj-a after the switch to proj-b → dropped.
-    expect(calls).not.toContain('update_llm_config');
-  });
-
-  it('the completion poll self-expires after the tick cap (no infinite IPC)', () => {
+  it('poll ticks probe only while the Anthropic card is active (context wiring)', () => {
     vi.useFakeTimers();
     try {
-      const internals = component as unknown as {
-        oauthCompletionPoll: ReturnType<typeof setInterval> | null;
-        startOauthCompletionPoll(): void;
+      const calls: string[] = [];
+      const prev = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push(cmd);
+        return prev(cmd, args);
       };
-      // Stay unauthenticated so only the tick cap can stop the poll.
+      fixture.componentRef.setInput('activeProject', 'proj');
+      const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
       component.oauthAuthenticated.set(false);
-      internals.startOauthCompletionPoll();
-      expect(internals.oauthCompletionPoll).not.toBeNull();
-      // Advance past the cap (200 ticks * 1500ms) → poll clears itself.
-      vi.advanceTimersByTime(201 * 1500);
-      expect(internals.oauthCompletionPoll).toBeNull();
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      watcher.startPoll();
+
+      vi.advanceTimersByTime(1500);
+      expect(calls).not.toContain('get_auth_status');
+
+      component.provider.set('anthropic');
+      component.selectedTarget.set('anthropic');
+      vi.advanceTimersByTime(1500);
+      expect(calls).toContain('get_auth_status');
     } finally {
       vi.useRealTimers();
     }
@@ -2406,6 +2331,122 @@ describe('LlmProviderComponent', () => {
     expect(component.extraProviders()[0].models).toBeNull();
   });
 
+  it('openrouter auth failure shows the inline key error (no silent dead end)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'discover_llm_models') throw new Error('auth');
+      return undefined;
+    };
+
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-bad');
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const err = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-extra-discovery-error-openrouter"]'
+    );
+    expect(err).not.toBeNull();
+    expect(err.textContent).toContain('Authentication failed — check the API key.');
+    // Still no model field — the error message is the user's signal.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
+    ).toBeNull();
+  });
+
+  it('openrouter non-auth failure shows a generic inline discovery error', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'discover_llm_models') throw new Error('connection refused');
+      return undefined;
+    };
+
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-x');
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const err = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-extra-discovery-error-openrouter"]'
+    );
+    expect(err).not.toBeNull();
+    expect(err.textContent).toContain('Model discovery failed');
+  });
+
+  it('openrouter HTTP-status failure surfaces the status code inline', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'discover_llm_models') throw new Error('LLM server returned HTTP 500');
+      return undefined;
+    };
+
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-x');
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const err = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-extra-discovery-error-openrouter"]'
+    );
+    expect(err.textContent).toContain('HTTP 500');
+  });
+
+  it('a successful re-discovery clears the openrouter inline error', async () => {
+    let fail = true;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'discover_llm_models') {
+        if (fail) throw new Error('auth');
+        return { models: [{ id: 'qwen/qwen3-coder', context_tokens: 262144 }] };
+      }
+      return undefined;
+    };
+    const errSelector = '[data-testid="settings-llm-extra-discovery-error-openrouter"]';
+
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-x');
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(errSelector)).not.toBeNull();
+
+    fail = false;
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector(errSelector)).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
+    ).not.toBeNull();
+  });
+
+  it('editing the openrouter key resets the inline discovery error', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'discover_llm_models') throw new Error('auth');
+      return undefined;
+    };
+    const errSelector = '[data-testid="settings-llm-extra-discovery-error-openrouter"]';
+
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-bad');
+    await component.discoverExtraModels(component.extraProviders()[0]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(errSelector)).not.toBeNull();
+
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-new');
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector(errSelector)).toBeNull();
+  });
+
+  it('reloading config resets a stale openrouter discovery error (fresh rows)', async () => {
+    component.extraProviders()[0].discoverError = { reason: 'auth' };
+
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    expect(component.extraProviders()[0].discoverError).toBeNull();
+  });
+
   it('marks the saved model selected once the async catalog renders', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'discover_llm_models') {
@@ -2533,6 +2574,80 @@ describe('LlmProviderComponent', () => {
     component.selectExtraProvider(component.extraProviders()[0]);
     // The fresh card model is captured so a later Save won't lose it.
     expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
+  });
+
+  it('onProviderChange snapshots the anthropic model when leaving the card (S4)', async () => {
+    component.model.set('claude-opus-4-8');
+
+    component.provider.set('local');
+    await component.onProviderChange();
+
+    expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
+  });
+
+  it('onProviderChange never snapshots a foreign model from the anthropic card (S4)', async () => {
+    component['loadedAnthropicModel'] = 'claude-opus-4-8';
+    // Corrupted card state: a `provider/model` id must not poison the snapshot.
+    component.model.set('vendor/foreign-model');
+
+    component.provider.set('local');
+    await component.onProviderChange();
+
+    expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
+  });
+
+  it('narrows an unknown persisted flat provider to the local card (typed domain)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_llm_config')
+        return { provider: 'mystery-llm', model: null, base_url: null, default_base_url: null };
+      if (cmd === 'list_anthropic_models') return TEST_ANTHROPIC_MODELS;
+      return undefined;
+    };
+
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    expect(component.provider()).toBe('local');
+    expect(component.selectedTarget()).toBe('local');
+  });
+
+  it('narrows a legacy generated openrouter id onto its fixed row by kind', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'openrouter-2',
+            model: 'z-ai/glm-5.2',
+            base_url: null,
+            default_base_url: null,
+            providers: [
+              { id: 'anthropic', kind: 'anthropic_oauth', model: null },
+              {
+                id: 'openrouter-2',
+                kind: 'open_router',
+                model: 'z-ai/glm-5.2',
+                has_api_key: true,
+              },
+            ],
+            active: { provider_id: 'openrouter-2', model: 'z-ai/glm-5.2' },
+          };
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        case 'discover_llm_models':
+          return { models: [{ id: 'z-ai/glm-5.2', context_tokens: 200000 }] };
+        default:
+          return undefined;
+      }
+    };
+
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+
+    expect(component.provider()).toBe('openrouter');
+    expect(component.selectedTarget()).toBe('openrouter');
+    expect(component.extraProviders()[0].model).toBe('z-ai/glm-5.2');
   });
 
   it('reload after OpenRouter-active save does not poison the anthropic card (F-5/b2)', async () => {

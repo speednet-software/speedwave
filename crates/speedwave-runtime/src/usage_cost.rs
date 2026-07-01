@@ -65,7 +65,8 @@ pub struct CostEntry {
 }
 
 impl CostEntry {
-    /// Builds an entry, debug-asserting the source↔cost invariant.
+    /// Builds an entry, enforcing the source↔cost invariant: debug builds
+    /// assert (documents intent), release builds clamp via [`normalize_cost`].
     pub(crate) fn new(response_id: String, cost_usd: Option<f64>, cost_source: CostSource) -> Self {
         debug_assert!(
             match cost_source {
@@ -80,9 +81,22 @@ impl CostEntry {
         );
         CostEntry {
             response_id,
-            cost_usd,
+            cost_usd: normalize_cost(cost_usd, cost_source),
             cost_source,
         }
+    }
+}
+
+/// Release-path clamp for the source↔cost invariant (invariant 6): an unpriced
+/// source never carries a cost — `null`, never collapsed to `0.0`.
+fn normalize_cost(cost_usd: Option<f64>, cost_source: CostSource) -> Option<f64> {
+    match cost_source {
+        CostSource::Catalog | CostSource::Actual => cost_usd,
+        CostSource::Subscription
+        | CostSource::Free
+        | CostSource::Unknown
+        | CostSource::Deferred
+        | CostSource::Failed => None,
     }
 }
 
@@ -780,6 +794,35 @@ mod tests {
     #[should_panic(expected = "CostEntry invariant")]
     fn cost_entry_new_rejects_subscription_with_cost() {
         CostEntry::new("x".into(), Some(1.0), CostSource::Subscription);
+    }
+
+    #[test]
+    fn normalize_cost_clamps_unpriced_sources_to_none() {
+        // Release-path clamp: `new` runs this after the debug_assert, so a
+        // release build can never emit Free/0.0 (invariant 6).
+        for src in [
+            CostSource::Subscription,
+            CostSource::Free,
+            CostSource::Unknown,
+            CostSource::Deferred,
+            CostSource::Failed,
+        ] {
+            assert_eq!(normalize_cost(Some(0.0), src), None, "{src:?}");
+            assert_eq!(normalize_cost(Some(1.5), src), None, "{src:?}");
+            assert_eq!(normalize_cost(None, src), None, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_cost_keeps_priced_sources_intact() {
+        assert_eq!(normalize_cost(Some(1.5), CostSource::Catalog), Some(1.5));
+        assert_eq!(
+            normalize_cost(Some(0.0042), CostSource::Actual),
+            Some(0.0042)
+        );
+        // A priced source with no cost stays None (fail-safe: never fabricate).
+        assert_eq!(normalize_cost(None, CostSource::Catalog), None);
+        assert_eq!(normalize_cost(None, CostSource::Actual), None);
     }
 
     #[test]

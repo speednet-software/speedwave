@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
   historyFitsTarget,
+  isNotAuthenticatedError,
   mapContextOverflowError,
   mapNotLoggedInError,
   messageBlocksToState,
@@ -2858,6 +2859,23 @@ describe('ChatStateService', () => {
     });
   });
 
+  // ── isNotAuthenticatedError gate predicate ─────────────────────────────────
+
+  describe('isNotAuthenticatedError', () => {
+    it('matches the backend "not authenticated" phrasings', () => {
+      expect(
+        isNotAuthenticatedError('Claude is not authenticated. Please authenticate first.')
+      ).toBe(true);
+      expect(isNotAuthenticatedError('not authenticated')).toBe(true);
+    });
+
+    it('is case-sensitive (exact backend phrasing) and rejects unrelated errors', () => {
+      expect(isNotAuthenticatedError('NOT AUTHENTICATED')).toBe(false);
+      expect(isNotAuthenticatedError('Broken pipe (os error 32)')).toBe(false);
+      expect(isNotAuthenticatedError('')).toBe(false);
+    });
+  });
+
   // ── handleStreamChunk Error — context-overflow mapping ────────────────────
 
   describe('handleStreamChunk Error — context-overflow mapping', () => {
@@ -3030,6 +3048,50 @@ describe('ChatStateService', () => {
       expect(calls).toContain('resume_conversation');
     });
 
+    it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
+      service.seedResumedSession('sess-window');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      // Stale cache from the PREVIOUS model: too small — would wrongly ask.
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const decider = vi.fn(() => Promise.resolve('fresh' as const));
+      service.setResumeDecider(decider);
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        // The post-restart model has a big window: history fits.
+        if (cmd === 'get_llm_config') return { provider: 'anthropic', context_tokens: 200_000 };
+        if (cmd === 'get_conversation') return { session_id: 'sess-window', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(decider).not.toHaveBeenCalled();
+      expect(calls).toContain('resume_conversation');
+    });
+
+    it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
+      service.seedResumedSession('sess-shrunk');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      // Stale cache from the PREVIOUS model: big — would wrongly auto-resume.
+      (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
+      const decider = vi.fn(() => Promise.resolve('resume' as const));
+      service.setResumeDecider(decider);
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_llm_config') return { provider: 'local', context_tokens: 8192 };
+        if (cmd === 'get_conversation') return { session_id: 'sess-shrunk', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      // The decision saw the NEW (smaller) window and asked the mounted view.
+      expect(decider).toHaveBeenCalledTimes(1);
+      expect(calls).toContain('resume_conversation'); // decider chose resume
+    });
+
     it('does nothing on restart when no durable session id is known', async () => {
       service.clearSessionTracking();
       const calls: string[] = [];
@@ -3115,17 +3177,24 @@ describe('ChatStateService', () => {
       };
 
       const restartDone = fireRestart(projectState);
-      await Promise.resolve();
+      // The llm-config re-read precedes the resume RPC; wait until it's in flight.
+      await vi.waitFor(() => {
+        expect(releaseResume).not.toBeNull();
+      });
       // Remount while resume is still in flight.
       await service.init();
       releaseResume!();
       await restartDone;
 
-      expect(calls).not.toContain('start_chat');
-      expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
-        type: 'text',
-        content: 'restored',
+      // The released resume pipeline settles asynchronously; wait for its load.
+      await vi.waitFor(() => {
+        expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
+          type: 'text',
+          content: 'restored',
+        });
       });
+      // Asserted after full settle: even a late competing start_chat would show.
+      expect(calls).not.toContain('start_chat');
     });
 
     it('a remount init() just after resume completes still does not start_chat', async () => {
@@ -3161,6 +3230,60 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(calls).toContain('start_chat');
+    });
+  });
+
+  // ── resumeConversation transcript failure (non-blocking notice) ────────────
+
+  describe('resumeConversation transcript failure', () => {
+    it('keeps the session live and shows a notice when get_conversation fails but resume succeeds', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') throw new Error('jsonl unreadable');
+        return undefined;
+      };
+
+      await service.resumeConversation('sess-notice');
+
+      expect(calls).toContain('resume_conversation');
+      // Session stays live: durable + footer ids seeded so retry/queue work.
+      expect(service.lastKnownSessionId).toBe('sess-notice');
+      expect(service.sessionStats?.session_id).toBe('sess-notice');
+      expect(service.isStreaming).toBe(false);
+      // Non-blocking notice explains the empty scrollback.
+      const blocks = service.messages.flatMap((m) => m.blocks);
+      const notice = blocks.find((b) => b.type === 'error');
+      expect(notice).toBeDefined();
+      expect((notice as { type: 'error'; content: string }).content).toContain('history');
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('shows no notice when the transcript loads successfully', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-ok',
+            messages: [
+              {
+                role: 'user',
+                content: 'hi',
+                timestamp: null,
+                blocks: [{ type: 'text', content: 'hi' }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+
+      await service.resumeConversation('sess-ok');
+
+      const blocks = service.messages.flatMap((m) => m.blocks);
+      expect(blocks.some((b) => b.type === 'error')).toBe(false);
+      expect(service.sessionStats?.session_id).toBe('sess-ok');
     });
   });
 
@@ -3240,6 +3363,122 @@ describe('ChatStateService', () => {
       };
       const [msg] = toChatMessages(transcript);
       expect(msg.meta).toBeUndefined();
+    });
+  });
+
+  // ── toChatMessages — history tool-block normalization ──────────────────────
+
+  describe('toChatMessages history tool-block normalization', () => {
+    /**
+     * Wraps raw history-shaped blocks into a one-message transcript.
+     * @param blocks - Raw blocks as the backend history payload ships them.
+     */
+    function transcriptWith(blocks: unknown[]): ConversationTranscript {
+      return {
+        session_id: '00000000-0000-0000-0000-000000000000',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: blocks as ConversationTranscript['messages'][number]['blocks'],
+          },
+        ],
+      };
+    }
+
+    it('nests a flat history tool_use into the live-chat shape (done, empty result)', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([{ type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"ls"}' }])
+      );
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: '',
+            tool_name: 'Bash',
+            input_json: '{"command":"ls"}',
+            status: 'done',
+            result: '',
+            result_is_error: false,
+          },
+        },
+      ]);
+    });
+
+    it('merges a tool_result into the preceding tool_use', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_use', tool_name: 'Read', input_json: '{"file_path":"/a.ts"}' },
+          { type: 'tool_result', content: 'file contents', is_error: false },
+        ])
+      );
+      expect(msg.blocks).toHaveLength(1);
+      const block = msg.blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.status).toBe('done');
+        if (block.tool.status === 'done') {
+          expect(block.tool.result).toBe('file contents');
+          expect(block.tool.result_is_error).toBe(false);
+        }
+      }
+    });
+
+    it('marks the merged tool errored when tool_result.is_error is true', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"boom"}' },
+          { type: 'tool_result', content: 'command not found', is_error: true },
+        ])
+      );
+      const block = msg.blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.status).toBe('error');
+        if (block.tool.status === 'error') {
+          expect(block.tool.result).toBe('command not found');
+          expect(block.tool.result_is_error).toBe(true);
+        }
+      }
+    });
+
+    it('drops an orphan tool_result with no preceding tool_use', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_result', content: 'orphan', is_error: false },
+          { type: 'text', content: 'after' },
+        ])
+      );
+      expect(msg.blocks).toEqual([{ type: 'text', content: 'after' }]);
+    });
+
+    it('does not merge a tool_result into a non-tool block', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'text', content: 'prose' },
+          { type: 'tool_result', content: 'dangling', is_error: false },
+        ])
+      );
+      expect(msg.blocks).toEqual([{ type: 'text', content: 'prose' }]);
+    });
+
+    it('passes an already-nested tool_use through unchanged', () => {
+      const nested = {
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: 't-live',
+          tool_name: 'Glob',
+          input_json: '{"pattern":"*.ts"}',
+          status: 'done',
+          result: 'a.ts',
+          result_is_error: false,
+        },
+      };
+      const [msg] = toChatMessages(transcriptWith([nested]));
+      expect(msg.blocks).toEqual([nested]);
     });
   });
 });

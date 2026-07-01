@@ -309,7 +309,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   private tauri = inject(TauriService);
 
-  /** Backoff (ms) for re-polling an unpriced (deferred) aggregate; ~60s total. */
+  /** Backoff (ms) for re-polling an unpriced (deferred) aggregate; ~59s total. */
   private static readonly DEFERRED_REPOLL_MS = [2_000, 4_000, 8_000, 15_000, 30_000];
   private repollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -364,15 +364,19 @@ export class LlmUsageComponent implements OnDestroy {
   }
 
   /**
-   * Re-polls on a bounded backoff while the aggregate is unpriced but has
-   * requests — OpenRouter cost is enriched async (deferred), like the footer.
+   * Re-polls on a bounded backoff while the aggregate is unpriced but still
+   * enrichable — OpenRouter cost lands async (deferred), like the footer.
+   * Permanently-unpriced aggregates (local/subscription) never re-poll.
    * @param project - Project to refetch usage for.
    * @param summary - Latest summary; drives the unpriced/deferred check.
    * @param attempt - Backoff index (0 on the first schedule).
    */
   private scheduleDeferredRepoll(project: string, summary: UsageSummary, attempt = 0): void {
     const backoff = LlmUsageComponent.DEFERRED_REPOLL_MS;
-    const deferred = summary.totals.requests > 0 && summary.totals.cost_usd === null;
+    const deferred =
+      summary.totals.requests > 0 &&
+      summary.totals.cost_usd === null &&
+      hasDeferrableUnpricedRows(summary);
     if (!deferred || attempt >= backoff.length) return;
     this.repollTimer = setTimeout(() => {
       void this.tauri
@@ -487,6 +491,26 @@ export function flattenRows(summary: UsageSummary): UsageRow[] {
 export function providerOf(model: string): string {
   const slash = model.indexOf('/');
   return slash > 0 ? model.slice(0, slash) : 'anthropic';
+}
+
+/** Provider prefixes whose `null` cost is terminal — never priced later (invariant 6). */
+const PERMANENTLY_UNPRICED_PROVIDERS: ReadonlySet<string> = new Set(['local', 'anthropic']);
+
+/**
+ * True when some null-cost row may still be priced by a later enrichment pass
+ * (deferred OpenRouter). Local and bare-Anthropic (subscription/unknown) rows
+ * stay `null` forever, so a summary of only those never re-polls.
+ * @param summary - Aggregate returned by the `get_llm_usage` command.
+ */
+export function hasDeferrableUnpricedRows(summary: UsageSummary): boolean {
+  for (const models of Object.values(summary.days)) {
+    for (const [model, bucket] of Object.entries(models)) {
+      if (bucket.cost_usd === null && !PERMANENTLY_UNPRICED_PROVIDERS.has(providerOf(model))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**

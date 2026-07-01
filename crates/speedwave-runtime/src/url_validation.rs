@@ -30,6 +30,18 @@ pub fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// SSOT loopback-host predicate: 127.0.0.0/8, `::1`, IPv6-mapped IPv4
+/// loopback, or the exact `localhost` domain (case-insensitive).
+pub fn is_loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(v4) => v4.is_loopback(),
+        url::Host::Ipv6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback())
+        }
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+    }
+}
+
 /// Loopback tolerance for [`is_private_on_premise`]: Redmine blocks it, LLM
 /// discovery allows it. Both accept RFC 1918 / ULA and reject reserved ranges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +55,7 @@ pub enum PrivatePolicy {
 /// True when the URL host is a private on-premise address under `policy`:
 /// RFC 1918, CGNAT (100.64/10), IPv6 ULA, plus loopback under `AllowLoopback`.
 pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
+    let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);
     match url.host() {
         Some(url::Host::Ipv4(ipv4)) => {
             if ipv4.is_private() && !ipv4.is_link_local() && !ipv4.is_unspecified() {
@@ -53,33 +66,15 @@ pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
             if oct[0] == 100 && (oct[1] & 0xc0) == 64 {
                 return true;
             }
-            let allow_loopback = match policy {
-                PrivatePolicy::BlockLoopback => false,
-                PrivatePolicy::AllowLoopback => true,
-            };
-            allow_loopback && ipv4.is_loopback()
+            allow_loopback && is_loopback_host(&url::Host::Ipv4(ipv4))
         }
         Some(url::Host::Ipv6(ipv6)) => {
             // fc00::/7 — IPv6 Unique Local Address (RFC 4193)
             if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
                 return true;
             }
-            let allow_loopback = match policy {
-                PrivatePolicy::BlockLoopback => false,
-                PrivatePolicy::AllowLoopback => true,
-            };
-            if allow_loopback {
-                if ipv6.is_loopback() {
-                    return true;
-                }
-                // IPv6-mapped IPv4 loopback (::ffff:127.0.0.1) follows native IPv4.
-                if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
-                    if mapped_v4.is_loopback() {
-                        return true;
-                    }
-                }
-            }
-            false
+            // Includes IPv6-mapped IPv4 loopback (::ffff:127.0.0.1).
+            allow_loopback && is_loopback_host(&url::Host::Ipv6(ipv6))
         }
         _ => false,
     }
@@ -150,6 +145,34 @@ pub fn validate_url(url: &str) -> Result<url::Url, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // -- is_loopback_host (loopback SSOT, shared with canonicalize_local_base_url) --
+
+    fn url_host_is_loopback(url: &str) -> bool {
+        let parsed = url::Url::parse(url).unwrap();
+        is_loopback_host(&parsed.host().unwrap())
+    }
+
+    #[test]
+    fn is_loopback_host_true_for_loopback_forms() {
+        assert!(url_host_is_loopback("http://127.0.0.1:1234"));
+        assert!(url_host_is_loopback("http://127.0.0.5:1234")); // whole 127/8
+        assert!(url_host_is_loopback("http://localhost:11434"));
+        assert!(url_host_is_loopback("http://LocalHost:8080")); // case-insensitive
+        assert!(url_host_is_loopback("http://[::1]:1234"));
+        assert!(url_host_is_loopback("http://[::ffff:127.0.0.1]:1234")); // mapped v4
+    }
+
+    #[test]
+    fn is_loopback_host_false_for_non_loopback_hosts() {
+        assert!(!url_host_is_loopback("http://192.168.1.1:1234")); // private != loopback
+        assert!(!url_host_is_loopback("http://8.8.8.8/"));
+        assert!(!url_host_is_loopback("http://0.0.0.0:1234")); // unspecified
+        assert!(!url_host_is_loopback("https://api.example.com/"));
+        assert!(!url_host_is_loopback("http://evil.localhost/")); // exact match only
+        assert!(!url_host_is_loopback("http://[fe80::1]/")); // link-local
+        assert!(!url_host_is_loopback("http://[::ffff:10.0.0.1]/")); // mapped private
+    }
 
     // -- scheme checks --
 

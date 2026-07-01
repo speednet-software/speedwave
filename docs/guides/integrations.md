@@ -674,11 +674,11 @@ You can run Claude Code inside Speedwave against a local or third-party LLM serv
 
 Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
 
-Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
+Settings holds a **provider list** rather than a single choice: configure several and pick the active one. A fresh project starts with no provider selected, so pick one and save it before the first chat. Each entry is one of these kinds:
 
 | Kind                    | What it is                                                                                                                | Key needed                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                                                                    | No (managed by Claude Code login) |
+| **Anthropic (OAuth)**   | Your Claude subscription                                                                                                  | No (managed by Claude Code login) |
 | **Anthropic (API key)** | Anthropic via a raw API key                                                                                               | Yes                               |
 | **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, gateways) | Only if the server requires one   |
 | **OpenRouter**          | OpenRouter's model catalog                                                                                                | Yes                               |
@@ -713,23 +713,24 @@ A stock OpenAI-only server (TGI, a plain Chat-Completions gateway) is **not** su
 
    > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
 
-2. In Speedwave Settings → LLM Provider → select **Ollama**
-3. The Settings UI fetches the model list from Ollama's `/api/tags` endpoint and pre-selects one automatically. You only need to type the model name manually if the Ollama server is offline when you open Settings.
-4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
-5. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
+4. Click **Discover models** (the probe lists models via `GET /v1/models`) and pick one from the dropdown
+5. Set the row active and **Save**
 
 ### LM Studio
 
 1. In LM Studio, load a model and enable the **Local Server**
-2. In Speedwave Settings → LLM Provider → select **LM Studio**
-3. Leave Base URL empty for the default port (`http://host.docker.internal:1234`)
-4. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:1234` (LM Studio's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
 ### llama.cpp
 
 1. Start `llama-server` with the Anthropic API server enabled
-2. Select **llama.cpp** in Settings → LLM Provider
-3. Default port: `http://host.docker.internal:8080`
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:8080` (llama-server's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
 ### Non-standard addresses
 

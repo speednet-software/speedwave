@@ -467,6 +467,7 @@ EOF
     [ -f "${TEST_HOME}/.claude.json" ]
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
     grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasCompletedProjectOnboarding": true' "${TEST_HOME}/.claude.json"
 }
 
 @test "pre-seeded ~/.claude.json is valid JSON in both credential states" {
@@ -522,6 +523,8 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
     [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
+    # The skip is logged (stderr), never silent.
+    [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
 # ---------------------------------------------------------------------------

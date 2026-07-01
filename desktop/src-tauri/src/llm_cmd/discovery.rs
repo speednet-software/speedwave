@@ -546,8 +546,17 @@ async fn discover_local(
     Ok(out)
 }
 
-/// Status/content-type guard for `/v1/models`. Err strings are a contract
-/// matched in `llm-provider.component.ts`: `"auth"`, `"LLM server returned HTTP {N}"`.
+// Discovery Err contract — string-matched by `classifyDiscoveryFailure` in
+// `llm-provider.component.ts`; pinned by `discovery_err_contract_matches_ts`.
+const ERR_AUTH: &str = "auth";
+const ERR_EMPTY: &str = "empty";
+const ERR_UNSUPPORTED: &str = "unsupported";
+const ERR_HTML_RESPONSE: &str = "LLM server returned an HTML response";
+/// Trailing space is load-bearing: the TS side slices the status after it.
+const ERR_HTTP_STATUS_PREFIX: &str = "LLM server returned HTTP ";
+
+/// Status/content-type guard for `/v1/models`. Err strings are the discovery
+/// contract consts above (matched in `llm-provider.component.ts`).
 fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> {
     if !resp.is_success() {
         if resp.status == 401 || resp.status == 403 {
@@ -557,7 +566,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
                 url,
                 resp.status
             );
-            return Err("auth".to_string());
+            return Err(ERR_AUTH.to_string());
         }
         if resp.is_redirect() {
             log::warn!(
@@ -568,7 +577,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
         } else {
             log::warn!("LLM model discovery: {} returned HTTP {}", url, resp.status);
         }
-        return Err(format!("LLM server returned HTTP {}", resp.status));
+        return Err(format!("{ERR_HTTP_STATUS_PREFIX}{}", resp.status));
     }
     if let Some(ct) = resp.content_type.as_deref() {
         if ct.to_ascii_lowercase().starts_with("text/html") {
@@ -576,7 +585,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
                 "LLM model discovery: {} returned HTML content-type, refusing",
                 url
             );
-            return Err("LLM server returned an HTML response".to_string());
+            return Err(ERR_HTML_RESPONSE.to_string());
         }
     }
     Ok(())
@@ -718,14 +727,14 @@ pub(crate) async fn do_discover_llm_models(
     transport: &dyn ProbeTransport,
 ) -> Result<DiscoverResult, String> {
     if provider == "anthropic" {
-        return Err("unsupported".to_string());
+        return Err(ERR_UNSUPPORTED.to_string());
     }
 
     // Fixed catalog URL — no user-supplied base_url to validate.
     if provider == "openrouter" {
         let models = discover_openrouter(transport).await?;
         if models.is_empty() {
-            return Err("empty".to_string());
+            return Err(ERR_EMPTY.to_string());
         }
         return Ok(DiscoverResult {
             models,
@@ -745,7 +754,7 @@ pub(crate) async fn do_discover_llm_models(
             let sanity = probe_messages_endpoint(&validated, first_model, transport).await;
             (models, sanity)
         }
-        _ => return Err("unsupported".to_string()),
+        _ => return Err(ERR_UNSUPPORTED.to_string()),
     };
 
     let models: Vec<DiscoveredModel> = raw_models
@@ -761,7 +770,7 @@ pub(crate) async fn do_discover_llm_models(
     );
 
     if models.is_empty() {
-        return Err("empty".to_string());
+        return Err(ERR_EMPTY.to_string());
     }
     Ok(DiscoverResult {
         models,
@@ -859,6 +868,40 @@ mod tests {
     ) -> Result<DiscoverResult, String> {
         let transport = HostProbe::new(client.clone(), timeout);
         super::do_discover_llm_models(provider, base_url, &transport).await
+    }
+
+    // ── Cross-language discovery-error contract ─────────────────────────
+
+    /// Extracts the first single-quoted TS literal after `marker` in `src`.
+    fn ts_string_after<'a>(src: &'a str, marker: &str) -> &'a str {
+        let start = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("TS source must contain `{marker}`"));
+        let rest = &src[start + marker.len()..];
+        let open = rest.find('\'').expect("opening quote after marker");
+        let rest = &rest[open + 1..];
+        let close = rest.find('\'').expect("closing quote after marker");
+        &rest[..close]
+    }
+
+    #[test]
+    fn discovery_err_contract_matches_ts() {
+        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
+        // `classifyDiscoveryFailure` string-matches the Rust Err sentinels.
+        let src =
+            include_str!("../../../src/src/app/settings/llm-provider/llm-provider.component.ts");
+        assert_eq!(
+            ts_string_after(src, "const HTTP_STATUS_ERR_PREFIX"),
+            ERR_HTTP_STATUS_PREFIX,
+            "TS HTTP_STATUS_ERR_PREFIX must equal the Rust prefix (incl. trailing space)"
+        );
+        for sentinel in [ERR_AUTH, ERR_EMPTY, ERR_UNSUPPORTED, ERR_HTML_RESPONSE] {
+            let needle = format!("msg === '{sentinel}'");
+            assert!(
+                src.contains(&needle),
+                "classifyDiscoveryFailure must exact-match `{needle}`"
+            );
+        }
     }
 
     // ── normalize_and_validate_discovery_url ────────────────────────────

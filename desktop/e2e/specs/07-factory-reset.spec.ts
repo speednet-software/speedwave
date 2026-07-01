@@ -2,7 +2,8 @@
  * Factory Reset E2E tests.
  *
  * Verifies the factory reset flow:
- *   1. Navigate to settings, confirm project exists
+ *   1. Pin e2e-test as the active project (specs 10-15 run earlier and may
+ *      leave e2e-second active), navigate to settings, assert the exact slug
  *   2. Invoke factory_reset via Tauri command — verify ~/.speedwave/ is wiped
  *   3. Confirm app.restart() fires (WebDriver port comes back up)
  *
@@ -10,6 +11,10 @@
  */
 
 import * as http from 'node:http';
+
+import { switchToProject, activeProjectSlug } from '../helpers/projects';
+
+const E2E_PROJECT_NAME = 'e2e-test';
 
 /** Poll the WebDriver endpoint until the restarted app is listening. */
 function waitForPort(port: number, timeoutMs: number): Promise<void> {
@@ -39,7 +44,16 @@ function waitForPort(port: number, timeoutMs: number): Promise<void> {
 }
 
 describe('Factory Reset', function () {
-  it('should navigate to settings and verify project exists', async function () {
+  before(async function () {
+    this.timeout(180_000);
+    // Earlier specs (10-15) switch projects; pin e2e-test so the
+    // active-project assertion below stays an exact, deterministic match.
+    if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
+      await switchToProject(E2E_PROJECT_NAME);
+    }
+  });
+
+  it('should navigate to settings and verify the e2e-test project is active', async function () {
     this.timeout(30_000);
 
     const nav = await $('[data-testid="nav-settings"]');
@@ -56,10 +70,8 @@ describe('Factory Reset', function () {
       timeoutMsg: 'Settings page heading not found',
     });
     expect(await title.isDisplayed()).toBe(true);
-    // Earlier specs may leave either e2e-test or e2e-second active; reset is
-    // project-agnostic, so assert a project exists, not which one.
-    const { activeProjectSlug } = await import('../helpers/projects');
-    expect(await activeProjectSlug()).not.toBeNull();
+    // The before hook pinned e2e-test — assert the exact slug, not just presence.
+    expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
   });
 
   it('should wipe state and restart the app', async function () {

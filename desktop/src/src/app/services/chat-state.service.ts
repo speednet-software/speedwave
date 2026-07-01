@@ -82,6 +82,15 @@ export function mapNotLoggedInError(raw: string): string | null {
   return null;
 }
 
+/**
+ * Gate predicate: the backend failure means the session is unauthenticated, so
+ * the UI routes to auth_required (display mapping stays in `mapNotLoggedInError`).
+ * @param msg - Raw error message from the backend.
+ */
+export function isNotAuthenticatedError(msg: string): boolean {
+  return msg.includes('not authenticated');
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -339,7 +348,7 @@ export class ChatStateService {
           return;
         }
         const msg = String(err);
-        if (msg.includes('not authenticated')) {
+        if (isNotAuthenticatedError(msg)) {
           this.projectState.status.set('auth_required');
           this.notifyChange();
         } else {
@@ -486,7 +495,7 @@ export class ChatStateService {
           return;
         } catch (retryErr) {
           const retryMsg = String(retryErr);
-          if (retryMsg.includes('not authenticated')) {
+          if (isNotAuthenticatedError(retryMsg)) {
             this.projectState.status.set('auth_required');
             this.isStreaming = false;
             this.notifyChange();
@@ -1046,23 +1055,30 @@ export class ChatStateService {
       if (this.isStreaming) await this.stopConversation();
     });
     this.projectState.onRestartComplete(() => {
-      const id = this._lastKnownSessionId;
-      if (!id) return;
-      if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
-        void this.resumeConversation(id);
-        return;
-      }
-      // History may not fit: ask if a chat view is mounted; else auto-resume
-      // (the non-lossy choice — never silently drop history on an unmounted view).
-      if (this._resumeDecider) {
-        void this._resumeDecider().then((choice) => {
-          if (choice === 'resume') void this.resumeConversation(id);
-          else void this.startFreshSession();
-        });
-      } else {
-        void this.resumeConversation(id);
-      }
+      void this.decideResumeAfterRestart();
     });
+  }
+
+  /** Resume-vs-ask decision after a restart; reads the NEW model's window first. */
+  private async decideResumeAfterRestart(): Promise<void> {
+    const id = this._lastKnownSessionId;
+    if (!id) return;
+    // The ready-triggered cache refresh is async and may still hold the previous
+    // model's window — re-read so the fit decision sees the post-restart model.
+    await this.refreshLlmConfigCache();
+    if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
+      void this.resumeConversation(id);
+      return;
+    }
+    // History may not fit: ask if a chat view is mounted; else auto-resume
+    // (the non-lossy choice — never silently drop history on an unmounted view).
+    if (this._resumeDecider) {
+      const choice = await this._resumeDecider();
+      if (choice === 'resume') void this.resumeConversation(id);
+      else void this.startFreshSession();
+    } else {
+      void this.resumeConversation(id);
+    }
   }
 
   /**
@@ -1088,6 +1104,8 @@ export class ChatStateService {
     const endStartingSession = this.beginStartingSession();
     // Stamp session id optimistically so drawer accent follows click without flicker.
     this._optimisticSessionId = sessionId;
+    // Early durable stamp: needed even when the transcript fetch fails, so the
+    // remount guard in startChatSession and a later restart-resume see this session.
     this._lastKnownSessionId = sessionId;
 
     try {
@@ -1106,15 +1124,31 @@ export class ChatStateService {
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
-        // Seed session id immediately so retry/queue work without waiting for live Result.
-        this.seedResumedSession(sessionId);
+      } else {
+        // Resume succeeded but the transcript fetch failed: keep the session
+        // live and say why the scrollback is empty instead of failing silently.
+        this.loadMessages([
+          {
+            role: 'assistant',
+            blocks: [
+              {
+                type: 'error' as const,
+                content:
+                  'Could not load this conversation’s history. The session was resumed — new messages will work, but earlier ones are not shown.',
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ]);
       }
+      // Seed session id immediately so retry/queue work without waiting for live Result.
+      this.seedResumedSession(sessionId);
     } catch (err) {
       // Drop the optimistic accent so a failed resume isn't shown as active.
       this._optimisticSessionId = null;
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
-      if (msg.includes('not authenticated')) {
+      if (isNotAuthenticatedError(msg)) {
         await this.projectState.retryAuth();
       } else {
         this.loadMessages([

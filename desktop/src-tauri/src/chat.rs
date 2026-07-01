@@ -218,6 +218,29 @@ impl TurnUsage {
     }
 }
 
+/// JSONL `usage` field names (Anthropic schema) — SSOT for the result reader,
+/// `history.rs` transcript parsing, and the resume-snapshot summing.
+pub(crate) const USAGE_INPUT_TOKENS: &str = "input_tokens";
+pub(crate) const USAGE_OUTPUT_TOKENS: &str = "output_tokens";
+pub(crate) const USAGE_CACHE_READ_TOKENS: &str = "cache_read_input_tokens";
+pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
+/// Legacy flat cache names some CLI builds emit in `result.usage`.
+pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
+pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
+
+/// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
+/// malformed fields. `None` when `usage` is not a JSON object.
+pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
+    let obj = usage.as_object()?;
+    let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    Some(TurnUsage {
+        input_tokens: read(USAGE_INPUT_TOKENS),
+        output_tokens: read(USAGE_OUTPUT_TOKENS),
+        cache_read_tokens: read(USAGE_CACHE_READ_TOKENS),
+        cache_write_tokens: read(USAGE_CACHE_WRITE_TOKENS),
+    })
+}
+
 /// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
@@ -853,17 +876,19 @@ impl StreamParser {
             self.last_model = Some(m.to_string());
         }
 
+        // Option-preserving reader (absent cache fields stay `None` for the UI);
+        // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(UsageInfo {
-                input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: u["cache_read_input_tokens"]
+                input_tokens: u[USAGE_INPUT_TOKENS].as_u64().unwrap_or(0),
+                output_tokens: u[USAGE_OUTPUT_TOKENS].as_u64().unwrap_or(0),
+                cache_read_tokens: u[USAGE_CACHE_READ_TOKENS]
                     .as_u64()
-                    .or_else(|| u["cache_read_tokens"].as_u64()),
-                cache_write_tokens: u["cache_creation_input_tokens"]
+                    .or_else(|| u[USAGE_CACHE_READ_TOKENS_LEGACY].as_u64()),
+                cache_write_tokens: u[USAGE_CACHE_WRITE_TOKENS]
                     .as_u64()
-                    .or_else(|| u["cache_write_tokens"].as_u64()),
+                    .or_else(|| u[USAGE_CACHE_WRITE_TOKENS_LEGACY].as_u64()),
             })
         } else {
             None
@@ -4973,6 +4998,58 @@ mod tests {
         assert_eq!(delta.output_tokens, 0);
         assert_eq!(delta.cache_read_tokens, 0);
         assert_eq!(delta.cache_write_tokens, 0);
+    }
+
+    // ── turn_usage_from_jsonl (JSONL usage SSOT) ────────────────────
+
+    #[test]
+    fn turn_usage_from_jsonl_maps_all_fields() {
+        let u = serde_json::json!({
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cache_read_input_tokens": 56,
+            "cache_creation_input_tokens": 78,
+        });
+        let turn = turn_usage_from_jsonl(&u).expect("object must parse");
+        assert_eq!(turn.input_tokens, 12);
+        assert_eq!(turn.output_tokens, 34);
+        assert_eq!(turn.cache_read_tokens, 56);
+        assert_eq!(turn.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_zero_fills_missing_fields() {
+        let u = serde_json::json!({ "input_tokens": 5 });
+        let turn = turn_usage_from_jsonl(&u).expect("partial object must parse");
+        assert_eq!(turn.input_tokens, 5);
+        assert_eq!(turn.output_tokens, 0);
+        assert_eq!(turn.cache_read_tokens, 0);
+        assert_eq!(turn.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_zero_fills_malformed_values() {
+        // Non-u64 values (string, negative, float, null) read as 0, not an error.
+        let u = serde_json::json!({
+            "input_tokens": "many",
+            "output_tokens": -3,
+            "cache_read_input_tokens": 1.5,
+            "cache_creation_input_tokens": null,
+        });
+        let turn = turn_usage_from_jsonl(&u).expect("object must parse");
+        assert_eq!(turn, TurnUsage::default());
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_non_object_is_none() {
+        for v in [
+            serde_json::Value::Null,
+            serde_json::json!("usage"),
+            serde_json::json!(7),
+            serde_json::json!([1, 2]),
+        ] {
+            assert!(turn_usage_from_jsonl(&v).is_none(), "expected None for {v}");
+        }
     }
 
     #[test]

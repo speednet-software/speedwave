@@ -586,6 +586,41 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(true);
     });
 
+    it('clears a deferred restart intent when the switch settles on no_provider', async () => {
+      await service.init();
+      mockTauri.dispatchEvent('project_switch_started', { project: 'bare' });
+      service.requestRestart(); // deferred while switching
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: false, // → no_provider
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'bare' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      // No-provider settle voids the intent — nothing is running to restart.
+      expect(service.status()).toBe('no_provider');
+      expect(service.needsRestart).toBe(false);
+
+      // The voided intent must not resurrect on a later ready settle.
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+
     it('drops a deferred restart intent when a new switch starts', async () => {
       await service.init();
       service.status.set('switching');
@@ -765,6 +800,44 @@ describe('ProjectStateService', () => {
 
       expect(service.status()).toBe('error');
       expect(service.error).toBe('Error: container not ready');
+    });
+
+    it('project_switch_succeeded auth failure fires onProjectFailed + onProjectSettled (parity with other error paths)', async () => {
+      const failed = vi.fn();
+      const settled = vi.fn();
+      service.onProjectFailed(failed);
+      service.onProjectSettled(settled);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') throw new Error('container not ready');
+        return undefined;
+      };
+
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('error');
+      expect(failed).toHaveBeenCalledWith(expect.stringContaining('container not ready'));
+      expect(settled).toHaveBeenCalledTimes(1);
+    });
+
+    it('project_switch_succeeded honors the backend status discriminant over contradictory flags', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            // Ready-looking flags, but the backend SSOT says no provider.
+            status: 'no_provider',
+            api_key_configured: true,
+            oauth_authenticated: true,
+            needs_anthropic_auth: false,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('no_provider');
     });
 
     it('project_switch_failed sets error state with rollback', () => {
@@ -1246,6 +1319,94 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('ready');
     });
 
+    it('applyAuthStatus never-downgrade guard also holds for discriminant payloads', () => {
+      for (const status of ['no_provider', 'auth_required'] as const) {
+        service.status.set('ready');
+        const cb = vi.fn();
+        service.onChange(cb);
+        service.applyAuthStatus({
+          status,
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: status !== 'no_provider',
+        });
+        expect(service.status()).toBe('ready');
+        expect(cb).not.toHaveBeenCalled();
+      }
+    });
+
+    it('applyAuthStatus promotes no_provider to ready from a discriminant payload', () => {
+      service.status.set('no_provider');
+      service.applyAuthStatus({
+        // Discriminant says ready even though the flags alone would not.
+        status: 'ready',
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning honors status=ready despite provider_configured=false', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              status: 'ready',
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning honors status=no_provider despite provider_configured=true', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              status: 'no_provider',
+              api_key_configured: true,
+              oauth_authenticated: true,
+              needs_anthropic_auth: false,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status()).toBe('no_provider');
+    });
+
     it('forceUnconfigured downgrades a live ready session (deliberate logout)', () => {
       // Unlike applyAuthStatus, a user-initiated logout is not a false
       // negative — the chat view must blank to the no_provider screen.
@@ -1691,6 +1852,33 @@ describe('ProjectStateService', () => {
       provider_configured: true,
       ...o,
     });
+
+    it('passes the backend discriminant through as the SSOT, overriding contradictory flags', () => {
+      // no_provider despite every credential flag and provider_configured=true.
+      expect(
+        authStatusToProjectStatus(
+          auth({
+            status: 'no_provider',
+            provider_configured: true,
+            api_key_configured: true,
+            oauth_authenticated: true,
+            needs_anthropic_auth: false,
+          })
+        )
+      ).toBe('no_provider');
+      // ready despite provider_configured=false (backend already decided).
+      expect(authStatusToProjectStatus(auth({ status: 'ready', provider_configured: false }))).toBe(
+        'ready'
+      );
+      // auth_required despite credentials being present.
+      expect(
+        authStatusToProjectStatus(
+          auth({ status: 'auth_required', api_key_configured: true, oauth_authenticated: true })
+        )
+      ).toBe('auth_required');
+    });
+
+    // The remaining cases exercise the legacy fallback (payload without `status`).
 
     it('no_provider wins first, regardless of credential flags', () => {
       expect(

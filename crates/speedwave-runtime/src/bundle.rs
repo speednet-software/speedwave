@@ -639,8 +639,13 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // node_modules is not copied into the build context, so it is not image content.
-        if child.is_dir() && child.file_name().is_some_and(|n| n == "node_modules") {
+        // Host-side build outputs are not image content: node_modules is never
+        // staged, target/ is .dockerignore'd, dist/ is rebuilt in-image.
+        if child.is_dir()
+            && child
+                .file_name()
+                .is_some_and(|n| n == "node_modules" || n == "target" || n == "dist")
+        {
             continue;
         }
         // Reject symlinks: the copier dereferences them, changing content without changing the hash.
@@ -781,6 +786,65 @@ mod tests {
         collect_directory_entries(&dir, "p", &mut out).unwrap();
         assert!(out.iter().any(|(r, _)| r.ends_with("pkg/index.ts")));
         assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_target_and_dist_directories() {
+        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
+        // COPY source) — both are host build outputs racing parallel test lanes.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proxy");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/proxy.d"), "junk").unwrap();
+        std::fs::create_dir_all(dir.join("nested/dist")).unwrap();
+        std::fs::write(dir.join("nested/dist/index.js"), "built").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/main.rs")), "{rels:?}");
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.contains("target") || r.contains("dist")),
+            "target/ and dist/ must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    fn collect_directory_entries_keeps_files_named_target_or_dist() {
+        // The skip is directory-gated: plain FILES with these names are content.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("svc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target"), "a file, not a build dir").unwrap();
+        std::fs::write(dir.join("dist"), "also a file").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.contains(&"p/target"), "{rels:?}");
+        assert!(rels.contains(&"p/dist"), "{rels:?}");
+    }
+
+    #[test]
+    fn target_and_dist_changes_do_not_alter_manifest_hash() {
+        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
+        // (mcp-servers/*/dist) must not perturb or race the image hashes.
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/proxy/target/debug")).unwrap();
+        std::fs::write(
+            tmp.path().join("containers/proxy/target/debug/proxy.d"),
+            "cargo junk",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp-servers/hub/dist")).unwrap();
+        std::fs::write(tmp.path().join("mcp-servers/hub/dist/index.js"), "built").unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(before.image_hashes, after.image_hashes);
+        assert_eq!(before.bundle_id, after.bundle_id);
     }
 
     #[test]

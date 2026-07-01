@@ -391,8 +391,8 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 }
 
 /// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
-/// re-exports the proxy base URL, then execs `claude auth login` so the OAuth
-/// flow starts directly (no interactive prompt, no MCP session).
+/// re-exports the proxy base URL, then execs `claude auth login --claudeai` so
+/// the OAuth flow starts directly (no interactive prompt, no MCP session).
 fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     let script = format!(
         "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
@@ -1682,7 +1682,7 @@ mod tests {
         assert!(!llm.is_unconfigured());
         assert_eq!(
             llm.active.as_ref().unwrap().provider_id,
-            "anthropic",
+            config::ANTHROPIC_PROVIDER_ID,
             "fresh project must select anthropic, not just stop being fresh"
         );
     }
@@ -1720,7 +1720,7 @@ mod tests {
         let llm = config::LlmConfig {
             schema_version: Some(config::LLM_SCHEMA_VERSION),
             providers: vec![config::LlmProviderEntry {
-                id: "anthropic".to_string(),
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
                 kind: config::LlmProviderKind::AnthropicOauth,
                 base_url: None,
                 model: None,
@@ -1772,7 +1772,7 @@ mod tests {
         let mut llm = config::LlmConfig {
             schema_version: Some(config::LLM_SCHEMA_VERSION),
             providers: vec![config::LlmProviderEntry {
-                id: "anthropic".to_string(),
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
                 kind: config::LlmProviderKind::AnthropicOauth,
                 base_url: None,
                 model: None,

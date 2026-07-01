@@ -44,8 +44,13 @@ export type ProjectStatus =
   | 'switching'
   | 'error';
 
+/** Backend-derived auth readiness (Rust `AuthReadiness`, snake_case wire values). */
+export type AuthReadiness = 'no_provider' | 'ready' | 'auth_required';
+
 /** Backend response from the `get_auth_status` Tauri command. */
 export interface AuthStatusResponse {
+  /** Backend-derived discriminant (SSOT: Rust `AuthReadiness::derive`). */
+  status?: AuthReadiness;
   api_key_configured: boolean;
   oauth_authenticated: boolean;
   /**
@@ -58,12 +63,12 @@ export interface AuthStatusResponse {
 }
 
 /**
- * no_provider always wins over the credential flags; see AuthStatusResponse for field meanings.
+ * Passes the backend `status` discriminant through (SSOT: Rust `AuthReadiness::derive`).
  * @param auth - Raw auth status from the backend.
  */
-export function authStatusToProjectStatus(
-  auth: AuthStatusResponse
-): 'no_provider' | 'ready' | 'auth_required' {
+export function authStatusToProjectStatus(auth: AuthStatusResponse): AuthReadiness {
+  if (auth.status) return auth.status;
+  // Fallback for payloads missing the discriminant; no_provider wins first.
   if (!auth.provider_configured) return 'no_provider';
   if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
     return 'ready';
@@ -257,6 +262,8 @@ export class ProjectStateService {
     this.notifyChange();
     if (this.status() === 'ready') {
       this.notifyReady();
+    } else if (this.status() === 'error') {
+      this.notifyFailed(this.error);
     }
     this.notifySettled();
   }
@@ -494,10 +501,14 @@ export class ProjectStateService {
 
   /** Promotes a deferred restart request to a live needsRestart once ready. */
   private applyPendingRestartOnSettle(): void {
-    if (
-      this.pendingRestartOnSettle &&
-      (this.status() === 'ready' || this.status() === 'auth_required')
-    ) {
+    if (!this.pendingRestartOnSettle) return;
+    // Settling on no_provider voids the intent: nothing is running to restart,
+    // and configuring a provider later starts containers fresh anyway.
+    if (this.status() === 'no_provider') {
+      this.pendingRestartOnSettle = false;
+      return;
+    }
+    if (this.status() === 'ready' || this.status() === 'auth_required') {
       this.pendingRestartOnSettle = false;
       this.needsRestart = true;
     }

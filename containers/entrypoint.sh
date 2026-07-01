@@ -276,14 +276,15 @@ if [ ! -f "${HOME}/.claude.json" ]; then
 }
 EOF
 fi
-# Onboarding-completion fields are defined ONCE here (SSOT), merged in whenever
-# logged in — covers both the fresh skeleton above and a headless Desktop rewrite.
+# Merge runs only when logged in: it owns the login-gated top-level fields and
+# re-asserts the /workspace booleans (also seeded by the fresh skeleton above).
 if creds_valid; then
     node -e "
 const fs = require('fs');
 const p = '${HOME}/.claude.json';
 let j;
-try { j = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { process.exit(0); }
+try { j = JSON.parse(fs.readFileSync(p, 'utf8')); }
+catch { console.error('entrypoint: .claude.json unparseable — onboarding merge skipped'); process.exit(0); }
 let changed = false;
 if (j.hasCompletedOnboarding !== true) { j.hasCompletedOnboarding = true; changed = true; }
 if (j.installMethod == null) { j.installMethod = 'native'; changed = true; }

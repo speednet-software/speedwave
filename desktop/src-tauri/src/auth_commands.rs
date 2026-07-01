@@ -97,12 +97,12 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         // False for an explicit v2 logout/dangling AND for a fresh project with
         // no llm override at all ("choose a provider" in both cases).
         let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
-        Ok(AuthStatusResponse {
+        Ok(AuthStatusResponse::from_flags(
             api_key_configured,
             oauth_authenticated,
             needs_anthropic_auth,
             provider_configured,
-        })
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1022,16 +1022,32 @@ mod tests {
 
     #[test]
     fn auth_status_response_serializes_all_fields() {
-        let resp = crate::types::AuthStatusResponse {
-            api_key_configured: true,
-            oauth_authenticated: false,
-            needs_anthropic_auth: true,
-            provider_configured: false,
-        };
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true,  // api_key_configured
+            false, // oauth_authenticated
+            true,  // needs_anthropic_auth
+            false, // provider_configured
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
         assert_eq!(json["needs_anthropic_auth"], true);
         assert_eq!(json["provider_configured"], false);
+        // Derived discriminant rides the same response (snake_case wire string).
+        assert_eq!(json["status"], "no_provider");
+    }
+
+    #[test]
+    fn auth_status_response_status_ready_wire_string() {
+        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, true);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "ready");
+    }
+
+    #[test]
+    fn auth_status_response_status_auth_required_wire_string() {
+        let resp = crate::types::AuthStatusResponse::from_flags(false, false, true, true);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "auth_required");
     }
 }

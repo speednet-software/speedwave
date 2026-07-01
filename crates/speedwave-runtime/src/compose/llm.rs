@@ -284,20 +284,15 @@ pub fn strip_trailing_v1(url: &str) -> String {
     }
 }
 
-/// Rewrites a loopback host (127.0.0.0/8, `localhost`, ::1) to
-/// `HOST_GATEWAY_ALIAS`; non-loopback hosts and bad input pass through.
+/// Rewrites a loopback host (SSOT: [`crate::url_validation::is_loopback_host`])
+/// to `HOST_GATEWAY_ALIAS`; non-loopback hosts and bad input pass through.
 pub fn canonicalize_local_base_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
     };
-    let is_loopback = match parsed.host() {
-        Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
-        Some(url::Host::Ipv6(v6)) => {
-            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback())
-        }
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => false,
-    };
+    let is_loopback = parsed
+        .host()
+        .is_some_and(|h| crate::url_validation::is_loopback_host(&h));
     if !is_loopback {
         return url.to_string();
     }

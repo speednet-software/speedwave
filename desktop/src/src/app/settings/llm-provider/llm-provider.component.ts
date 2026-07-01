@@ -19,17 +19,22 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AuthTerminalComponent } from '../auth-terminal.component';
+import { OauthCompletionWatcher } from './oauth-completion-watcher';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   AnthropicModel,
   DiscoveredModel,
   DiscoverResult,
+  ExtraProviderId,
+  FlatProviderId,
   formatContextLabel,
   LEGACY_LOCAL_PROVIDERS,
   LlmActive,
   LlmConfigResponse,
   LlmProviderEntry,
   LlmProviderKind,
+  ProviderCardId,
+  ProviderTarget,
 } from '../../models/llm';
 
 /**
@@ -37,7 +42,7 @@ import {
  * lives in `keyInput` until Save; config carries the `hasKey` presence flag.
  */
 interface ExtraProviderEdit {
-  id: string;
+  id: ExtraProviderId;
   kind: 'open_router';
   baseUrl: string;
   model: string;
@@ -47,6 +52,8 @@ interface ExtraProviderEdit {
   /** Catalog models (openrouter rows); null until discovery ran. */
   models: DiscoveredModel[] | null;
   discovering: boolean;
+  /** Classified failure of the last catalog discovery; null when none/cleared. */
+  discoverError: { reason: DiscoveryFailureReason; status?: number } | null;
   /** Context window of the selected catalog model. */
   contextTokens: number | null;
 }
@@ -56,7 +63,7 @@ interface ExtraProviderEdit {
  * cards; an unconfigured row is simply not persisted.
  */
 function fixedExtraRows(): ExtraProviderEdit[] {
-  const empty = (id: string, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
+  const empty = (id: ExtraProviderId, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
     id,
     kind,
     baseUrl: '',
@@ -66,6 +73,7 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     hasKey: false,
     models: null,
     discovering: false,
+    discoverError: null,
     contextTokens: null,
   });
   return [empty('openrouter', 'open_router')];
@@ -96,6 +104,9 @@ type DiscoveryState =
 /** Backend Err-string prefix (discovery.rs) for a non-auth HTTP status. */
 const HTTP_STATUS_ERR_PREFIX = 'LLM server returned HTTP ';
 
+/** Shared inline message for the `auth` discovery sentinel (local + remote cards). */
+const AUTH_FAILURE_MESSAGE = 'Authentication failed — check the API key.';
+
 /**
  * Maps a discovery Err string to a reason + status (contract: discovery.rs).
  * @param msg - Backend Err string from `discover_llm_models`.
@@ -119,6 +130,7 @@ function classifyDiscoveryFailure(msg: string): {
 @Component({
   selector: 'app-llm-provider',
   imports: [CommonModule, TooltipDirective, AuthTerminalComponent],
+  providers: [OauthCompletionWatcher],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -224,7 +236,7 @@ function classifyDiscoveryFailure(msg: string): {
                   autocomplete="off"
                   spellcheck="false"
                   [value]="anthropicApiKeyInput()"
-                  (input)="anthropicApiKeyInput.set($any($event.target).value)"
+                  (input)="anthropicApiKeyInput.set(inputValue($event))"
                   placeholder="sk-ant-..."
                   class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                   data-testid="settings-api-key"
@@ -287,7 +299,7 @@ function classifyDiscoveryFailure(msg: string): {
               <select
                 id="llm-model"
                 [value]="model()"
-                (change)="model.set($any($event.target).value)"
+                (change)="model.set(inputValue($event))"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
@@ -360,7 +372,7 @@ function classifyDiscoveryFailure(msg: string): {
                 id="llm-base-url"
                 type="text"
                 [value]="baseUrl()"
-                (input)="onBaseUrlInput($any($event.target).value)"
+                (input)="onBaseUrlInput(inputValue($event))"
                 [placeholder]="defaultBaseUrl()"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-base-url"
@@ -381,7 +393,7 @@ function classifyDiscoveryFailure(msg: string): {
                 autocomplete="off"
                 spellcheck="false"
                 [value]="apiKey()"
-                (input)="onApiKeyInput($any($event.target).value)"
+                (input)="onApiKeyInput(inputValue($event))"
                 [placeholder]="
                   hasApiKey()
                     ? '••••• (key saved — type to replace, clear to remove)'
@@ -447,7 +459,7 @@ function classifyDiscoveryFailure(msg: string): {
                 @let ds = discoveryState();
                 <select
                   id="llm-model"
-                  (change)="onLocalModelChange($any($event.target).value)"
+                  (change)="onLocalModelChange(inputValue($event))"
                   class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                   data-testid="settings-llm-model"
                 >
@@ -487,7 +499,7 @@ function classifyDiscoveryFailure(msg: string): {
                   rows="3"
                   spellcheck="false"
                   [value]="customHeaders()"
-                  (input)="onCustomHeadersInput($any($event.target).value)"
+                  (input)="onCustomHeadersInput(inputValue($event))"
                   [placeholder]="
                     hasCustomHeaders()
                       ? '••••• (saved — type to replace, clear to remove)'
@@ -546,7 +558,7 @@ function classifyDiscoveryFailure(msg: string): {
                 autocomplete="off"
                 spellcheck="false"
                 [value]="entry.keyInput"
-                (input)="onExtraKeyInput(entry, $any($event.target).value)"
+                (input)="onExtraKeyInput(entry, inputValue($event))"
                 [placeholder]="
                   entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
                 "
@@ -564,6 +576,15 @@ function classifyDiscoveryFailure(msg: string): {
                 {{ entry.discovering ? '↻ discovering...' : '↻ discover models' }}
               </button>
 
+              @if (entry.discoverError) {
+                <p
+                  class="mono mt-1 text-[11px] text-[var(--amber)]"
+                  [attr.data-testid]="'settings-llm-extra-discovery-error-' + entry.id"
+                >
+                  {{ extraDiscoveryErrorMessage(entry) }}
+                </p>
+              }
+
               @if (entry.models && entry.models.length > 0) {
                 <div class="mt-3">
                   <label
@@ -574,7 +595,7 @@ function classifyDiscoveryFailure(msg: string): {
                   <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
                   <select
                     [id]="'extra-model-' + entry.id"
-                    (change)="onExtraModelSelect(entry, $any($event.target).value)"
+                    (change)="onExtraModelSelect(entry, inputValue($event))"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
                   >
@@ -616,7 +637,7 @@ function classifyDiscoveryFailure(msg: string): {
   `,
 })
 export class LlmProviderComponent implements OnInit, OnDestroy {
-  provider = signal('anthropic');
+  provider = signal<FlatProviderId>('anthropic');
   model = signal('');
   baseUrl = signal('');
   defaultBaseUrl = signal('');
@@ -657,18 +678,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   oauthAuthenticated = signal(false);
   loggingOut = signal(false);
 
-  /** Poll that detects an external-terminal OAuth login (no frontend callback). */
-  private oauthCompletionPoll: ReturnType<typeof setInterval> | null = null;
-  /** Unsubscribes the window-focus listener (forces a check past poll throttling). */
-  private unlistenFocus: (() => void) | null = null;
-  /** Remaining ticks before the poll self-expires (bounds the IPC/log churn). */
-  private oauthPollTicksLeft = 0;
-  /** True while a poll tick's autosave is running; blocks overlapping ticks. */
-  private autosaveInFlight = false;
-  /** Poll cadence; get_auth_status also nudges container readiness, so not too tight. */
-  private static readonly OAUTH_POLL_MS = 1500;
-  /** Cap the poll lifetime (~5 min): a login not done by then needs a re-open. */
-  private static readonly OAUTH_POLL_MAX_TICKS = 200;
+  /** Detects an external-terminal OAuth login and runs the embedded autosave path. */
+  private readonly oauthWatcher = inject(OauthCompletionWatcher);
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
@@ -680,7 +691,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * Which target is active: `'anthropic'`, `'local'`, or an extra provider
    * id. The cards and the extra rows share this one radio state.
    */
-  selectedTarget = signal('anthropic');
+  selectedTarget = signal<ProviderTarget>('anthropic');
 
   /**
    * `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot
@@ -710,8 +721,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    */
   private loadedLocalContextTokens: number | null = null;
 
-  /** Cards rendered at the top of the section (mockup-aligned). */
-
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
   discoveryState = signal<DiscoveryState>({ kind: 'idle' });
 
@@ -725,13 +734,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * Tracks the provider value from the previous `onProviderChange` call so we
    * can detect actual changes (ngModelChange can fire without a user edit).
    */
-  private lastKnownProvider = 'anthropic';
+  private lastKnownProvider: FlatProviderId = 'anthropic';
 
   /**
    * Per-provider session cache of the last Base URL, restored on switch-back
    * instead of the often-wrong default. Seeded from config on init.
    */
-  private baseUrlByProvider: Record<string, string> = {};
+  private baseUrlByProvider: Partial<Record<FlatProviderId, string>> = {};
 
   /** Loaded `local` entry — passed through Save while the card is inactive. */
   private loadedLocalEntry: LlmProviderEntry | null = null;
@@ -740,9 +749,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private loadedAnthropicModel: string | null = null;
 
   /** Per-provider default base URL cache (via `get_default_base_url`). */
-  private defaultBaseUrlsByProvider: Record<string, string> = {};
+  private defaultBaseUrlsByProvider: Partial<Record<FlatProviderId, string>> = {};
 
-  readonly providerChange = output<string>();
+  readonly providerChange = output<FlatProviderId>();
   readonly errorOccurred = output<string>();
 
   private cdr = inject(ChangeDetectorRef);
@@ -751,6 +760,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
+    this.oauthWatcher.attach({
+      activeProject: () => this.activeProject(),
+      isAuthenticated: () => this.oauthAuthenticated(),
+      // Only probe while on the Anthropic card — no IPC when configuring local/OpenRouter.
+      shouldProbe: () => this.effectiveTarget() === 'anthropic',
+      onLoginDetected: () => this.onOAuthDone(true),
+    });
     effect(() => {
       if (this.activeProject()) {
         // Only the first firing races the initial load; later firings are
@@ -759,62 +775,11 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         void this.loadAuthStatus().then(() => {
           if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
         });
-        this.startOauthCompletionPoll();
+        this.oauthWatcher.startPoll();
       }
     });
   }
 
-  /**
-   * Self-expires after OAUTH_POLL_MAX_TICKS so an idle Settings page
-   * does not probe forever.
-   */
-  private startOauthCompletionPoll(): void {
-    this.stopOauthCompletionPoll();
-    this.oauthPollTicksLeft = LlmProviderComponent.OAUTH_POLL_MAX_TICKS;
-    this.oauthCompletionPoll = setInterval(() => {
-      if (this.oauthAuthenticated() || this.oauthPollTicksLeft-- <= 0) {
-        this.stopOauthCompletionPoll();
-        return;
-      }
-      // Only probe while on the Anthropic card — no IPC when configuring local/OpenRouter.
-      if (this.effectiveTarget() !== 'anthropic') return;
-      void this.detectExternalLoginAndAutosave();
-    }, LlmProviderComponent.OAUTH_POLL_MS);
-  }
-
-  /** Stops the external-login completion poll. */
-  private stopOauthCompletionPoll(): void {
-    if (this.oauthCompletionPoll !== null) {
-      clearInterval(this.oauthCompletionPoll);
-      this.oauthCompletionPoll = null;
-    }
-  }
-
-  /**
-   * One poll tick: if credentials just appeared (false→true), run the autosave.
-   * Edge-guarded so it fires once and never double-saves with the embedded path.
-   */
-  private async detectExternalLoginAndAutosave(): Promise<void> {
-    const project = this.activeProject();
-    // In-flight guard: a slow get_auth_status would otherwise let the next tick
-    // pass the same false→true edge and fire a second onOAuthDone/restart.
-    if (!project || this.autosaveInFlight) return;
-    this.autosaveInFlight = true;
-    try {
-      const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      // Drop a stale probe: the active project changed while we were awaiting,
-      // so this result belongs to a project the user already left.
-      if (this.activeProject() !== project) return;
-      if (status.oauth_authenticated && !this.oauthAuthenticated()) {
-        this.stopOauthCompletionPoll();
-        await this.onOAuthDone(true);
-      }
-    } catch {
-      // Container not running yet — keep polling.
-    } finally {
-      this.autosaveInFlight = false;
-    }
-  }
   private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
   private log = inject(LoggerService);
@@ -839,23 +804,12 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
-    this.tauri
-      .listen('window_focused', () => void this.detectExternalLoginAndAutosave())
-      .then((unlisten) => {
-        this.unlistenFocus = unlisten;
-      })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context
-      });
+    this.oauthWatcher.watchWindowFocus();
   }
 
-  /** Tears down the external-login completion poll and the focus listener. */
+  /** Tears down the external-login watcher (poll + focus listener). */
   ngOnDestroy(): void {
-    this.stopOauthCompletionPoll();
-    if (this.unlistenFocus) {
-      this.unlistenFocus();
-      this.unlistenFocus = null;
-    }
+    this.oauthWatcher.destroy();
   }
 
   /**
@@ -967,7 +921,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * caching, default fetching, and probe gating stay intact.
    * @param id - Card-class provider id (`anthropic` | `local`).
    */
-  async selectProvider(id: 'anthropic' | 'local'): Promise<void> {
+  async selectProvider(id: ProviderCardId): Promise<void> {
     this.selectedTarget.set(id);
     if (this.provider() === id) return;
     this.provider.set(id);
@@ -975,7 +929,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /** Currently expanded (editable) remote row — independent of the radio. */
-  expandedExtraId: string | null = null;
+  expandedExtraId: ExtraProviderId | null = null;
 
   /**
    * Whole-bar click: first click activates the row (and expands it);
@@ -995,12 +949,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param entry - The selected row.
    */
   selectExtraProvider(entry: ExtraProviderEdit): void {
-    // Snapshot a freshly-edited anthropic-card model before leaving the card,
-    // so a later Save doesn't fall back to a stale snapshot (F2/a1).
-    const model = this.model();
-    if (this.effectiveTarget() === 'anthropic' && model && !this.isForeignModel(model)) {
-      this.loadedAnthropicModel = model;
-    }
+    this.snapshotAnthropicModel();
     this.selectedTarget.set(entry.id);
     this.expandedExtraId = entry.id;
     // No auto-discover on expand — discovery is explicit and gated on the key.
@@ -1032,6 +981,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       return;
     }
     entry.discovering = true;
+    entry.discoverError = null;
     this.extraProviders.set([...this.extraProviders()]);
     this.cdr.markForCheck();
     try {
@@ -1043,20 +993,37 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const row = this.extraProviders().find((p) => p.id === entry.id);
       if (row && models.length > 0) {
         row.models = models;
+        row.discoverError = null;
         if (row.model) {
           row.contextTokens =
             models.find((m) => m.id === row.model)?.context_tokens ?? row.contextTokens;
         }
       }
     } catch (e: unknown) {
-      this.log.warn(
-        `openrouter catalog discovery failed: ${e instanceof Error ? e.message : String(e)}`
-      );
+      const msg = e instanceof Error ? e.message : String(e);
+      // Same classification contract as the local card (discovery.rs sentinels).
+      const row = this.extraProviders().find((p) => p.id === entry.id);
+      if (row) row.discoverError = classifyDiscoveryFailure(msg);
+      this.log.warn(`openrouter catalog discovery failed: ${msg}`);
     } finally {
       entry.discovering = false;
       this.extraProviders.set([...this.extraProviders()]);
       this.cdr.markForCheck();
     }
+  }
+
+  /**
+   * Inline error for a remote row's failed catalog discovery. The `auth`
+   * sentinel maps to the shared key message; anything else gets a generic hint.
+   * @param entry - The remote provider row.
+   */
+  protected extraDiscoveryErrorMessage(entry: ExtraProviderEdit): string {
+    const failure = entry.discoverError;
+    if (!failure) return '';
+    if (failure.reason === 'auth') return AUTH_FAILURE_MESSAGE;
+    return failure.status
+      ? `Model discovery failed — the server returned HTTP ${failure.status}.`
+      : 'Model discovery failed — check the network connection and try again.';
   }
 
   /**
@@ -1097,6 +1064,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
     entry.keyInput = value;
     entry.keyTouched = true;
+    // A new key invalidates the previous failure (mirrors onBaseUrlInput).
+    entry.discoverError = null;
     this.extraProviders.set([...this.extraProviders()]);
   }
 
@@ -1111,10 +1080,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return 'llama3.3';
   });
 
-  /**
-   * Human-readable reason discovery failed, shown inline under the Model field
-   * to explain the fallback to a free-text input.
-   */
+  /** Human-readable reason the discovery probe failed, shown inline under the discover button. */
   discoveryFailureMessage(): string {
     const s = this.discoveryState();
     if (s.kind !== 'failed') return '';
@@ -1124,7 +1090,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       case 'offline':
         return `${label} server not reachable at ${url}. Make sure it's running and the local server is enabled.`;
       case 'auth':
-        return `Authentication failed — check the API key.`;
+        return AUTH_FAILURE_MESSAGE;
       case 'server-error': {
         const code = s.status;
         return code
@@ -1160,10 +1126,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       this.baseUrlByProvider[previousProvider] = previousBaseUrl;
     }
     // Snapshot the anthropic model when leaving the card so it is restored below.
-    const previousModel = this.model();
-    if (previousProvider === 'anthropic' && previousModel) {
-      this.loadedAnthropicModel = previousModel;
-    }
+    this.snapshotAnthropicModel(previousProvider);
     this.lastKnownProvider = provider;
     this.discoveryCounter++;
     // Clear state now; model is provider-specific and restored from snapshot.
@@ -1352,7 +1315,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       await this.loadAuthStatus();
       // The poll self-stopped while authenticated; restart it so a subsequent
       // external-terminal re-login on this same project is detected again.
-      this.startOauthCompletionPoll();
+      this.oauthWatcher.startPoll();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.error(`anthropic_logout failed: ${msg}`);
@@ -1428,7 +1391,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * Resolves the radio state to a concrete target id. With no matching extra
    * row, the cards win — `provider` decides (covers programmatic mutation).
    */
-  private readonly effectiveTarget = computed<string>(() => {
+  private readonly effectiveTarget = computed<ProviderTarget>(() => {
     const selectedTarget = this.selectedTarget();
     if (this.extraProviders().some((p) => p.id === selectedTarget)) {
       return selectedTarget;
@@ -1511,6 +1474,39 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    */
   private isForeignModel(model: string): boolean {
     return model.includes('/');
+  }
+
+  /**
+   * Snapshots the anthropic-card model before leaving the card, so a later
+   * Save doesn't fall back to a stale snapshot (F2/a1). Foreign ids never stick.
+   * @param fromTarget - The target being left (defaults to the current one).
+   */
+  private snapshotAnthropicModel(fromTarget: string = this.effectiveTarget()): void {
+    const model = this.model();
+    if (fromTarget === 'anthropic' && model && !this.isForeignModel(model)) {
+      this.loadedAnthropicModel = model;
+    }
+  }
+
+  /**
+   * Narrows a persisted flat provider to the typed target domain: cards pass
+   * through, remote ids land on their fixed row (id first, then kind for
+   * legacy generated ids), anything unknown falls back to the local card.
+   * @param raw - Persisted flat provider string.
+   * @param kind - Kind of the matching provider entry, when known.
+   */
+  private narrowFlatProvider(raw: string, kind?: LlmProviderKind): ProviderTarget {
+    if (raw === 'anthropic' || raw === 'local') return raw;
+    return this.findExtraRow(raw, kind)?.id ?? 'local';
+  }
+
+  /**
+   * Value of an input/select/textarea change event target — the one typed
+   * narrowing point for template event bindings (no `$any` casts).
+   * @param e - The DOM event from the template.
+   */
+  protected inputValue(e: Event): string {
+    return (e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
   }
 
   /** The active selection Save will persist, derived from the radio state. */
@@ -1681,7 +1677,10 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.provider.set('local');
       } else {
         this.legacyMigrationProvider.set(null);
-        this.provider.set(persistedProvider);
+        const persistedKind = (config.providers ?? []).find(
+          (p) => p.id === persistedProvider
+        )?.kind;
+        this.provider.set(this.narrowFlatProvider(persistedProvider, persistedKind));
       }
       const provider = this.provider();
       const baseUrl = config.base_url || '';

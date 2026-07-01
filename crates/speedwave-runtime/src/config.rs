@@ -10,6 +10,10 @@ use std::path::Path;
 /// provenance quarantine ([`quarantine_foreign_anthropic_models`]).
 pub const LLM_SCHEMA_VERSION: u32 = 3;
 
+/// Canonical id of the built-in Anthropic provider entry; persisted in
+/// on-disk configs, so it must never change.
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+
 /// What class of backend a configured provider entry is (ADR-073).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -142,13 +146,14 @@ impl LlmConfig {
     }
 
     /// Selects an Anthropic provider as active, adding an `anthropic` OAuth
-    /// entry if none exists. Returns true when state changed.
+    /// entry if none exists. The active pointer mirrors the entry's own model
+    /// (provenance, ADR-073; foreign shapes cleared). True when state changed.
     pub fn set_active_to_anthropic(&mut self) -> bool {
-        let id = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
-            Some(entry) => entry.id.clone(),
+        let (id, model) = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
+            Some(entry) => (entry.id.clone(), entry.model.clone()),
             None => {
                 self.providers.push(LlmProviderEntry {
-                    id: "anthropic".to_string(),
+                    id: ANTHROPIC_PROVIDER_ID.to_string(),
                     kind: LlmProviderKind::AnthropicOauth,
                     base_url: None,
                     model: None,
@@ -157,7 +162,7 @@ impl LlmConfig {
                     has_custom_headers: false,
                 });
                 self.schema_version = Some(LLM_SCHEMA_VERSION);
-                "anthropic".to_string()
+                (ANTHROPIC_PROVIDER_ID.to_string(), None)
             }
         };
         if self.active.as_ref().map(|a| &a.provider_id) == Some(&id) {
@@ -165,7 +170,7 @@ impl LlmConfig {
         }
         self.active = Some(LlmActive {
             provider_id: id,
-            model: None,
+            model: model.filter(|m| !is_foreign_anthropic_model(m)),
         });
         true
     }
@@ -244,7 +249,7 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
                 LlmProviderKind::AnthropicOauth
             };
             llm.providers.push(LlmProviderEntry {
-                id: "anthropic".to_string(),
+                id: ANTHROPIC_PROVIDER_ID.to_string(),
                 kind,
                 base_url: None,
                 model: llm.model.clone(),
@@ -253,7 +258,7 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
                 has_custom_headers: false,
             });
             llm.active = Some(LlmActive {
-                provider_id: "anthropic".to_string(),
+                provider_id: ANTHROPIC_PROVIDER_ID.to_string(),
                 model: llm.model.clone(),
             });
         }
@@ -352,7 +357,7 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.model.clone_from(&entry.model);
         }
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
-            llm.provider = Some("anthropic".to_string());
+            llm.provider = Some(ANTHROPIC_PROVIDER_ID.to_string());
             llm.base_url = None;
             llm.has_api_key = false;
             llm.has_custom_headers = false;
@@ -361,7 +366,7 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
         // No v1 equivalent — flat masquerades as anthropic, so its model must
         // NOT carry the OpenRouter id (404s a downgrade reader); v2 fields keep it.
         LlmProviderKind::OpenRouter => {
-            llm.provider = Some("anthropic".to_string());
+            llm.provider = Some(ANTHROPIC_PROVIDER_ID.to_string());
             llm.base_url = None;
             llm.has_api_key = false;
             llm.has_custom_headers = false;
@@ -1141,6 +1146,12 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_provider_id_is_pinned_for_on_disk_compat() {
+        // Persisted config.json files carry this id — changing it orphans them.
+        assert_eq!(ANTHROPIC_PROVIDER_ID, "anthropic");
+    }
+
+    #[test]
     fn set_active_to_anthropic_selects_existing_entry() {
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
@@ -1150,12 +1161,57 @@ mod tests {
         };
         assert!(llm.set_active_to_anthropic());
         assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "entry has no model — pointer stays empty"
+        );
         assert_eq!(llm.providers.len(), 1, "no duplicate entry added");
         assert!(!llm.is_unconfigured());
     }
 
     #[test]
+    fn set_active_to_anthropic_mirrors_existing_entry_model() {
+        // Previously selected Anthropic model (per-provider SSOT) is not discarded.
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        let active = llm.active.as_ref().unwrap();
+        assert_eq!(active.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn set_active_to_anthropic_clears_foreign_entry_model() {
+        // Corrupt pre-quarantine state: a provider/model shape under an
+        // Anthropic entry must not leak into the active pointer.
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("openrouter/z-ai/glm-5.2".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
     fn set_active_to_anthropic_adds_entry_when_absent() {
+        // Switching from an active non-Anthropic entry: its model must not
+        // carry over to the fresh Anthropic entry's pointer.
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![LlmProviderEntry {
@@ -1167,11 +1223,19 @@ mod tests {
                 context_tokens: None,
                 has_custom_headers: false,
             }],
-            active: None,
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen".into()),
+            }),
             ..Default::default()
         };
         assert!(llm.set_active_to_anthropic());
         assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "local model must not follow the provider switch"
+        );
         assert!(llm.providers.iter().any(|p| p.kind.is_anthropic()));
     }
 
@@ -1179,7 +1243,10 @@ mod tests {
     fn set_active_to_anthropic_noop_when_already_active() {
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
-            providers: vec![anthropic_entry()],
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
             active: Some(LlmActive {
                 provider_id: "anthropic".into(),
                 model: None,
@@ -1189,6 +1256,11 @@ mod tests {
         assert!(
             !llm.set_active_to_anthropic(),
             "no change when already active"
+        );
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "noop must not rewrite the pointer (migrate_llm reconciles it)"
         );
     }
 

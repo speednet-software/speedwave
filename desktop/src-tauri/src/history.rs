@@ -386,16 +386,10 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     };
 
     let model = message["model"].as_str().map(String::from);
-    // JSONL field names differ from TurnUsage; remap on parse.
-    let usage = message.get("usage").map(|u| {
-        let read = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
-        crate::chat::TurnUsage {
-            input_tokens: read("input_tokens"),
-            output_tokens: read("output_tokens"),
-            cache_read_tokens: read("cache_read_input_tokens"),
-            cache_write_tokens: read("cache_creation_input_tokens"),
-        }
-    });
+    // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
+    let usage = message
+        .get("usage")
+        .and_then(crate::chat::turn_usage_from_jsonl);
 
     Some(ConversationMessage {
         role: "assistant".to_string(),
@@ -754,21 +748,23 @@ fn compute_resume_snapshot_impl(
                     latest_cost = Some(cost);
                 }
                 if let Some(usage) = parsed.get("usage") {
+                    // Summing keeps its legacy-name fallback; field names are
+                    // the chat SSOT consts (cf. `turn_usage_from_jsonl`).
                     let read_u64 = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64);
                     summed.input_tokens = summed
                         .input_tokens
-                        .saturating_add(read_u64("input_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_INPUT_TOKENS).unwrap_or(0));
                     summed.output_tokens = summed
                         .output_tokens
-                        .saturating_add(read_u64("output_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_OUTPUT_TOKENS).unwrap_or(0));
                     summed.cache_read_tokens = summed.cache_read_tokens.saturating_add(
-                        read_u64("cache_read_input_tokens")
-                            .or_else(|| read_u64("cache_read_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_READ_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_READ_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                     summed.cache_write_tokens = summed.cache_write_tokens.saturating_add(
-                        read_u64("cache_creation_input_tokens")
-                            .or_else(|| read_u64("cache_write_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                 }
@@ -1177,6 +1173,14 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_null_usage_is_none() {
+        // `usage: null` is not an object — None, not a zero-filled TurnUsage.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":null}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.usage.is_none());
     }
 

@@ -611,6 +611,34 @@ describe('ChatComponent', () => {
       expect(resetSpy).toHaveBeenCalled();
       expect(component.conversations).toEqual([]);
     });
+
+    it('clears the durable restart-resume id when deleting that session even if it is not the viewed one', async () => {
+      projectState.activeProject.set('test');
+      // Durable id points at an older session; the live view shows a different one.
+      chatState.seedResumedSession('s-old');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's-live',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      expect(chatState.lastKnownSessionId).toBe('s-old');
+      component.conversations = [
+        { session_id: 's-old', timestamp: null, preview: 'a', message_count: 1 },
+      ];
+      const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
+      mockTauri.invokeHandler = async () => undefined;
+
+      await component.deleteConversation('s-old');
+
+      // The durable id is cleared so a later restart cannot resume a deleted session…
+      expect(chatState.lastKnownSessionId).toBeNull();
+      // …while the viewed session keeps running (no live-chat reset).
+      expect(resetSpy).not.toHaveBeenCalled();
+      expect(component.conversations).toEqual([]);
+    });
   });
 
   // ── newConversation ─────────────────────────────────────────────────────────
@@ -1097,6 +1125,20 @@ describe('ChatComponent', () => {
       const choice = component.promptResumeOrFresh();
       component.ngOnDestroy();
       await expect(choice).resolves.toBe('fresh');
+    });
+
+    it('a second promptResumeOrFresh resolves the pending prior dialog as "fresh"', async () => {
+      const first = component.promptResumeOrFresh();
+      const second = component.promptResumeOrFresh();
+
+      // Re-entrancy: the superseded prompt settles (fresh) instead of leaking.
+      await expect(first).resolves.toBe('fresh');
+      expect(component.contextOverflowOpen()).toBe(true);
+
+      // Only the latest prompt is still user-controlled.
+      component.onContextOverflowResume();
+      await expect(second).resolves.toBe('resume');
+      expect(component.contextOverflowOpen()).toBe(false);
     });
   });
 

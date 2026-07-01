@@ -1,10 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import {
   DAILY_CHART_DAYS,
   LlmUsageComponent,
   dailySeries,
   flattenRows,
+  hasDeferrableUnpricedRows,
   heatmapRows,
   providerOf,
   providerShares,
@@ -429,16 +430,94 @@ describe('heatmapRows', () => {
     const legacy = heatmapRows({ ...summary(), hours: undefined as never });
     expect(legacy.max).toBe(0);
   });
+});
 
-  it('re-polls an unpriced (deferred) aggregate until the cost is enriched', async () => {
+describe('hasDeferrableUnpricedRows', () => {
+  it('is true for a null-cost OpenRouter row (deferred enrichment pending)', () => {
+    const s = summary({
+      days: {
+        '2026-06-12': { 'openrouter/openai/gpt-4o': bucket({ requests: 1, cost_usd: null }) },
+      },
+    });
+    expect(hasDeferrableUnpricedRows(s)).toBe(true);
+  });
+
+  it('is false when every null-cost row is permanently unpriced (local/anthropic)', () => {
+    const s = summary({
+      days: {
+        '2026-06-12': {
+          'local/unsloth/Qwen3.6-35B-A3B': bucket({ requests: 1, cost_usd: null }),
+          'claude-opus-4-8': bucket({ requests: 1, cost_usd: null }),
+        },
+      },
+    });
+    expect(hasDeferrableUnpricedRows(s)).toBe(false);
+  });
+
+  it('is true when a deferrable null-cost row hides among permanently-unpriced ones', () => {
+    const s = summary({
+      days: {
+        '2026-06-12': { 'local/qwen3': bucket({ requests: 1, cost_usd: null }) },
+        '2026-06-13': { 'openrouter/x': bucket({ requests: 1, cost_usd: null }) },
+      },
+    });
+    expect(hasDeferrableUnpricedRows(s)).toBe(true);
+  });
+
+  it('ignores priced rows and is false for an empty summary', () => {
+    const priced = summary({
+      days: { '2026-06-12': { 'openrouter/x': bucket({ requests: 1, cost_usd: 0.01 }) } },
+    });
+    expect(hasDeferrableUnpricedRows(priced)).toBe(false);
+    expect(hasDeferrableUnpricedRows(summary())).toBe(false);
+  });
+
+  it('treats an unknown custom provider prefix as deferrable (conservative)', () => {
+    const s = summary({
+      days: { '2026-06-12': { 'my-router/m': bucket({ requests: 1, cost_usd: null }) } },
+    });
+    expect(hasDeferrableUnpricedRows(s)).toBe(true);
+  });
+});
+
+describe('LlmUsageComponent deferred re-poll', () => {
+  beforeEach(() => {
     vi.useFakeTimers();
-    const deferred = summary({ totals: bucket({ requests: 1, cost_usd: null }) });
-    const priced = summary({ totals: bucket({ requests: 1, cost_usd: 0.0003 }) });
-    const invoke = vi
-      .fn()
-      .mockResolvedValueOnce(deferred) // initial mount fetch: unpriced
-      .mockResolvedValue(priced); // re-poll fetch: priced
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
+  /** Unpriced aggregate with a deferrable (OpenRouter) row — re-poll eligible. */
+  function deferredSummary(): UsageSummary {
+    return summary({
+      totals: bucket({ requests: 1, cost_usd: null }),
+      days: {
+        '2026-06-12': { 'openrouter/openai/gpt-4o': bucket({ requests: 1, cost_usd: null }) },
+      },
+    });
+  }
+
+  /**
+   * Priced aggregate (enrichment landed).
+   * @param cost - Total cost the enrichment resolved to.
+   */
+  function pricedSummary(cost: number): UsageSummary {
+    return summary({
+      totals: bucket({ requests: 1, cost_usd: cost }),
+      days: {
+        '2026-06-12': { 'openrouter/openai/gpt-4o': bucket({ requests: 1, cost_usd: cost }) },
+      },
+    });
+  }
+
+  /**
+   * Mounts the component bound to project `proj` and settles the initial fetch.
+   * @param invoke - TauriService.invoke mock backing `get_llm_usage`.
+   */
+  async function mount(
+    invoke: ReturnType<typeof vi.fn>
+  ): Promise<ComponentFixture<LlmUsageComponent>> {
     await TestBed.configureTestingModule({
       imports: [LlmUsageComponent],
       providers: [{ provide: TauriService, useValue: { invoke } }],
@@ -447,33 +526,90 @@ describe('heatmapRows', () => {
     fixture.componentRef.setInput('project', 'proj');
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);
+    return fixture;
+  }
+
+  it('re-polls an unpriced (deferred) aggregate until the cost is enriched', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(deferredSummary()) // initial mount fetch: unpriced
+      .mockResolvedValue(pricedSummary(0.0003)); // re-poll fetch: priced
+    const fixture = await mount(invoke);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBeNull();
 
     // First backoff tick (2s) fires the re-poll, which returns the priced value.
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.0003);
     expect(invoke).toHaveBeenCalledTimes(2);
-
     fixture.destroy();
-    vi.useRealTimers();
   });
 
   it('does not re-poll once the aggregate is already priced', async () => {
-    vi.useFakeTimers();
-    const priced = summary({ totals: bucket({ requests: 1, cost_usd: 0.0003 }) });
-    const invoke = vi.fn().mockResolvedValue(priced);
-
-    await TestBed.configureTestingModule({
-      imports: [LlmUsageComponent],
-      providers: [{ provide: TauriService, useValue: { invoke } }],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(LlmUsageComponent);
-    fixture.componentRef.setInput('project', 'proj');
-    fixture.detectChanges();
+    const invoke = vi.fn().mockResolvedValue(pricedSummary(0.0003));
+    const fixture = await mount(invoke);
     await vi.advanceTimersByTimeAsync(60_000);
-
     expect(invoke).toHaveBeenCalledTimes(1);
     fixture.destroy();
-    vi.useRealTimers();
+  });
+
+  it('never re-polls a permanently-unpriced aggregate (local + subscription rows)', async () => {
+    const unpriced = summary({
+      totals: bucket({ requests: 2, cost_usd: null }),
+      days: {
+        '2026-06-12': {
+          'local/qwen3': bucket({ requests: 1, cost_usd: null }),
+          'claude-opus-4-8': bucket({ requests: 1, cost_usd: null }),
+        },
+      },
+    });
+    const invoke = vi.fn().mockResolvedValue(unpriced);
+    const fixture = await mount(invoke);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    // Unpriced stays null → the dash, never coerced to $0 (invariant 6).
+    expect(fixture.componentInstance.summary()?.totals.cost_usd).toBeNull();
+    fixture.destroy();
+  });
+
+  it('stops re-polling after the last backoff step (bounded, never a poll loop)', async () => {
+    const invoke = vi.fn().mockResolvedValue(deferredSummary());
+    const fixture = await mount(invoke);
+    // All five backoff steps: 2+4+8+15+30 s = 59 s → 1 mount fetch + 5 re-polls.
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(invoke).toHaveBeenCalledTimes(6);
+    // Exhausted: no sixth re-poll no matter how long we wait.
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(invoke).toHaveBeenCalledTimes(6);
+    fixture.destroy();
+  });
+
+  it('drops a stale re-poll response after the project changed mid-flight', async () => {
+    let resolveStale: (s: UsageSummary) => void = () => undefined;
+    const stale = new Promise<UsageSummary>((resolve) => {
+      resolveStale = resolve;
+    });
+    let projCalls = 0;
+    const invoke = vi.fn((_cmd: string, args: { project: string }): Promise<UsageSummary> => {
+      if (args.project === 'other') return Promise.resolve(pricedSummary(0.42));
+      projCalls++;
+      return projCalls === 1 ? Promise.resolve(deferredSummary()) : stale;
+    });
+    const fixture = await mount(invoke);
+
+    // Re-poll for 'proj' fires and is left in flight (unresolved promise).
+    await vi.advanceTimersByTimeAsync(2_000);
+    fixture.componentRef.setInput('project', 'other');
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);
+
+    // The stale 'proj' response must neither apply nor re-schedule.
+    resolveStale(pricedSummary(0.99));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);
+    const projCallsAfterStale = projCalls;
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(projCalls).toBe(projCallsAfterStale);
+    fixture.destroy();
   });
 });

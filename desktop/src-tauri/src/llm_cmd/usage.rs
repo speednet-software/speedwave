@@ -53,15 +53,15 @@ pub async fn get_usage_for_response(
     if u.cost_usd.is_some() {
         return Some(u);
     }
-    // Price EVERY unpriced row (local→Free/0.0, subscription→null), not just
+    // Price EVERY unpriced row (local→Free/null, subscription→null), not just
     // OpenRouter — else the footer keeps Claude Code's live preview (invariant 6).
     enrich_with_openrouter(data_dir.as_path(), &project).await;
     enrich_all_unpriced(data_dir.as_path(), &project);
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
 }
 
-/// Writes terminal sidecar entries for all non-OpenRouter unpriced rows. No HTTP;
-/// OpenRouter rows without a fetched gen-cost stay `deferred` for that pass.
+/// Writes terminal sidecar entries (local→Free/null) for all non-OpenRouter
+/// unpriced rows. No HTTP; unfetched OpenRouter rows stay `deferred` that pass.
 fn enrich_all_unpriced(data_dir: &std::path::Path, project: &str) {
     if let Err(e) =
         speedwave_runtime::usage_cost::enrich_cost_with_in(data_dir, project, &|_gen_id| None)
