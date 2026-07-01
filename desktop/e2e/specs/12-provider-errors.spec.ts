@@ -50,7 +50,7 @@ describe('Provider Error Paths', function () {
     expect(await $('[data-testid="settings-llm-model"]').isExisting()).toBe(false);
   });
 
-  it('keeps Save disabled until a model is chosen', async function () {
+  it('enables Save once discovery auto-selects the model', async function () {
     this.timeout(60_000);
     const local = requireLocalLlm();
     await (await $('[data-testid="settings-llm-base-url"]')).setValue(local.baseUrl);
@@ -59,7 +59,11 @@ describe('Provider Error Paths', function () {
 
     const modelSelect = await $('[data-testid="settings-llm-model"]');
     await modelSelect.waitForExist({ timeout: 30_000 });
-    // Model dropdown present but nothing selected yet → Save must stay disabled.
-    expect(await $('[data-testid="settings-llm-save"]').isEnabled()).toBe(false);
+    // A successful discovery auto-selects the sole model — the only way a
+    // single-model server becomes saveable — so Save flips to enabled.
+    await browser.waitUntil(async () => await $('[data-testid="settings-llm-save"]').isEnabled(), {
+      timeout: 15_000,
+      timeoutMsg: 'Save never enabled after the model auto-selected',
+    });
   });
 });
