@@ -58,7 +58,7 @@ describe('Local Provider + Resume', function () {
     this.timeout(240_000);
     // Provider switch triggers a full container restart — wait for chat ready.
     await openChat();
-    await sendMessageAndWait('What number did I ask you to remember? Reply with just the number.');
+    await sendMessageAndWait('What is my favourite number? Reply with just the number, nothing else.');
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
   });
 
@@ -67,7 +67,7 @@ describe('Local Provider + Resume', function () {
     // Only one conversation exists on e2e-test here (the continuous 08/09/11a
     // one), so the newest history row is it — resume it through the sidebar UI.
     await resumeNewestConversation();
-    await sendMessageAndWait('Once more: what number should you remember? Reply with just the number.');
+    await sendMessageAndWait('Again, what is my favourite number? Reply with just the number, nothing else.');
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
   });
 
