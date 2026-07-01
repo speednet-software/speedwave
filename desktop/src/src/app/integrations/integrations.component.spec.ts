@@ -197,6 +197,7 @@ describe('IntegrationsComponent', () => {
 
     projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'test-project';
+    projectState.status.set('ready'); // toggles/saves happen on a ready project
 
     fixture = TestBed.createComponent(IntegrationsComponent);
     component = fixture.componentInstance;

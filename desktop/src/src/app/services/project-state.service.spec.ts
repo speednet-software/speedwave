@@ -545,6 +545,71 @@ describe('ProjectStateService', () => {
       expect(ensureSpy).toHaveBeenCalled();
       expect(service.needsRestart).toBe(false);
     });
+
+    it('defers a restart requested mid-switch, keeping needsRestart false for now', () => {
+      service.status.set('switching');
+      service.needsRestart = false;
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      // Overlay can't render while switching — flag stays down until we settle.
+      expect(service.needsRestart).toBe(false);
+      expect(ensureSpy).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a restart requested during switching once the switch settles to ready', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: true, // → ready
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_started', { project: 'e2e-test' });
+      expect(service.status()).toBe('switching');
+
+      // Save fires requestRestart while switching — deferred, not visible yet.
+      service.requestRestart();
+      expect(service.needsRestart).toBe(false);
+
+      // Switch settles → the deferred intent becomes a live needsRestart.
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'e2e-test' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a deferred restart intent when a new switch starts', async () => {
+      await service.init();
+      service.status.set('switching');
+      service.requestRestart(); // deferred
+
+      // A brand-new switch supersedes the stale deferred intent.
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
   });
 
   describe('reconcile status', () => {

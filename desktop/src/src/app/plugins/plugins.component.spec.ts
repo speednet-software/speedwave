@@ -99,6 +99,7 @@ describe('PluginsComponent', () => {
 
     projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'test-project';
+    projectState.status.set('ready'); // toggles/saves happen on a ready project
 
     fixture = TestBed.createComponent(PluginsComponent);
     component = fixture.componentInstance;

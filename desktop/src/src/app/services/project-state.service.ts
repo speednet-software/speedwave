@@ -83,6 +83,8 @@ export class ProjectStateService {
   needsRestart = false;
   restarting = false;
   restartError = '';
+  /** Restart requested while status was pre-ready; surfaced once we settle. */
+  private pendingRestartOnSettle = false;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -247,6 +249,7 @@ export class ProjectStateService {
         project: this.activeProject,
       });
       this.status.set(authStatusToProjectStatus(auth));
+      this.applyPendingRestartOnSettle();
     } catch (err) {
       this.status.set('error');
       this.error = String(err);
@@ -312,6 +315,7 @@ export class ProjectStateService {
         await this.waitForSystemHealthy();
       }
       this.status.set(next);
+      this.applyPendingRestartOnSettle();
     } catch (err) {
       const msg = String(err);
       // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
@@ -416,6 +420,7 @@ export class ProjectStateService {
       // Only promote from a terminal pre-ready state; don't re-notify a live session.
       if (this.status() === 'auth_required' || this.status() === 'no_provider') {
         this.status.set('ready');
+        this.applyPendingRestartOnSettle();
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
@@ -477,8 +482,25 @@ export class ProjectStateService {
       void this.ensureContainersRunning();
       return;
     }
+    // The overlay only renders in ready/auth_required. Mid-switch/mid-start it
+    // would be a dead flag, so defer and surface it on settle instead.
+    if (this.status() !== 'ready' && this.status() !== 'auth_required') {
+      this.pendingRestartOnSettle = true;
+      return;
+    }
     this.needsRestart = true;
     this.notifyChange();
+  }
+
+  /** Promotes a deferred restart request to a live needsRestart once ready. */
+  private applyPendingRestartOnSettle(): void {
+    if (
+      this.pendingRestartOnSettle &&
+      (this.status() === 'ready' || this.status() === 'auth_required')
+    ) {
+      this.pendingRestartOnSettle = false;
+      this.needsRestart = true;
+    }
   }
 
   /**
@@ -582,6 +604,7 @@ export class ProjectStateService {
         this.failureProvider = undefined;
         this.failureProjectDir = undefined;
         this.needsRestart = false;
+        this.pendingRestartOnSettle = false;
         this.restarting = false;
         this.restartError = '';
         this.notifyChange();

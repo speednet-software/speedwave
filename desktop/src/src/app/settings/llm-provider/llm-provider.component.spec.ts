@@ -321,6 +321,7 @@ describe('LlmProviderComponent', () => {
   it('requests container restart on successful save', async () => {
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
+    projectState.status.set('ready'); // save on an already-running project
     component.provider.set('ollama');
     component.model.set('llama3.3');
 
@@ -1076,6 +1077,7 @@ describe('LlmProviderComponent', () => {
     // running container drifted from the already-'anthropic' saved active).
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
+    projectState.status.set('ready'); // OAuth login self-heal on a running project
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;

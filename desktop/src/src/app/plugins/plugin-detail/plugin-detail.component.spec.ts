@@ -161,6 +161,7 @@ describe('PluginDetailComponent', () => {
     // Set activeProject on the SSOT so loadActiveProject() picks it up
     const projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'test-project';
+    projectState.status.set('ready'); // credential saves/uninstalls happen on a ready project
 
     const fixture = TestBed.createComponent(PluginDetailComponent);
     return { component: fixture.componentInstance, fixture };
@@ -865,6 +866,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
       await component.onConfirmUninstall();
 
@@ -1080,6 +1082,7 @@ describe('PluginDetailComponent', () => {
       });
       const projectState = TestBed.inject(ProjectStateService);
       projectState.activeProject = 'test-project';
+      projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;
@@ -1152,6 +1155,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
       await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
@@ -1247,6 +1251,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
       await component.onResetCredentials();
 
@@ -1381,6 +1386,7 @@ describe('PluginDetailComponent', () => {
       });
       const projectState = TestBed.inject(ProjectStateService);
       projectState.activeProject = 'test-project';
+      projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;

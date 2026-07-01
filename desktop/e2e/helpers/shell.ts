@@ -23,7 +23,7 @@ export async function waitForShellReady(timeoutMs = 60_000): Promise<void> {
 export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> {
   const btn = await $('[data-testid="restart-now-btn"]');
   await btn.waitForExist({
-    timeout: 30_000,
+    timeout: 60_000,
     timeoutMsg: 'restart-now-btn never appeared — provider change did not request a restart',
   });
   await btn.click();

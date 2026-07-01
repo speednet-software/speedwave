@@ -38,4 +38,7 @@ export async function switchToProject(slug: string, timeoutMs = 180_000): Promis
     timeout: timeoutMs,
     timeoutMsg: `active_project did not become ${slug} — switch did not complete`,
   });
+  // The slug flips before compose_up finishes; wait for status to settle out of
+  // 'switching' so callers act on a ready project (no_provider returns at once).
+  await waitForShellReady(timeoutMs);
 }
