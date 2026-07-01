@@ -1,4 +1,12 @@
-import { ChangeDetectionStrategy, Component, effect, inject, input, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  effect,
+  inject,
+  input,
+  signal,
+  OnDestroy,
+} from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import type { UsageBucket, UsageSummary } from '../../models/llm';
 import { formatTokens, formatUsd } from '../../shared/format-number';
@@ -291,11 +299,15 @@ export const DAILY_CHART_DAYS = 30;
     </div>
   `,
 })
-export class LlmUsageComponent {
+export class LlmUsageComponent implements OnDestroy {
   /** Project whose usage to display. */
   readonly project = input.required<string>();
 
   private tauri = inject(TauriService);
+
+  /** Backoff (ms) for re-polling an unpriced (deferred) aggregate; ~60s total. */
+  private static readonly DEFERRED_REPOLL_MS = [2_000, 4_000, 8_000, 15_000, 30_000];
+  private repollTimer: ReturnType<typeof setTimeout> | null = null;
 
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
@@ -323,6 +335,7 @@ export class LlmUsageComponent {
    * @param project - Project to fetch usage for; defaults to the bound input.
    */
   async refresh(project: string = this.project()): Promise<void> {
+    this.clearRepoll();
     this.loading.set(true);
     this.error.set(null);
     try {
@@ -338,11 +351,55 @@ export class LlmUsageComponent {
       const { rows, max } = heatmapRows(summary);
       this.heatRows.set(rows);
       this.heatMax.set(max);
+      this.scheduleDeferredRepoll(project, summary);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /**
+   * Re-polls on a bounded backoff while the aggregate is unpriced but has
+   * requests — OpenRouter cost is enriched async (deferred), like the footer.
+   * @param project - Project to refetch usage for.
+   * @param summary - Latest summary; drives the unpriced/deferred check.
+   * @param attempt - Backoff index (0 on the first schedule).
+   */
+  private scheduleDeferredRepoll(project: string, summary: UsageSummary, attempt = 0): void {
+    const backoff = LlmUsageComponent.DEFERRED_REPOLL_MS;
+    const deferred = summary.totals.requests > 0 && summary.totals.cost_usd === null;
+    if (!deferred || attempt >= backoff.length) return;
+    this.repollTimer = setTimeout(() => {
+      void this.tauri
+        .invoke<UsageSummary>('get_llm_usage', { project })
+        .then((next) => {
+          if (this.project() !== project) return;
+          this.summary.set(next);
+          this.rows.set(flattenRows(next));
+          this.dayBars.set(dailySeries(next));
+          const { shares, total } = providerShares(next);
+          this.shares.set(shares);
+          this.shareTotal.set(total);
+          const { rows, max } = heatmapRows(next);
+          this.heatRows.set(rows);
+          this.heatMax.set(max);
+          this.scheduleDeferredRepoll(project, next, attempt + 1);
+        })
+        .catch(() => undefined);
+    }, backoff[attempt]);
+  }
+
+  private clearRepoll(): void {
+    if (this.repollTimer !== null) {
+      clearTimeout(this.repollTimer);
+      this.repollTimer = null;
+    }
+  }
+
+  /** Cancels any pending deferred-cost re-poll timer on teardown. */
+  ngOnDestroy(): void {
+    this.clearRepoll();
   }
 
   /**

@@ -132,6 +132,19 @@ export async function openUsage(): Promise<void> {
   await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
 }
 
+/** Navigates to the integrations page and waits for it to mount. */
+export async function openIntegrations(): Promise<void> {
+  await (await $('[data-testid="nav-integrations"]')).click();
+  await $('[data-testid="integrations-body"]').waitForExist({ timeout: 15_000 });
+}
+
+/** Clicks the enable/disable toggle for an integration service row. */
+export async function toggleIntegration(service: string): Promise<void> {
+  const toggle = await $(`[data-testid="integrations-row-toggle-${service}"]`);
+  await toggle.waitForExist({ timeout: 10_000 });
+  await toggle.click();
+}
+
 /** Types `text` and clicks send; does not wait for the turn to finish. */
 export async function sendMessageNoWait(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
@@ -198,6 +211,23 @@ export async function waitForUsd(
   }, opts);
   if (resolved === null) throw new Error(`waitForUsd resolved without a value for ${selector}`);
   return resolved;
+}
+
+/** Polls the dashboard cost card, remounting the view each round so it refetches
+ *  (the usage view only fetches on mount / project change, not on a timer). */
+export async function waitForDashboardUsd(
+  opts: { timeout: number; interval: number; timeoutMsg: string }
+): Promise<number> {
+  const deadline = Date.now() + opts.timeout;
+  let value: number | null = null;
+  for (;;) {
+    await openUsage();
+    value = await readUsd('[data-testid="llm-usage-card-cost"]');
+    if (value !== null) return value;
+    if (Date.now() >= deadline) throw new Error(opts.timeoutMsg);
+    await (await $('[data-testid="nav-chat"]')).click();
+    await browser.pause(opts.interval);
+  }
 }
 
 /** True when a `$X.XXXX`/`—` cost element shows no priced value (unpriced). */

@@ -398,4 +398,51 @@ describe('heatmapRows', () => {
     const legacy = heatmapRows({ ...summary(), hours: undefined as never });
     expect(legacy.max).toBe(0);
   });
+
+  it('re-polls an unpriced (deferred) aggregate until the cost is enriched', async () => {
+    vi.useFakeTimers();
+    const deferred = summary({ totals: bucket({ requests: 1, cost_usd: null }) });
+    const priced = summary({ totals: bucket({ requests: 1, cost_usd: 0.0003 }) });
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(deferred) // initial mount fetch: unpriced
+      .mockResolvedValue(priced); // re-poll fetch: priced
+
+    await TestBed.configureTestingModule({
+      imports: [LlmUsageComponent],
+      providers: [{ provide: TauriService, useValue: { invoke } }],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(LlmUsageComponent);
+    fixture.componentRef.setInput('project', 'proj');
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.summary()?.totals.cost_usd).toBeNull();
+
+    // First backoff tick (2s) fires the re-poll, which returns the priced value.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.0003);
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    fixture.destroy();
+    vi.useRealTimers();
+  });
+
+  it('does not re-poll once the aggregate is already priced', async () => {
+    vi.useFakeTimers();
+    const priced = summary({ totals: bucket({ requests: 1, cost_usd: 0.0003 }) });
+    const invoke = vi.fn().mockResolvedValue(priced);
+
+    await TestBed.configureTestingModule({
+      imports: [LlmUsageComponent],
+      providers: [{ provide: TauriService, useValue: { invoke } }],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(LlmUsageComponent);
+    fixture.componentRef.setInput('project', 'proj');
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    fixture.destroy();
+    vi.useRealTimers();
+  });
 });

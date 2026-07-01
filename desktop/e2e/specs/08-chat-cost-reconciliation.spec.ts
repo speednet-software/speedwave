@@ -24,7 +24,7 @@
  * UX-volatile text content.
  */
 
-import { openChat, openUsage, sendMessageAndWait, waitForUsd } from '../helpers/llm';
+import { openChat, sendMessageAndWait, waitForUsd, waitForDashboardUsd } from '../helpers/llm';
 
 describe('Chat Cost Reconciliation', function () {
   before(async function () {
@@ -46,7 +46,7 @@ describe('Chat Cost Reconciliation', function () {
   it('should reconcile the footer cost against the usage dashboard aggregate', async function () {
     // OpenRouter cost is deferred and reconciled on a backoff spanning ~60s
     // (chat-state.service.ts DEFERRED_RECONCILE_BACKOFF_MS); allow headroom.
-    this.timeout(120_000);
+    this.timeout(180_000);
 
     // Poll the session-stats footer until the deferred OpenRouter cost resolves
     // to a priced (non-em-dash) value, mirroring reconcileFooterCost's patience.
@@ -59,11 +59,11 @@ describe('Chat Cost Reconciliation', function () {
 
     // Cross-check against the global usage dashboard's aggregate cost card,
     // which reads the same proxy usage JSONL + host cost sidecar (invariant 6).
-    await openUsage();
-
-    const dashboardCost = await waitForUsd('[data-testid="llm-usage-card-cost"]', {
-      timeout: 30_000,
-      interval: 2_000,
+    // The dashboard only fetches on mount, so remount each poll until the
+    // sidecar-enriched cost is picked up.
+    const dashboardCost = await waitForDashboardUsd({
+      timeout: 60_000,
+      interval: 3_000,
       timeoutMsg: 'Usage dashboard cost card never resolved to a priced value',
     });
 

@@ -19,6 +19,7 @@ export const config = {
     './specs/12-provider-errors.spec.ts',
     './specs/13-chat-controls.spec.ts',
     './specs/14-usage-per-project.spec.ts',
+    './specs/15-integration-toggle.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,
