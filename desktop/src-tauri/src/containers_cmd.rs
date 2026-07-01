@@ -729,6 +729,14 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
             log::warn!("check_containers_running: runtime not available");
             return Ok(false);
         }
+        // A deferred-start project (no LLM provider yet) has no compose.yml
+        // at all — compose_ps would Err rather than report "not running".
+        let compose_file =
+            speedwave_runtime::runtime::compose_file_path(&project).map_err(|e| e.to_string())?;
+        if !std::path::Path::new(&compose_file).exists() {
+            log::info!("check_containers_running: no compose.yml yet for '{project}'");
+            return Ok(false);
+        }
         let containers = rt.compose_ps(&project).map_err(|e| {
             log::error!("check_containers_running: error: {e}");
             e.to_string()
@@ -2602,6 +2610,26 @@ mod tests {
         assert!(
             build_pos < start_pos,
             "image build must precede start_containers (ADR-057/066)"
+        );
+    }
+
+    /// Compose file check must precede compose_ps (else nerdctl fatally errors).
+    #[test]
+    fn check_containers_running_checks_compose_file_before_compose_ps() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn check_containers_running(")
+            .expect("check_containers_running must exist");
+        let body = &source[fn_start..];
+        let exists_pos = body
+            .find("compose_file).exists()")
+            .expect("check_containers_running must check the compose file exists");
+        let ps_pos = body
+            .find("rt.compose_ps(&project)")
+            .expect("check_containers_running must call compose_ps");
+        assert!(
+            exists_pos < ps_pos,
+            "compose.yml existence check must precede compose_ps"
         );
     }
 
