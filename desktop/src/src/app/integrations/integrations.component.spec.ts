@@ -196,7 +196,8 @@ describe('IntegrationsComponent', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test-project';
+    projectState.activeProject.set('test-project');
+    projectState.status.set('ready'); // toggles/saves happen on a ready project
 
     fixture = TestBed.createComponent(IntegrationsComponent);
     component = fixture.componentInstance;
@@ -374,7 +375,7 @@ describe('IntegrationsComponent', () => {
 
   it('should not load integrations without active project', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
     await component.ngOnInit();
     expect(invokeSpy).not.toHaveBeenCalledWith('get_integrations', expect.anything());

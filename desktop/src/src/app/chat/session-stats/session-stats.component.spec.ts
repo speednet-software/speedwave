@@ -37,7 +37,7 @@ describe('SessionStatsComponent', () => {
     });
 
     it('renders the zero row + ctx 0% for a seeded resume (known window, no usage)', () => {
-      // The exact shape seedResumedSession produces before any Result arrives.
+      // The exact shape seedSessionId produces before any Result arrives.
       fixture.componentRef.setInput('stats', {
         session_id: '11111111-1111-1111-1111-111111111111',
         total_cost: null,

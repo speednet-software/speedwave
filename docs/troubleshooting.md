@@ -1,5 +1,53 @@
 # Troubleshooting
 
+## Local LLM: models discover but chat fails silently
+
+**Symptom:** A local provider (LM Studio / Ollama / llama.cpp) lists models in
+Settings, but a chat with that model never answers.
+
+**Cause:** A `base_url` with a loopback host (`http://127.0.0.1:<port>`,
+`localhost`) reaches the LLM during host-side discovery but not during a session:
+sessions originate inside the proxy container, where `127.0.0.1` is the
+container itself, not the host running the LLM.
+
+**Recovery:** Re-save the provider in Settings → LLM providers. Loopback hosts
+are now canonicalized to `http://host.docker.internal:<port>`, which the proxy
+container can reach. New saves are fixed automatically.
+
+**Note:** The provider form discovers models only when you click **discover
+models** (after entering the base URL and any API key) — it no longer probes
+automatically. The model field and Save appear only after a successful
+discovery (or a previously saved model). A discovery failure shows a specific
+reason (authentication failed → check the API key; reachable but HTTP error;
+not reachable → server down).
+
+---
+
+## Switching LLM provider keeps the conversation
+
+**Behavior:** Changing the active LLM provider (Settings → LLM providers) keeps
+the conversation you're viewing — the new model resumes it with full history.
+A streaming turn is interrupted first, then the session resumes after the
+container restart.
+
+**If the history is too large for the new model:** you're asked to **Resume
+anyway** or **Start fresh** before the switch, instead of hitting
+a silent context-overflow. Pick a larger-window model, or start fresh, if the
+history doesn't fit. Switching on an empty conversation just starts clean.
+
+## Logging in to Anthropic while a local/OpenRouter provider is active
+
+**Behavior:** "Open terminal and log in" (Desktop) and `speedwave login` (CLI)
+always run Claude Code's Anthropic OAuth `/login`, even when the active provider
+is a local model or OpenRouter. The login session clears that provider's
+injected environment first, so you reach Anthropic's sign-in rather than a chat
+against the local model.
+
+**After logging in:** the Anthropic card shows **connected**, and **Save**
+becomes enabled. Select **anthropic** and **Save** to route chats to Anthropic.
+Your previously configured local/OpenRouter provider stays in the list — switch
+back any time without re-entering its credentials.
+
 ## Chat session ends immediately ("ended unexpectedly") on a managed enterprise account
 
 **Symptom:** Every Desktop chat turn or CLI session exits right after start with
@@ -102,6 +150,23 @@ _Allow_. The integration is now bound to the new identifier and the banner does
 not reappear.
 
 This is a one-time migration. See ADR-049 for the rationale.
+
+---
+
+## `speedwave self-update`: "Installed Speedwave Desktop resources are vX"
+
+**Symptom:** After `speedwave self-update`, the CLI reports that the installed
+Desktop resources belong to an older version and skips the container rebuild.
+Project commands may also fail with _"installed Desktop resources are vX but
+this binary is vY … Update Speedwave Desktop"_.
+
+**Cause:** The CLI binary was updated ahead of the Desktop app. Container
+images are built from the Desktop's bundled resources, and an older resource
+tree does not contain the new version's build inputs.
+
+**Recovery:** Update (or relaunch) the Speedwave Desktop app, then run
+`speedwave update`. The Desktop app re-links the CLI on every startup, so both
+end up on the same version.
 
 ---
 

@@ -92,6 +92,10 @@ it carries `extra_hosts` for local backends) but not from the Desktop host
 process. Host-side probes call `http_util::rewrite_container_alias_to_loopback`.
 SSOT: `consts::HOST_GATEWAY_ALIAS`.
 
+`compose::canonicalize_local_base_url` rewrites a saved loopback `base_url`
+to `HOST_GATEWAY_ALIAS`, since the persisted value must be reachable from
+inside the proxy container, not just from the Desktop host process.
+
 ## Authentication bypass
 
 `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only

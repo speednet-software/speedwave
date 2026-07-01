@@ -64,7 +64,7 @@ export class ProjectPillComponent implements OnInit, OnDestroy {
   }
 
   private refresh(): void {
-    const name = this.projectState.activeProject ?? '';
+    const name = this.projectState.activeProject() ?? '';
     this.projectName.set(name);
     this.activeIndex.set(this.projectState.projects.findIndex((p) => p.name === name));
   }

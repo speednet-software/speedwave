@@ -105,6 +105,12 @@ ensure_provisioned_macos() {
 # The Windows install dir is C:\Speedwave.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 
+# Escape a value for embedding in a PowerShell single-quoted literal.
+# PowerShell escapes ' inside '...' by doubling it ('' = literal ').
+ps_squote() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
 # Run a PowerShell script on the Windows host.
 # Writes the script to a .ps1 temp file via sftp, then executes via -File.
 # This is necessary because `powershell.exe -Command -` (reading from stdin)
@@ -115,9 +121,15 @@ windows_ps() {
     tmpname="e2e-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # Inject $WINDOWS_WSL_DISTRO so PS heredocs can reference it without
-    # switching to unquoted heredocs (which would require escaping all PS $vars).
-    local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'"
+    # Inject vars so PS heredocs can reference them without unquoting
+    # (SSH does not forward local env vars to the remote shell).
+    local ps_prefix
+    ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
+\$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
+\$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
+\$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
+\$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
+\$env:LOCAL_LLM_MODEL = '$(ps_squote "${LOCAL_LLM_MODEL:-}")'"
     # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
     # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
     # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
@@ -849,7 +861,15 @@ SCRIPT
 # Expects the .app to be installed at /Applications/Speedwave.app and E2E
 # suite to be in /tmp/speedwave-e2e.
 run_macos_e2e() {
-    macos_ssh bash <<'SCRIPT'
+    # SSH does not forward local env vars — export the LLM test config via
+    # locally expanded prefix lines ahead of the quoted heredoc body.
+    {
+        printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
+        printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
+        printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
+        printf 'export LOCAL_LLM_MODEL=%q\n' "${LOCAL_LLM_MODEL:-}"
+        cat <<'SCRIPT'
 set -euo pipefail
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -907,6 +927,7 @@ trap - EXIT
 
 exit $E2E_EXIT
 SCRIPT
+    } | macos_ssh bash
 }
 
 # -- Preview mode: install & launch app for manual testing ---------------------

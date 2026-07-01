@@ -35,6 +35,21 @@ export interface DiscoverResult {
   messages_endpoint_ok?: boolean;
 }
 
+/** Fixed provider cards in the Settings section (ADR-073): anthropic + local. */
+export type ProviderCardId = 'anthropic' | 'local';
+
+/** Ids of the permanent remote provider rows rendered under the cards. */
+export type ExtraProviderId = 'openrouter';
+
+/** Radio target of the provider section: a card or a remote row. */
+export type ProviderTarget = ProviderCardId | ExtraProviderId;
+
+/** Legacy local-provider ids still accepted from persisted configs. */
+export type LegacyLocalProviderId = 'ollama' | 'lmstudio' | 'llamacpp';
+
+/** Value domain of the flat `provider` field: targets + unmigrated legacy ids. */
+export type FlatProviderId = ProviderTarget | LegacyLocalProviderId;
+
 /** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */
 export const LOCAL_PROVIDERS: ReadonlyArray<string> = ['ollama', 'lmstudio', 'llamacpp', 'local'];
 

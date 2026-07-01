@@ -2,6 +2,8 @@
  * Helpers for project state introspection inside the running webview.
  */
 
+import { waitForShellReady } from './shell';
+
 /** Returns the slug of the active project from `__TAURI_INTERNALS__`. */
 export async function activeProjectSlug(): Promise<string | null> {
   return browser.executeAsync((done: (slug: string | null) => void) => {
@@ -16,4 +18,40 @@ export async function activeProjectSlug(): Promise<string | null> {
       .then((r) => done(r.active_project))
       .catch(() => done(null));
   });
+}
+
+/** Opens the project switcher and switches to `slug`, waiting for the SSOT signal. */
+export async function switchToProject(slug: string, timeoutMs = 180_000): Promise<void> {
+  await waitForShellReady();
+  const pill = await $('[data-testid="project-pill"]');
+  const dropdown = await $('[data-testid="project-switcher-dropdown"]');
+  await browser.waitUntil(
+    async () => {
+      if (await dropdown.isExisting()) return true;
+      await pill.click();
+      return await dropdown.isExisting();
+    },
+    { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' }
+  );
+  await (await $(`[data-testid="project-switcher-item-${slug}"]`)).click();
+  await browser.waitUntil(async () => (await activeProjectSlug()) === slug, {
+    timeout: timeoutMs,
+    timeoutMsg: `active_project did not become ${slug} — switch did not complete`,
+  });
+  // The slug flips before compose_up finishes; wait for status to settle out of
+  // 'switching' so callers act on a ready project (no_provider returns at once).
+  await waitForShellReady(timeoutMs);
+}
+
+/** Reads whether a project's containers are running, via the Tauri command. */
+export async function containersRunning(project: string): Promise<boolean> {
+  return browser.executeAsync((proj: string, done: (r: boolean) => void) => {
+    (
+      window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<boolean> };
+      }
+    ).__TAURI_INTERNALS__.invoke('check_containers_running', { project: proj })
+      .then((r) => done(r))
+      .catch(() => done(false));
+  }, project);
 }

@@ -37,6 +37,7 @@ import {
   type TurnUsage,
   type QueuedMessage,
   type WireContentBlock,
+  type ConversationTranscript,
 } from '../models/chat';
 
 // Re-export types consumed by components
@@ -59,6 +60,37 @@ const SESSION_START_TIMEOUT_MS = 30_000;
 /** Polling interval while waiting for a session to start. */
 const SESSION_START_POLL_MS = 500;
 
+/**
+ * Returns null for anything but the two known backend phrasings.
+ * @param raw - Raw error message from the backend.
+ */
+export function mapContextOverflowError(raw: string): string | null {
+  if (/exceeds the available context size/i.test(raw) || /context length exceeded/i.test(raw)) {
+    return 'This conversation’s history is larger than the selected model’s context window. Pick a model with a bigger window, or start a new conversation.';
+  }
+  return null;
+}
+
+/**
+ * Claude Code's own message points at `/login`, which doesn't apply here.
+ * @param raw - Raw error message from the backend.
+ */
+export function mapNotLoggedInError(raw: string): string | null {
+  if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
+    return 'Not logged in. Go to Settings and choose an LLM provider.';
+  }
+  return null;
+}
+
+/**
+ * Gate predicate: the backend failure means the session is unauthenticated, so
+ * the UI routes to auth_required (display mapping stays in `mapNotLoggedInError`).
+ * @param msg - Raw error message from the backend.
+ */
+export function isNotAuthenticatedError(msg: string): boolean {
+  return msg.includes('not authenticated');
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -78,6 +110,8 @@ export class ChatStateService {
 
   /** ADR-045 — current queued message (null when slot is empty). */
   private _pendingQueue: QueuedMessage | null = null;
+  /** Queue accepted before the session id was known; flushed on first seed. */
+  private _queueAwaitingSession = false;
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
     return this._pendingQueue;
@@ -92,9 +126,15 @@ export class ChatStateService {
   /** Read-only signal mirror so OnPush components re-render on stats changes. */
   readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
+  /** input_tokens from the most recent successful Result; survives stream reset. */
+  get lastSuccessfulInputTokens(): number | null {
+    return this._lastSuccessfulInputTokens;
+  }
+
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
+  private _lastSuccessfulInputTokens: number | null = null;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -119,6 +159,39 @@ export class ChatStateService {
    * start_chat that finishes later no-ops instead of clobbering the resume.
    */
   private _sessionGeneration = 0;
+
+  /** Durable session id; survives a container restart that nulls live stats. */
+  private _lastKnownSessionId: string | null = null;
+  /** Optimistic session id stamped on resume (drawer accent before first Result). */
+  private _optimisticSessionId: string | null = null;
+  /** Re-entrancy guard for resumeConversation. */
+  private _resumeInProgress = false;
+  /** Set by a mounted ChatComponent to ask the user on context overflow; null when unmounted. */
+  private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
+
+  /** Durable session id (test/Component read). */
+  get lastKnownSessionId(): string | null {
+    return this._lastKnownSessionId;
+  }
+  /** Optimistic resume stamp (read by the view-session-id getter). */
+  get optimisticSessionId(): string | null {
+    return this._optimisticSessionId;
+  }
+
+  /**
+   * Unregistering (null) makes overflow default to auto-resume.
+   * @param cb - Decider callback, or null to unregister.
+   */
+  setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
+    this._resumeDecider = cb;
+  }
+
+  /** Clears durable + optimistic session tracking (new conversation / delete). */
+  clearSessionTracking(): void {
+    this._lastKnownSessionId = null;
+    this._optimisticSessionId = null;
+  }
+
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
@@ -234,6 +307,7 @@ export class ChatStateService {
       this.listenerReady = true;
       await this.setupStreamListener();
       this.setupProjectStateListeners();
+      this.setupRestartResumeListeners();
       // Best-effort cache warm so the chat footer has a context window
       // ready before the first Result chunk lands.
       void this.refreshLlmConfigCache();
@@ -242,7 +316,7 @@ export class ChatStateService {
       this.initialized = true;
       // Start session in background (UI stays responsive); sendMessage
       // auto-retries on "no active session" if a message races start_chat.
-      if (this.projectState.status === 'ready') {
+      if (this.projectState.status() === 'ready') {
         this.startChatSession();
       } else {
         const unsub = this.projectState.onProjectReady(() => {
@@ -254,7 +328,13 @@ export class ChatStateService {
   }
 
   private async startChatSession(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
+    // A resume owns the session; a remount must not clobber it with a fresh start.
+    // newConversation/delete null _lastKnownSessionId, so this gates only resume.
+    if (this._resumeInProgress || this._lastKnownSessionId) {
+      this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
+      return;
+    }
     if (project && !this.startingSession) {
       this.startingSession = true;
       const gen = this._sessionGeneration;
@@ -270,14 +350,14 @@ export class ChatStateService {
           return;
         }
         const msg = String(err);
-        if (msg.includes('not authenticated')) {
-          this.projectState.status = 'auth_required';
+        if (isNotAuthenticatedError(msg)) {
+          this.projectState.status.set('auth_required');
           this.notifyChange();
         } else {
           // Non-auth start failure is fatal — surface it in project state so
           // the UI shows an error instead of a silently dead chat.
           this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
-          this.projectState.status = 'error';
+          this.projectState.status.set('error');
           this.projectState.error = `Failed to start chat session: ${msg}`;
           this.notifyChange();
         }
@@ -417,8 +497,8 @@ export class ChatStateService {
           return;
         } catch (retryErr) {
           const retryMsg = String(retryErr);
-          if (retryMsg.includes('not authenticated')) {
-            this.projectState.status = 'auth_required';
+          if (isNotAuthenticatedError(retryMsg)) {
+            this.projectState.status.set('auth_required');
             this.isStreaming = false;
             this.notifyChange();
             return;
@@ -633,7 +713,13 @@ export class ChatStateService {
       }
 
       case 'SystemInit':
-        this._model = chunk.data.model;
+        if (chunk.data.model) this._model = chunk.data.model;
+        // ADR-045: seed the session id at stream start so queue/retry work
+        // during the FIRST turn (before any Result carries it).
+        if (chunk.data.session_id) {
+          this.seedSessionId(chunk.data.session_id);
+          void this.flushDeferredQueue(chunk.data.session_id);
+        }
         break;
 
       case 'RateLimit':
@@ -662,7 +748,12 @@ export class ChatStateService {
           }
         }
         const resolvedModel = chunk.data.model ?? (this._model || undefined);
-        const meta = buildEntryMeta(chunk.data, resolvedModel);
+        // Suppress the live cost preview for local (no real cost; reconcile confirms null).
+        const meta = buildEntryMeta(
+          chunk.data,
+          resolvedModel,
+          isLocalProvider(this._currentProvider)
+        );
         if (this._currentBlocks.length > 0) {
           const assistantUuid = chunk.data.assistant_uuid;
           const assistantEntry: ChatMessage = {
@@ -686,8 +777,12 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
+        // Local has no real cost; Claude Code's estimate is meaningless → null
+        // (no $0.00x flicker before reconcile confirms the free/null SSOT value).
         const livePreviewCost =
-          typeof chunk.data.total_cost === 'number' && Number.isFinite(chunk.data.total_cost)
+          !isLocalProvider(this._currentProvider) &&
+          typeof chunk.data.total_cost === 'number' &&
+          Number.isFinite(chunk.data.total_cost)
             ? chunk.data.total_cost
             : null;
         this._sessionStats.set({
@@ -699,6 +794,14 @@ export class ChatStateService {
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
+        // Durable id so a later container restart (model switch) can resume this session.
+        if (chunk.data.session_id) {
+          this._lastKnownSessionId = chunk.data.session_id;
+          void this.flushDeferredQueue(chunk.data.session_id);
+        }
+        if (typeof chunk.data.usage?.input_tokens === 'number') {
+          this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
+        }
         // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
@@ -723,11 +826,12 @@ export class ChatStateService {
         break;
       }
 
-      case 'Error':
-        this._currentBlocks = [
-          ...this._currentBlocks,
-          { type: 'error', content: chunk.data.content },
-        ];
+      case 'Error': {
+        const errContent =
+          mapContextOverflowError(chunk.data.content) ??
+          mapNotLoggedInError(chunk.data.content) ??
+          chunk.data.content;
+        this._currentBlocks = [...this._currentBlocks, { type: 'error', content: errContent }];
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -735,10 +839,12 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         break;
+      }
 
       case 'QueueDrained': {
         // ADR-045: backend sent the queued payload to stdin; mirror to local state.
         this._pendingQueue = null;
+        this._queueAwaitingSession = false;
         this._messages = [
           ...this._messages,
           {
@@ -779,8 +885,10 @@ export class ChatStateService {
     this.log.debug('[chat-state] resetForNewConversation');
     this.resetCoreStreamState();
     this._pendingQueue = null;
+    this._queueAwaitingSession = false;
     this.initialized = false;
     this.startingSession = false;
+    this.clearSessionTracking();
     this.notifyChange();
   }
 
@@ -800,11 +908,13 @@ export class ChatStateService {
   }
 
   /**
-   * Seeds the session id after a resume so retry / queue can run before the first `Result`.
-   * @param sessionId - Resumed JSONL session uuid.
+   * Seeds the session id (resume or stream-start SystemInit) so retry / queue
+   * can run before the first `Result`.
+   * @param sessionId - Session uuid from a resume or a SystemInit chunk.
    */
-  seedResumedSession(sessionId: string): void {
+  seedSessionId(sessionId: string): void {
     if (!sessionId) return;
+    this._lastKnownSessionId = sessionId;
     const cur = this._sessionStats();
     if (cur?.session_id === sessionId) return;
     // The seed is replaced as soon as the next `Result` chunk arrives with
@@ -821,29 +931,54 @@ export class ChatStateService {
   }
 
   /**
-   * Queue a message as the next turn (ADR-045); replace semantics.
+   * Queue a message as the next turn (ADR-045); replace semantics. The local
+   * slot fills immediately; before the first session id (init not yet parsed)
+   * the backend registration is deferred to {@link flushDeferredQueue} so an
+   * early queue is never silently dropped.
    * @param text - The message to queue.
    * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
+    if (!text) return null;
+    const prior = this._pendingQueue?.text ?? null;
+    this._pendingQueue = { text, queued_at: Date.now() };
+    this.notifyChange();
     const sessionId = this._sessionStats()?.session_id;
-    if (!sessionId || !text) return null;
+    if (!sessionId) {
+      this._queueAwaitingSession = true;
+      return prior;
+    }
     try {
-      const prior = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
+      const displaced = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
         'queue_message',
         { sessionId, text }
       );
-      this._pendingQueue = { text, queued_at: Date.now() };
-      this.notifyChange();
-      return prior?.text ?? null;
+      return displaced?.text ?? prior;
     } catch (err) {
       this.log.warn(`[chat-state] queueMessage: backend invoke failed: ${String(err)}`);
-      return null;
+      return prior;
+    }
+  }
+
+  /**
+   * Registers a deferred queued message once the session id becomes known.
+   * @param sessionId - Session id from the first SystemInit or Result seed.
+   */
+  private async flushDeferredQueue(sessionId: string): Promise<void> {
+    if (!this._queueAwaitingSession) return;
+    this._queueAwaitingSession = false;
+    const queued = this._pendingQueue;
+    if (!queued) return;
+    try {
+      await this.tauri.invoke('queue_message', { sessionId, text: queued.text });
+    } catch (err) {
+      this.log.warn(`[chat-state] flushDeferredQueue: backend invoke failed: ${String(err)}`);
     }
   }
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
+    this._queueAwaitingSession = false;
     const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
       // No session yet — clear the local slot anyway.
@@ -938,17 +1073,137 @@ export class ChatStateService {
    */
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
-      if (this.projectState.status === 'switching') {
+      if (this.projectState.status() === 'switching') {
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
+        // A genuine project switch starts fresh — never resume the prior project.
+        this.clearSessionTracking();
         this.notifyChange();
-      } else if (this.projectState.status === 'ready') {
+      } else if (this.projectState.status() === 'ready') {
         // Project just settled — re-pull the persisted context tokens so
         // the chat footer reflects whatever the user picked in Settings.
         void this.refreshLlmConfigCache();
       }
     });
+  }
+
+  /** Resumes the conversation only after a restart, not a project-switch. */
+  private setupRestartResumeListeners(): void {
+    this.projectState.onRestartBegin(async () => {
+      if (this.isStreaming) await this.stopConversation();
+    });
+    this.projectState.onRestartComplete(() => {
+      void this.decideResumeAfterRestart();
+    });
+  }
+
+  /** Resume-vs-ask decision after a restart; reads the NEW model's window first. */
+  private async decideResumeAfterRestart(): Promise<void> {
+    const id = this._lastKnownSessionId;
+    if (!id) return;
+    // The ready-triggered cache refresh is async and may still hold the previous
+    // model's window — re-read so the fit decision sees the post-restart model.
+    await this.refreshLlmConfigCache();
+    if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
+      void this.resumeConversation(id);
+      return;
+    }
+    // History may not fit: ask if a chat view is mounted; else auto-resume
+    // (the non-lossy choice — never silently drop history on an unmounted view).
+    if (this._resumeDecider) {
+      const choice = await this._resumeDecider();
+      if (choice === 'resume') void this.resumeConversation(id);
+      else void this.startFreshSession();
+    } else {
+      void this.resumeConversation(id);
+    }
+  }
+
+  /**
+   * Resets tracking first so the new session isn't gated by the stale durable id.
+   */
+  private async startFreshSession(): Promise<void> {
+    this.resetForNewConversation();
+    await this.startChatSession();
+  }
+
+  /**
+   * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
+   * @param sessionId - session UUID to resume.
+   */
+  async resumeConversation(sessionId: string): Promise<void> {
+    if (this._resumeInProgress) return;
+    this._resumeInProgress = true;
+
+    this.resetForNewConversation();
+    this.beginTranscriptLoad();
+    // Mark start in progress so a racing send waits instead of tearing down this
+    // resumed session; disposer released in the `finally` below.
+    const endStartingSession = this.beginStartingSession();
+    // Stamp session id optimistically so drawer accent follows click without flicker.
+    this._optimisticSessionId = sessionId;
+    // Early durable stamp: needed even when the transcript fetch fails, so the
+    // remount guard in startChatSession and a later restart-resume see this session.
+    this._lastKnownSessionId = sessionId;
+
+    try {
+      const project = this.projectState.activeProject();
+      if (!project) return;
+
+      // Run transcript fetch and resume_conversation in parallel; both independent.
+      const transcriptPromise = this.tauri
+        .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
+        .catch((err) => {
+          this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
+          return null;
+        });
+      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
+
+      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
+      if (transcript) {
+        this.loadMessages(toChatMessages(transcript));
+      } else {
+        // Resume succeeded but the transcript fetch failed: keep the session
+        // live and say why the scrollback is empty instead of failing silently.
+        this.loadMessages([
+          {
+            role: 'assistant',
+            blocks: [
+              {
+                type: 'error' as const,
+                content:
+                  'Could not load this conversation’s history. The session was resumed — new messages will work, but earlier ones are not shown.',
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ]);
+      }
+      // Seed session id immediately so retry/queue work without waiting for live Result.
+      this.seedSessionId(sessionId);
+    } catch (err) {
+      // Drop the optimistic accent so a failed resume isn't shown as active.
+      this._optimisticSessionId = null;
+      this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
+      const msg = String(err);
+      if (isNotAuthenticatedError(msg)) {
+        await this.projectState.retryAuth();
+      } else {
+        this.loadMessages([
+          ...this.messagesFromState(),
+          {
+            role: 'assistant',
+            blocks: [{ type: 'error' as const, content: `Failed to resume session: ${err}` }],
+            timestamp: Date.now(),
+          },
+        ]);
+      }
+    } finally {
+      this.endTranscriptLoad();
+      endStartingSession();
+      this._resumeInProgress = false;
+    }
   }
 
   /**
@@ -965,7 +1220,7 @@ export class ChatStateService {
    */
   private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
     if (!assistantUuid) return;
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     // A newer turn (or a stop) bumps `_turnId`; abandon a stale deferred retry.
     const capturedTurn = this._turnId;
@@ -1076,9 +1331,14 @@ export class ChatStateService {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
-        // Metadata-only chunks never mutate _messages / _currentBlocks and
-        // are legitimate between or after turns (e.g. trailing RateLimit).
-        if (chunk.chunk_type === 'SystemInit' || chunk.chunk_type === 'RateLimit') {
+        // Chunks legitimate between/after turns: metadata (SystemInit,
+        // trailing RateLimit) and QueueDrained — the drain fires right AFTER
+        // Result flipped isStreaming=false and itself starts the next turn.
+        if (
+          chunk.chunk_type === 'SystemInit' ||
+          chunk.chunk_type === 'RateLimit' ||
+          chunk.chunk_type === 'QueueDrained'
+        ) {
           this.handleStreamChunk(chunk);
           return;
         }
@@ -1089,7 +1349,7 @@ export class ChatStateService {
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {
         this.log.error(`[chat-state] Failed to set up stream listener: ${String(err)}`);
-        this.projectState.status = 'error';
+        this.projectState.status.set('error');
         this.projectState.error = `Failed to set up stream listener: ${err}`;
       }
     }
@@ -1166,6 +1426,7 @@ function findRetryAnchorIn(
  * @param data.turn_cost - Cost (USD) for the turn.
  * @param data.model - Model id from the payload, if present.
  * @param resolvedModel - Model id already resolved by the reducer.
+ * @param suppressCost - Skip the cost preview (local has no real cost).
  */
 function buildEntryMeta(
   data: {
@@ -1173,7 +1434,8 @@ function buildEntryMeta(
     turn_cost?: number;
     model?: string;
   },
-  resolvedModel: string | undefined
+  resolvedModel: string | undefined,
+  suppressCost = false
 ): EntryMeta | undefined {
   const { turn_usage, turn_cost } = data;
   const model = data.model ?? resolvedModel;
@@ -1186,7 +1448,7 @@ function buildEntryMeta(
 
   // Cost preview = backend turn_cost only; reconcileFooterCost replaces it with
   // the proxy SSOT. No frontend pricing — undefined hides the segment.
-  if (turn_cost !== undefined && Number.isFinite(turn_cost)) {
+  if (!suppressCost && turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
   }
   return meta;
@@ -1454,4 +1716,103 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
     else if (b.type === 'error') parts.push(b.content);
   }
   return parts.join('\n\n').trim();
+}
+
+/**
+ * Null handling is asymmetric: unknown history defaults to fits (resume),
+ * unknown window defaults to doesn't fit (ask) — local models with no discovery.
+ * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
+ * @param windowTokens - Target model's context window, or null if undiscovered.
+ */
+export function historyFitsTarget(
+  historyTokens: number | null,
+  windowTokens: number | null
+): boolean {
+  if (historyTokens == null) return true;
+  if (windowTokens == null) return false;
+  return historyTokens < windowTokens;
+}
+
+/** Raw tool_use block shape from Rust history.rs (flat, no nested `tool`). */
+interface HistoryToolUseBlock {
+  type: 'tool_use';
+  tool_name: string;
+  input_json: string;
+}
+
+/** Raw tool_result block from Rust history.rs (consumed during normalization). */
+interface HistoryToolResultBlock {
+  type: 'tool_result';
+  content: string;
+  is_error: boolean;
+}
+
+/**
+ * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
+ * @param transcript - Backend conversation transcript to convert.
+ */
+export function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
+  return transcript.messages.map((msg) => {
+    const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
+    const rawBlocks =
+      msg.blocks && msg.blocks.length > 0
+        ? (msg.blocks as unknown as (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[])
+        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
+    const blocks = normalizeHistoryBlocks(rawBlocks);
+    const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
+    // Propagate JSONL uuid and mark Committed so retry accepts it as anchor (ADR-046).
+    const base: ChatMessage = { role, blocks, timestamp };
+    if (msg.uuid) {
+      base.uuid = msg.uuid;
+      base.uuid_status = 'Committed';
+    }
+    // Restore the per-message footer (model · tokens) on resume.
+    if (msg.model !== undefined || msg.usage !== undefined) {
+      base.meta = {};
+      if (msg.model !== undefined) base.meta.model = msg.model;
+      if (msg.usage !== undefined) base.meta.usage = msg.usage;
+    }
+    return base;
+  });
+}
+
+/**
+ * Converts blocks from backend history format to live-chat format, merging tool_result into tool_use.
+ * @param blocks - Raw blocks from the backend history payload.
+ */
+function normalizeHistoryBlocks(
+  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+): MessageBlock[] {
+  const result: MessageBlock[] = [];
+
+  for (const block of blocks) {
+    if (block.type === 'tool_use' && !('tool' in block)) {
+      const hist = block as HistoryToolUseBlock;
+      result.push({
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: '',
+          tool_name: hist.tool_name,
+          input_json: hist.input_json,
+          status: 'done',
+          result: '',
+          result_is_error: false,
+        },
+      });
+    } else if (block.type === 'tool_result') {
+      const hist = block as HistoryToolResultBlock;
+      const prev = result[result.length - 1];
+      if (prev?.type === 'tool_use') {
+        const base = { ...prev.tool, result: hist.content };
+        prev.tool = hist.is_error
+          ? { ...base, status: 'error' as const, result_is_error: true as const }
+          : { ...base, status: 'done' as const, result_is_error: false as const };
+      }
+    } else {
+      result.push(block as MessageBlock);
+    }
+  }
+
+  return result;
 }

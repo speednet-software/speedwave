@@ -51,7 +51,7 @@ describe('SystemHealthService', () => {
     });
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test';
+    projectState.activeProject.set('test');
     service = TestBed.inject(SystemHealthService);
   });
 
@@ -128,7 +128,7 @@ describe('SystemHealthService', () => {
     });
 
     it('does nothing when no project is active', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
       const spy = vi.spyOn(mockTauri, 'invoke');
 
       await service.refresh();

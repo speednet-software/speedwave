@@ -59,8 +59,8 @@ pub(crate) use llm::apply_llm_config_in;
 #[cfg(test)]
 use llm::provider_display_label;
 pub use llm::{
-    default_base_url, read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1,
-    validate_base_url,
+    anthropic_login_unset_keys, canonicalize_local_base_url, default_base_url,
+    read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
 // Plugin compose injection.
@@ -1110,18 +1110,20 @@ mod tests {
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
 
+        let mut llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("unsloth/Qwen3.6-35B".to_string()),
+            base_url: Some("http://100.74.182.88:8888".to_string()),
+            context_tokens: None,
+            has_api_key: true,
+            has_custom_headers: true,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
-            llm: crate::config::LlmConfig {
-                provider: Some("local".to_string()),
-                model: Some("unsloth/Qwen3.6-35B".to_string()),
-                base_url: Some("http://100.74.182.88:8888".to_string()),
-                context_tokens: None,
-                has_api_key: true,
-                has_custom_headers: true,
-                ..Default::default()
-            },
+            llm,
         };
         let integrations = ResolvedIntegrationsConfig::default();
 
@@ -1182,18 +1184,20 @@ mod tests {
 
         // Default Anthropic provider (no explicit model) — exercises
         // anthropic_default_models_env(), which emits the `[1m]` suffix.
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("anthropic".to_string()),
-                model: None,
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
+            llm,
         };
 
         let yaml = render_compose_isolated(
@@ -1264,18 +1268,20 @@ mod tests {
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
 
+        let mut llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("m".to_string()),
+            base_url: Some("http://x:1".to_string()),
+            context_tokens: None,
+            has_api_key: true,
+            has_custom_headers: true,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
-            llm: crate::config::LlmConfig {
-                provider: Some("local".to_string()),
-                model: Some("m".to_string()),
-                base_url: Some("http://x:1".to_string()),
-                context_tokens: None,
-                has_api_key: true,
-                has_custom_headers: true,
-                ..Default::default()
-            },
+            llm,
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -1335,6 +1341,18 @@ mod tests {
             .expect("header entry present");
         assert!(header_entry.contains("X-Tenant-ID: foo"));
         assert!(header_entry.contains("X-Subscription-ID: bar"));
+    }
+
+    /// Migrated, configured Anthropic-OAuth `LlmConfig` for tests that only need
+    /// *some* renderable LLM config as an unrelated fixture (SSOT gate requires
+    /// a resolved active provider — see `LlmConfig::is_unconfigured`).
+    fn configured_anthropic_llm() -> LlmConfig {
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm
     }
 
     fn default_flags() -> Vec<String> {
@@ -1820,7 +1838,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -1894,7 +1912,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let manifest = bundle::load_current_bundle_manifest_from(&test_build_root()).unwrap();
 
@@ -1942,7 +1960,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -1973,7 +1991,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2052,7 +2070,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             office: true,
@@ -2113,7 +2131,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2153,7 +2171,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2194,7 +2212,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2232,7 +2250,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2317,7 +2335,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2409,7 +2427,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2439,7 +2457,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2469,7 +2487,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2498,7 +2516,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2547,7 +2565,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2610,6 +2628,7 @@ services:
         let service = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            std::path::Path::new("/nonexistent/plugins/legacy"),
             "test-project",
             "speedwave_test-project_network",
             tokens_dir,
@@ -2649,7 +2668,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2767,7 +2786,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2865,7 +2884,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3247,18 +3266,23 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_render_compose_ollama_provider() {
         let data_dir = tempfile::tempdir().unwrap();
+        // Kill-switch off: exercises the legacy direct-injection path (this
+        // test asserts the raw default_base_url, not the proxy-routed model).
+        let mut llm = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm.proxy_enabled = Some(false);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("ollama".to_string()),
-                model: Some("llama3.3".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
+            llm,
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3282,18 +3306,20 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_local_provider_requires_model() {
         let data_dir = tempfile::tempdir().unwrap();
+        let mut llm = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("ollama".to_string()),
-                model: None,
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
+            llm,
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -3310,8 +3336,10 @@ services:
             msg.contains("requires a model name"),
             "Error must mention model requirement, got: {msg}"
         );
+        // Migration normalises every LOCAL_PROVIDERS alias to the canonical
+        // "local" id (ADR-073) — the error names that id, not the raw "ollama".
         assert!(
-            msg.contains("ollama"),
+            msg.contains("local"),
             "Error must mention the provider, got: {msg}"
         );
     }
@@ -3323,7 +3351,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(), // provider = None → defaults to "anthropic"
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3335,20 +3363,23 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        // Default anthropic: proxy service always exists (ADR-073) but claude env is not redirected until proxy injection active.
+        // Default anthropic: proxy service always exists (ADR-073) and claude
+        // routes at it via the passthrough leg (not the pre-ADR-073 direct path).
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
         );
         assert!(
-            !get_claude_env(&yaml).iter().any(|e| e.contains("proxy")),
-            "Default anthropic (direct path) must not point claude env at the proxy"
+            get_claude_env(&yaml)
+                .iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "Default anthropic must route claude env through the proxy passthrough (ADR-073)"
         );
         assert!(
             !yaml.contains("ghcr.io/berriai"),
             "proxy image must be the locally built one, never pulled from ghcr"
         );
-        // Should not contain base_url override (unless explicitly configured)
+        // ANTHROPIC_BASE_URL is the proxy passthrough URL, not a user override.
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let claude_env = doc
             .get("services")
@@ -3356,13 +3387,14 @@ services:
             .and_then(|c| c.get("environment"))
             .and_then(|e| e.as_sequence())
             .unwrap();
-        let has_base_url = claude_env.iter().any(|v| {
-            v.as_str()
-                .is_some_and(|s| s.starts_with("ANTHROPIC_BASE_URL="))
+        let has_foreign_base_url = claude_env.iter().any(|v| {
+            v.as_str().is_some_and(|s| {
+                s.starts_with("ANTHROPIC_BASE_URL=") && s != "ANTHROPIC_BASE_URL=http://proxy:4000"
+            })
         });
         assert!(
-            !has_base_url,
-            "Default anthropic should not set ANTHROPIC_BASE_URL"
+            !has_foreign_base_url,
+            "Default anthropic should not set an ANTHROPIC_BASE_URL other than the proxy passthrough"
         );
     }
 
@@ -3375,7 +3407,7 @@ services:
             base_url: base_url.map(str::to_string),
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm
     }
 
@@ -3617,9 +3649,10 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_kill_switch_dangling_active_falls_through_without_error() {
-        // CR review #5: proxy_enabled=false + active points at no entry → legacy
-        // path (account default), not an error (heal repairs it in production).
+    fn test_kill_switch_dangling_active_bails_no_provider_configured() {
+        // Dangling active (points at a missing entry) is unconfigured (SSOT
+        // gate) regardless of the proxy kill-switch: render must refuse rather
+        // than silently fall back to the Anthropic account default.
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -3636,7 +3669,7 @@ services:
             flags: default_flags(),
             llm,
         };
-        let yaml = render_compose_isolated(
+        let err = render_compose_isolated(
             data_dir.path(),
             "test-project",
             "/home/user/projects/test",
@@ -3645,11 +3678,11 @@ services:
             None,
             &HostBridgesInfo::default(),
         )
-        .expect("dangling active on kill-switch must not error");
-        let env = get_claude_env(&yaml);
+        .unwrap_err()
+        .to_string();
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "dangling active → account default, no model injected: {env:?}"
+            err.contains("No LLM provider configured"),
+            "dangling active + kill-switch off must still bail: {err}"
         );
     }
 
@@ -3668,7 +3701,7 @@ services:
             has_custom_headers: true,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -3718,7 +3751,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3821,7 +3854,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3864,18 +3897,26 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
         let data_dir = tempfile::tempdir().unwrap();
+        // Kill-switch off: this test asserts the legacy direct-injection path.
+        // Migration normalises the "ollama" alias to the generic "local" id
+        // (ADR-073), so the display label is "Local", not the v1 "Ollama" alias
+        // (that per-alias-string behavior is covered directly, unmigrated, by
+        // compose::llm::tests::legacy_in_ollama_uses_its_own_display_label).
+        let mut llm = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+            context_tokens: None,
+            has_api_key: false,
+            has_custom_headers: false,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm.proxy_enabled = Some(false);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("ollama".to_string()),
-                model: Some("llama3.3".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
+            llm,
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3911,13 +3952,13 @@ services:
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Ollama)"),
-            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_NAME with provider label, got: {env:?}"
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Local)"),
+            "Post-migration ollama collapses to the generic 'Local' label, got: {env:?}"
         );
         assert!(
             env.iter()
                 .any(|e| e
-                    == "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model served by Ollama"),
+                    == "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model served by Local"),
             "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION, got: {env:?}"
         );
         assert!(
@@ -3945,154 +3986,21 @@ services:
         );
     }
 
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_lmstudio_default_url() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("lmstudio".to_string()),
-                model: Some("qwen2.5-coder".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let env = get_claude_env(&yaml);
-        let expected = format!(
-            "ANTHROPIC_BASE_URL={}",
-            default_base_url("lmstudio").unwrap()
-        );
-        assert!(
-            env.iter().any(|e| e == &expected),
-            "LM Studio must set {expected}, got: {env:?}"
-        );
-    }
+    // test_lmstudio_default_url / test_llamacpp_default_url / test_llamacpp_custom_model_option_labels /
+    // test_lmstudio_custom_model_option_labels: relocated to compose::llm::tests as
+    // legacy_in_lmstudio_uses_its_own_default_port / legacy_in_llamacpp_uses_its_own_default_port /
+    // legacy_in_llamacpp_uses_its_own_display_label / legacy_in_lmstudio_uses_its_own_display_label.
+    // Migration collapses every LOCAL_PROVIDERS alias to the canonical "local" id
+    // (ADR-073) before it ever reaches the renderer, so the per-alias URL/label is
+    // only observable via the unmigrated, direct apply_llm_config_legacy_in call
+    // those tests already make.
 
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_llamacpp_default_url() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("llamacpp".to_string()),
-                model: Some("deepseek-r1".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let env = get_claude_env(&yaml);
-        let expected = format!(
-            "ANTHROPIC_BASE_URL={}",
-            default_base_url("llamacpp").unwrap()
-        );
-        assert!(
-            env.iter().any(|e| e == &expected),
-            "llama.cpp must set {expected}, got: {env:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_unsupported_provider_rejected() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("openrouter".to_string()),
-                model: Some("some-model".to_string()),
-                base_url: Some("http://host.docker.internal:9999".to_string()),
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let result = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        );
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("Unsupported LLM provider") && msg.contains("openrouter"),
-            "Error must mention unsupported provider, got: {msg}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_custom_provider_rejected_after_removal() {
-        let data_dir = tempfile::tempdir().unwrap();
-        // Regression guard: provider="custom" removed end-to-end; falls through to the unknown-provider path.
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("custom".to_string()),
-                model: Some("my-model".to_string()),
-                base_url: Some("http://host.docker.internal:9999".to_string()),
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let result = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        );
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("Unsupported LLM provider") && msg.contains("custom"),
-            "Error must treat 'custom' as unsupported, got: {msg}"
-        );
-        assert!(
-            !msg.contains("Custom provider requires a base_url"),
-            "The legacy 'custom requires base_url' error must be gone, got: {msg}"
-        );
-    }
+    // test_unsupported_provider_rejected / test_custom_provider_rejected_after_removal:
+    // relocated to compose::llm::tests as legacy_in_rejects_unsupported_provider /
+    // legacy_in_rejects_custom_provider_after_removal — an unmigrated raw config
+    // now bails at the SSOT gate before ever reaching apply_llm_config_legacy_in's
+    // unsupported-provider check, so the direct-legacy-path variant is the only
+    // one still reachable through that code path.
 
     #[test]
     fn test_strip_trailing_v1() {
@@ -4106,10 +4014,99 @@ services:
         assert_eq!(strip_trailing_v1("http://x:8080///"), "http://x:8080");
     }
 
+    // `url::Url` adds a trailing `/` to a host-only authority; the save path's
+    // later `strip_trailing_v1` removes it. Tests assert the exact returned form.
+    #[test]
+    fn canonicalize_rewrites_loopback_hosts_to_gateway_alias() {
+        let alias = crate::consts::HOST_GATEWAY_ALIAS;
+        // Happy: the common loopback forms a user types for a local LLM.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1:1234"),
+            format!("http://{alias}:1234/")
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://localhost:11434"),
+            format!("http://{alias}:11434/")
+        );
+        // Case-insensitive localhost (mirrors validate_url).
+        assert_eq!(
+            canonicalize_local_base_url("http://LocalHost:8080"),
+            format!("http://{alias}:8080/")
+        );
+        // Whole 127.0.0.0/8 loopback range, not just 127.0.0.1.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.5:1234"),
+            format!("http://{alias}:1234/")
+        );
+        // IPv6 loopback and IPv6-mapped IPv4 loopback.
+        assert_eq!(
+            canonicalize_local_base_url("http://[::1]:1234"),
+            format!("http://{alias}:1234/")
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://[::ffff:127.0.0.1]:1234"),
+            format!("http://{alias}:1234/")
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_scheme_port_path_and_is_idempotent() {
+        let alias = crate::consts::HOST_GATEWAY_ALIAS;
+        // Path preserved (the /v1 strip is a separate step).
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1:1234/v1"),
+            format!("http://{alias}:1234/v1")
+        );
+        // Scheme preserved.
+        assert_eq!(
+            canonicalize_local_base_url("https://127.0.0.1:1234"),
+            format!("https://{alias}:1234/")
+        );
+        // No port — the host swaps, nothing else.
+        assert_eq!(
+            canonicalize_local_base_url("http://127.0.0.1"),
+            format!("http://{alias}/")
+        );
+        // Already canonical → unchanged (idempotent).
+        let already = format!("http://{alias}:1234/");
+        assert_eq!(canonicalize_local_base_url(&already), already);
+    }
+
+    #[test]
+    fn canonicalize_leaves_non_loopback_hosts_untouched() {
+        // Non-loopback hosts are returned verbatim (no re-serialization), so a
+        // real remote server's exact string is preserved.
+        assert_eq!(
+            canonicalize_local_base_url("http://192.168.5.10:1234"),
+            "http://192.168.5.10:1234"
+        );
+        assert_eq!(
+            canonicalize_local_base_url("http://10.0.0.4:8080"),
+            "http://10.0.0.4:8080"
+        );
+        // Public domain — untouched.
+        assert_eq!(
+            canonicalize_local_base_url("https://api.example.com/"),
+            "https://api.example.com/"
+        );
+        // 0.0.0.0 is not a loopback the user would target — untouched.
+        assert_eq!(
+            canonicalize_local_base_url("http://0.0.0.0:1234"),
+            "http://0.0.0.0:1234"
+        );
+    }
+
+    #[test]
+    fn canonicalize_returns_input_unchanged_on_parse_failure() {
+        // Malformed input is returned verbatim — validation runs separately.
+        assert_eq!(canonicalize_local_base_url("not-a-url"), "not-a-url");
+        assert_eq!(canonicalize_local_base_url(""), "");
+    }
+
     #[test]
     fn test_idempotent_render() {
         let data_dir = tempfile::tempdir().unwrap();
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
             base_url: None,
@@ -4118,6 +4115,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let result1 =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let result2 = apply_llm_config_in(data_dir.path(), &result1, &llm, "test-project").unwrap();
@@ -4605,7 +4603,7 @@ services:
     fn test_anthropic_with_model_injects_anthropic_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
         // claude.llm.model must translate into the ANTHROPIC_MODEL env var so Claude Code respects the pick.
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             base_url: None,
@@ -4614,6 +4612,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4621,10 +4620,12 @@ services:
             env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
             "Anthropic + explicit model must inject ANTHROPIC_MODEL, got: {env:?}"
         );
-        // Local-provider envs must not leak in for the anthropic provider.
+        // ADR-073: anthropic sessions route through the proxy passthrough, so
+        // ANTHROPIC_BASE_URL points at it (never a foreign/local URL).
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
-            "Anthropic provider must not set ANTHROPIC_BASE_URL, got: {env:?}"
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "Anthropic provider must route through the proxy passthrough, got: {env:?}"
         );
     }
 
@@ -4633,7 +4634,7 @@ services:
         let data_dir = tempfile::tempdir().unwrap();
         // Empty/unset model = let Claude Code pick its default: base_env() must stay free of
         // ANTHROPIC_MODEL (fallback path per defaults.rs::base_env_does_not_set_model).
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: None,
             base_url: None,
@@ -4642,6 +4643,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4652,7 +4654,7 @@ services:
 
         // An empty string after trim should behave the same as None — a
         // user clearing the dropdown from the UI sends "" through Tauri.
-        let llm_blank = LlmConfig {
+        let mut llm_blank = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("   ".to_string()),
             base_url: None,
@@ -4661,6 +4663,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm_blank, crate::config::AnthropicEvidence::None);
         let rendered_blank = apply_llm_config_in(
             data_dir.path(),
             COMPOSE_TEMPLATE,
@@ -4746,7 +4749,7 @@ services:
         let data_dir = tempfile::tempdir().unwrap();
         // Workaround for anthropics/claude-code#34083: inject ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
         // `[1m]` variants regardless of an explicit pinned model.
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: None,
             base_url: None,
@@ -4755,6 +4758,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4776,7 +4780,7 @@ services:
     #[test]
     fn test_switching_provider_ollama_to_anthropic() {
         let data_dir = tempfile::tempdir().unwrap();
-        let llm_ollama = LlmConfig {
+        let mut llm_ollama = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
             base_url: None,
@@ -4785,7 +4789,8 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        let llm_anthropic = LlmConfig::default();
+        crate::config::migrate_llm(&mut llm_ollama, crate::config::AnthropicEvidence::None);
+        let llm_anthropic = configured_anthropic_llm();
 
         let with_ollama = apply_llm_config_in(
             data_dir.path(),
@@ -4811,19 +4816,22 @@ services:
                 .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
             "Ollama must set ANTHROPIC_BASE_URL"
         );
+        // ADR-073: both providers route through the proxy, but only ollama's
+        // model is prefixed with its provider id — anthropic's is bare.
         assert!(
-            !env_anthropic
+            env_anthropic
                 .iter()
-                .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
-            "Anthropic must not set ANTHROPIC_BASE_URL, got: {env_anthropic:?}"
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "Anthropic must route through the proxy passthrough, got: {env_anthropic:?}"
         );
+        // ADR-073: the proxy path sets this for every provider kind (prompt-cache
+        // only, OAuth-neutral) — no longer a local-only marker (see
+        // llm::tests::login_unset_keys_cover_local_proxy_env's OAUTH_NEUTRAL list).
         assert!(
-            !env_anthropic
+            env_anthropic
                 .iter()
                 .any(|e| e == "CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
-            "Anthropic must NOT disable attribution header — it is only stripped \
-             for local providers to avoid breaking llama.cpp/Ollama KV cache. \
-             Got: {env_anthropic:?}"
+            "Anthropic (proxy path) must still set the attribution header, got: {env_anthropic:?}"
         );
         assert!(
             !env_anthropic
@@ -4834,75 +4842,8 @@ services:
         );
     }
 
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_llamacpp_custom_model_option_labels() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("llamacpp".to_string()),
-                model: Some("deepseek-r1".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let env = get_claude_env(&yaml);
-        assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=deepseek-r1 (llama.cpp)"),
-            "llamacpp display name must use 'llama.cpp' label, got: {env:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_lmstudio_custom_model_option_labels() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: default_flags(),
-            llm: LlmConfig {
-                provider: Some("lmstudio".to_string()),
-                model: Some("qwen2.5-coder".to_string()),
-                base_url: None,
-                context_tokens: None,
-                has_api_key: false,
-                has_custom_headers: false,
-                ..Default::default()
-            },
-        };
-        let yaml = render_compose_isolated(
-            data_dir.path(),
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        )
-        .unwrap();
-        let env = get_claude_env(&yaml);
-        assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=qwen2.5-coder (LM Studio)"),
-            "lmstudio display name must use 'LM Studio' label, got: {env:?}"
-        );
-    }
+    // test_llamacpp_custom_model_option_labels / test_lmstudio_custom_model_option_labels:
+    // duplicates — see the relocation note above test_strip_trailing_v1.
 
     #[test]
     #[serial_test::serial(host_addressing)]
@@ -4912,7 +4853,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -4951,7 +4892,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6037,7 +5978,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6104,7 +6045,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
-            llm: crate::config::LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6139,7 +6080,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
-            llm: crate::config::LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6178,7 +6119,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
-            llm: crate::config::LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6225,7 +6166,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6263,7 +6204,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6301,7 +6242,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6802,7 +6743,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let integrations = ResolvedIntegrationsConfig {
             sharepoint: true,
@@ -7024,7 +6965,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
-            llm: crate::config::LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         // Enable all integrations so no services are filtered out
         let integrations = ResolvedIntegrationsConfig {
@@ -7339,7 +7280,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -7785,6 +7726,7 @@ services:
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "test",
             "speedwave_test_network",
             &tokens_dir,
@@ -7835,6 +7777,7 @@ services:
         let svc = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-svc"),
             "proj",
             "net",
             std::path::Path::new("/tokens/proj"),
@@ -7935,6 +7878,7 @@ services:
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -10244,7 +10188,7 @@ services:
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
-            llm: LlmConfig::default(),
+            llm: configured_anthropic_llm(),
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -11061,7 +11005,9 @@ services:
     #[test]
     fn apply_llm_config_local_provider_renders_with_dummy_when_no_key() {
         let data_dir = tempfile::tempdir().unwrap();
-        let llm = LlmConfig {
+        // Kill-switch off: asserts the legacy direct-injection path's raw
+        // base_url + "Local" display label, not the proxy-routed values.
+        let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("my-model".to_string()),
             base_url: Some("http://host.docker.internal:8080/anthropic".to_string()),
@@ -11070,6 +11016,8 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -11127,7 +11075,9 @@ services:
     #[test]
     fn apply_llm_config_local_uses_default_base_url_when_none() {
         let data_dir = tempfile::tempdir().unwrap();
-        let llm = LlmConfig {
+        // Kill-switch off: asserts the legacy direct-injection path's raw
+        // default_base_url, not the proxy-routed URL.
+        let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("foo".to_string()),
             base_url: None,
@@ -11136,6 +11086,8 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -11294,8 +11246,9 @@ services:
         crate::fs_perms::write_restricted_file_atomic(&api_key_path, "leaked-secret-from-crash")
             .expect("write must succeed");
 
-        // Config carries `has_api_key=false` (crash before flag flip).
-        let llm = LlmConfig {
+        // Config carries `has_api_key=false` (crash before flag flip). Kill-switch
+        // off: only the legacy direct-injection path reads the local-llm token file.
+        let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("test-model".to_string()),
             base_url: Some("http://host.docker.internal:8080".to_string()),
@@ -11304,6 +11257,8 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
         let env = get_claude_env(&rendered);
@@ -11338,7 +11293,7 @@ services:
         crate::fs_perms::write_restricted_file_atomic(&headers_path, multiline)
             .expect("write_restricted_file_atomic must succeed");
 
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("test-model".to_string()),
             base_url: Some("http://host.docker.internal:8080".to_string()),
@@ -11347,6 +11302,9 @@ services:
             has_custom_headers: true,
             ..Default::default()
         };
+        // has_custom_headers routes to the direct path regardless of the
+        // kill-switch (the proxy would consume headers meant for the LLM server).
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
 

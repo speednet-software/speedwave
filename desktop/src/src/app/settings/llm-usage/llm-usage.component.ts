@@ -1,4 +1,12 @@
-import { ChangeDetectionStrategy, Component, effect, inject, input, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  effect,
+  inject,
+  input,
+  signal,
+  OnDestroy,
+} from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import type { UsageBucket, UsageSummary } from '../../models/llm';
 import { formatTokens, formatUsd } from '../../shared/format-number';
@@ -263,7 +271,11 @@ export const DAILY_CHART_DAYS = 30;
             </thead>
             <tbody>
               @for (row of rows(); track row.day + '|' + row.model) {
-                <tr class="border-t border-[var(--line)]">
+                <tr
+                  class="border-t border-[var(--line)]"
+                  data-testid="llm-usage-row"
+                  [attr.data-model]="row.model"
+                >
                   <td class="py-1 pr-3 whitespace-nowrap">{{ row.day }}</td>
                   <td class="py-1 pr-3 break-all">{{ row.model }}</td>
                   <td class="py-1 pr-3 text-right">{{ num(row.bucket.requests) }}</td>
@@ -279,7 +291,7 @@ export const DAILY_CHART_DAYS = 30;
                       —
                     }
                   </td>
-                  <td class="py-1 text-right">
+                  <td class="py-1 text-right" data-testid="llm-usage-row-cost">
                     {{ row.bucket.cost_usd !== null ? usd(row.bucket.cost_usd) : '—' }}
                   </td>
                 </tr>
@@ -291,11 +303,15 @@ export const DAILY_CHART_DAYS = 30;
     </div>
   `,
 })
-export class LlmUsageComponent {
+export class LlmUsageComponent implements OnDestroy {
   /** Project whose usage to display. */
   readonly project = input.required<string>();
 
   private tauri = inject(TauriService);
+
+  /** Backoff (ms) for re-polling an unpriced (deferred) aggregate; ~59s total. */
+  private static readonly DEFERRED_REPOLL_MS = [2_000, 4_000, 8_000, 15_000, 30_000];
+  private repollTimer: ReturnType<typeof setTimeout> | null = null;
 
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
@@ -323,6 +339,7 @@ export class LlmUsageComponent {
    * @param project - Project to fetch usage for; defaults to the bound input.
    */
   async refresh(project: string = this.project()): Promise<void> {
+    this.clearRepoll();
     this.loading.set(true);
     this.error.set(null);
     try {
@@ -338,11 +355,59 @@ export class LlmUsageComponent {
       const { rows, max } = heatmapRows(summary);
       this.heatRows.set(rows);
       this.heatMax.set(max);
+      this.scheduleDeferredRepoll(project, summary);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /**
+   * Re-polls on a bounded backoff while the aggregate is unpriced but still
+   * enrichable — OpenRouter cost lands async (deferred), like the footer.
+   * Permanently-unpriced aggregates (local/subscription) never re-poll.
+   * @param project - Project to refetch usage for.
+   * @param summary - Latest summary; drives the unpriced/deferred check.
+   * @param attempt - Backoff index (0 on the first schedule).
+   */
+  private scheduleDeferredRepoll(project: string, summary: UsageSummary, attempt = 0): void {
+    const backoff = LlmUsageComponent.DEFERRED_REPOLL_MS;
+    const deferred =
+      summary.totals.requests > 0 &&
+      summary.totals.cost_usd === null &&
+      hasDeferrableUnpricedRows(summary);
+    if (!deferred || attempt >= backoff.length) return;
+    this.repollTimer = setTimeout(() => {
+      void this.tauri
+        .invoke<UsageSummary>('get_llm_usage', { project })
+        .then((next) => {
+          if (this.project() !== project) return;
+          this.summary.set(next);
+          this.rows.set(flattenRows(next));
+          this.dayBars.set(dailySeries(next));
+          const { shares, total } = providerShares(next);
+          this.shares.set(shares);
+          this.shareTotal.set(total);
+          const { rows, max } = heatmapRows(next);
+          this.heatRows.set(rows);
+          this.heatMax.set(max);
+          this.scheduleDeferredRepoll(project, next, attempt + 1);
+        })
+        .catch(() => undefined);
+    }, backoff[attempt]);
+  }
+
+  private clearRepoll(): void {
+    if (this.repollTimer !== null) {
+      clearTimeout(this.repollTimer);
+      this.repollTimer = null;
+    }
+  }
+
+  /** Cancels any pending deferred-cost re-poll timer on teardown. */
+  ngOnDestroy(): void {
+    this.clearRepoll();
   }
 
   /**
@@ -426,6 +491,26 @@ export function flattenRows(summary: UsageSummary): UsageRow[] {
 export function providerOf(model: string): string {
   const slash = model.indexOf('/');
   return slash > 0 ? model.slice(0, slash) : 'anthropic';
+}
+
+/** Provider prefixes whose `null` cost is terminal — never priced later (invariant 6). */
+const PERMANENTLY_UNPRICED_PROVIDERS: ReadonlySet<string> = new Set(['local', 'anthropic']);
+
+/**
+ * True when some null-cost row may still be priced by a later enrichment pass
+ * (deferred OpenRouter). Local and bare-Anthropic (subscription/unknown) rows
+ * stay `null` forever, so a summary of only those never re-polls.
+ * @param summary - Aggregate returned by the `get_llm_usage` command.
+ */
+export function hasDeferrableUnpricedRows(summary: UsageSummary): boolean {
+  for (const models of Object.values(summary.days)) {
+    for (const [model, bucket] of Object.entries(models)) {
+      if (bucket.cost_usd === null && !PERMANENTLY_UNPRICED_PROVIDERS.has(providerOf(model))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**

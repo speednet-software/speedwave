@@ -32,7 +32,7 @@ export type StreamChunk =
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
-  | { chunk_type: 'SystemInit'; data: { model: string } }
+  | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
@@ -293,6 +293,10 @@ export interface ConversationMessage {
    * become a retry target.
    */
   uuid?: string;
+  /** Per-message model id (assistant turns only); restores the resumed footer. */
+  model?: string;
+  /** Per-message token usage (assistant turns only). */
+  usage?: TurnUsage;
 }
 
 // Wire types — mirror `chat.rs::WireContentBlock` (ADR-065).

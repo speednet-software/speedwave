@@ -14,6 +14,8 @@ pub struct SetupState {
     pub project_created: Option<String>,
     pub tokens_configured: Vec<String>,
     pub images_built: bool,
+    /// True once step 4 is done — containers actually started, or
+    /// legitimately deferred pending an LLM provider choice.
     pub containers_started: bool,
     pub cli_linked: bool,
 }
@@ -288,6 +290,13 @@ pub fn build_images() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
+    // No provider is a valid state ("choose a provider" screen) — every
+    // caller must skip starting rather than let render_compose bail.
+    if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
+        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        return defer_container_start_gated(project, true);
+    }
+
     let rt = runtime::detect_runtime();
 
     log::info!("ensuring runtime is ready");
@@ -348,6 +357,26 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     state.containers_started = true;
     state.save()?;
 
+    Ok(())
+}
+
+/// Marks step 4 done without starting containers, for a project with no LLM
+/// provider yet. Refuses if a provider IS configured (must start for real).
+pub fn defer_container_start(project: &str) -> anyhow::Result<()> {
+    let unconfigured =
+        crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)?;
+    defer_container_start_gated(project, unconfigured)
+}
+
+/// Testable core of [`defer_container_start`] — takes the unconfigured check
+/// as a plain bool so tests don't need real disk-backed config/state.
+fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow::Result<()> {
+    if !llm_unconfigured {
+        anyhow::bail!("project '{project}' has a configured LLM provider — call start_containers");
+    }
+    let mut state = SetupState::load();
+    state.containers_started = true;
+    state.save()?;
     Ok(())
 }
 
@@ -1498,6 +1527,18 @@ mod tests {
         );
         assert!(state.runtime_ready);
         assert!(!state.vm_ready);
+    }
+
+    // ── defer_container_start_gated ─────────────────────────────────────────
+
+    #[test]
+    fn defer_container_start_gated_refuses_when_provider_configured() {
+        let result = defer_container_start_gated("proj", false);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("configured LLM provider"));
     }
 
     // ── is_setup_complete logic ─────────────────────────────────────────────
@@ -2891,6 +2932,23 @@ networks:
         );
     }
 
+    /// No-provider check must precede rt.ensure_ready() (else render_compose bails).
+    #[test]
+    fn start_containers_checks_no_provider_before_ensure_ready() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub fn start_containers(");
+        let check_pos = body
+            .find("project_llm_is_unconfigured(project)")
+            .expect("start_containers must pre-check for a missing provider");
+        let ready_pos = body
+            .find("rt.ensure_ready()")
+            .expect("start_containers must call ensure_ready");
+        assert!(
+            check_pos < ready_pos,
+            "no-provider check must precede ensure_ready/render_compose"
+        );
+    }
+
     /// Structural test: `build_images` must warn (not silently default) when
     /// `load_user_config` fails, mirroring `main.rs::get_health`.
     #[test]
@@ -2939,6 +2997,27 @@ networks:
         assert!(
             migration_pos < reconcile_pos,
             "ensure_lima_vm_config() must be called BEFORE reconcile_bundle_update() in main.rs"
+        );
+    }
+
+    /// Structural test: the post-setup migration block (VM stop/start, possible
+    /// long tooling download) must not run on the Tauri main thread.
+    #[test]
+    fn post_setup_migrations_run_off_the_main_thread() {
+        let source = include_str!("main.rs");
+        let anchor = source
+            .find("Post-setup migrations")
+            .expect("post-setup migration block must exist in main.rs");
+        let window = &source[anchor..anchor + 700];
+        let spawn = window
+            .find("std::thread::spawn")
+            .expect("migration block must spawn a worker thread");
+        let lima = window
+            .find("ensure_lima_vm_config()")
+            .expect("lima migration inside the block");
+        assert!(
+            spawn < lima,
+            "VM migrations must run inside the spawned thread, not on the main thread"
         );
     }
 

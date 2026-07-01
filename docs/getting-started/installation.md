@@ -109,14 +109,14 @@ See [ADR-064: Bypass `canonicalize()` for WSL UNC project paths](../adr/ADR-064-
 
 After the setup wizard finishes, log in to your Claude account so Claude Code can run inside the container without prompting on every start. Two equivalent paths:
 
-- **From the Desktop app** — open Settings → Authentication and click **Open terminal and log in**. Speedwave opens a system terminal running `speedwave login --project <name>`. Type `/login` at Claude's prompt and follow the OAuth flow. Claude Code saves your credentials inside the container automatically when the flow completes.
+- **From the Desktop app** — open Settings → Authentication and click **Open terminal and log in**. Speedwave opens a system terminal running `speedwave login --project <name>`, which starts the Anthropic sign-in automatically. Follow the OAuth flow. Claude Code saves your credentials inside the container automatically when the flow completes.
 - **From the CLI** — run:
 
   ```bash
   speedwave login
   ```
 
-  This logs in for the active project (the one selected in the Desktop project switcher). Pass `--project <name>` to log in for a different registered project from any directory. Type `/login` at Claude's prompt.
+  This logs in for the active project (the one selected in the Desktop project switcher). Pass `--project <name>` to log in for a different registered project from any directory. The Anthropic sign-in starts automatically.
 
 Credentials are stored by Claude Code at `~/.speedwave/claude-home/<project>/.claude/.credentials.json` (the per-project CLAUDE_HOME bind-mount) and are available on every subsequent `speedwave` start. To log out, run `speedwave logout` (or `speedwave logout --project <name>`). Credentials are per-project — logging in for one project does not authenticate another. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the full rationale.
 

@@ -23,9 +23,9 @@ import { LoggerService } from '../services/logger.service';
   template: `
     <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
       <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Click the button below — Speedwave opens a terminal, runs Claude Code, and you type
-        <code>/login</code> at the prompt. Claude Code saves your credentials inside the container
-        so the next start skips the login flow.
+        Click the button below — Speedwave opens a terminal and starts Anthropic sign-in. Follow the
+        prompt to authorize. Claude Code saves your credentials inside the container so the next
+        start skips the login flow.
       </p>
       <div class="mt-3 flex items-center gap-2">
         <button

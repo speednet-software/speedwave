@@ -674,11 +674,11 @@ You can run Claude Code inside Speedwave against a local or third-party LLM serv
 
 Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
 
-Settings holds a **provider list** rather than a single choice — configure several and pick the active one. Each entry is one of these kinds:
+Settings holds a **provider list** rather than a single choice: configure several and pick the active one. A fresh project starts with no provider selected, so pick one and save it before the first chat. Each entry is one of these kinds:
 
 | Kind                    | What it is                                                                                                                | Key needed                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| **Anthropic (OAuth)**   | Your Claude subscription (the default)                                                                                    | No (managed by Claude Code login) |
+| **Anthropic (OAuth)**   | Your Claude subscription                                                                                                  | No (managed by Claude Code login) |
 | **Anthropic (API key)** | Anthropic via a raw API key                                                                                               | Yes                               |
 | **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, gateways) | Only if the server requires one   |
 | **OpenRouter**          | OpenRouter's model catalog                                                                                                | Yes                               |
@@ -689,19 +689,20 @@ Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider
 
 #### Supported local / self-hosted servers
 
-The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streaming) and does **not** translate — the server must expose that endpoint. Supported servers and minimum versions:
+The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streaming) and does **not** translate — the server must expose that endpoint. Supported servers:
 
-| Server         | Minimum version           | Notes                                                                          |
-| -------------- | ------------------------- | ------------------------------------------------------------------------------ |
-| **llama.cpp**  | Jan 2026 build (#17570)   | `llama-server` native Anthropic Messages support (incl. `count_tokens`, tools) |
-| **Ollama**     | 0.14.0                    | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
-| **LM Studio**  | 0.4.1                     | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
-| **vLLM**       | build with `/v1/messages` | Use the **Local** row with the remote URL for a remote vLLM                    |
-| **OpenRouter** | —                         | Remote; exposes the Anthropic Messages API natively                            |
+| Server         | Notes                                                                          |
+| -------------- | ------------------------------------------------------------------------------ |
+| **llama.cpp**  | `llama-server` native Anthropic Messages support (incl. `count_tokens`, tools) |
+| **Ollama**     | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
+| **LM Studio**  | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
+| **Unsloth**    | Serves via `llama-server`; same Anthropic Messages endpoint as llama.cpp       |
+| **vLLM**       | A build exposing `/v1/messages`; use the **Local** row (local or remote URL)   |
+| **OpenRouter** | Remote; exposes the Anthropic Messages API natively                            |
 
-A stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
+A stock OpenAI-only server (TGI, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
-### Ollama (requires 0.14.0+)
+### Ollama
 
 1. Install Ollama and pull a model:
 
@@ -712,23 +713,24 @@ A stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) 
 
    > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
 
-2. In Speedwave Settings → LLM Provider → select **Ollama**
-3. The Settings UI fetches the model list from Ollama's `/api/tags` endpoint and pre-selects one automatically. You only need to type the model name manually if the Ollama server is offline when you open Settings.
-4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
-5. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
+4. Click **Discover models** (the probe lists models via `GET /v1/models`) and pick one from the dropdown
+5. Set the row active and **Save**
 
-### LM Studio (requires 0.4.1+)
+### LM Studio
 
 1. In LM Studio, load a model and enable the **Local Server**
-2. In Speedwave Settings → LLM Provider → select **LM Studio**
-3. Leave Base URL empty for the default port (`http://host.docker.internal:1234`)
-4. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:1234` (LM Studio's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
-### llama.cpp (requires January 2026 build or later)
+### llama.cpp
 
 1. Start `llama-server` with the Anthropic API server enabled
-2. Select **llama.cpp** in Settings → LLM Provider
-3. Default port: `http://host.docker.internal:8080`
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:8080` (llama-server's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
 ### Non-standard addresses
 
@@ -755,7 +757,7 @@ For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscript
 
 ### Remote / custom-URL servers (vLLM, gateways)
 
-The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). Modern builds of vLLM (`/v1/messages` endpoint), llama.cpp, LM Studio, and Ollama all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
+The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). llama.cpp, LM Studio, Ollama, and a vLLM build with `/v1/messages` all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
 1. In Settings → LLM Provider, open the **Local** row (it serves both local and remote custom-URL backends that speak the Anthropic Messages API).
 2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). A trailing `/v1` is fine — it's normalized away, and the forwarder appends `/v1/messages` itself.

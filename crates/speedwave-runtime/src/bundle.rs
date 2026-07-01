@@ -136,13 +136,19 @@ const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
 ];
 
+/// Bundle-relative path of the nerdctl-full tarball (Windows offline install).
+pub const NERDCTL_TARBALL_ASSET: &str = "wsl/nerdctl-full.tar.gz";
+
+/// Bundle-relative path of the Ubuntu WSL rootfs tarball (Windows offline install).
+pub const UBUNTU_ROOTFS_ASSET: &str = "wsl/ubuntu-rootfs.tar.gz";
+
 const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
-        path: "wsl/nerdctl-full.tar.gz",
+        path: NERDCTL_TARBALL_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
-        path: "wsl/ubuntu-rootfs.tar.gz",
+        path: UBUNTU_ROOTFS_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
@@ -261,6 +267,7 @@ pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
 /// root instead of reading `SPEEDWAVE_RESOURCES_DIR` from env.
 pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<BundleManifest> {
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
+    let mut resources_version = None;
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
@@ -268,12 +275,35 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
+        resources_version = Some(manifest.app_version);
     }
     generate_bundle_manifest(
         env!("CARGO_PKG_VERSION"),
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
+    .map_err(|e| {
+        // An older Desktop's tree lacks new image inputs — name the real remedy.
+        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+            Some(v) => anyhow::anyhow!(
+                "installed Desktop resources are v{v} but this binary is v{}: {e}. \
+                 Update Speedwave Desktop, then run `speedwave update`.",
+                env!("CARGO_PKG_VERSION")
+            ),
+            None => e,
+        }
+    })
+}
+
+/// App version stamped in the on-disk manifest; `None` when absent/unreadable.
+/// Never regenerates — safe on incomplete (older-Desktop) trees.
+pub fn manifest_app_version_in(build_root: &Path) -> Option<String> {
+    let data = std::fs::read_to_string(build_root.join(BUNDLE_MANIFEST_FILE)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&data)
+        .ok()?
+        .get("app_version")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Per-image hashes cover each image's declared `hash_inputs` + build args;
@@ -458,6 +488,57 @@ pub fn validate_bundled_runtime_assets(
     Ok(())
 }
 
+/// Finds a bundled asset by bundle-relative path across every known resources
+/// root (env var, exe dir, Tauri Windows `resources/` layout, Desktop marker).
+pub fn find_bundled_asset(relative_path: &str) -> Option<PathBuf> {
+    let roots = bundled_resource_roots(
+        std::env::var(consts::BUNDLE_RESOURCES_ENV)
+            .ok()
+            .map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+        resources_marker_dir(consts::data_dir()),
+    );
+    find_bundled_asset_in(&roots, relative_path)
+}
+
+/// Candidate resources roots in priority order; pure core of [`find_bundled_asset`].
+/// The exe parent covers a binary living one level inside the resources root.
+fn bundled_resource_roots(
+    env_root: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    marker_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.extend(env_root);
+    if let Some(dir) = exe_dir {
+        roots.push(dir.clone());
+        roots.push(dir.join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR));
+        if let Some(parent) = dir.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.extend(marker_root);
+    roots
+}
+
+/// Reads the Desktop-written resources marker under `data_dir`; absolute only.
+fn resources_marker_dir(data_dir: &Path) -> Option<PathBuf> {
+    let marker = data_dir.join(consts::RESOURCES_MARKER);
+    let content = std::fs::read_to_string(marker).ok()?;
+    let path = PathBuf::from(content.trim());
+    path.is_absolute().then_some(path)
+}
+
+/// First root that actually contains `relative_path`.
+fn find_bundled_asset_in(roots: &[PathBuf], relative_path: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(relative_path))
+        .find(|candidate| candidate.exists())
+}
+
 fn bundle_state_path() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join(BUNDLE_STATE_FILE))
 }
@@ -613,6 +694,11 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
+/// Host build-output dir names that are never image content — skipped from digests here,
+/// pruned by bundle-build-context.{sh,ps1}, and ignored via `containers/.dockerignore`
+/// (alignment test-enforced).
+pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+
 fn collect_directory_entries(
     dir: &Path,
     prefix: &str,
@@ -639,8 +725,12 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // node_modules is not copied into the build context, so it is not image content.
-        if child.is_dir() && child.file_name().is_some_and(|n| n == "node_modules") {
+        if child.is_dir()
+            && child
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| HOST_BUILD_OUTPUT_DIRS.contains(&n))
+        {
             continue;
         }
         // Reject symlinks: the copier dereferences them, changing content without changing the hash.
@@ -725,6 +815,63 @@ mod tests {
     }
 
     #[test]
+    fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+        let ps1 = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+            .expect("bundle-build-context.ps1 should exist");
+        let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
+            .expect("containers/.dockerignore should exist");
+
+        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
+        let sh_line = sh
+            .lines()
+            .find(|l| l.contains("-prune"))
+            .expect("-prune find line should exist in .sh");
+        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
+        let mut sh_names: Vec<&str> = sh_tokens
+            .windows(2)
+            .filter(|w| w[0] == "-name")
+            .map(|w| w[1])
+            .collect();
+        sh_names.sort_unstable();
+
+        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
+        let ps1_line = ps1
+            .lines()
+            .find(|l| l.contains(" -in "))
+            .expect("-in prune line should exist in .ps1");
+        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
+        ps1_names.sort_unstable();
+
+        let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
+        expected.sort_unstable();
+
+        assert_eq!(
+            sh_names, expected,
+            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        assert_eq!(
+            ps1_names, expected,
+            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        for name in HOST_BUILD_OUTPUT_DIRS {
+            assert!(
+                dockerignore
+                    .lines()
+                    .any(|l| l.trim() == format!("**/{name}/")),
+                "containers/.dockerignore must contain '**/{name}/' (HOST_BUILD_OUTPUT_DIRS)"
+            );
+        }
+    }
+
+    #[test]
     fn collect_directory_entries_skips_node_modules_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
@@ -781,6 +928,65 @@ mod tests {
         collect_directory_entries(&dir, "p", &mut out).unwrap();
         assert!(out.iter().any(|(r, _)| r.ends_with("pkg/index.ts")));
         assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_target_and_dist_directories() {
+        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
+        // COPY source) — both are host build outputs racing parallel test lanes.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proxy");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/proxy.d"), "junk").unwrap();
+        std::fs::create_dir_all(dir.join("nested/dist")).unwrap();
+        std::fs::write(dir.join("nested/dist/index.js"), "built").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/main.rs")), "{rels:?}");
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.contains("target") || r.contains("dist")),
+            "target/ and dist/ must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    fn collect_directory_entries_keeps_files_named_target_or_dist() {
+        // The skip is directory-gated: plain FILES with these names are content.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("svc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target"), "a file, not a build dir").unwrap();
+        std::fs::write(dir.join("dist"), "also a file").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.contains(&"p/target"), "{rels:?}");
+        assert!(rels.contains(&"p/dist"), "{rels:?}");
+    }
+
+    #[test]
+    fn target_and_dist_changes_do_not_alter_manifest_hash() {
+        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
+        // (mcp-servers/*/dist) must not perturb or race the image hashes.
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/proxy/target/debug")).unwrap();
+        std::fs::write(
+            tmp.path().join("containers/proxy/target/debug/proxy.d"),
+            "cargo junk",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp-servers/hub/dist")).unwrap();
+        std::fs::write(tmp.path().join("mcp-servers/hub/dist/index.js"), "built").unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(before.image_hashes, after.image_hashes);
+        assert_eq!(before.bundle_id, after.bundle_id);
     }
 
     #[test]
@@ -1204,6 +1410,110 @@ mod tests {
             "legacy manifest must be discarded and regenerated from the tree"
         );
         assert_ne!(manifest.bundle_id, "legacy0123456789");
+    }
+
+    /// Regeneration over an OLDER Desktop's incomplete tree must name the
+    /// real remedy (update the Desktop app), not a bare digest error.
+    #[test]
+    fn stale_resources_regeneration_error_names_desktop_update() {
+        let temp = tempfile::tempdir().unwrap();
+        // Legacy manifest + no build tree: digesting the new catalogue fails.
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Update Speedwave Desktop"),
+            "error must name the remedy: {msg}"
+        );
+        assert!(msg.contains("v0.1.0"), "error must name the stale version");
+    }
+
+    /// Same failure with a matching app_version keeps the raw error (a real
+    /// corruption, not a version skew).
+    #[test]
+    fn same_version_regeneration_error_stays_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            format!(
+                r#"{{"app_version": "{}", "bundle_id": "x0123456789abcd", "claude_resources_hash": "cafebabe"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        assert!(!err.to_string().contains("Update Speedwave Desktop"));
+    }
+
+    #[test]
+    fn manifest_app_version_reads_without_regenerating() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.13.3", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_app_version_in(temp.path()).as_deref(),
+            Some("0.13.3")
+        );
+        std::fs::write(temp.path().join(BUNDLE_MANIFEST_FILE), "not json").unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+    }
+
+    #[test]
+    fn bundled_resource_roots_priority_and_layouts() {
+        let roots = bundled_resource_roots(
+            Some(PathBuf::from("/env")),
+            Some(PathBuf::from("/install/bin")),
+            Some(PathBuf::from("/marker")),
+        );
+        assert_eq!(roots[0], PathBuf::from("/env"), "env override wins");
+        assert!(roots.contains(&PathBuf::from("/install/bin")));
+        assert!(
+            roots.contains(
+                &PathBuf::from("/install/bin").join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR)
+            ),
+            "Tauri Windows resources/ layout covered"
+        );
+        assert!(roots.contains(&PathBuf::from("/install")));
+        assert_eq!(roots.last().unwrap(), &PathBuf::from("/marker"));
+        assert!(bundled_resource_roots(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn find_bundled_asset_in_returns_first_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(b.join("wsl")).unwrap();
+        std::fs::write(b.join(NERDCTL_TARBALL_ASSET), "x").unwrap();
+        assert_eq!(
+            find_bundled_asset_in(&[a.clone(), b.clone()], NERDCTL_TARBALL_ASSET),
+            Some(b.join(NERDCTL_TARBALL_ASSET))
+        );
+        assert_eq!(find_bundled_asset_in(&[a], NERDCTL_TARBALL_ASSET), None);
+        assert_eq!(find_bundled_asset_in(&[], NERDCTL_TARBALL_ASSET), None);
+    }
+
+    #[test]
+    fn resources_marker_dir_requires_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "missing marker");
+        std::fs::write(dir.path().join(consts::RESOURCES_MARKER), "relative/path").unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "relative rejected");
+        let abs = dir.path().join("resources");
+        std::fs::write(
+            dir.path().join(consts::RESOURCES_MARKER),
+            abs.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), Some(abs));
     }
 
     #[test]

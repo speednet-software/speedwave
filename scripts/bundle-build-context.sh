@@ -56,6 +56,11 @@ rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/oauth"
 mkdir -p "$DEST/build-context"
 cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
 
+# Host build outputs (e.g. a dirty containers/proxy/target) are never image
+# content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
+find "$DEST/build-context/containers" -type d \
+    \( -name target -o -name dist -o -name node_modules \) -prune -exec rm -rf {} +
+
 # Linux kernel rejects #!/bin/bash\r with exit 127 (issue #603).
 # `sed -i.bak` preserves perms in place; `.bak` suffix is the portable form across BSD and GNU.
 find "$DEST/build-context/containers" -type f -name '*.sh' -print0 |

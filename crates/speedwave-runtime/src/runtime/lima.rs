@@ -298,6 +298,12 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
+        // No compose.yml → nothing was ever started (deferred no-provider
+        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
+        if super::compose_down_is_noop(&compose_file) {
+            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            return Ok(());
+        }
         compose_down_and_cleanup_with_retry(
             &*self.runner,
             "limactl",
@@ -872,9 +878,12 @@ impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
-        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
+        // Provisioning-grade budget: the first boot after a Lima bump downloads
+        // the guest nerdctl-full archive inside `limactl start`.
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
-            "Lima VM '{}' is stopped, starting (timeout: {}s)",
+            "Lima VM '{}' is stopped, starting (timeout: {}s; a one-time \
+             container-tooling download may run first)",
             vm,
             timeout.as_secs()
         );
@@ -882,8 +891,8 @@ impl LimaRuntime {
             .run_with_timeout("limactl", &["start", vm], timeout)
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to start Lima VM '{vm}': {e}. \
-                     Please restart Speedwave or check system resources.",
+                    "Failed to start Lima VM '{vm}': {e}. {}",
+                    consts::LIMA_START_PROVISION_HINT
                 )
             })?;
         log::info!("Lima VM '{}' started successfully", vm);
@@ -1539,6 +1548,22 @@ mod tests {
 
     #[test]
     fn test_compose_down_runs_compose_command() {
+        // compose_down short-circuits when no compose.yml exists; create one so
+        // this test exercises the real command path (cleaned up after).
+        let compose_file = crate::runtime::compose_file_path("testproject").unwrap();
+        let compose_path = std::path::PathBuf::from(&compose_file);
+        if let Some(parent) = compose_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&compose_path, "services: {}").unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_path);
+
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
         rt.compose_down("testproject").unwrap();
@@ -1676,8 +1701,8 @@ mod tests {
             "error should mention VM start failure, got: {err_msg}"
         );
         assert!(
-            err_msg.contains("restart Speedwave"),
-            "error should suggest restarting, got: {err_msg}"
+            err_msg.contains(consts::LIMA_START_PROVISION_HINT),
+            "error should carry the download cause + retry hint, got: {err_msg}"
         );
     }
 

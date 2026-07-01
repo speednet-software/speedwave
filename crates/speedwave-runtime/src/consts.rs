@@ -130,6 +130,38 @@ pub const NERDCTL_FULL_SHA256_AMD64: &str =
 pub const NERDCTL_FULL_SHA256_ARM64: &str =
     "55d68d2613b5f065021146bac21f620cde9e7fdd4bd3eff74cd324f5462e107a";
 
+/// Tauri Windows bundle layout: resources live in `<install>\resources`.
+/// Aligned with `setup_wizard::resolve_cli_source_from` (Desktop side).
+pub const TAURI_WINDOWS_RESOURCES_SUBDIR: &str = "resources";
+
+/// Filename (under `data_dir()`) of the cross-process nerdctl install lock;
+/// serializes Desktop `ensure_ready` and CLI startup reinstalls.
+pub const NERDCTL_INSTALL_LOCK_FILE: &str = "nerdctl-install.lock";
+
+/// Filename (under `data_dir()`) of the nerdctl download-backoff marker; a
+/// failed in-distro download is recorded here so short-lived CLI processes
+/// don't restart the full download on every invocation.
+pub const NERDCTL_DOWNLOAD_BACKOFF_FILE: &str = "nerdctl-download-backoff.json";
+
+/// Minimum delay before retrying a failed in-distro nerdctl-full download.
+pub const NERDCTL_DOWNLOAD_RETRY_DELAY_SECS: u64 = 3600;
+
+/// `curl --connect-timeout` for the in-distro nerdctl-full download.
+pub const NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// `curl --max-time` ceiling for the in-distro nerdctl-full download; bounds a
+/// stalled multi-hundred-MB fetch instead of hanging CLI startup indefinitely.
+pub const NERDCTL_DOWNLOAD_MAX_TIME_SECS: u64 = 900;
+
+/// Host-side ceiling for the whole in-distro nerdctl-full install (download +
+/// untar + service readiness). Must exceed the curl `--max-time` above.
+pub const NERDCTL_INSTALL_TIMEOUT_SECS: u64 = 1200;
+
+// Compile-time invariants: connect < max-time < host-side wait < retry delay.
+const _: () = assert!(NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS < NERDCTL_DOWNLOAD_MAX_TIME_SECS);
+const _: () = assert!(NERDCTL_DOWNLOAD_MAX_TIME_SECS < NERDCTL_INSTALL_TIMEOUT_SECS);
+const _: () = assert!(NERDCTL_DOWNLOAD_RETRY_DELAY_SECS > NERDCTL_INSTALL_TIMEOUT_SECS);
+
 /// amd64 Ubuntu WSL rootfs URL; SHA256 below pins the version. `current` is
 /// rolling — a download/verify failure on clean dev/CI means bump the SHA256 (#183).
 pub const WSL_ROOTFS_URL_AMD64: &str =
@@ -253,6 +285,21 @@ pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 /// Max seconds to wait for `limactl start` to boot the Lima VM (cold boot is
 /// ~15-45s; 120s covers slow machines without an indefinite UI hang).
 pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
+
+/// Max seconds for a `limactl start` that may provision: the first start under
+/// a newly bundled Lima downloads the guest nerdctl-full archive before boot.
+/// Budget equals the Desktop image-rebuild wait (`RECONCILE_WAIT_TIMEOUT`).
+pub const LIMA_VM_PROVISION_START_TIMEOUT_SECS: u64 = 600;
+
+// Compile-time invariant: the provisioning window must extend the normal one.
+const _: () = assert!(LIMA_VM_PROVISION_START_TIMEOUT_SECS > LIMA_VM_START_TIMEOUT_SECS);
+
+/// Cause + remedy appended to `limactl start` failures on a provisioning start.
+pub const LIMA_START_PROVISION_HINT: &str =
+    "The first start after a Speedwave update downloads updated container \
+     tooling (nerdctl-full) inside the VM; on a slow or offline connection \
+     this download fails or times out. Check your internet connection and \
+     relaunch Speedwave to retry.";
 
 /// Max seconds for exit cleanup (teardown + VM stop) before force-exit; watchdog
 /// in both the RunEvent::Exit handler and the ctrlc handler.
@@ -1210,6 +1257,31 @@ mod tests {
     fn test_wsl_rootfs_urls_are_https() {
         assert!(WSL_ROOTFS_URL_AMD64.starts_with("https://"));
         assert!(WSL_ROOTFS_URL_ARM64.starts_with("https://"));
+    }
+
+    // Lock and backoff markers are flat filenames directly under data_dir().
+    #[test]
+    fn nerdctl_lock_and_backoff_files_are_distinct_flat_names() {
+        for name in [NERDCTL_INSTALL_LOCK_FILE, NERDCTL_DOWNLOAD_BACKOFF_FILE] {
+            assert!(!name.is_empty(), "marker filename must not be empty");
+            assert!(
+                !name.contains('/') && !name.contains('\\'),
+                "marker must be a flat filename under data_dir: {name}"
+            );
+        }
+        assert_ne!(NERDCTL_INSTALL_LOCK_FILE, NERDCTL_DOWNLOAD_BACKOFF_FILE);
+    }
+
+    // TAURI_WINDOWS_RESOURCES_SUBDIR must match the Desktop's production
+    // bundle layout (setup_wizard resolves `<exe_dir>\resources\...`).
+    #[test]
+    fn tauri_windows_resources_subdir_matches_desktop_layout() {
+        let wizard = include_str!("../../../desktop/src-tauri/src/setup_wizard.rs");
+        assert!(
+            wizard.contains(&format!("join(\"{TAURI_WINDOWS_RESOURCES_SUBDIR}\")")),
+            "setup_wizard must resolve the same '{TAURI_WINDOWS_RESOURCES_SUBDIR}' subdir; \
+             rename it there too (SSOT alignment)"
+        );
     }
 
     #[test]
@@ -2173,6 +2245,32 @@ mod tests {
             LIMA_VM_STOP_TIMEOUT_SECS > 0,
             "LIMA_VM_STOP_TIMEOUT_SECS must be positive"
         );
+    }
+
+    /// SSOT pair: the provisioning-start budget is derived from the Desktop
+    /// image-rebuild wait (`RECONCILE_WAIT_TIMEOUT` in containers_cmd.rs).
+    #[test]
+    fn lima_provision_start_timeout_matches_desktop_reconcile_wait_budget() {
+        let src = include_str!("../../../desktop/src-tauri/src/containers_cmd.rs");
+        let re = regex::Regex::new(r"RECONCILE_WAIT_TIMEOUT[^;]*?from_secs\((\d+)\)").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("containers_cmd.rs must declare RECONCILE_WAIT_TIMEOUT via from_secs(N)");
+        let desktop_budget: u64 = cap[1].parse().unwrap();
+        assert_eq!(
+            LIMA_VM_PROVISION_START_TIMEOUT_SECS, desktop_budget,
+            "LIMA_VM_PROVISION_START_TIMEOUT_SECS must match the Desktop \
+             RECONCILE_WAIT_TIMEOUT budget it is derived from"
+        );
+    }
+
+    /// Error-path quality: the provisioning hint must name the likely cause
+    /// (tooling download) and the remedy (network + retry).
+    #[test]
+    fn lima_provision_hint_names_cause_and_remedy() {
+        assert!(LIMA_START_PROVISION_HINT.contains("nerdctl-full"));
+        assert!(LIMA_START_PROVISION_HINT.contains("internet connection"));
+        assert!(LIMA_START_PROVISION_HINT.contains("retry"));
     }
 
     #[test]

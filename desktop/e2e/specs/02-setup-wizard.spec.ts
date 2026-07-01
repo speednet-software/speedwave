@@ -6,8 +6,10 @@
  *   2. Auto steps: check environment → start virtual machine → build images
  *   3. Create-project modal opens → mock the OS folder picker, fill name,
  *      click `create-project-submit`
- *   4. Auto steps: start containers → finalize
+ *   4. Auto steps: start containers (deferred — no LLM provider yet) → finalize
  *   5. Success message → auto-redirect to `/settings`
+ *   6. Configure an OpenRouter provider (OPENROUTER_API_KEY env) so
+ *      container-health (spec 03) has something to start against.
  *
  * Every step MUST succeed. If any step fails, the test fails with the
  * actual error message — no conditional branching that silently accepts errors.
@@ -18,6 +20,8 @@
  */
 
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
+import { openSettings, configureOpenRouter, requireOpenrouterKey } from '../helpers/llm';
+import { waitForShellReady } from '../helpers/shell';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
@@ -209,11 +213,21 @@ describe('Setup Wizard — Full Flow', function () {
     const complete = await isSetupComplete();
     expect(complete).toBe(true);
 
-    // WebDriver stale-element during fast transitions; force nav to root to re-evaluate setupCompleteGuard.
-    await browser.execute(() => (window.location.href = '/'));
+    // Root '/' redirects to /chat which hides the pill for a no-provider
+    // project; /settings renders the pill unconditionally.
+    await browser.execute(() => (window.location.href = '/settings'));
 
     // The shell is identified by the project pill in the header.
     const projectPill = await $('[data-testid="project-pill"]');
     await projectPill.waitForExist({ timeout: 15_000 });
+  });
+
+  it('should configure an OpenRouter provider so containers can start', async function () {
+    this.timeout(180_000);
+    await openSettings();
+    await configureOpenRouter(requireOpenrouterKey());
+    // Saving the first provider starts the containers; wait for the project to
+    // return to ready before the container-health spec inspects it.
+    await waitForShellReady(150_000);
   });
 });

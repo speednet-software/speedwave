@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# Structural test: verifies that rsync/tar transfer functions in e2e-vm.sh
-# use a shared exclude array and contain required excludes.
+# Structural tests for e2e-vm.sh: shared rsync/tar exclude array and
+# PowerShell single-quote escaping of injected secrets (ps_squote).
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 
@@ -35,4 +35,23 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
             echo "missing desktop/src-tauri/${asset}"; return 1
         }
     done
+}
+
+@test "ps_squote doubles single quotes for PowerShell literals" {
+    eval "$(sed -n '/^ps_squote()/,/^}/p' "$SCRIPT")"
+    [ "$(ps_squote "plain")" = "plain" ]
+    [ "$(ps_squote "")" = "" ]
+    [ "$(ps_squote "o'brien")" = "o''brien" ]
+    [ "$(ps_squote "a'b'c")" = "a''b''c" ]
+    # Breakout attempt: '; calc; ' stays a single PS literal after doubling.
+    [ "$(ps_squote "'; calc; '")" = "''; calc; ''" ]
+}
+
+@test "every windows_ps env injection goes through ps_squote" {
+    local body assignments squoted
+    body="$(sed -n '/^windows_ps()/,/^}/p' "$SCRIPT")"
+    assignments="$(echo "$body" | grep -c "= '")"
+    squoted="$(echo "$body" | grep -c "= '\$(ps_squote ")"
+    [ "$assignments" -gt 0 ]
+    [ "$assignments" -eq "$squoted" ]
 }

@@ -290,7 +290,15 @@ pub(crate) fn restore_projects(
     projects: &[String],
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<(), String> {
+    let user_config = config::load_user_config().unwrap_or_default();
+    let data_dir = speedwave_runtime::consts::data_dir();
     for project in projects {
+        // No-provider guard (mirrors the deferred start paths): a restore render
+        // would hard-fail and wedge the whole reconcile in a failing loop.
+        if !crate::auth_commands::project_llm_configured_in(data_dir, &user_config, project) {
+            log::warn!("restore_projects: skipping '{project}' — no LLM provider configured");
+            continue;
+        }
         // Substitute CloudStorage TCC prefix before the error escapes this function.
         if let Err(e) = restore_one_project(project, rt) {
             if e.starts_with(speedwave_runtime::consts::CLOUDSTORAGE_TCC_PREFIX) {
@@ -1058,6 +1066,25 @@ mod tests {
         assert!(
             wait_pos < build_pos,
             "teardown join must precede any restore work"
+        );
+    }
+
+    #[test]
+    fn restore_projects_skips_unconfigured_projects_before_restoring() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("pub(crate) fn restore_projects(")
+            .expect("restore_projects must exist");
+        let body = &source[fn_start..fn_start + 1200];
+        let guard_pos = body
+            .find("project_llm_configured_in")
+            .expect("restore must guard on a configured provider (reconcile must not wedge)");
+        let restore_pos = body
+            .find("restore_one_project")
+            .expect("restore must call restore_one_project");
+        assert!(
+            guard_pos < restore_pos,
+            "no-provider guard must run before the restore render"
         );
     }
 
@@ -1864,7 +1891,7 @@ mod tests {
         let main_source = include_str!("main.rs");
         // The reconcile call must be inside an `if setup_started` block.
         let idx = main_source
-            .find("reconcile::reconcile_bundle_update(app.handle())")
+            .find("reconcile::reconcile_bundle_update(&app_handle)")
             .expect("main.rs must call reconcile_bundle_update");
         // Look backwards for the nearest `if setup_started`
         let before = &main_source[..idx];

@@ -449,6 +449,13 @@ pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// True when a host-side compose file is absent — a `compose_down` on it is a
+/// no-op (deferred no-provider project never rendered one), so skip the engine
+/// call that would fatally error and retry.
+pub(crate) fn compose_down_is_noop(host_compose_file: &str) -> bool {
+    !std::path::Path::new(host_compose_file).exists()
+}
+
 /// Guards a compose service name before splicing into engine argv — only built-in
 /// (runtime-managed, e.g. proxy) services qualify, never plugin/user input.
 pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()> {
@@ -1156,6 +1163,21 @@ mod tests {
         assert!(path.contains("compose"));
         assert!(path.contains("my-project"));
         assert!(path.ends_with("compose.yml"));
+    }
+
+    #[test]
+    fn compose_down_is_noop_true_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("compose.yml");
+        assert!(compose_down_is_noop(&missing.to_string_lossy()));
+    }
+
+    #[test]
+    fn compose_down_is_noop_false_when_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("compose.yml");
+        std::fs::write(&present, "services: {}").unwrap();
+        assert!(!compose_down_is_noop(&present.to_string_lossy()));
     }
 
     #[test]

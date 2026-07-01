@@ -87,6 +87,15 @@ describe('ProgressStepsComponent', () => {
     expect(spinner.classList.contains('w-4')).toBe(true);
   });
 
+  it('colors the active-step circle with the brand accent to match primary buttons', () => {
+    // The spinner stroke is currentColor, inherited from the circle's color.
+    host.steps.set([makeStep('a', 'active')]);
+    fixture.detectChanges();
+    const circle = fixture.nativeElement.querySelector('app-spin-icon').closest('div');
+    expect(circle.style.color).toBe('var(--accent)');
+    expect(circle.style.borderColor).toBe('var(--accent-dim)');
+  });
+
   it('renders the progress bar only for active steps with progress set', () => {
     host.steps.set([
       makeStep('a', 'active'), // no progress → no bar

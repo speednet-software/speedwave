@@ -136,7 +136,10 @@ pub(crate) const MSG_NOT_AUTHENTICATED: &str =
 
 use diagnostics::export_diagnostics;
 use window::should_debounce;
-use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
+use window::{
+    hide_main_window, should_emit_focus_event, should_prevent_close, should_run_cleanup,
+    show_main_window,
+};
 
 // ---------------------------------------------------------------------------
 // Extracted subsystem starters (reused by setup() and ensure_*_running())
@@ -641,12 +644,26 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
 // Application entry point
 // ---------------------------------------------------------------------------
 
+/// Logs a sanitized panic message via `log_fn`, falling back to `eprintln!`
+/// if `log_fn` itself panics — a panic during unwind aborts the process, so
+/// the (pipe-fragile) log sink must run isolated from the panic hook.
+fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
+        // Sanctioned panic-hook stderr fallback (logging.md) — the log
+        // sink itself panicked, so bypass it entirely.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("PANIC: {sanitized} (log sink also panicked)");
+        }
+    }
+}
+
 fn main() {
-    // Panic hook — sanitize panic payload before logging
+    // Panic hook — sanitize panic payload before logging.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
-        log::error!("PANIC: {sanitized}");
+        log_panic_with_fallback(&sanitized, || log::error!("PANIC: {sanitized}"));
         #[cfg(debug_assertions)]
         default_hook(info);
         #[cfg(not(debug_assertions))]
@@ -895,33 +912,37 @@ fn main() {
                 Err(e) => log::warn!("auto-check handle mutex poisoned: {e}"),
             }
 
-            // Re-link CLI binary on every startup to keep it in sync after updates.
+            // Post-setup migrations + CLI re-link + reconcile, ordered, off the
+            // main thread — the VM migrations can stop/start the VM (long downloads).
             if setup_started {
-                #[cfg(target_os = "macos")]
-                if let Err(e) = setup_wizard::ensure_lima_vm_config() {
-                    log::warn!("Lima VM config migration failed: {e}");
-                }
-
-                #[cfg(target_os = "windows")]
-                if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
-                    log::warn!(".wslconfig VPN-compat migration failed: {e}");
-                }
-
-                // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
-                #[cfg(target_os = "windows")]
-                {
-                    use setup_wizard::TerminateOnChange;
-                    if let Err(e) =
-                        setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
-                    {
-                        log::warn!("wsl.conf metadata migration failed: {e}");
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    if let Err(e) = setup_wizard::ensure_lima_vm_config() {
+                        log::warn!("Lima VM config migration failed: {e}");
                     }
-                }
 
-                if let Err(e) = setup_wizard::link_cli() {
-                    log::warn!("CLI re-link on startup failed: {e}");
-                }
-                reconcile::reconcile_bundle_update(app.handle());
+                    #[cfg(target_os = "windows")]
+                    if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
+                        log::warn!(".wslconfig VPN-compat migration failed: {e}");
+                    }
+
+                    // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
+                    #[cfg(target_os = "windows")]
+                    {
+                        use setup_wizard::TerminateOnChange;
+                        if let Err(e) =
+                            setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
+                        {
+                            log::warn!("wsl.conf metadata migration failed: {e}");
+                        }
+                    }
+
+                    if let Err(e) = setup_wizard::link_cli() {
+                        log::warn!("CLI re-link on startup failed: {e}");
+                    }
+                    reconcile::reconcile_bundle_update(&app_handle);
+                });
             }
 
             // Build system tray from the managed `TrayMenuState`.
@@ -1111,6 +1132,7 @@ fn main() {
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,
             containers_cmd::start_containers,
+            containers_cmd::defer_container_start,
             containers_cmd::check_containers_running,
             // Settings
             containers_cmd::factory_reset,
@@ -1119,6 +1141,7 @@ fn main() {
             containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
             containers_cmd::set_llm_provider_key,
+            containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
             llm_cmd::discover_llm_models,
             llm_cmd::get_llm_usage,
@@ -1129,6 +1152,7 @@ fn main() {
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
             auth_commands::get_auth_status,
+            auth_commands::anthropic_logout,
             oauth_login_cmd::start_oauth_login,
             // URL opener
             url_validation::open_url,
@@ -1259,6 +1283,12 @@ fn main() {
                         stash_cleanup_handle(&exit_cleanup_handle_window, handle);
                     }
                 }
+                tauri::WindowEvent::Focused(focused) => {
+                    if should_emit_focus_event(window.label(), *focused) {
+                        use tauri::Emitter;
+                        let _ = window.emit("window_focused", ());
+                    }
+                }
                 _ => {}
             }
         })
@@ -1317,6 +1347,24 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    // -- log_panic_with_fallback --
+
+    #[test]
+    fn log_panic_with_fallback_runs_log_fn_when_it_succeeds() {
+        let ran = std::cell::Cell::new(false);
+        log_panic_with_fallback("msg", || ran.set(true));
+        assert!(ran.get(), "log_fn must run on the happy path");
+    }
+
+    /// Regression guard: a panic inside `log_fn` (e.g. the fern/tauri-plugin-log
+    /// sink panicking on a broken pipe) must not propagate — it must be caught
+    /// and handled by the eprintln fallback instead of escalating to abort().
+    #[test]
+    fn log_panic_with_fallback_survives_a_panicking_log_fn() {
+        log_panic_with_fallback("msg", || panic!("simulated log sink panic"));
+        // Reaching this line proves the panic did not propagate out of the call.
     }
 
     #[test]

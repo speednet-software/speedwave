@@ -852,7 +852,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   }
 
   private loadActiveProject(): void {
-    this.activeProject = this.projectState.activeProject;
+    this.activeProject = this.projectState.activeProject();
   }
 
   private async loadPlugin(slug: string): Promise<void> {

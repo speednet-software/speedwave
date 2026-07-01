@@ -49,12 +49,25 @@ pub async fn get_usage_for_response(
         }
     }
     let u = found?;
-    // Line is present; enrich cost once (HTTP + sidecar) only if not yet priced.
+    // Already priced (terminal cost in the sidecar) → done.
     if u.cost_usd.is_some() {
         return Some(u);
     }
+    // Price EVERY unpriced row (local→Free/null, subscription→null), not just
+    // OpenRouter — else the footer keeps Claude Code's live preview (invariant 6).
     enrich_with_openrouter(data_dir.as_path(), &project).await;
+    enrich_all_unpriced(data_dir.as_path(), &project);
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
+}
+
+/// Writes terminal sidecar entries (local→Free/null) for all non-OpenRouter
+/// unpriced rows. No HTTP; unfetched OpenRouter rows stay `deferred` that pass.
+fn enrich_all_unpriced(data_dir: &std::path::Path, project: &str) {
+    if let Err(e) =
+        speedwave_runtime::usage_cost::enrich_cost_with_in(data_dir, project, &|_gen_id| None)
+    {
+        log::warn!("cost sidecar write failed for project '{project}': {e}");
+    }
 }
 
 /// Summed session cost (USD) from the proxy cost sidecar (sole aggregator,
@@ -78,6 +91,7 @@ pub async fn get_session_cost(project: String) -> Option<f64> {
 pub async fn get_conversation_cost(project: String, response_ids: Vec<String>) -> Option<f64> {
     let data_dir = speedwave_runtime::consts::data_dir();
     enrich_with_openrouter(data_dir.as_path(), &project).await;
+    enrich_all_unpriced(data_dir.as_path(), &project);
     speedwave_runtime::usage::conversation_cost_in(data_dir.as_path(), &project, &response_ids)
 }
 

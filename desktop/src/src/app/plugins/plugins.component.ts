@@ -326,7 +326,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
   /** Syncs the active project from ProjectStateService. */
   loadActiveProject(): void {
-    this.activeProject = this.projectState.activeProject;
+    this.activeProject = this.projectState.activeProject();
     this.cdr.markForCheck();
   }
 

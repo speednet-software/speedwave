@@ -109,9 +109,11 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 /// and the always-on fit test. See ADR-068.
 pub const MIN_SUPPORTED_HOST_GIB: u32 = 16;
 
-/// Desired Lima VM memory in GiB based on host RAM: half of host, clamped 8–32.
+/// Desired Lima VM memory in GiB: half of host RAM, clamped 4–32. Supported
+/// (≥16 GiB) hosts land on the ADR-068 8 GiB floor via `host/2`; smaller hosts
+/// must never get a VM above half their RAM (8 GiB host keeps a 4 GiB VM).
 pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
-    (host_ram_gib / 2).clamp(8, 32)
+    (host_ram_gib / 2).clamp(4, 32)
 }
 
 /// Host logical CPU count, or 8 on detection failure (→ 4 vCPU via `host/2`).
@@ -210,11 +212,29 @@ mod tests {
 
     #[test]
     fn vm_memory_small_hosts() {
-        // Floor at 8 GiB — (host/2).clamp(8, 32).
-        assert_eq!(desired_vm_memory_gib(16), 8);
-        assert_eq!(desired_vm_memory_gib(8), 8); // floor
-        assert_eq!(desired_vm_memory_gib(6), 8); // floor
-        assert_eq!(desired_vm_memory_gib(0), 8); // floor
+        // Floor never exceeds host/2: an 8 GiB host keeps its v0.13.3 4 GiB VM.
+        assert_eq!(desired_vm_memory_gib(8), 4);
+        assert_eq!(desired_vm_memory_gib(6), 4); // absolute floor 4
+        assert_eq!(desired_vm_memory_gib(0), 4); // absolute floor 4
+    }
+
+    #[test]
+    fn vm_memory_host_table() {
+        // Host-size table: 8/16/32/64 GiB hosts.
+        for (host, vm) in [(8u32, 4u32), (16, 8), (32, 16), (64, 32)] {
+            assert_eq!(desired_vm_memory_gib(host), vm, "host {host} GiB");
+        }
+    }
+
+    #[test]
+    fn vm_memory_never_exceeds_half_host() {
+        // A VM sized above host/2 starves macOS (swap-bound 8 GiB Macs).
+        for host in [8u32, 10, 12, 14, 16, 24, 32, 64, 128] {
+            assert!(
+                desired_vm_memory_gib(host) <= (host / 2).max(4),
+                "host {host} GiB: VM must not exceed host/2 (min 4)"
+            );
+        }
     }
 
     #[test]

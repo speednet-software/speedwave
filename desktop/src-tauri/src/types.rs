@@ -53,6 +53,37 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) default_base_url: Option<String>,
 }
 
+/// Auth-status discriminant derived from the `AuthStatusResponse` flags.
+/// Wire strings are snake_case: `no_provider` | `ready` | `auth_required`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthReadiness {
+    /// Fail-safe default: an absent/unknown status routes to provider setup.
+    #[default]
+    NoProvider,
+    Ready,
+    AuthRequired,
+}
+
+impl AuthReadiness {
+    /// SSOT derivation (mirrors `authStatusToProjectStatus` in
+    /// `project-state.service.ts`): no provider wins, then the R7 gate + flags.
+    pub(crate) fn derive(
+        provider_configured: bool,
+        needs_anthropic_auth: bool,
+        api_key_configured: bool,
+        oauth_authenticated: bool,
+    ) -> Self {
+        if !provider_configured {
+            return AuthReadiness::NoProvider;
+        }
+        if !needs_anthropic_auth || api_key_configured || oauth_authenticated {
+            return AuthReadiness::Ready;
+        }
+        AuthReadiness::AuthRequired
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
@@ -61,6 +92,38 @@ pub(crate) struct AuthStatusResponse {
     /// Whether the active provider needs Anthropic auth at all (R7); `false`
     /// for non-anthropic kinds, so the UI gate never blocks on the two flags.
     pub(crate) needs_anthropic_auth: bool,
+    /// False when the project has no active LLM provider (logout) — the UI shows
+    /// "choose a provider" instead of a fake-ready chat.
+    #[serde(default)]
+    pub(crate) provider_configured: bool,
+    /// Backend-derived discriminant (`AuthReadiness::derive`) — the frontend
+    /// consumes this instead of re-deriving from the raw flags above.
+    #[serde(default)]
+    pub(crate) status: AuthReadiness,
+}
+
+impl AuthStatusResponse {
+    /// Builds the response with `status` derived from the flags — the only
+    /// constructor, so no site can ship an inconsistent discriminant.
+    pub(crate) fn from_flags(
+        api_key_configured: bool,
+        oauth_authenticated: bool,
+        needs_anthropic_auth: bool,
+        provider_configured: bool,
+    ) -> Self {
+        Self {
+            api_key_configured,
+            oauth_authenticated,
+            needs_anthropic_auth,
+            provider_configured,
+            status: AuthReadiness::derive(
+                provider_configured,
+                needs_anthropic_auth,
+                api_key_configured,
+                oauth_authenticated,
+            ),
+        }
+    }
 }
 
 /// Update DTO for the LLM settings save path. Mirrors `LlmConfig` plus two
@@ -469,6 +532,103 @@ mod tests {
             !json.contains("context_tokens"),
             "context_tokens must be skipped when None, got: {json}"
         );
+    }
+
+    // ── AuthReadiness derivation (SSOT for the frontend discriminant) ──
+
+    #[test]
+    fn auth_readiness_no_provider_wins_over_everything() {
+        // provider_configured=false → NoProvider regardless of the other flags.
+        for needs in [false, true] {
+            for key in [false, true] {
+                for oauth in [false, true] {
+                    assert_eq!(
+                        AuthReadiness::derive(false, needs, key, oauth),
+                        AuthReadiness::NoProvider,
+                        "needs={needs} key={key} oauth={oauth}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auth_readiness_ready_when_no_anthropic_auth_needed() {
+        // R7: non-anthropic providers are ready without any credential flag.
+        assert_eq!(
+            AuthReadiness::derive(true, false, false, false),
+            AuthReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn auth_readiness_ready_with_api_key_or_oauth() {
+        assert_eq!(
+            AuthReadiness::derive(true, true, true, false),
+            AuthReadiness::Ready
+        );
+        assert_eq!(
+            AuthReadiness::derive(true, true, false, true),
+            AuthReadiness::Ready
+        );
+        assert_eq!(
+            AuthReadiness::derive(true, true, true, true),
+            AuthReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn auth_readiness_auth_required_only_without_credentials() {
+        assert_eq!(
+            AuthReadiness::derive(true, true, false, false),
+            AuthReadiness::AuthRequired
+        );
+    }
+
+    #[test]
+    fn auth_readiness_wire_strings_are_snake_case() {
+        let cases = [
+            (AuthReadiness::NoProvider, "\"no_provider\""),
+            (AuthReadiness::Ready, "\"ready\""),
+            (AuthReadiness::AuthRequired, "\"auth_required\""),
+        ];
+        for (v, wire) in cases {
+            assert_eq!(serde_json::to_string(&v).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<AuthReadiness>(wire).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn auth_status_missing_provider_configured_deserializes_to_no_provider() {
+        // Fail-safe: a legacy payload without `provider_configured`/`status`
+        // reads as false → derives NoProvider (provider setup, not fake-ready).
+        let json = r#"{
+            "api_key_configured": true,
+            "oauth_authenticated": true,
+            "needs_anthropic_auth": true
+        }"#;
+        let resp: AuthStatusResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.provider_configured);
+        assert_eq!(resp.status, AuthReadiness::NoProvider);
+        assert_eq!(
+            AuthReadiness::derive(
+                resp.provider_configured,
+                resp.needs_anthropic_auth,
+                resp.api_key_configured,
+                resp.oauth_authenticated,
+            ),
+            AuthReadiness::NoProvider
+        );
+    }
+
+    #[test]
+    fn auth_status_from_flags_populates_consistent_status() {
+        let resp = AuthStatusResponse::from_flags(false, true, true, true);
+        assert_eq!(resp.status, AuthReadiness::Ready);
+        let resp = AuthStatusResponse::from_flags(false, false, true, true);
+        assert_eq!(resp.status, AuthReadiness::AuthRequired);
+        let resp = AuthStatusResponse::from_flags(true, true, true, false);
+        assert_eq!(resp.status, AuthReadiness::NoProvider);
     }
 
     #[test]

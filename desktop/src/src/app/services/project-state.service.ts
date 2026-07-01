@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import type {
@@ -39,12 +39,18 @@ export type ProjectStatus =
   | 'starting'
   | 'rebuilding'
   | 'auth_required'
+  | 'no_provider'
   | 'ready'
   | 'switching'
   | 'error';
 
+/** Backend-derived auth readiness (Rust `AuthReadiness`, snake_case wire values). */
+export type AuthReadiness = 'no_provider' | 'ready' | 'auth_required';
+
 /** Backend response from the `get_auth_status` Tauri command. */
 export interface AuthStatusResponse {
+  /** Backend-derived discriminant (SSOT: Rust `AuthReadiness::derive`). */
+  status?: AuthReadiness;
   api_key_configured: boolean;
   oauth_authenticated: boolean;
   /**
@@ -52,20 +58,38 @@ export interface AuthStatusResponse {
    * non-anthropic providers, so the gate must not block on the credential flags.
    */
   needs_anthropic_auth: boolean;
+  /** False when the project has no active provider (logout) → "choose a provider". */
+  provider_configured: boolean;
+}
+
+/**
+ * Passes the backend `status` discriminant through (SSOT: Rust `AuthReadiness::derive`).
+ * @param auth - Raw auth status from the backend.
+ */
+export function authStatusToProjectStatus(auth: AuthStatusResponse): AuthReadiness {
+  if (auth.status) return auth.status;
+  // Fallback for payloads missing the discriminant; no_provider wins first.
+  if (!auth.provider_configured) return 'no_provider';
+  if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+    return 'ready';
+  }
+  return 'auth_required';
 }
 
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
 @Injectable({ providedIn: 'root' })
 export class ProjectStateService {
-  activeProject: string | null = null;
+  readonly activeProject = signal<string | null>(null);
   targetProject: string | null = null;
   /** All configured projects from `~/.speedwave/config.json`. */
   projects: ProjectEntry[] = [];
-  status: ProjectStatus = 'loading';
+  readonly status = signal<ProjectStatus>('loading');
   error = '';
   needsRestart = false;
   restarting = false;
   restartError = '';
+  /** Restart requested while status was pre-ready; surfaced once we settle. */
+  private pendingRestartOnSettle = false;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -89,6 +113,7 @@ export class ProjectStateService {
   private changeListeners: Array<() => void> = [];
   private readyListeners: Array<() => void> = [];
   private restartListeners: Array<() => void> = [];
+  private restartBeginListeners: Array<() => Promise<void>> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -132,6 +157,28 @@ export class ProjectStateService {
   }
 
   /**
+   * Subscribe to fire (and be awaited) BEFORE a container restart begins.
+   * @param cb - Listener invoked before restart; unsubscribe via the returned function.
+   */
+  onRestartBegin(cb: () => Promise<void>): () => void {
+    this.restartBeginListeners.push(cb);
+    return () => {
+      this.restartBeginListeners = this.restartBeginListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Awaits all begin-callbacks; a failing pre-restart hook must not block the restart. */
+  private async notifyRestartBegin(): Promise<void> {
+    for (const cb of this.restartBeginListeners) {
+      try {
+        await cb();
+      } catch {
+        /* intentional: see method doc */
+      }
+    }
+  }
+
+  /**
    * Registers a callback invoked when switching -> error. Returns unsubscribe.
    * @param cb - The callback to invoke with the error string.
    */
@@ -160,7 +207,7 @@ export class ProjectStateService {
     await this.setupListeners();
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
+      this.activeProject.set(result.active_project);
       this.projects = result.projects;
 
       // Check reconcile state before checking containers
@@ -168,7 +215,7 @@ export class ProjectStateService {
         'get_bundle_reconcile_state'
       );
       if (bundleStatus.in_progress) {
-        this.status = 'rebuilding';
+        this.status.set('rebuilding');
         this.notifyChange();
       } else {
         await this.ensureContainersRunning();
@@ -181,7 +228,7 @@ export class ProjectStateService {
       // Inside Tauri the initial project/reconcile lookup genuinely failed;
       // surface it instead of leaving the UI stuck on the loading overlay.
       const msg = err instanceof Error ? err.message : String(err);
-      this.status = 'error';
+      this.status.set('error');
       this.error = msg;
       this.log.error(`[ProjectStateService] init failed: ${msg}`);
       this.notifyChange();
@@ -199,70 +246,92 @@ export class ProjectStateService {
     }
   }
 
+  /** Resolves post-switch status via `get_auth_status` (no_provider vs ready vs auth_required). */
+  private async resolveSwitchSucceededStatus(): Promise<void> {
+    if (!this.activeProject()) return;
+    try {
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject(),
+      });
+      this.status.set(authStatusToProjectStatus(auth));
+      this.applyPendingRestartOnSettle();
+    } catch (err) {
+      this.status.set('error');
+      this.error = String(err);
+    }
+    this.notifyChange();
+    if (this.status() === 'ready') {
+      this.notifyReady();
+    } else if (this.status() === 'error') {
+      this.notifyFailed(this.error);
+    }
+    this.notifySettled();
+  }
+
   /** Checks OS prereqs, then verifies containers are running, starting them if not. */
   async ensureContainersRunning(): Promise<void> {
     if (
-      this.status === 'system_check' ||
-      this.status === 'checking' ||
-      this.status === 'starting' ||
-      this.status === 'auth_required'
+      this.status() === 'system_check' ||
+      this.status() === 'checking' ||
+      this.status() === 'starting' ||
+      this.status() === 'auth_required'
     ) {
       return; // guard: already in progress
     }
-    if (!this.activeProject) {
-      this.status = 'error';
+    if (!this.activeProject()) {
+      this.status.set('error');
       this.error = 'No active project selected.';
       this.notifyChange();
       return;
     }
 
     // Phase 1: OS prerequisite check
-    this.status = 'system_check';
+    this.status.set('system_check');
     this.error = '';
     this.notifyChange();
     try {
       await this.tauri.invoke('run_system_check');
     } catch (err) {
-      this.status = 'check_failed';
+      this.status.set('check_failed');
       this.error = String(err);
       this.notifyChange();
       return;
     }
 
     // Phase 2: check/start containers (includes SecurityCheck in backend)
-    this.status = 'checking';
+    this.status.set('checking');
     this.notifyChange();
     try {
       const running = await this.tauri.invoke<boolean>('check_containers_running', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       if (!running) {
-        this.status = 'starting';
+        this.status.set('starting');
         this.notifyChange();
         // Backend ensure_images_ready() blocks up to 600s (RECONCILE_WAIT_TIMEOUT in containers_cmd.rs).
         // The 'starting' overlay stays visible for the duration.
-        await this.tauri.invoke('start_containers', { project: this.activeProject });
+        await this.tauri.invoke('start_containers', { project: this.activeProject() });
       }
       // Phase 3: verify Claude authentication before declaring ready
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
-      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+      const next = authStatusToProjectStatus(auth);
+      if (next === 'ready') {
         // Phase 4: hold the overlay until the system is actually healthy.
         await this.waitForSystemHealthy();
-        this.status = 'ready';
-      } else {
-        this.status = 'auth_required';
       }
+      this.status.set(next);
+      this.applyPendingRestartOnSettle();
     } catch (err) {
       const msg = String(err);
       // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
       if (msg.startsWith('System check failed:')) {
-        this.status = 'check_failed';
+        this.status.set('check_failed');
         this.errorKind = undefined;
       } else if (msg.startsWith(CLOUDSTORAGE_TCC_PREFIX)) {
         // CloudStorage TCC denial — parse "{stable_id}|{dir}" from the prefix.
-        this.status = 'error';
+        this.status.set('error');
         this.errorKind = 'cloudstorage_tcc_required';
         const body = msg.slice(CLOUDSTORAGE_TCC_PREFIX.length);
         const pipeIdx = body.indexOf('|');
@@ -271,19 +340,19 @@ export class ProjectStateService {
           this.failureProjectDir = body.slice(pipeIdx + 1);
         }
       } else {
-        this.status = 'error';
+        this.status.set('error');
         this.errorKind = undefined;
       }
       this.error = msg;
     }
     this.notifyChange();
-    if (this.status === 'ready') {
+    if (this.status() === 'ready') {
       this.notifyReady();
       this.notifySettled();
-    } else if (this.status === 'error' || this.status === 'check_failed') {
+    } else if (this.status() === 'error' || this.status() === 'check_failed') {
       this.notifyFailed(this.error);
       this.notifySettled();
-    } else if (this.status === 'auth_required') {
+    } else if (this.status() === 'auth_required') {
       this.notifySettled();
     }
   }
@@ -299,7 +368,7 @@ export class ProjectStateService {
     for (;;) {
       try {
         const report = await this.tauri.invoke<HealthReport | undefined>('get_health', {
-          project: this.activeProject,
+          project: this.activeProject(),
         });
         // No report = health unverifiable (non-Tauri/test harness) — pass through.
         if (!report) return;
@@ -319,26 +388,27 @@ export class ProjectStateService {
 
   /** Re-checks Claude auth status after user completes authentication. */
   async retryAuth(): Promise<void> {
-    if (!this.activeProject) return;
+    if (!this.activeProject()) return;
     try {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
-      if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
+      const next = authStatusToProjectStatus(auth);
+      if (next === 'ready') {
         await this.waitForSystemHealthy();
-        this.status = 'ready';
+        this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       } else {
-        this.status = 'auth_required';
+        this.status.set(next);
         this.notifyChange();
       }
     } catch (err) {
       // Auth check failed (transient IPC) — not "unauthenticated", so surface a
       // retryable error instead of falling through to auth_required.
       const msg = err instanceof Error ? err.message : String(err);
-      this.status = 'error';
+      this.status.set('error');
       this.error = msg;
       this.log.error(`[ProjectStateService] retryAuth check failed: ${msg}`);
       this.notifyChange();
@@ -352,17 +422,30 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
-    if (!auth.needs_anthropic_auth || auth.api_key_configured || auth.oauth_authenticated) {
-      if (this.status === 'auth_required') {
-        this.status = 'ready';
+    const next = authStatusToProjectStatus(auth);
+    if (next === 'ready') {
+      // Only promote from a terminal pre-ready state; don't re-notify a live session.
+      if (this.status() === 'auth_required' || this.status() === 'no_provider') {
+        this.status.set('ready');
+        this.applyPendingRestartOnSettle();
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
       }
-    } else {
-      this.status = 'auth_required';
-      this.notifyChange();
+      return;
     }
+    // next is a pre-ready state (no_provider | auth_required). Never downgrade a
+    // live session: opening Settings must not blank a running chat on a transient
+    // or false negative (e.g. a dangling-active config reading provider_configured=false).
+    if (this.status() === 'ready') return;
+    this.status.set(next);
+    this.notifyChange();
+  }
+
+  /** Force-sets status to no_provider, skipping the never-downgrade guard. */
+  forceUnconfigured(): void {
+    this.status.set('no_provider');
+    this.notifyChange();
   }
 
   /**
@@ -374,7 +457,7 @@ export class ProjectStateService {
     this.failureProvider = undefined;
     this.failureProjectDir = undefined;
     this.error = '';
-    this.status = 'loading';
+    this.status.set('loading');
     this.notifyChange();
     await this.ensureContainersRunning();
   }
@@ -383,16 +466,16 @@ export class ProjectStateService {
   async dismissError(): Promise<void> {
     try {
       const running = await this.tauri.invoke<boolean>('check_containers_running', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       if (running) {
-        this.status = 'ready';
+        this.status.set('ready');
         this.error = '';
       } else {
         this.error = 'Containers are not running. Click Retry to start them.';
       }
     } catch {
-      this.status = 'ready';
+      this.status.set('ready');
       this.error = '';
     }
     this.notifyChange();
@@ -400,8 +483,35 @@ export class ProjectStateService {
 
   /** Marks that pending changes require a container restart. */
   requestRestart(): void {
+    // On a not-yet-started project (no_provider) the restart overlay never
+    // renders, so needsRestart is a dead flag — start the containers instead.
+    if (this.status() === 'no_provider') {
+      void this.ensureContainersRunning();
+      return;
+    }
+    // The overlay only renders in ready/auth_required. Mid-switch/mid-start it
+    // would be a dead flag, so defer and surface it on settle instead.
+    if (this.status() !== 'ready' && this.status() !== 'auth_required') {
+      this.pendingRestartOnSettle = true;
+      return;
+    }
     this.needsRestart = true;
     this.notifyChange();
+  }
+
+  /** Promotes a deferred restart request to a live needsRestart once ready. */
+  private applyPendingRestartOnSettle(): void {
+    if (!this.pendingRestartOnSettle) return;
+    // Settling on no_provider voids the intent: nothing is running to restart,
+    // and configuring a provider later starts containers fresh anyway.
+    if (this.status() === 'no_provider') {
+      this.pendingRestartOnSettle = false;
+      return;
+    }
+    if (this.status() === 'ready' || this.status() === 'auth_required') {
+      this.pendingRestartOnSettle = false;
+      this.needsRestart = true;
+    }
   }
 
   /**
@@ -419,8 +529,8 @@ export class ProjectStateService {
 
   /** Restarts integration containers; backend rebuilds missing worker images. */
   async restartContainers(): Promise<void> {
-    if (!this.activeProject || this.restarting) return;
-    const project = this.activeProject;
+    if (!this.activeProject() || this.restarting) return;
+    const project = this.activeProject();
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
@@ -428,6 +538,7 @@ export class ProjectStateService {
 
     let restartedOk = false;
     try {
+      await this.notifyRestartBegin();
       await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;
@@ -449,6 +560,9 @@ export class ProjectStateService {
     this.pendingJustEnabled = null;
     this.notifyChange();
     if (restartedOk) {
+      // Re-check auth: a provider switch may have cleared the need for it, so a
+      // stale auth_required must not survive the restart.
+      if (this.status() === 'auth_required') await this.retryAuth();
       this.notifyReady();
       this.notifySettled();
       // Distinct from a plain ready: the chat layer resumes the live session so
@@ -495,34 +609,34 @@ export class ProjectStateService {
     try {
       await this.tauri.listen<{ project: string }>('project_switch_started', (event) => {
         this.targetProject = event.payload.project;
-        this.status = 'switching';
+        this.status.set('switching');
         this.error = '';
         this.errorKind = undefined;
         this.failureProvider = undefined;
         this.failureProjectDir = undefined;
         this.needsRestart = false;
+        this.pendingRestartOnSettle = false;
         this.restarting = false;
         this.restartError = '';
         this.notifyChange();
       });
 
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
-        this.activeProject = event.payload.project;
+        this.activeProject.set(event.payload.project);
         this.targetProject = null;
-        this.status = 'ready';
         this.error = '';
-        this.notifyChange();
-        this.notifyReady();
-        this.notifySettled();
+        // A no-provider project has no containers to start — status must
+        // reflect that, not be hardcoded to 'ready'.
+        void this.resolveSwitchSucceededStatus();
         // Fire-and-forget list refresh so consumers eventually see added/renamed
         // entries; a stale list for one tick is acceptable.
         void this.refreshProjectList();
       });
 
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
-        this.activeProject = event.payload.project;
+        this.activeProject.set(event.payload.project);
         this.targetProject = null;
-        this.status = 'error';
+        this.status.set('error');
         this.error = event.payload.error;
         this.errorKind = event.payload.error_kind;
         this.failureProvider = event.payload.provider;
@@ -536,24 +650,24 @@ export class ProjectStateService {
         // Ignore reconcile events during active operations — backend
         // ensure_images_ready() already blocks those operations.
         if (
-          this.status === 'switching' ||
-          this.status === 'starting' ||
-          this.status === 'checking' ||
-          this.status === 'auth_required'
+          this.status() === 'switching' ||
+          this.status() === 'starting' ||
+          this.status() === 'checking' ||
+          this.status() === 'auth_required'
         ) {
           return;
         }
         if (event.payload.in_progress) {
-          this.status = 'rebuilding';
+          this.status.set('rebuilding');
           this.error = '';
           this.notifyChange();
         } else if (event.payload.last_error) {
-          this.status = 'error';
+          this.status.set('error');
           this.error = event.payload.last_error;
           this.notifyChange();
         } else {
           // Reconcile done — if we were rebuilding, check containers
-          if (this.status === 'rebuilding') {
+          if (this.status() === 'rebuilding') {
             this.ensureContainersRunning();
           }
         }

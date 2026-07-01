@@ -71,8 +71,13 @@ pub enum StreamChunk {
     },
     /// Error from the Claude subprocess.
     Error { content: String },
-    /// Session init metadata — model name from system init message.
-    SystemInit { model: String },
+    /// Session init metadata — model + session id from the system init message.
+    /// `session_id` lets the frontend queue/retry during the FIRST turn (ADR-045).
+    SystemInit {
+        model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Rate limit event — utilization and reset info.
     RateLimit {
         status: String,
@@ -216,6 +221,29 @@ impl TurnUsage {
                 .saturating_sub(previous.cache_write_tokens),
         }
     }
+}
+
+/// JSONL `usage` field names (Anthropic schema) — SSOT for the result reader,
+/// `history.rs` transcript parsing, and the resume-snapshot summing.
+pub(crate) const USAGE_INPUT_TOKENS: &str = "input_tokens";
+pub(crate) const USAGE_OUTPUT_TOKENS: &str = "output_tokens";
+pub(crate) const USAGE_CACHE_READ_TOKENS: &str = "cache_read_input_tokens";
+pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
+/// Legacy flat cache names some CLI builds emit in `result.usage`.
+pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
+pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
+
+/// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
+/// malformed fields. `None` when `usage` is not a JSON object.
+pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
+    let obj = usage.as_object()?;
+    let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    Some(TurnUsage {
+        input_tokens: read(USAGE_INPUT_TOKENS),
+        output_tokens: read(USAGE_OUTPUT_TOKENS),
+        cache_read_tokens: read(USAGE_CACHE_READ_TOKENS),
+        cache_write_tokens: read(USAGE_CACHE_WRITE_TOKENS),
+    })
 }
 
 /// Tool name constant for the AskUserQuestion tool.
@@ -853,17 +881,19 @@ impl StreamParser {
             self.last_model = Some(m.to_string());
         }
 
+        // Option-preserving reader (absent cache fields stay `None` for the UI);
+        // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(UsageInfo {
-                input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: u["cache_read_input_tokens"]
+                input_tokens: u[USAGE_INPUT_TOKENS].as_u64().unwrap_or(0),
+                output_tokens: u[USAGE_OUTPUT_TOKENS].as_u64().unwrap_or(0),
+                cache_read_tokens: u[USAGE_CACHE_READ_TOKENS]
                     .as_u64()
-                    .or_else(|| u["cache_read_tokens"].as_u64()),
-                cache_write_tokens: u["cache_creation_input_tokens"]
+                    .or_else(|| u[USAGE_CACHE_READ_TOKENS_LEGACY].as_u64()),
+                cache_write_tokens: u[USAGE_CACHE_WRITE_TOKENS]
                     .as_u64()
-                    .or_else(|| u["cache_write_tokens"].as_u64()),
+                    .or_else(|| u[USAGE_CACHE_WRITE_TOKENS_LEGACY].as_u64()),
             })
         } else {
             None
@@ -963,9 +993,13 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // ── Extract model from system init message ──
+        // ── Extract model + session id from system init message ──
         // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
+            let session_id = parsed["session_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     // Cache the model for subsequent result chunks.
@@ -977,12 +1011,25 @@ impl StreamParser {
                     return (
                         Some(StreamChunk::SystemInit {
                             model: model.to_string(),
+                            session_id,
                         }),
                         log_entry,
                     );
                 }
             }
-            // "init" subtype but model missing/empty — fall through to text logic.
+            // Model missing/empty — still surface the session id (ADR-045 first-turn queue).
+            if session_id.is_some() {
+                return (
+                    Some(StreamChunk::SystemInit {
+                        model: String::new(),
+                        session_id,
+                    }),
+                    Some(LogEntry {
+                        prefix: "SYSTEM",
+                        message: "init".to_string(),
+                    }),
+                );
+            }
         }
 
         // System messages carry text in either `message` or `content`
@@ -3314,39 +3361,51 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "claude-opus-4-6");
+                assert!(session_id.is_none());
+            }
             other => panic!("expected SystemInit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_system_init_with_extra_fields() {
+    fn parse_system_init_extracts_session_id_with_model() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6","session_id":"abc","tools":["Read","Write"],"mcp_servers":[],"message":""}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "claude-opus-4-6");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+            }
             other => panic!("expected SystemInit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_system_init_without_model_falls_through() {
+    fn parse_system_init_without_model_still_surfaces_session_id() {
+        // ADR-045: the first-turn queue needs the session id even when the
+        // init line lacks a model.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init without model field should fall through and produce None"
-        );
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+            }
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_system_init_with_empty_model_falls_through() {
+    fn parse_system_init_with_empty_model_and_no_session_falls_through() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":""}"#;
         assert!(
             parse_line_str(&mut parser, line).is_none(),
-            "init with empty model should fall through and produce None"
+            "init with empty model and no session id should fall through and produce None"
         );
     }
 
@@ -3383,8 +3442,10 @@ mod tests {
 
     #[test]
     fn stream_chunk_system_init_round_trips() {
+        // No session id → field omitted (wire shape unchanged for old events).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
+            session_id: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
@@ -3393,9 +3454,23 @@ mod tests {
         );
         let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
         match deserialized {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "test"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "test");
+                assert!(session_id.is_none());
+            }
             other => panic!("expected SystemInit after round-trip, got {other:?}"),
         }
+
+        // With session id → serialized for the frontend (ADR-045 first-turn queue).
+        let chunk = StreamChunk::SystemInit {
+            model: "test".to_string(),
+            session_id: Some("abc".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
+        );
     }
 
     #[test]
@@ -4973,6 +5048,58 @@ mod tests {
         assert_eq!(delta.output_tokens, 0);
         assert_eq!(delta.cache_read_tokens, 0);
         assert_eq!(delta.cache_write_tokens, 0);
+    }
+
+    // ── turn_usage_from_jsonl (JSONL usage SSOT) ────────────────────
+
+    #[test]
+    fn turn_usage_from_jsonl_maps_all_fields() {
+        let u = serde_json::json!({
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cache_read_input_tokens": 56,
+            "cache_creation_input_tokens": 78,
+        });
+        let turn = turn_usage_from_jsonl(&u).expect("object must parse");
+        assert_eq!(turn.input_tokens, 12);
+        assert_eq!(turn.output_tokens, 34);
+        assert_eq!(turn.cache_read_tokens, 56);
+        assert_eq!(turn.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_zero_fills_missing_fields() {
+        let u = serde_json::json!({ "input_tokens": 5 });
+        let turn = turn_usage_from_jsonl(&u).expect("partial object must parse");
+        assert_eq!(turn.input_tokens, 5);
+        assert_eq!(turn.output_tokens, 0);
+        assert_eq!(turn.cache_read_tokens, 0);
+        assert_eq!(turn.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_zero_fills_malformed_values() {
+        // Non-u64 values (string, negative, float, null) read as 0, not an error.
+        let u = serde_json::json!({
+            "input_tokens": "many",
+            "output_tokens": -3,
+            "cache_read_input_tokens": 1.5,
+            "cache_creation_input_tokens": null,
+        });
+        let turn = turn_usage_from_jsonl(&u).expect("object must parse");
+        assert_eq!(turn, TurnUsage::default());
+    }
+
+    #[test]
+    fn turn_usage_from_jsonl_non_object_is_none() {
+        for v in [
+            serde_json::Value::Null,
+            serde_json::json!("usage"),
+            serde_json::json!(7),
+            serde_json::json!([1, 2]),
+        ] {
+            assert!(turn_usage_from_jsonl(&v).is_none(), "expected None for {v}");
+        }
     }
 
     #[test]

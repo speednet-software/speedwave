@@ -58,6 +58,12 @@ pub struct ConversationMessage {
     /// `None` when the line lacks a `uuid` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
+    /// Per-message model id (assistant turns only); restores the resumed footer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-message token usage (assistant turns only). Reuses the chat SSOT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::chat::TurnUsage>,
 }
 
 /// Full transcript of a conversation.
@@ -278,6 +284,8 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             }]),
             timestamp,
             uuid,
+            model: None,
+            usage: None,
         });
     }
 
@@ -315,6 +323,8 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             blocks: Some(rich_blocks),
             timestamp,
             uuid,
+            model: None,
+            usage: None,
         });
     }
 
@@ -375,12 +385,20 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         parts.join("\n")
     };
 
+    let model = message["model"].as_str().map(String::from);
+    // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
+    let usage = message
+        .get("usage")
+        .and_then(crate::chat::turn_usage_from_jsonl);
+
     Some(ConversationMessage {
         role: "assistant".to_string(),
         content: flat_content,
         blocks: Some(rich_blocks),
         timestamp,
         uuid,
+        model,
+        usage,
     })
 }
 
@@ -405,6 +423,8 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
             }]),
             timestamp,
             uuid: uuid.clone(),
+            model: None,
+            usage: None,
         });
     }
 
@@ -416,6 +436,8 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
         }]),
         timestamp,
         uuid,
+        model: None,
+        usage: None,
     })
 }
 
@@ -726,21 +748,23 @@ fn compute_resume_snapshot_impl(
                     latest_cost = Some(cost);
                 }
                 if let Some(usage) = parsed.get("usage") {
+                    // Summing keeps its legacy-name fallback; field names are
+                    // the chat SSOT consts (cf. `turn_usage_from_jsonl`).
                     let read_u64 = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64);
                     summed.input_tokens = summed
                         .input_tokens
-                        .saturating_add(read_u64("input_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_INPUT_TOKENS).unwrap_or(0));
                     summed.output_tokens = summed
                         .output_tokens
-                        .saturating_add(read_u64("output_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_OUTPUT_TOKENS).unwrap_or(0));
                     summed.cache_read_tokens = summed.cache_read_tokens.saturating_add(
-                        read_u64("cache_read_input_tokens")
-                            .or_else(|| read_u64("cache_read_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_READ_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_READ_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                     summed.cache_write_tokens = summed.cache_write_tokens.saturating_add(
-                        read_u64("cache_creation_input_tokens")
-                            .or_else(|| read_u64("cache_write_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                 }
@@ -1115,6 +1139,65 @@ mod tests {
         let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.uuid.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_extracts_model_and_usage() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":12,"output_tokens":34,"cache_read_input_tokens":56,"cache_creation_input_tokens":78}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
+        let usage = msg.usage.expect("usage must be present");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 34);
+        // cache_read_input_tokens → cache_read_tokens
+        assert_eq!(usage.cache_read_tokens, 56);
+        // cache_creation_input_tokens → cache_write_tokens
+        assert_eq!(usage.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn parse_assistant_message_usage_missing_fields_default_zero() {
+        // A `usage` object with only partial fields zero-fills the rest.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"haiku-4.5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        let usage = msg.usage.expect("usage must be present");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_assistant_message_without_usage_leaves_none() {
+        // No `usage` object — `usage` stays None (model still parsed when present).
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_null_usage_is_none() {
+        // `usage: null` is not an object — None, not a zero-filled TurnUsage.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":null}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_user_message_has_no_model_or_usage() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.model.is_none());
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_result_message_has_no_model_or_usage() {
+        let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.model.is_none());
+        assert!(msg.usage.is_none());
     }
 
     #[test]

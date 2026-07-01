@@ -262,16 +262,11 @@ creds_valid() {
     # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
     [ -s "$f" ] && [ "$(tr -d '[:space:]' < "$f" | tail -c 1)" = "}" ]
 }
+# Fresh file: write the always-on /workspace trust+onboarding skeleton (no creds
+# needed — both are per-workspace, independent of login).
 if [ ! -f "${HOME}/.claude.json" ]; then
-    if creds_valid; then
-        onboarding='"hasCompletedOnboarding": true,
-  "installMethod": "native",'
-    else
-        onboarding=''
-    fi
-    cat > "${HOME}/.claude.json" << EOF
+    cat > "${HOME}/.claude.json" << 'EOF'
 {
-  ${onboarding}
   "projects": {
     "/workspace": {
       "hasTrustDialogAccepted": true,
@@ -280,6 +275,30 @@ if [ ! -f "${HOME}/.claude.json" ]; then
   }
 }
 EOF
+fi
+# Merge runs only when logged in: it owns the login-gated top-level fields and
+# re-asserts the /workspace booleans (also seeded by the fresh skeleton above).
+if creds_valid; then
+    node -e "
+const fs = require('fs');
+const p = '${HOME}/.claude.json';
+let j;
+try { j = JSON.parse(fs.readFileSync(p, 'utf8')); }
+catch { console.error('entrypoint: .claude.json unparseable — onboarding merge skipped'); process.exit(0); }
+let changed = false;
+if (j.hasCompletedOnboarding !== true) { j.hasCompletedOnboarding = true; changed = true; }
+if (j.installMethod == null) { j.installMethod = 'native'; changed = true; }
+j.projects = j.projects || {};
+const ws = j.projects['/workspace'] || {};
+if (ws.hasTrustDialogAccepted !== true) { ws.hasTrustDialogAccepted = true; changed = true; }
+if (ws.hasCompletedProjectOnboarding !== true) { ws.hasCompletedProjectOnboarding = true; changed = true; }
+j.projects['/workspace'] = ws;
+if (changed) {
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
+  fs.renameSync(tmp, p);
+}
+" || echo 'entrypoint: .claude.json onboarding merge skipped' >&2
 fi
 
 

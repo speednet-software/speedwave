@@ -7,8 +7,9 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 @Component({
   selector: 'app-spin-icon',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  // Default to a 14px square; the host class can override (e.g. `h-8 w-8`).
-  host: { class: 'inline-block h-3.5 w-3.5' },
+  // `block` (not inline-block) so the SVG box has no baseline gap — inline-block
+  // makes the small spinner rotate on an ellipse in WKWebView. 14px default size.
+  host: { class: 'block h-3.5 w-3.5' },
   template: `
     <svg
       [attr.data-testid]="testId() || null"

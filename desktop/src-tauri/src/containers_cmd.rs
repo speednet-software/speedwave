@@ -287,6 +287,28 @@ pub(crate) fn switch_project_core(
 // Compose helpers — resolve config, render, security check, save
 // ---------------------------------------------------------------------------
 
+/// True when `project` has no resolvable LLM provider (SSOT:
+/// `LlmConfig::is_unconfigured`) — callers must skip starting containers.
+pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    project_llm_is_unconfigured_in(&user_config, project)
+}
+
+/// Testable variant of [`project_llm_is_unconfigured`] taking an explicit config.
+fn project_llm_is_unconfigured_in(
+    user_config: &config::SpeedwaveUserConfig,
+    project: &str,
+) -> Result<bool, String> {
+    let project_dir = user_config
+        .find_project(project)
+        .map(|p| p.dir.clone())
+        .ok_or_else(|| format!("project '{}' not found", project))?;
+    let project_path = std::path::Path::new(&project_dir);
+    let (resolved, _integrations) =
+        config::resolve_project_config(project_path, user_config, project);
+    Ok(resolved.llm.is_unconfigured())
+}
+
 /// Renders a project's compose.yml and saves it after security check. Caller
 /// MUST pre-build images — passes `None` to render_compose (ADR-066).
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
@@ -532,6 +554,12 @@ pub async fn add_project(
             if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
+            // No provider is a valid state ("choose a provider" screen) —
+            // skip starting containers rather than let render_compose bail.
+            if project_llm_is_unconfigured(proj)? {
+                log::info!("add_project: '{proj}' has no LLM provider — skipping container start");
+                return Ok(());
+            }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
             crate::ensure_oauth_running(&oauth_arc, proj);
@@ -671,6 +699,24 @@ pub async fn start_containers(
     Ok(())
 }
 
+/// Wizard step 4 for a project with no LLM provider yet — marks the step
+/// done without starting containers. See `setup_wizard::defer_container_start`.
+#[tauri::command]
+pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        check_project(&project)?;
+        setup_wizard::defer_container_start(&project).map_err(|e| {
+            log::error!("defer_container_start: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
@@ -681,6 +727,14 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
         // containers" signal where compose_ps() would Err (confusing UX).
         if !rt.is_available() {
             log::warn!("check_containers_running: runtime not available");
+            return Ok(false);
+        }
+        // A deferred-start project (no LLM provider yet) has no compose.yml
+        // at all — compose_ps would Err rather than report "not running".
+        let compose_file =
+            speedwave_runtime::runtime::compose_file_path(&project).map_err(|e| e.to_string())?;
+        if !std::path::Path::new(&compose_file).exists() {
+            log::info!("check_containers_running: no compose.yml yet for '{project}'");
             return Ok(false);
         }
         let containers = rt.compose_ps(&project).map_err(|e| {
@@ -947,7 +1001,17 @@ fn apply_llm_config(
 /// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
 /// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
-pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
+pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
+    // Canonicalize loopback hosts before validation so the persisted base_url
+    // is the one the proxy container can reach.
+    if config::is_local_provider(update.provider.as_deref()) {
+        if let Some(url) = update.base_url.as_deref() {
+            update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+        }
+    }
+    if let Some(ref mut providers) = update.providers {
+        canonicalize_provider_base_urls(providers);
+    }
     log::info!(
         "update_llm_config: provider={:?} model={:?} context_tokens={:?} \
          api_key_change={} custom_headers_change={}",
@@ -1118,6 +1182,19 @@ fn validate_active_selection(
     Ok(())
 }
 
+/// Rewrites local entries' loopback base_url to the gateway alias, since only
+/// that alias is reachable from inside the proxy container.
+fn canonicalize_provider_base_urls(providers: &mut [speedwave_runtime::config::LlmProviderEntry]) {
+    use speedwave_runtime::config::LlmProviderKind;
+    for entry in providers {
+        if entry.kind == LlmProviderKind::Local {
+            if let Some(url) = entry.base_url.as_deref() {
+                entry.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+            }
+        }
+    }
+}
+
 /// Validates a v2 provider list before save (ADR-073): slug ids, no
 /// duplicates, SSRF-clean base URLs where the kind requires one.
 fn validate_provider_entries(
@@ -1223,6 +1300,29 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
                     "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
                 );
             }
+        }
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
+/// Clears the active LLM provider (logout → no provider). `update_llm_config`
+/// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
+#[tauri::command]
+pub fn clear_active_llm_provider() -> Result<(), String> {
+    log::info!("clear_active_llm_provider");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            llm.active = None;
         }
         config::save_user_config(&user_config)?;
         Ok(())
@@ -1712,6 +1812,49 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_provider_base_urls_rewrites_only_local_loopback() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let mut providers = vec![
+            // Local loopback → rewritten to the gateway alias.
+            v2_entry("local", K::Local, Some("http://127.0.0.1:1234")),
+            // Local localhost → rewritten.
+            v2_entry("local2", K::Local, Some("http://localhost:11434")),
+            // Local non-loopback (real LAN box) → untouched.
+            v2_entry("remote", K::Local, Some("http://192.168.5.10:1234")),
+            // Non-local kinds → never touched, even with a base_url present.
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+        ];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(
+            providers[0].base_url.as_deref(),
+            Some(format!("http://{alias}:1234/").as_str())
+        );
+        assert_eq!(
+            providers[1].base_url.as_deref(),
+            Some(format!("http://{alias}:11434/").as_str())
+        );
+        assert_eq!(
+            providers[2].base_url.as_deref(),
+            Some("http://192.168.5.10:1234"),
+            "real LAN server must not be rewritten"
+        );
+        assert_eq!(providers[3].base_url, None);
+        assert_eq!(providers[4].base_url, None);
+    }
+
+    #[test]
+    fn canonicalize_provider_base_urls_is_idempotent() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let canonical = format!("http://{alias}:1234/");
+        let mut providers = vec![v2_entry("local", K::Local, Some(&canonical))];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(providers[0].base_url.as_deref(), Some(canonical.as_str()));
+    }
+
+    #[test]
     fn validate_provider_entries_rejects_flag_shaped_model() {
         use speedwave_runtime::config::LlmProviderKind as K;
         let mut entry = v2_entry("openrouter", K::OpenRouter, None);
@@ -1788,6 +1931,23 @@ mod tests {
             err.contains("ghost") && err.contains("not in the provider list"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
+        // Structural: the command must clear active (not merge-preserve it like
+        // update_llm_config) and persist through the standard lock/save path.
+        let src = include_str!("containers_cmd.rs");
+        let start = src
+            .find("pub fn clear_active_llm_provider(")
+            .expect("clear_active_llm_provider command must exist");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        assert!(body.contains("llm.active = None"), "must clear active");
+        assert!(
+            body.contains("with_config_lock"),
+            "must use the config lock"
+        );
+        assert!(body.contains("save_user_config"), "must persist");
     }
 
     #[test]
@@ -2076,6 +2236,33 @@ mod tests {
     fn get_default_base_url_returns_none_for_unknown_provider() {
         let result = get_default_base_url("openai".to_string()).unwrap();
         assert_eq!(result, None);
+    }
+
+    // -- project_llm_is_unconfigured_in tests --
+
+    #[test]
+    fn project_llm_is_unconfigured_in_true_for_fresh_project() {
+        // alpha has no claude override at all — the fresh, first-class no-provider state.
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "alpha");
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn project_llm_is_unconfigured_in_false_for_configured_provider() {
+        // beta has an unmigrated legacy `provider: anthropic` — resolve_project_config
+        // runs it through migrate_llm, so it resolves to a usable active provider.
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "beta");
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn project_llm_is_unconfigured_in_errors_for_unknown_project() {
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "ghost");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 
     // -- MockRuntime for switch/teardown tests --
@@ -2426,6 +2613,48 @@ mod tests {
         );
     }
 
+    /// Compose file check must precede compose_ps (else nerdctl fatally errors).
+    #[test]
+    fn check_containers_running_checks_compose_file_before_compose_ps() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn check_containers_running(")
+            .expect("check_containers_running must exist");
+        let body = &source[fn_start..];
+        let exists_pos = body
+            .find("compose_file).exists()")
+            .expect("check_containers_running must check the compose file exists");
+        let ps_pos = body
+            .find("rt.compose_ps(&project)")
+            .expect("check_containers_running must call compose_ps");
+        assert!(
+            exists_pos < ps_pos,
+            "compose.yml existence check must precede compose_ps"
+        );
+    }
+
+    /// Structural: add_project's closure must check for a missing LLM provider
+    /// BEFORE calling start_containers — otherwise render_compose bails and
+    /// teardown_only is attempted against a compose.yml that was never written.
+    #[test]
+    fn add_project_checks_no_provider_before_start() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist");
+        let body = &source[fn_start..];
+        let check_pos = body
+            .find("project_llm_is_unconfigured(proj)")
+            .expect("add_project closure must pre-check for a missing provider");
+        let start_pos = body
+            .find("start_containers(proj)")
+            .expect("add_project closure must call start_containers");
+        assert!(
+            check_pos < start_pos,
+            "no-provider check must precede start_containers"
+        );
+    }
+
     // -- add_project flow tests: switch_project_core with a closure that calls
     //    check_project + start_containers (previous handed back for teardown) --
 
@@ -2517,6 +2746,34 @@ mod tests {
         // No previous → no down, only up(new)
         assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
+    }
+
+    /// A closure that skips to `Ok(())` for a no-provider project must
+    /// succeed with no compose_up/compose_down calls at all.
+    #[test]
+    fn add_project_skips_start_when_no_provider_configured() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let cfg = make_config_with_active_project();
+        let prev = Some("prev".to_string());
+        let recreate = |proj: &str, _rt: &speedwave_runtime::runtime::LockedRuntime| {
+            if project_llm_is_unconfigured_in(&cfg, proj).unwrap_or(false) {
+                return Ok(());
+            }
+            panic!("test project must be unconfigured");
+        };
+        let result = switch_project_core(&prev, "alpha", &rt, &recreate);
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(
+            handles.down_projects().is_empty(),
+            "no-provider path must never attempt teardown"
+        );
+        assert!(
+            handles.up_projects().is_empty(),
+            "no-provider path must never attempt compose_up"
+        );
     }
 
     #[test]

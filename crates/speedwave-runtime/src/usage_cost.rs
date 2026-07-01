@@ -16,7 +16,7 @@ pub enum CostSource {
     Catalog,
     /// Anthropic OAuth — billed on the subscription, no per-call USD.
     Subscription,
-    /// Local custom-URL server — no charge ($0.00).
+    /// Local custom-URL server — no charge; cost is `null` (shown as `—`, not $0.00).
     Free,
     /// Real cost fetched from OpenRouter `/generation`.
     Actual,
@@ -65,13 +65,14 @@ pub struct CostEntry {
 }
 
 impl CostEntry {
-    /// Builds an entry, debug-asserting the source↔cost invariant.
+    /// Builds an entry, enforcing the source↔cost invariant: debug builds
+    /// assert (documents intent), release builds clamp via [`normalize_cost`].
     pub(crate) fn new(response_id: String, cost_usd: Option<f64>, cost_source: CostSource) -> Self {
         debug_assert!(
             match cost_source {
                 CostSource::Catalog | CostSource::Actual => cost_usd.is_some(),
-                CostSource::Free => cost_usd == Some(0.0),
                 CostSource::Subscription
+                | CostSource::Free
                 | CostSource::Unknown
                 | CostSource::Deferred
                 | CostSource::Failed => cost_usd.is_none(),
@@ -80,9 +81,22 @@ impl CostEntry {
         );
         CostEntry {
             response_id,
-            cost_usd,
+            cost_usd: normalize_cost(cost_usd, cost_source),
             cost_source,
         }
+    }
+}
+
+/// Release-path clamp for the source↔cost invariant (invariant 6): an unpriced
+/// source never carries a cost — `null`, never collapsed to `0.0`.
+fn normalize_cost(cost_usd: Option<f64>, cost_source: CostSource) -> Option<f64> {
+    match cost_source {
+        CostSource::Catalog | CostSource::Actual => cost_usd,
+        CostSource::Subscription
+        | CostSource::Free
+        | CostSource::Unknown
+        | CostSource::Deferred
+        | CostSource::Failed => None,
     }
 }
 
@@ -122,7 +136,7 @@ pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher
             None => (None, CostSource::Unknown),
         },
         "anthropic_oauth" => (None, CostSource::Subscription),
-        "local" => (Some(0.0), CostSource::Free),
+        "local" => (None, CostSource::Free),
         // With a gen_id the cost is still fetchable later → `deferred` (retryable);
         // without one no source exists → `unknown` (terminal).
         "openrouter" => match r.gen_id.as_deref().filter(|g| !g.is_empty()) {
@@ -377,9 +391,10 @@ mod tests {
     }
 
     #[test]
-    fn local_cost_is_zero_free() {
+    fn local_cost_is_null_free() {
+        // Local is no-charge: cost is null (rendered `—`), never $0.00 (invariant 6).
         let e = compute_cost_with(&record("local", "qwen3", 100, 100, 0, 0), &|_| None);
-        assert_eq!(e.cost_usd, Some(0.0));
+        assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, CostSource::Free);
     }
 
@@ -762,7 +777,7 @@ mod tests {
         // Each source paired with its legal cost; the debug_assert must not fire.
         CostEntry::new("a".into(), Some(1.0), CostSource::Catalog);
         CostEntry::new("b".into(), Some(0.5), CostSource::Actual);
-        CostEntry::new("c".into(), Some(0.0), CostSource::Free);
+        CostEntry::new("c".into(), None, CostSource::Free);
         CostEntry::new("d".into(), None, CostSource::Subscription);
         CostEntry::new("e".into(), None, CostSource::Unknown);
         CostEntry::new("f".into(), None, CostSource::Deferred);
@@ -779,6 +794,35 @@ mod tests {
     #[should_panic(expected = "CostEntry invariant")]
     fn cost_entry_new_rejects_subscription_with_cost() {
         CostEntry::new("x".into(), Some(1.0), CostSource::Subscription);
+    }
+
+    #[test]
+    fn normalize_cost_clamps_unpriced_sources_to_none() {
+        // Release-path clamp: `new` runs this after the debug_assert, so a
+        // release build can never emit Free/0.0 (invariant 6).
+        for src in [
+            CostSource::Subscription,
+            CostSource::Free,
+            CostSource::Unknown,
+            CostSource::Deferred,
+            CostSource::Failed,
+        ] {
+            assert_eq!(normalize_cost(Some(0.0), src), None, "{src:?}");
+            assert_eq!(normalize_cost(Some(1.5), src), None, "{src:?}");
+            assert_eq!(normalize_cost(None, src), None, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_cost_keeps_priced_sources_intact() {
+        assert_eq!(normalize_cost(Some(1.5), CostSource::Catalog), Some(1.5));
+        assert_eq!(
+            normalize_cost(Some(0.0042), CostSource::Actual),
+            Some(0.0042)
+        );
+        // A priced source with no cost stays None (fail-safe: never fabricate).
+        assert_eq!(normalize_cost(None, CostSource::Catalog), None);
+        assert_eq!(normalize_cost(None, CostSource::Actual), None);
     }
 
     #[test]

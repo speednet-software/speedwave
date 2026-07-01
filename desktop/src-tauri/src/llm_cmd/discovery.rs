@@ -546,10 +546,28 @@ async fn discover_local(
     Ok(out)
 }
 
-/// Shared status/content-type guard for `GET /v1/models` over either probe
-/// transport. Status outside 2xx → Err; HTML content-type → Err.
+// Discovery Err contract — string-matched by `classifyDiscoveryFailure` in
+// `llm-provider.component.ts`; pinned by `discovery_err_contract_matches_ts`.
+const ERR_AUTH: &str = "auth";
+const ERR_EMPTY: &str = "empty";
+const ERR_UNSUPPORTED: &str = "unsupported";
+const ERR_HTML_RESPONSE: &str = "LLM server returned an HTML response";
+/// Trailing space is load-bearing: the TS side slices the status after it.
+const ERR_HTTP_STATUS_PREFIX: &str = "LLM server returned HTTP ";
+
+/// Status/content-type guard for `/v1/models`. Err strings are the discovery
+/// contract consts above (matched in `llm-provider.component.ts`).
 fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> {
     if !resp.is_success() {
+        if resp.status == 401 || resp.status == 403 {
+            // Reachable but auth rejected — never log the key.
+            log::warn!(
+                "LLM model discovery: {} returned HTTP {} (auth) — bad or missing API key",
+                url,
+                resp.status
+            );
+            return Err(ERR_AUTH.to_string());
+        }
         if resp.is_redirect() {
             log::warn!(
                 "LLM model discovery: refusing to follow {} redirect from {}",
@@ -559,7 +577,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
         } else {
             log::warn!("LLM model discovery: {} returned HTTP {}", url, resp.status);
         }
-        return Err(format!("LLM server returned HTTP {}", resp.status));
+        return Err(format!("{ERR_HTTP_STATUS_PREFIX}{}", resp.status));
     }
     if let Some(ct) = resp.content_type.as_deref() {
         if ct.to_ascii_lowercase().starts_with("text/html") {
@@ -567,7 +585,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
                 "LLM model discovery: {} returned HTML content-type, refusing",
                 url
             );
-            return Err("LLM server returned an HTML response".to_string());
+            return Err(ERR_HTML_RESPONSE.to_string());
         }
     }
     Ok(())
@@ -673,11 +691,16 @@ fn resolve_transient_credential(
 }
 
 /// Probes `POST /v1/messages` with a 1-token request to detect whether the
-/// server implements the Anthropic Messages chat endpoint. See ADR-041.
-async fn probe_messages_endpoint(base: &url::Url, transport: &dyn ProbeTransport) -> Option<bool> {
+/// server implements the Anthropic Messages chat endpoint. Uses a real model id
+/// so a "model not found" 404 isn't mistaken for a missing endpoint. See ADR-041.
+async fn probe_messages_endpoint(
+    base: &url::Url,
+    model: Option<&str>,
+    transport: &dyn ProbeTransport,
+) -> Option<bool> {
     let url = format!("{}/v1/messages", base.as_str().trim_end_matches('/'));
     let body = serde_json::json!({
-        "model": "ping",
+        "model": model.unwrap_or("ping"),
         "max_tokens": 1,
         "messages": [{ "role": "user", "content": "ping" }],
     });
@@ -704,14 +727,14 @@ pub(crate) async fn do_discover_llm_models(
     transport: &dyn ProbeTransport,
 ) -> Result<DiscoverResult, String> {
     if provider == "anthropic" {
-        return Err("unsupported".to_string());
+        return Err(ERR_UNSUPPORTED.to_string());
     }
 
     // Fixed catalog URL — no user-supplied base_url to validate.
     if provider == "openrouter" {
         let models = discover_openrouter(transport).await?;
         if models.is_empty() {
-            return Err("empty".to_string());
+            return Err(ERR_EMPTY.to_string());
         }
         return Ok(DiscoverResult {
             models,
@@ -724,14 +747,14 @@ pub(crate) async fn do_discover_llm_models(
     // Non-anthropic providers route through `discover_local`; legacy names accepted on read.
     let (raw_models, messages_endpoint_ok) = match provider {
         "local" | "ollama" | "lmstudio" | "llamacpp" => {
-            let (models, sanity) = futures_util::future::join(
-                discover_local(&validated, transport),
-                probe_messages_endpoint(&validated, transport),
-            )
-            .await;
-            (models?, sanity)
+            // List first, then probe with a real model id so a "model not found"
+            // 404 isn't read as a missing endpoint (Ollama false-positive).
+            let models = discover_local(&validated, transport).await?;
+            let first_model = models.first().map(|m| m.id.as_str());
+            let sanity = probe_messages_endpoint(&validated, first_model, transport).await;
+            (models, sanity)
         }
-        _ => return Err("unsupported".to_string()),
+        _ => return Err(ERR_UNSUPPORTED.to_string()),
     };
 
     let models: Vec<DiscoveredModel> = raw_models
@@ -747,7 +770,7 @@ pub(crate) async fn do_discover_llm_models(
     );
 
     if models.is_empty() {
-        return Err("empty".to_string());
+        return Err(ERR_EMPTY.to_string());
     }
     Ok(DiscoverResult {
         models,
@@ -845,6 +868,40 @@ mod tests {
     ) -> Result<DiscoverResult, String> {
         let transport = HostProbe::new(client.clone(), timeout);
         super::do_discover_llm_models(provider, base_url, &transport).await
+    }
+
+    // ── Cross-language discovery-error contract ─────────────────────────
+
+    /// Extracts the first single-quoted TS literal after `marker` in `src`.
+    fn ts_string_after<'a>(src: &'a str, marker: &str) -> &'a str {
+        let start = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("TS source must contain `{marker}`"));
+        let rest = &src[start + marker.len()..];
+        let open = rest.find('\'').expect("opening quote after marker");
+        let rest = &rest[open + 1..];
+        let close = rest.find('\'').expect("closing quote after marker");
+        &rest[..close]
+    }
+
+    #[test]
+    fn discovery_err_contract_matches_ts() {
+        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
+        // `classifyDiscoveryFailure` string-matches the Rust Err sentinels.
+        let src =
+            include_str!("../../../src/src/app/settings/llm-provider/llm-provider.component.ts");
+        assert_eq!(
+            ts_string_after(src, "const HTTP_STATUS_ERR_PREFIX"),
+            ERR_HTTP_STATUS_PREFIX,
+            "TS HTTP_STATUS_ERR_PREFIX must equal the Rust prefix (incl. trailing space)"
+        );
+        for sentinel in [ERR_AUTH, ERR_EMPTY, ERR_UNSUPPORTED, ERR_HTML_RESPONSE] {
+            let needle = format!("msg === '{sentinel}'");
+            assert!(
+                src.contains(&needle),
+                "classifyDiscoveryFailure must exact-match `{needle}`"
+            );
+        }
     }
 
     // ── normalize_and_validate_discovery_url ────────────────────────────
@@ -1360,6 +1417,7 @@ mod tests {
     // Generic HTTP-layer tests via llama.cpp; cover status/content-type/timeout/redirect.
     #[tokio::test]
     async fn integration_returns_err_on_500() {
+        // Non-auth HTTP error keeps the verbatim status string (→ server-error in UI).
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1367,15 +1425,15 @@ mod tests {
             .create_async()
             .await;
         let client = build_llm_probe_client().unwrap();
-        assert!(
-            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2),)
+        let err =
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
-                .is_err()
-        );
+                .unwrap_err();
+        assert_eq!(err, "LLM server returned HTTP 500");
     }
 
     #[tokio::test]
-    async fn integration_returns_err_on_401() {
+    async fn integration_returns_auth_sentinel_on_401() {
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1383,11 +1441,27 @@ mod tests {
             .create_async()
             .await;
         let client = build_llm_probe_client().unwrap();
-        assert!(
-            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2),)
+        let err =
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
-                .is_err()
-        );
+                .unwrap_err();
+        assert_eq!(err, "auth");
+    }
+
+    #[tokio::test]
+    async fn integration_returns_auth_sentinel_on_403() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(403)
+            .create_async()
+            .await;
+        let client = build_llm_probe_client().unwrap();
+        let err =
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
+                .await
+                .unwrap_err();
+        assert_eq!(err, "auth");
     }
 
     #[tokio::test]
@@ -1657,6 +1731,52 @@ mod tests {
         models_mock.assert_async().await;
         messages_mock.assert_async().await;
         no_show_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn integration_local_messages_probe_uses_real_model_not_ping() {
+        // Regression (Ollama): the endpoint exists but a nonexistent model 404s.
+        // Probe must use a real model from /v1/models → Some(true), not Some(false).
+        let mut server = mockito::Server::new_async().await;
+        let models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"qwen3:0.6b","meta":{"n_ctx_train":4096}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        // The probe with the real model succeeds.
+        let real_model_mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"model":"qwen3:0.6b"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"type":"message","content":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        // A probe with the bogus "ping" model must NOT be issued.
+        let ping_mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"model":"ping"}"#.to_string(),
+            ))
+            .with_status(404)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        let result =
+            do_discover_llm_models("local", &server.url(), &client, Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(result.messages_endpoint_ok, Some(true));
+        models_mock.assert_async().await;
+        real_model_mock.assert_async().await;
+        ping_mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -59,7 +59,7 @@ export class SystemViewComponent implements OnInit, OnDestroy {
 
   /** Fetches a fresh health report and updates view state. */
   protected async refresh(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) {
       this.loading = false;
       this.report = null;
@@ -79,7 +79,7 @@ export class SystemViewComponent implements OnInit, OnDestroy {
   }
 
   protected async restart(name: string): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project || this.restarting.has(name)) return;
     this.restarting.add(name);
     this.cdr.markForCheck();

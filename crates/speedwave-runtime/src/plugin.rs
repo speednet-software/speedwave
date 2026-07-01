@@ -555,6 +555,60 @@ fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
 }
 
+/// Marker under `plugin-state/<slug>/` holding the previously-built image tag
+/// in use while a failed content-addressed rebuild is pending retry (ADR-072).
+const IMAGE_REBUILD_PENDING_MARKER: &str = "image_rebuild_pending";
+
+fn image_rebuild_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
+    plugin_state_dir_for(plugins_dir, slug).join(IMAGE_REBUILD_PENDING_MARKER)
+}
+
+/// Charset gate for tags read back from plugin-state before they reach the
+/// compose `image:` field — blocks YAML injection via a tampered marker.
+fn is_safe_image_ref(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 256
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+}
+
+/// Reads the recorded fallback tag; `None` when absent, a symlink, or unsafe.
+fn read_image_fallback_tag_for(plugins_dir: &Path, slug: &str) -> Option<String> {
+    let path = image_rebuild_pending_marker_for(plugins_dir, slug);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        log::warn!("plugin '{slug}': rebuild-pending marker is a symlink; ignoring");
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let tag = raw.trim();
+    if !is_safe_image_ref(tag) {
+        log::warn!("plugin '{slug}': rebuild-pending marker holds an invalid image ref; ignoring");
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+pub(crate) fn write_image_fallback_tag_for(
+    plugins_dir: &Path,
+    slug: &str,
+    tag: &str,
+) -> anyhow::Result<()> {
+    let dir = plugin_state_dir_for(plugins_dir, slug);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(IMAGE_REBUILD_PENDING_MARKER), tag)?;
+    Ok(())
+}
+
+/// Best-effort clear — after a successful rebuild, or when the
+/// content-addressed image turns out to be present after all.
+fn clear_image_rebuild_pending_for(plugins_dir: &Path, slug: &str) {
+    let _ = std::fs::remove_file(image_rebuild_pending_marker_for(plugins_dir, slug));
+}
+
 /// Moves a legacy marker into the plugin-state dir. Returns `true` only
 /// on a clean relocation.
 fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
@@ -2346,16 +2400,44 @@ fn ensure_plugin_images_from_dir(
         }
 
         let tag = plugin_image_tag(manifest, vp.tree_digest_hex());
-        let exists = runtime.image_exists(&tag).unwrap_or(false);
-        if !exists {
-            log::info!(
-                "Plugin image '{}' missing — rebuilding from {}",
-                tag,
-                plugin_dir.display()
-            );
-            if let Err(e) = build_single_plugin_image(runtime, manifest, plugin_dir) {
-                errors.push(format!("plugin '{}': {e}", manifest.slug));
+        if runtime.image_exists(&tag).unwrap_or(false) {
+            // Content-addressed image present — drop any stale fallback marker.
+            clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
+            continue;
+        }
+        log::info!(
+            "Plugin image '{}' missing — rebuilding from {}",
+            tag,
+            plugin_dir.display()
+        );
+        let build_err = match build_single_plugin_image(runtime, manifest, plugin_dir) {
+            Ok(()) => continue,
+            Err(e) => e,
+        };
+        // Rebuild failed (e.g. offline right after the ADR-072 retag). Fall back
+        // to a surviving previously-built image; the rebuild retries next start.
+        match usable_fallback_tag(runtime, plugins_dir, manifest, &tag) {
+            Some(fallback) => {
+                match write_image_fallback_tag_for(plugins_dir, &manifest.slug, &fallback) {
+                    Ok(()) => log::warn!(
+                        "plugin '{}': rebuild of image '{tag}' failed ({build_err}); \
+                         starting with previously-built image '{fallback}' — the \
+                         rebuild will be retried on the next project start",
+                        manifest.slug
+                    ),
+                    Err(we) => errors.push(format!(
+                        "plugin '{}': image build failed ({build_err}); fallback image \
+                         '{fallback}' exists but recording it failed: {we}",
+                        manifest.slug
+                    )),
+                }
             }
+            None => errors.push(format!(
+                "plugin '{}': image build failed ({build_err}); no previously-built \
+                 image is available — restore network/registry access and restart \
+                 the project to retry, or reinstall the plugin",
+                manifest.slug
+            )),
         }
     }
 
@@ -2367,6 +2449,34 @@ fn ensure_plugin_images_from_dir(
             errors.join("\n")
         )
     }
+}
+
+/// First previously-built tag for this plugin still present in the engine:
+/// the recorded fallback, the last applied tag, then the legacy pre-ADR-072 tag.
+fn usable_fallback_tag(
+    runtime: &crate::runtime::LockedRuntime,
+    plugins_dir: &Path,
+    manifest: &PluginManifest,
+    current_tag: &str,
+) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = read_image_fallback_tag_for(plugins_dir, &manifest.slug) {
+        candidates.push(t);
+    }
+    if let Ok(applied) = std::fs::read_to_string(
+        plugin_state_dir_for(plugins_dir, &manifest.slug).join(APPLIED_IMAGE_TAG_MARKER),
+    ) {
+        let applied = applied.trim();
+        if is_safe_image_ref(applied) {
+            candidates.push(applied.to_string());
+        }
+    }
+    candidates.push(plugin_legacy_image_tag(manifest));
+    candidates.retain(|t| t != current_tag);
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find(|t| runtime.image_exists(t).unwrap_or(false))
 }
 
 /// Builds pending plugin images (`.image_pending` marker).
@@ -2510,6 +2620,8 @@ fn build_single_plugin_image_locked(
     );
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
+        // Successful rebuild ends any fallback-image period (ADR-072).
+        clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
     } else {
         // Unreachable: a plugin dir always has a parent. Don't touch the
         // signed tree here as a "fallback" — that's exactly what the
@@ -2629,11 +2741,27 @@ fn plugin_legacy_image_tag(manifest: &PluginManifest) -> String {
     format!("speedwave-mcp-{}:{base}", manifest.slug)
 }
 
+/// Compose-facing tag: the recorded fallback while a rebuild is pending
+/// (ADR-072 upgrade resilience), otherwise the content-addressed tag.
+fn effective_plugin_image_tag(
+    manifest: &PluginManifest,
+    digest_hex: &str,
+    plugin_dir: &Path,
+) -> String {
+    if let Some(plugins_dir) = plugin_dir.parent() {
+        if let Some(tag) = read_image_fallback_tag_for(plugins_dir, &manifest.slug) {
+            return tag;
+        }
+    }
+    plugin_image_tag(manifest, digest_hex)
+}
+
 /// Generates a fully-resolved compose service definition for a plugin.
 /// Follows the `apply_llm_config()` pattern (format! + serde_yaml insert).
 pub fn generate_plugin_service(
     manifest: &PluginManifest,
     digest_hex: &str,
+    plugin_dir: &Path,
     project_name: &str,
     network_name: &str,
     tokens_dir: &Path,
@@ -2644,7 +2772,7 @@ pub fn generate_plugin_service(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("generate_plugin_service requires service_id"))?;
 
-    let tag = plugin_image_tag(manifest, digest_hex);
+    let tag = effective_plugin_image_tag(manifest, digest_hex, plugin_dir);
     let container_name = format!(
         "{}_{}_{}_{}",
         consts::compose_prefix(),
@@ -3237,6 +3365,7 @@ mod tests {
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -3320,6 +3449,7 @@ mod tests {
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/sp-ext"),
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -3364,6 +3494,7 @@ mod tests {
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-env"),
             "proj",
             "net",
             &tokens_dir,
@@ -5025,6 +5156,7 @@ mod tests {
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-special"),
             "proj",
             "net",
             &tokens_dir,
@@ -5276,6 +5408,7 @@ mod tests {
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/heavy"),
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -8027,6 +8160,149 @@ mod tests {
                 .unwrap();
         let digest = signing::plugin_tree_digest_hex(&dir).unwrap();
         plugin_image_tag(&manifest, &digest)
+    }
+
+    // --- Rebuild-failure fallback to a previously-built image ---
+
+    /// Plugins dir nested in the tempdir so `plugin-state/` (a sibling) stays inside it.
+    fn nested_plugins_dir(tmp: &Path) -> PathBuf {
+        let plugins_dir = tmp.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        plugins_dir
+    }
+
+    fn manifest_for(plugins_dir: &Path, slug: &str) -> PluginManifest {
+        serde_json::from_str(
+            &std::fs::read_to_string(plugins_dir.join(slug).join("plugin.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rebuild_failure_falls_back_to_surviving_legacy_image() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let manifest = manifest_for(&plugins_dir, "example-plugin");
+        let legacy = plugin_legacy_image_tag(&manifest);
+
+        let (rt, _handle) = failing_tracking_runtime(&[&legacy]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir)
+            .expect("a surviving previously-built image must keep the project startable");
+
+        let digest = signing::plugin_tree_digest_hex(&plugins_dir.join("example-plugin")).unwrap();
+        assert_eq!(
+            effective_plugin_image_tag(&manifest, &digest, &plugins_dir.join("example-plugin")),
+            legacy,
+            "compose must run the recorded fallback image"
+        );
+    }
+
+    #[test]
+    fn rebuild_failure_without_any_image_fails_with_retry_guidance() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+
+        let (rt, _handle) = failing_tracking_runtime(&[]);
+        let err =
+            ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("no previously-built"),
+            "error must say no fallback exists and how to retry: {err}"
+        );
+    }
+
+    #[test]
+    fn successful_rebuild_clears_fallback_marker() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        write_image_fallback_tag_for(
+            &plugins_dir,
+            "example-plugin",
+            "speedwave-mcp-example-plugin:old",
+        )
+        .unwrap();
+
+        let (rt, handle) = tracking_runtime(&[]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
+        assert_eq!(handle.build_call_count(), 1, "missing image rebuilt");
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "successful rebuild ends the fallback period"
+        );
+    }
+
+    #[test]
+    fn present_content_image_clears_stale_fallback_marker() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        write_image_fallback_tag_for(
+            &plugins_dir,
+            "example-plugin",
+            "speedwave-mcp-example-plugin:old",
+        )
+        .unwrap();
+
+        let tag = expected_tag_for(&plugins_dir, "example-plugin");
+        let (rt, handle) = tracking_runtime(&[&tag]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
+        assert_eq!(handle.build_call_count(), 0, "present image skips rebuild");
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "stale marker dropped once the content-addressed image exists"
+        );
+    }
+
+    #[test]
+    fn unsafe_fallback_marker_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let manifest = manifest_for(&plugins_dir, "example-plugin");
+        write_image_fallback_tag_for(&plugins_dir, "example-plugin", "bad tag; rm -rf /").unwrap();
+
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "charset-invalid marker must be ignored"
+        );
+        assert_eq!(
+            effective_plugin_image_tag(
+                &manifest,
+                "f00ddeadbeefcafe0123456789abcdef",
+                &plugins_dir.join("example-plugin")
+            ),
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123456789abcdef"),
+            "compose falls back to the content-addressed tag"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_fallback_marker_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let target = tmp.path().join("target-file");
+        std::fs::write(&target, "speedwave-mcp-example-plugin:evil").unwrap();
+        let state_dir = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::os::unix::fs::symlink(&target, state_dir.join(IMAGE_REBUILD_PENDING_MARKER)).unwrap();
+
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "symlinked marker must be ignored"
+        );
     }
 
     #[test]

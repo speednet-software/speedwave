@@ -370,13 +370,29 @@ fn run_self_update() -> anyhow::Result<()> {
 
     if status.updated() {
         out!("Updated to version {}.", status.version());
-        out!("Rebuilding container images...");
-        if let Err(e) = run_rebuild(&exe_path) {
-            let e = redact_err(&e);
-            err!("Binary updated successfully, but container rebuild failed: {e}");
-            std::process::exit(1);
+        // Older Desktop resources cannot digest the new image catalogue —
+        // skip the rebuild with guidance instead of bricking every invocation.
+        let resources_version = speedwave_runtime::build::resolve_build_root()
+            .ok()
+            .and_then(|root| speedwave_runtime::bundle::manifest_app_version_in(&root));
+        let new_version = status.version().trim_start_matches('v').to_string();
+        match resources_version {
+            Some(v) if v.trim_start_matches('v') != new_version => {
+                out!(
+                    "Installed Speedwave Desktop resources are v{v}. Update the Desktop \
+                     app, then run `speedwave update` to rebuild container images."
+                );
+            }
+            _ => {
+                out!("Rebuilding container images...");
+                if let Err(e) = run_rebuild(&exe_path) {
+                    let e = redact_err(&e);
+                    err!("Binary updated successfully, but container rebuild failed: {e}");
+                    std::process::exit(1);
+                }
+                out!("Container images rebuilt successfully.");
+            }
         }
-        out!("Container images rebuilt successfully.");
     } else {
         out!("Already up to date ({}).", current);
     }
@@ -388,6 +404,51 @@ fn run_self_update() -> anyhow::Result<()> {
 /// Delegates to the canonical validation in `speedwave_runtime::validation`.
 fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
+}
+
+/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
+/// re-exports the proxy base URL, then execs `claude auth login --claudeai` so
+/// the OAuth flow starts directly (no interactive prompt, no MCP session).
+fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
+    let script = format!(
+        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
+        unset_keys.join(" "),
+        consts::CLAUDE_BINARY,
+    );
+    vec!["sh".to_string(), "-lc".to_string(), script]
+}
+
+/// Makes Anthropic active on `project`'s `llm` config, creating the override
+/// when absent; `false` when `project` has no entry in `user_config` at all.
+fn select_anthropic_in(
+    user_config: &mut config::SpeedwaveUserConfig,
+    project: &str,
+    evidence: config::AnthropicEvidence,
+) -> bool {
+    let Some(entry) = user_config.find_project_mut(project) else {
+        return false;
+    };
+    let claude = entry.claude.get_or_insert_with(Default::default);
+    let llm = claude.llm.get_or_insert_with(Default::default);
+    // Lift v1 BEFORE selecting — set_active_to_anthropic on a raw v1 shape
+    // stamps schema_version and would permanently disable the lift (data loss).
+    let migrated = config::migrate_llm(llm, evidence);
+    let selected = llm.set_active_to_anthropic();
+    selected || migrated
+}
+
+/// After a successful `speedwave login`, makes Anthropic active so a
+/// logout-emptied OR never-configured project is usable again. No-op when
+/// the project has no entry in `user_config` (nothing to attach `llm` to).
+fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let evidence = config::AnthropicEvidence::detect_in(consts::data_dir().as_path(), project);
+        if select_anthropic_in(&mut user_config, project, evidence) {
+            config::save_user_config(&user_config)?;
+        }
+        Ok(())
+    })
 }
 
 /// Printed by `speedwave --help` / `-h` / `help`. Must not require the
@@ -402,7 +463,7 @@ USAGE:
     speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
     speedwave check                   Run security + OS prerequisite checks
     speedwave init [name]             Register the current directory as a project
-    speedwave login   [--project <p>] Run Anthropic OAuth login (type /login at Claude's prompt)
+    speedwave login   [--project <p>] Run Anthropic OAuth login (sign-in starts automatically)
     speedwave logout  [--project <p>] Delete Claude Code credentials for the project
     speedwave update                  Rebuild container images for the active project
     speedwave self-update             Download the latest speedwave CLI binary
@@ -503,6 +564,12 @@ fn main() -> anyhow::Result<()> {
 
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
+
+    // Persist the LLM schema migration for CLI-first upgrades (Desktop heals at
+    // its own startup); non-fatal — resolve still migrates in-memory.
+    if let Err(e) = config::heal_llm_config_on_disk() {
+        log::warn!("llm config heal failed: {}", redact_err(&e));
+    }
 
     // Hard-fail on tampered plugins, except for recovery actions.
     if !skip_plugin_audit(&action) {
@@ -782,7 +849,7 @@ fn main() -> anyhow::Result<()> {
     speedwave_runtime::provision::ensure_nerdctl_version();
 
     // Load config once — used for both project resolution and compose rendering
-    let user_config = config::load_user_config().unwrap_or_else(|e| {
+    let mut user_config = config::load_user_config().unwrap_or_else(|e| {
         err!("Failed to load config: {err}", err = redact_err(&e));
         std::process::exit(1);
     });
@@ -791,6 +858,24 @@ fn main() -> anyhow::Result<()> {
 
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Login must select Anthropic BEFORE render_compose, else the no-provider
+    // guard bails and the terminal closes before `claude auth login` runs.
+    if matches!(action, CliAction::Login(_)) {
+        // Fatal on failure: continuing would hit that very guard and print a
+        // misleading "Run `speedwave login`" while the real cause stays hidden.
+        if let Err(e) = select_anthropic_after_login(&project_name) {
+            err!(
+                "Login failed: could not select Anthropic: {}",
+                redact_err(&e)
+            );
+            std::process::exit(1);
+        }
+        user_config = config::load_user_config().unwrap_or_else(|e| {
+            err!("Failed to load config: {err}", err = redact_err(&e));
+            std::process::exit(1);
+        });
+    }
 
     // Project dir comes from config (authoritative); an unresolved name is a
     // hard error, never a working-directory fallback.
@@ -963,15 +1048,17 @@ fn main() -> anyhow::Result<()> {
     // before the login branch so image paste works in `login` sessions too.
     let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
-    // Handle `speedwave login` — runs `claude` interactively with the resolved
-    // flags. The user types /login; Claude writes credentials to the mount.
+    // Handle `speedwave login` — runs `claude auth login` directly so the
+    // Anthropic OAuth flow starts at once. Claude Code writes credentials to the mount.
     if let CliAction::Login(_) = action {
-        err!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend(resolved.flags.iter().map(String::as_str));
-        let status = runtime
-            .container_exec(&container_name, &exec_cmd)
-            .status()?;
+        err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
+        // Unset any non-Anthropic provider env so OAuth runs against Anthropic.
+        let cmd = build_login_exec_cmd(
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
         std::process::exit(
             status
                 .code()
@@ -1505,6 +1592,352 @@ mod tests {
         let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
         exec_cmd.extend_from_slice(&["--flag"]);
         assert_eq!(exec_cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn build_login_exec_cmd_unsets_and_execs_auth_login() {
+        let cmd = build_login_exec_cmd(
+            "http://proxy:4000",
+            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
+        );
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-lc");
+        let script = &cmd[2];
+        assert!(
+            script.contains("unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL"),
+            "{script}"
+        );
+        assert!(
+            script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "{script}"
+        );
+        // `auth login --claudeai` runs OAuth directly — no interactive prompt.
+        let exec_pos = script.find("exec ").expect("exec present");
+        let unset_pos = script.find("unset ").unwrap();
+        assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
+        assert!(
+            script.contains(&format!("{} auth login --claudeai", consts::CLAUDE_BINARY)),
+            "auth login subcommand: {script}"
+        );
+    }
+
+    #[test]
+    fn build_login_exec_cmd_uses_runtime_ssot_unset_list() {
+        let cmd = build_login_exec_cmd(
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let script = &cmd[2];
+        for key in compose::anthropic_login_unset_keys() {
+            assert!(script.contains(key), "unset list missing `{key}`: {script}");
+        }
+        assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
+    }
+
+    /// Login must select Anthropic active BEFORE render_compose, so a
+    /// logout-emptied project escapes the no-provider guard (avoids the dead-loop
+    /// where the login terminal closes before `claude auth login` runs).
+    #[test]
+    fn login_selects_anthropic_before_render_compose() {
+        let source = include_str!("main.rs");
+        let select_idx = source
+            .find("select_anthropic_after_login(&project_name)")
+            .expect("main() must select Anthropic on the login path");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("the CLI must call render_compose in main()");
+        assert!(
+            select_idx < render_idx,
+            "select_anthropic_after_login must run before render_compose"
+        );
+        // It must be gated on the Login action (not run for plain `speedwave`).
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("the Anthropic-select must be gated on the Login action");
+        assert!(
+            gate_idx < select_idx && select_idx < render_idx,
+            "select must sit inside the Login gate, before render_compose"
+        );
+    }
+
+    /// A select failure on the login path must be fatal — warn-and-continue would
+    /// fall into the no-provider guard and print a misleading "Run `speedwave login`".
+    #[test]
+    fn login_select_failure_is_fatal_not_a_warning() {
+        let source = include_str!("main.rs");
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("login gate must exist");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("render_compose must exist");
+        let block = &source[gate_idx..render_idx];
+        assert!(
+            block.contains("Login failed: could not select Anthropic")
+                && block.contains("std::process::exit(1)"),
+            "login select failure must exit non-zero, not warn-and-continue"
+        );
+    }
+
+    fn user_config_with_project(
+        project: &str,
+        claude: Option<config::ClaudeOverrides>,
+    ) -> config::SpeedwaveUserConfig {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        user_config.projects.push(config::ProjectUserEntry {
+            name: project.to_string(),
+            dir: "/tmp/proj".to_string(),
+            claude,
+            integrations: None,
+            plugin_settings: None,
+        });
+        user_config
+    }
+
+    /// Happy path: a never-configured project (no `claude` override at all)
+    /// gets an `llm` override created and Anthropic selected.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_for_fresh_project() {
+        let mut user_config = user_config_with_project("proj", None);
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        let llm = user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert!(!llm.is_unconfigured());
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            config::ANTHROPIC_PROVIDER_ID,
+            "fresh project must select anthropic, not just stop being fresh"
+        );
+    }
+
+    /// Edge case: `claude` exists but `llm` is `None` (partial override) —
+    /// same fresh-llm creation path applies.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_when_claude_present_but_llm_absent() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: None,
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Explicit logout (v2 shape, providers present, active cleared) must be
+    /// reactivated — the original no-op-when-absent behavior is preserved
+    /// when there IS an llm config, just no longer the only path.
+    #[test]
+    fn select_anthropic_in_reactivates_explicit_logout() {
+        let llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.is_unconfigured(),
+            "precondition: logged-out is unconfigured"
+        );
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Selecting Anthropic on a RAW v1 local config must lift it first —
+    /// stamping schema_version pre-lift would erase the local provider forever.
+    #[test]
+    fn select_anthropic_in_preserves_raw_v1_local_config() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some("lmstudio".into()),
+                    base_url: Some("http://localhost:1234".into()),
+                    model: Some("qwen".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::Oauth
+        ));
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        let local = llm
+            .providers
+            .iter()
+            .find(|p| p.id == "local")
+            .expect("local entry must survive the lift");
+        assert_eq!(local.base_url.as_deref(), Some("http://localhost:1234"));
+        assert_eq!(local.model.as_deref(), Some("qwen"));
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            config::ANTHROPIC_PROVIDER_ID
+        );
+    }
+
+    /// A raw v1 anthropic config keeps its pinned model through
+    /// login (the lift runs before the entry is fabricated model-less).
+    #[test]
+    fn select_anthropic_in_preserves_v1_pinned_anthropic_model() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some(config::ANTHROPIC_PROVIDER_ID.to_string()),
+                    model: Some("claude-opus-4-6".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::Oauth);
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    /// After a self-update, the rebuild must be gated on the installed
+    /// Desktop resources version — an older tree cannot digest the new catalogue.
+    #[test]
+    fn run_self_update_checks_resources_version_before_rebuild() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let probe = fn_body
+            .find("manifest_app_version_in")
+            .expect("run_self_update must probe the installed resources version");
+        let rebuild = fn_body
+            .find("run_rebuild(")
+            .expect("run_self_update must call run_rebuild()");
+        assert!(probe < rebuild, "version gate must precede the rebuild");
+    }
+
+    /// The CLI must persist the LLM migration on startup (Desktop
+    /// heals at its own startup; CLI-first upgrades need parity).
+    #[test]
+    fn main_heals_llm_config_before_project_actions() {
+        let source = include_str!("main.rs");
+        let heal = source
+            .find("heal_llm_config_on_disk")
+            .expect("CLI must persist the LLM schema migration");
+        let audit = source
+            .find("plugin::audit_all")
+            .expect("plugin audit anchor");
+        assert!(heal < audit, "heal must run before project actions");
+    }
+
+    /// Error path: a project absent from `user_config` entirely is a no-op —
+    /// there is nothing to attach an `llm` override to.
+    #[test]
+    fn select_anthropic_in_noop_when_project_not_found() {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        assert!(!select_anthropic_in(
+            &mut user_config,
+            "ghost-project",
+            config::AnthropicEvidence::None
+        ));
+        assert!(user_config.find_project_mut("ghost-project").is_none());
+    }
+
+    /// State transition: already-active Anthropic is idempotent (no spurious
+    /// `true` that would trigger an unnecessary config write).
+    #[test]
+    fn select_anthropic_in_idempotent_when_already_anthropic() {
+        let mut llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.set_active_to_anthropic(),
+            "first activation changes state"
+        );
+        // Normalize (flat-mirror sync) so only the selection itself is measured.
+        config::migrate_llm(&mut llm, config::AnthropicEvidence::None);
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(
+            !select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::None),
+            "already-active anthropic must not report a change"
+        );
     }
 
     #[test]

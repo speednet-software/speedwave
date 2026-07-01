@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   computed,
   effect,
@@ -18,17 +19,22 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AuthTerminalComponent } from '../auth-terminal.component';
+import { OauthCompletionWatcher } from './oauth-completion-watcher';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   AnthropicModel,
   DiscoveredModel,
   DiscoverResult,
+  ExtraProviderId,
+  FlatProviderId,
   formatContextLabel,
   LEGACY_LOCAL_PROVIDERS,
   LlmActive,
   LlmConfigResponse,
   LlmProviderEntry,
   LlmProviderKind,
+  ProviderCardId,
+  ProviderTarget,
 } from '../../models/llm';
 
 /**
@@ -36,7 +42,7 @@ import {
  * lives in `keyInput` until Save; config carries the `hasKey` presence flag.
  */
 interface ExtraProviderEdit {
-  id: string;
+  id: ExtraProviderId;
   kind: 'open_router';
   baseUrl: string;
   model: string;
@@ -46,6 +52,8 @@ interface ExtraProviderEdit {
   /** Catalog models (openrouter rows); null until discovery ran. */
   models: DiscoveredModel[] | null;
   discovering: boolean;
+  /** Classified failure of the last catalog discovery; null when none/cleared. */
+  discoverError: { reason: DiscoveryFailureReason; status?: number } | null;
   /** Context window of the selected catalog model. */
   contextTokens: number | null;
 }
@@ -55,7 +63,7 @@ interface ExtraProviderEdit {
  * cards; an unconfigured row is simply not persisted.
  */
 function fixedExtraRows(): ExtraProviderEdit[] {
-  const empty = (id: string, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
+  const empty = (id: ExtraProviderId, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
     id,
     kind,
     baseUrl: '',
@@ -65,6 +73,7 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     hasKey: false,
     models: null,
     discovering: false,
+    discoverError: null,
     contextTokens: null,
   });
   return [empty('openrouter', 'open_router')];
@@ -84,33 +93,56 @@ function nullIfEmpty(value: string): string | null {
  * Discovery state for the LLM model listing (discriminated union). `in-flight.id`
  * matches the monotonic counter; non-latest responses are discarded as stale.
  */
+type DiscoveryFailureReason = 'offline' | 'unsupported' | 'other' | 'auth' | 'server-error';
+
 type DiscoveryState =
   | { kind: 'idle' }
   | { kind: 'in-flight'; url: string; id: number }
   | { kind: 'ready'; url: string; models: DiscoveredModel[] }
-  | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
+  | { kind: 'failed'; url: string; reason: DiscoveryFailureReason; status?: number };
+
+/** Backend Err-string prefix (discovery.rs) for a non-auth HTTP status. */
+const HTTP_STATUS_ERR_PREFIX = 'LLM server returned HTTP ';
+
+/** Shared inline message for the `auth` discovery sentinel (local + remote cards). */
+const AUTH_FAILURE_MESSAGE = 'Authentication failed — check the API key.';
+
+/**
+ * Maps a discovery Err string to a reason + status (contract: discovery.rs).
+ * @param msg - Backend Err string from `discover_llm_models`.
+ */
+function classifyDiscoveryFailure(msg: string): {
+  reason: DiscoveryFailureReason;
+  status?: number;
+} {
+  if (msg === 'unsupported') return { reason: 'unsupported' };
+  if (msg === 'empty') return { reason: 'other' };
+  if (msg === 'auth') return { reason: 'auth' };
+  if (msg === 'LLM server returned an HTML response') return { reason: 'server-error' };
+  if (msg.startsWith(HTTP_STATUS_ERR_PREFIX)) {
+    const n = parseInt(msg.slice(HTTP_STATUS_ERR_PREFIX.length), 10);
+    return Number.isNaN(n) ? { reason: 'server-error' } : { reason: 'server-error', status: n };
+  }
+  return { reason: 'offline' };
+}
 
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
   imports: [CommonModule, TooltipDirective, AuthTerminalComponent],
+  providers: [OauthCompletionWatcher],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     <section id="section-llm-provider">
       <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
-      <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        One active provider per project — every session routes through the local proxy.
-        <code>/model</code> switches models of the active provider in-session; on non-Anthropic
-        providers the built-in aliases map to that provider's model.
-      </p>
 
-      @if (legacyMigrationProvider) {
+      @if (legacyMigrationProvider()) {
         <div
           class="mono mt-3 rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] text-[var(--accent)]"
           data-testid="settings-llm-legacy-migration-banner"
         >
-          Provider name <code>{{ legacyMigrationProvider }}</code> is legacy and will be saved as
+          Provider name <code>{{ legacyMigrationProvider() }}</code> is legacy and will be saved as
           <code>local</code> on next Save. Same behavior, unified naming.
         </div>
       }
@@ -119,7 +151,7 @@ type DiscoveryState =
       <div
         class="mt-4 rounded border"
         [class]="
-          selectedTarget === 'anthropic'
+          selectedTarget() === 'anthropic'
             ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
             : 'border-[var(--line)] bg-[var(--bg-1)]'
         "
@@ -127,23 +159,23 @@ type DiscoveryState =
         <button
           type="button"
           role="radio"
-          [attr.aria-checked]="selectedTarget === 'anthropic'"
+          [attr.aria-checked]="selectedTarget() === 'anthropic'"
           class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
           [class]="
-            selectedTarget === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+            selectedTarget() === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
           "
           data-testid="settings-llm-provider-anthropic"
           (click)="selectProvider('anthropic')"
         >
           <span>
-            {{ selectedTarget === 'anthropic' ? '● ' : '○ ' }}anthropic
+            {{ selectedTarget() === 'anthropic' ? '● ' : '○ ' }}anthropic
             <span class="text-[10px] text-[var(--ink-mute)]"> · cloud</span>
           </span>
           <span class="flex items-center gap-2" data-testid="auth-status-row">
-            @if (apiKeyConfigured || oauthAuthenticated) {
+            @if (apiKeyConfigured() || oauthAuthenticated()) {
               <span class="pill green" data-testid="auth-status-value">● connected</span>
               <span class="pill green" data-testid="auth-status-method">{{
-                apiKeyConfigured ? 'api key' : 'oauth'
+                apiKeyConfigured() ? 'api key' : 'oauth'
               }}</span>
             } @else {
               <span class="pill amber" data-testid="auth-status-value">not configured</span>
@@ -151,7 +183,7 @@ type DiscoveryState =
           </span>
         </button>
 
-        @if (selectedTarget === 'anthropic') {
+        @if (selectedTarget() === 'anthropic') {
           <div class="border-t border-[var(--line)] px-3 py-3">
             <!-- Auth method: subscription (oauth) vs raw API key -->
             <div
@@ -162,36 +194,36 @@ type DiscoveryState =
               <button
                 type="button"
                 role="radio"
-                [attr.aria-checked]="authMethod === 'oauth'"
+                [attr.aria-checked]="authMethod() === 'oauth'"
                 class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
                 [class]="
-                  authMethod === 'oauth'
+                  authMethod() === 'oauth'
                     ? 'bg-[var(--bg-2)] text-[var(--ink)]'
                     : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
                 "
                 data-testid="settings-auth-method-oauth"
-                (click)="authMethod = 'oauth'"
+                (click)="authMethod.set('oauth')"
               >
                 subscription (oauth · claude.ai)
               </button>
               <button
                 type="button"
                 role="radio"
-                [attr.aria-checked]="authMethod === 'api_key'"
+                [attr.aria-checked]="authMethod() === 'api_key'"
                 class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
                 [class]="
-                  authMethod === 'api_key'
+                  authMethod() === 'api_key'
                     ? 'bg-[var(--bg-2)] text-[var(--ink)]'
                     : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
                 "
                 data-testid="settings-auth-method-api-key"
-                (click)="authMethod = 'api_key'"
+                (click)="authMethod.set('api_key')"
               >
                 api key
               </button>
             </div>
 
-            @if (authMethod === 'api_key') {
+            @if (authMethod() === 'api_key') {
               <div class="mt-3">
                 <label
                   class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
@@ -203,8 +235,8 @@ type DiscoveryState =
                   type="password"
                   autocomplete="off"
                   spellcheck="false"
-                  [value]="anthropicApiKeyInput"
-                  (input)="anthropicApiKeyInput = $any($event.target).value"
+                  [value]="anthropicApiKeyInput()"
+                  (input)="anthropicApiKeyInput.set(inputValue($event))"
                   placeholder="sk-ant-..."
                   class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                   data-testid="settings-api-key"
@@ -216,28 +248,45 @@ type DiscoveryState =
                   class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                   data-testid="settings-api-key-save"
                   (click)="saveAnthropicApiKey()"
-                  [disabled]="anthropicApiKeySaving || !anthropicApiKeyInput"
+                  [disabled]="anthropicApiKeySaving() || !anthropicApiKeyInput()"
                 >
-                  {{ anthropicApiKeySaving ? 'saving...' : 'save key' }}
+                  {{ anthropicApiKeySaving() ? 'saving...' : 'save key' }}
                 </button>
                 <button
                   type="button"
                   class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
                   data-testid="settings-api-key-remove"
                   (click)="deleteAnthropicApiKey()"
-                  [disabled]="!apiKeyConfigured"
+                  [disabled]="!apiKeyConfigured()"
                 >
                   remove key
                 </button>
-                @if (anthropicApiKeySaved) {
+                @if (anthropicApiKeySaved()) {
                   <span class="mono text-[11px] text-[var(--green)]">saved!</span>
                 }
               </div>
             }
-            @if (authMethod === 'oauth' && activeProject(); as project) {
-              <div class="mt-3">
-                <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
-              </div>
+            @if (authMethod() === 'oauth' && activeProject(); as project) {
+              @if (oauthAuthenticated()) {
+                <div class="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    data-testid="settings-oauth-logout"
+                    [disabled]="loggingOut()"
+                    (click)="anthropicLogout(project)"
+                  >
+                    {{ loggingOut() ? 'logging out...' : 'log out' }}
+                  </button>
+                  <span class="text-[11.5px] text-[var(--ink-dim)]"
+                    >Removes this project's Anthropic credentials.</span
+                  >
+                </div>
+              } @else {
+                <div class="mt-3">
+                  <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
+                </div>
+              }
             }
 
             <!-- Default model -->
@@ -249,8 +298,8 @@ type DiscoveryState =
               >
               <select
                 id="llm-model"
-                [value]="model"
-                (change)="model = $any($event.target).value"
+                [value]="model()"
+                (change)="model.set(inputValue($event))"
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
@@ -271,8 +320,8 @@ type DiscoveryState =
                     }
                   </optgroup>
                 }
-                @if (model && !modelInCatalog(model)) {
-                  <option [value]="model">{{ model }} (not in catalog)</option>
+                @if (model() && !modelInCatalog(model())) {
+                  <option [value]="model()">{{ model() }} (not in catalog)</option>
                 }
               </select>
             </div>
@@ -284,7 +333,7 @@ type DiscoveryState =
       <div
         class="mt-2 rounded border"
         [class]="
-          selectedTarget === 'local'
+          selectedTarget() === 'local'
             ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
             : 'border-[var(--line)] bg-[var(--bg-1)]'
         "
@@ -292,120 +341,43 @@ type DiscoveryState =
         <button
           type="button"
           role="radio"
-          [attr.aria-checked]="selectedTarget === 'local'"
+          [attr.aria-checked]="selectedTarget() === 'local'"
           class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
-          [class]="selectedTarget === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+          [class]="selectedTarget() === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
           data-testid="settings-llm-provider-local"
           (click)="selectProvider('local')"
         >
           <span>
-            {{ selectedTarget === 'local' ? '● ' : '○ ' }}local
+            {{ selectedTarget() === 'local' ? '● ' : '○ ' }}local
             <span class="text-[10px] text-[var(--ink-mute)]"> · own server</span>
           </span>
-          @if (selectedTarget !== 'local' && baseUrlByProviderView()) {
+          @if (selectedTarget() !== 'local' && baseUrlByProviderView()) {
             <span class="mono text-[10px] text-[var(--ink-mute)]">{{
               baseUrlByProviderView()
             }}</span>
           }
         </button>
 
-        @if (selectedTarget === 'local') {
+        @if (selectedTarget() === 'local') {
           <div class="border-t border-[var(--line)] px-3 py-3">
-            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-base-url"
-                  >base_url</label
-                >
-                <input
-                  id="llm-base-url"
-                  type="text"
-                  [value]="baseUrl"
-                  (input)="baseUrl = $any($event.target).value"
-                  [placeholder]="defaultBaseUrl"
-                  (blur)="discoverModels(false)"
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  data-testid="settings-llm-base-url"
-                />
-              </div>
-              <div>
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-model"
-                  >default_model</label
-                >
-                @if (discoveryState.kind === 'ready') {
-                  <select
-                    id="llm-model"
-                    [value]="model"
-                    (change)="onLocalModelChange($any($event.target).value)"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  >
-                    @if (model && !discoveredModelIds().includes(model)) {
-                      <option [value]="model">{{ model }} (not on server)</option>
-                    }
-                    @for (m of discoveryState.models; track m.id) {
-                      <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
-                    }
-                  </select>
-                } @else {
-                  <input
-                    id="llm-model"
-                    type="text"
-                    [value]="model"
-                    (input)="model = $any($event.target).value"
-                    [placeholder]="modelPlaceholder()"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    data-testid="settings-llm-model"
-                  />
-                }
-                @if (discoveryState.kind === 'failed') {
-                  <p
-                    class="mono mt-1 text-[11px] text-[var(--amber)]"
-                    data-testid="settings-llm-discovery-error"
-                  >
-                    {{ discoveryFailureMessage() }}
-                  </p>
-                }
-                @if (discoveryState.kind === 'in-flight') {
-                  <p
-                    class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                    data-testid="settings-llm-discovering"
-                  >
-                    Probing {{ discoveryState.url }}...
-                  </p>
-                }
-              </div>
-            </div>
-
-            <button
-              type="button"
-              data-testid="settings-llm-refresh"
-              class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
-              [disabled]="discoveryState.kind === 'in-flight'"
-              (click)="discoverModels(true)"
-              appTooltip="Fetch the list of models from the server"
-              placement="top"
-            >
-              @if (discoveryState.kind === 'in-flight') {
-                &#8635; discovering...
-              } @else {
-                &#8635; discover models
-              }
-            </button>
-
-            @if (messagesEndpointOk === false) {
-              <div
-                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
-                data-testid="settings-llm-messages-endpoint-warning"
+            <!-- Order: base_url → api_key → discover → model (only after a
+                 successful discover or a saved model) → advanced. -->
+            <div>
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                for="llm-base-url"
+                >base_url</label
               >
-                <strong>Warning:</strong> the server returned a model list but did not respond to
-                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
-                will fail.
-              </div>
-            }
+              <input
+                id="llm-base-url"
+                type="text"
+                [value]="baseUrl()"
+                (input)="onBaseUrlInput(inputValue($event))"
+                [placeholder]="defaultBaseUrl()"
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-base-url"
+              />
+            </div>
 
             <!-- Bearer for servers requiring auth; on a load-balanced cluster
                  a unique per-user value also pins session stickiness. -->
@@ -420,10 +392,10 @@ type DiscoveryState =
                 type="password"
                 autocomplete="off"
                 spellcheck="false"
-                [value]="apiKey"
-                (input)="onApiKeyInput($any($event.target).value)"
+                [value]="apiKey()"
+                (input)="onApiKeyInput(inputValue($event))"
                 [placeholder]="
-                  hasApiKey
+                  hasApiKey()
                     ? '••••• (key saved — type to replace, clear to remove)'
                     : 'Bearer token (e.g. sk-…)'
                 "
@@ -431,6 +403,84 @@ type DiscoveryState =
                 data-testid="settings-llm-api-key"
               />
             </div>
+
+            <button
+              type="button"
+              data-testid="settings-llm-refresh"
+              class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              [disabled]="discoveryState().kind === 'in-flight'"
+              (click)="discoverModels(true)"
+              appTooltip="Fetch the list of models from the server"
+              placement="top"
+            >
+              @if (discoveryState().kind === 'in-flight') {
+                &#8635; discovering...
+              } @else {
+                &#8635; discover models
+              }
+            </button>
+
+            @if (discoveryState().kind === 'failed') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-discovery-error"
+              >
+                {{ discoveryFailureMessage() }}
+              </p>
+            }
+            @let inflight = discoveryState();
+            @if (inflight.kind === 'in-flight') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-llm-discovering"
+              >
+                Probing {{ inflight.url }}...
+              </p>
+            }
+
+            @if (messagesEndpointOk() === false) {
+              <div
+                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-messages-endpoint-warning"
+              >
+                <strong>Warning:</strong> the server returned a model list but did not respond to
+                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
+                will fail.
+              </div>
+            }
+
+            @if (discoveryState().kind === 'ready' || hasSavedModel()) {
+              <div class="mt-3">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-model"
+                  >default_model</label
+                >
+                @let ds = discoveryState();
+                <select
+                  id="llm-model"
+                  (change)="onLocalModelChange(inputValue($event))"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-model"
+                >
+                  @if (ds.kind === 'ready') {
+                    @if (model() && !discoveredModelIds().includes(model())) {
+                      <option [value]="model()" [selected]="true">
+                        {{ model() }} (not on server)
+                      </option>
+                    }
+                    @for (m of ds.models; track m.id) {
+                      <option [value]="m.id" [selected]="m.id === model()">
+                        {{ formatLocalModelLabel(m) }}
+                      </option>
+                    }
+                  } @else {
+                    <!-- Saved config: show the model without re-probing. -->
+                    <option [value]="model()" [selected]="true">{{ model() }}</option>
+                  }
+                </select>
+              </div>
+            }
 
             <details class="mt-3">
               <summary
@@ -448,10 +498,10 @@ type DiscoveryState =
                   id="llm-custom-headers"
                   rows="3"
                   spellcheck="false"
-                  [value]="customHeaders"
-                  (input)="onCustomHeadersInput($any($event.target).value)"
+                  [value]="customHeaders()"
+                  (input)="onCustomHeadersInput(inputValue($event))"
                   [placeholder]="
-                    hasCustomHeaders
+                    hasCustomHeaders()
                       ? '••••• (saved — type to replace, clear to remove)'
                       : 'X-Tenant-ID: foo'
                   "
@@ -469,11 +519,11 @@ type DiscoveryState =
       </div>
 
       <!-- ── remote provider rows (ADR-073) ────────────────────────────── -->
-      @for (entry of extraProviders; track entry.id) {
+      @for (entry of extraProviders(); track entry.id) {
         <div
           class="mt-2 rounded border"
           [class]="
-            selectedTarget === entry.id
+            selectedTarget() === entry.id
               ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
               : 'border-[var(--line)] bg-[var(--bg-1)]'
           "
@@ -482,24 +532,70 @@ type DiscoveryState =
           <button
             type="button"
             role="radio"
-            [attr.aria-checked]="selectedTarget === entry.id"
+            [attr.aria-checked]="selectedTarget() === entry.id"
             class="mono flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium"
-            [class]="selectedTarget === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+            [class]="
+              selectedTarget() === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+            "
             [attr.data-testid]="'settings-llm-extra-select-' + entry.id"
             (click)="onExtraHeaderClick(entry)"
           >
-            {{ selectedTarget === entry.id ? '●' : '○' }} {{ entry.id }}
+            {{ selectedTarget() === entry.id ? '●' : '○' }} {{ entry.id }}
             <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
           </button>
           @if (expandedExtraId === entry.id) {
-            <div
-              class="grid grid-cols-1 gap-2 border-t border-[var(--line)] px-3 py-3 md:grid-cols-2"
-            >
+            <!-- Order: api_key → discover → model (only after catalog loads),
+                 matching the local card. -->
+            <div class="border-t border-[var(--line)] px-3 py-3">
+              <label
+                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                [attr.for]="'extra-key-' + entry.id"
+                >api_key</label
+              >
+              <input
+                [id]="'extra-key-' + entry.id"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                [value]="entry.keyInput"
+                (input)="onExtraKeyInput(entry, inputValue($event))"
+                [placeholder]="
+                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
+                "
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
+              />
+
+              <button
+                type="button"
+                class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                [disabled]="entry.discovering || !canDiscoverExtra(entry)"
+                (click)="discoverExtraModels(entry)"
+                [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
+              >
+                {{ entry.discovering ? '↻ discovering...' : '↻ discover models' }}
+              </button>
+
+              @if (entry.discoverError) {
+                <p
+                  class="mono mt-1 text-[11px] text-[var(--amber)]"
+                  [attr.data-testid]="'settings-llm-extra-discovery-error-' + entry.id"
+                >
+                  {{ extraDiscoveryErrorMessage(entry) }}
+                </p>
+              }
+
               @if (entry.models && entry.models.length > 0) {
-                <div class="flex items-center gap-2">
+                <div class="mt-3">
+                  <label
+                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    [attr.for]="'extra-model-' + entry.id"
+                    >default_model</label
+                  >
                   <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
                   <select
-                    (change)="onExtraModelSelect(entry, $any($event.target).value)"
+                    [id]="'extra-model-' + entry.id"
+                    (change)="onExtraModelSelect(entry, inputValue($event))"
                     class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                     [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
                   >
@@ -514,55 +610,8 @@ type DiscoveryState =
                       </option>
                     }
                   </select>
-                  <button
-                    type="button"
-                    class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                    [disabled]="entry.discovering"
-                    (click)="discoverExtraModels(entry)"
-                    [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
-                  >
-                    {{ entry.discovering ? '…' : '↻' }}
-                  </button>
-                </div>
-              } @else {
-                <div class="flex items-center gap-2">
-                  <input
-                    type="text"
-                    [value]="entry.model"
-                    (input)="entry.model = $any($event.target).value"
-                    [placeholder]="
-                      entry.kind === 'open_router'
-                        ? 'model (e.g. qwen/qwen3-coder)'
-                        : 'model (e.g. gpt-5.2)'
-                    "
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
-                  />
-                  @if (entry.kind === 'open_router') {
-                    <button
-                      type="button"
-                      class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                      [disabled]="entry.discovering"
-                      (click)="discoverExtraModels(entry)"
-                      [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
-                    >
-                      {{ entry.discovering ? '…' : '↻' }}
-                    </button>
-                  }
                 </div>
               }
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                [value]="entry.keyInput"
-                (input)="onExtraKeyInput(entry, $any($event.target).value)"
-                [placeholder]="
-                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
-                "
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
-              />
             </div>
           }
         </div>
@@ -574,11 +623,11 @@ type DiscoveryState =
           class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="settings-llm-save"
           (click)="saveConfig()"
-          [disabled]="saving"
+          [disabled]="saving() || !canSave()"
         >
-          {{ saving ? 'saving...' : 'save' }}
+          {{ saving() ? 'saving...' : 'save' }}
         </button>
-        @if (saved) {
+        @if (saved()) {
           <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
             >saved!</span
           >
@@ -587,32 +636,32 @@ type DiscoveryState =
     </section>
   `,
 })
-export class LlmProviderComponent implements OnInit {
-  provider = 'anthropic';
-  model = '';
-  baseUrl = '';
-  defaultBaseUrl = '';
-  saving = false;
-  saved = false;
+export class LlmProviderComponent implements OnInit, OnDestroy {
+  provider = signal<FlatProviderId>('anthropic');
+  model = signal('');
+  baseUrl = signal('');
+  defaultBaseUrl = signal('');
+  saving = signal(false);
+  saved = signal(false);
 
   /**
    * Local-LLM API key (Bearer), form-only — backend stores it per-project and
    * exposes only `has_api_key`. `apiKeyTouched` gates the unchanged/empty/value tri-state.
    */
-  apiKey = '';
-  apiKeyTouched = false;
-  hasApiKey = false;
+  apiKey = signal('');
+  apiKeyTouched = signal(false);
+  hasApiKey = signal(false);
 
   /**
    * Optional custom HTTP headers (Azure APIM, corporate gateways). Same
    * touched-flag pattern as apiKey. Format: one `Name: Value` per line.
    */
-  customHeaders = '';
-  customHeadersTouched = false;
-  hasCustomHeaders = false;
+  customHeaders = signal('');
+  customHeadersTouched = signal(false);
+  hasCustomHeaders = signal(false);
 
   /** Result of the latest discovery probe — populated for `provider==="local"`. */
-  messagesEndpointOk: boolean | null = null;
+  messagesEndpointOk = signal<boolean | null>(null);
 
   /** Active project — drives the auth-status load and the OAuth terminal. */
   readonly activeProject = input<string | null>(null);
@@ -621,24 +670,28 @@ export class LlmProviderComponent implements OnInit {
    * Anthropic auth — OAuth default, api-key tab one click away. The key VALUE
    * goes via `save_api_key` to `secrets/<project>/anthropic_api_key`, never LlmConfig.
    */
-  authMethod: 'oauth' | 'api_key' = 'oauth';
-  anthropicApiKeyInput = '';
-  anthropicApiKeySaving = false;
-  anthropicApiKeySaved = false;
-  apiKeyConfigured = false;
-  oauthAuthenticated = false;
+  authMethod = signal<'oauth' | 'api_key'>('oauth');
+  anthropicApiKeyInput = signal('');
+  anthropicApiKeySaving = signal(false);
+  anthropicApiKeySaved = signal(false);
+  apiKeyConfigured = signal(false);
+  oauthAuthenticated = signal(false);
+  loggingOut = signal(false);
+
+  /** Detects an external-terminal OAuth login and runs the embedded autosave path. */
+  private readonly oauthWatcher = inject(OauthCompletionWatcher);
 
   /**
    * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
    * list on load (anthropic/local stay on cards); Save sends the full set.
    */
-  extraProviders: ExtraProviderEdit[] = fixedExtraRows();
+  extraProviders = signal<ExtraProviderEdit[]>(fixedExtraRows());
 
   /**
    * Which target is active: `'anthropic'`, `'local'`, or an extra provider
    * id. The cards and the extra rows share this one radio state.
    */
-  selectedTarget = 'anthropic';
+  selectedTarget = signal<ProviderTarget>('anthropic');
 
   /**
    * `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot
@@ -647,10 +700,20 @@ export class LlmProviderComponent implements OnInit {
   private loadedActiveKey = '';
 
   /**
+   * Whole-form fingerprint on load, gating `canSave` (see `computeFormSnapshot`).
+   * A signal so `isDirty`'s `computed()` invalidates on every reassignment.
+   */
+  private loadedFormSnapshot = signal('');
+
+  /** Join state for the initial load race — see `maybeSnapshotInitialLoad`. */
+  private initialConfigLoaded = false;
+  private initialAuthStatusLoaded = false;
+
+  /**
    * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config,
    * else `null`. Drives the migration banner; rewrite to `local` waits for Save.
    */
-  legacyMigrationProvider: string | null = null;
+  legacyMigrationProvider = signal<string | null>(null);
 
   /**
    * Persisted `context_tokens`, seeded on load. Fallback for
@@ -658,10 +721,8 @@ export class LlmProviderComponent implements OnInit {
    */
   private loadedLocalContextTokens: number | null = null;
 
-  /** Cards rendered at the top of the section (mockup-aligned). */
-
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
-  discoveryState: DiscoveryState = { kind: 'idle' };
+  discoveryState = signal<DiscoveryState>({ kind: 'idle' });
 
   /**
    * Monotonic counter bumped per discovery trigger; a response whose `id`
@@ -673,13 +734,13 @@ export class LlmProviderComponent implements OnInit {
    * Tracks the provider value from the previous `onProviderChange` call so we
    * can detect actual changes (ngModelChange can fire without a user edit).
    */
-  private lastKnownProvider = 'anthropic';
+  private lastKnownProvider: FlatProviderId = 'anthropic';
 
   /**
    * Per-provider session cache of the last Base URL, restored on switch-back
    * instead of the often-wrong default. Seeded from config on init.
    */
-  private baseUrlByProvider: Record<string, string> = {};
+  private baseUrlByProvider: Partial<Record<FlatProviderId, string>> = {};
 
   /** Loaded `local` entry — passed through Save while the card is inactive. */
   private loadedLocalEntry: LlmProviderEntry | null = null;
@@ -687,13 +748,10 @@ export class LlmProviderComponent implements OnInit {
   /** Loaded anthropic model — preserved when another provider is active. */
   private loadedAnthropicModel: string | null = null;
 
-  /**
-   * Per-provider default base URL cache (via `get_default_base_url`) keeping
-   * `isDefaultBaseUrl` sync. SSOT: `speedwave_runtime::compose::default_base_url`.
-   */
-  private defaultBaseUrlsByProvider: Record<string, string> = {};
+  /** Per-provider default base URL cache (via `get_default_base_url`). */
+  private defaultBaseUrlsByProvider: Partial<Record<FlatProviderId, string>> = {};
 
-  readonly providerChange = output<string>();
+  readonly providerChange = output<FlatProviderId>();
   readonly errorOccurred = output<string>();
 
   private cdr = inject(ChangeDetectorRef);
@@ -702,12 +760,26 @@ export class LlmProviderComponent implements OnInit {
 
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
+    this.oauthWatcher.attach({
+      activeProject: () => this.activeProject(),
+      isAuthenticated: () => this.oauthAuthenticated(),
+      // Only probe while on the Anthropic card — no IPC when configuring local/OpenRouter.
+      shouldProbe: () => this.effectiveTarget() === 'anthropic',
+      onLoginDetected: () => this.onOAuthDone(true),
+    });
     effect(() => {
       if (this.activeProject()) {
-        void this.loadAuthStatus();
+        // Only the first firing races the initial load; later firings are
+        // refreshes, and re-snapshotting there would mask real dirty state.
+        const isInitialLoad = !this.initialAuthStatusLoaded;
+        void this.loadAuthStatus().then(() => {
+          if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
+        });
+        this.oauthWatcher.startPoll();
       }
     });
   }
+
   private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
   private log = inject(LoggerService);
@@ -732,6 +804,12 @@ export class LlmProviderComponent implements OnInit {
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
+    this.oauthWatcher.watchWindowFocus();
+  }
+
+  /** Tears down the external-login watcher (poll + focus listener). */
+  ngOnDestroy(): void {
+    this.oauthWatcher.destroy();
   }
 
   /**
@@ -764,9 +842,15 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /** Ids of every model returned by the most recent discovery probe. */
-  protected discoveredModelIds(): string[] {
-    return this.discoveryState.kind === 'ready' ? this.discoveryState.models.map((m) => m.id) : [];
-  }
+  protected readonly discoveredModelIds = computed<string[]>(() => {
+    const s = this.discoveryState();
+    return s.kind === 'ready' ? s.models.map((m) => m.id) : [];
+  });
+
+  /** True when a non-empty model should render while discovery is idle. */
+  protected readonly hasSavedModel = computed<boolean>(
+    () => this.discoveryState().kind === 'idle' && !!this.model()
+  );
 
   /**
    * Local-model `<select>` change handler. `context_tokens` are derived on
@@ -774,7 +858,19 @@ export class LlmProviderComponent implements OnInit {
    * @param id - Model id from the dropdown's value attribute.
    */
   protected onLocalModelChange(id: string): void {
-    this.model = id;
+    this.model.set(id);
+  }
+
+  /**
+   * Base-URL edit resets stale discovery + model, so Save re-gates on a fresh
+   * discover against the new server.
+   * @param value - New base URL typed by the user.
+   */
+  protected onBaseUrlInput(value: string): void {
+    this.baseUrl.set(value);
+    this.discoveryState.set({ kind: 'idle' });
+    this.model.set('');
+    this.messagesEndpointOk.set(null);
   }
 
   /**
@@ -782,8 +878,8 @@ export class LlmProviderComponent implements OnInit {
    * @param value - New value typed by the user.
    */
   protected onApiKeyInput(value: string): void {
-    this.apiKey = value;
-    this.apiKeyTouched = true;
+    this.apiKey.set(value);
+    this.apiKeyTouched.set(true);
   }
 
   /**
@@ -791,8 +887,8 @@ export class LlmProviderComponent implements OnInit {
    * @param value - New value typed by the user (multi-line `Name: Value`).
    */
   protected onCustomHeadersInput(value: string): void {
-    this.customHeaders = value;
-    this.customHeadersTouched = true;
+    this.customHeaders.set(value);
+    this.customHeadersTouched.set(true);
   }
 
   /**
@@ -800,12 +896,14 @@ export class LlmProviderComponent implements OnInit {
    * model's window; local pre-discovery→loaded config value; else `null`.
    */
   private resolveContextTokensForSave(): number | null {
-    if (!this.model) return null;
-    if (this.provider === 'anthropic') {
-      return this.anthropicCatalog().find((m) => m.id === this.model)?.context_tokens ?? null;
+    const model = this.model();
+    if (!model) return null;
+    if (this.provider() === 'anthropic') {
+      return this.anthropicCatalog().find((m) => m.id === model)?.context_tokens ?? null;
     }
-    if (this.discoveryState.kind === 'ready') {
-      const picked = this.discoveryState.models.find((m) => m.id === this.model);
+    const s = this.discoveryState();
+    if (s.kind === 'ready') {
+      const picked = s.models.find((m) => m.id === model);
       return picked?.context_tokens ?? null;
     }
     return this.loadedLocalContextTokens;
@@ -823,15 +921,15 @@ export class LlmProviderComponent implements OnInit {
    * caching, default fetching, and probe gating stay intact.
    * @param id - Card-class provider id (`anthropic` | `local`).
    */
-  async selectProvider(id: 'anthropic' | 'local'): Promise<void> {
-    this.selectedTarget = id;
-    if (this.provider === id) return;
-    this.provider = id;
+  async selectProvider(id: ProviderCardId): Promise<void> {
+    this.selectedTarget.set(id);
+    if (this.provider() === id) return;
+    this.provider.set(id);
     await this.onProviderChange();
   }
 
   /** Currently expanded (editable) remote row — independent of the radio. */
-  expandedExtraId: string | null = null;
+  expandedExtraId: ExtraProviderId | null = null;
 
   /**
    * Whole-bar click: first click activates the row (and expands it);
@@ -839,7 +937,7 @@ export class LlmProviderComponent implements OnInit {
    * @param entry - The clicked row.
    */
   onExtraHeaderClick(entry: ExtraProviderEdit): void {
-    if (this.selectedTarget !== entry.id) {
+    if (this.selectedTarget() !== entry.id) {
       this.selectExtraProvider(entry);
     } else {
       this.toggleExtraExpanded(entry);
@@ -851,14 +949,10 @@ export class LlmProviderComponent implements OnInit {
    * @param entry - The selected row.
    */
   selectExtraProvider(entry: ExtraProviderEdit): void {
-    // Snapshot a freshly-edited anthropic-card model before leaving the card,
-    // so a later Save doesn't fall back to a stale snapshot (F2/a1).
-    if (this.effectiveTarget() === 'anthropic' && this.model && !this.isForeignModel(this.model)) {
-      this.loadedAnthropicModel = this.model;
-    }
-    this.selectedTarget = entry.id;
+    this.snapshotAnthropicModel();
+    this.selectedTarget.set(entry.id);
     this.expandedExtraId = entry.id;
-    this.maybeDiscover(entry);
+    // No auto-discover on expand — discovery is explicit and gated on the key.
   }
 
   /**
@@ -867,20 +961,19 @@ export class LlmProviderComponent implements OnInit {
    */
   toggleExtraExpanded(entry: ExtraProviderEdit): void {
     this.expandedExtraId = this.expandedExtraId === entry.id ? null : entry.id;
-    if (this.expandedExtraId === entry.id) {
-      this.maybeDiscover(entry);
-    }
-  }
-
-  private maybeDiscover(entry: ExtraProviderEdit): void {
-    if (entry.kind === 'open_router' && entry.models === null && !entry.discovering) {
-      void this.discoverExtraModels(entry);
-    }
   }
 
   /**
-   * Fetches the OpenRouter catalog (host-side, tool-capable models). Failure
-   * keeps the free-text input — the catalog is a convenience, not a gate.
+   * OpenRouter discovery is gated on a non-empty API key.
+   * @param entry - The remote provider row.
+   */
+  protected canDiscoverExtra(entry: ExtraProviderEdit): boolean {
+    return entry.kind === 'open_router' && !!entry.keyInput.trim();
+  }
+
+  /**
+   * Fetches the OpenRouter catalog (host-side, tool-capable models), sending
+   * the transient key so the catalog probe authenticates.
    * @param entry - The openrouter row to populate.
    */
   async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
@@ -888,28 +981,49 @@ export class LlmProviderComponent implements OnInit {
       return;
     }
     entry.discovering = true;
+    entry.discoverError = null;
+    this.extraProviders.set([...this.extraProviders()]);
     this.cdr.markForCheck();
     try {
+      const apiKey = entry.keyInput.trim() ? entry.keyInput.trim() : undefined;
       const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-        args: { provider: 'openrouter', baseUrl: '' },
+        args: { provider: 'openrouter', baseUrl: '', apiKey },
       });
       const models = res?.models ?? [];
-      const row = this.extraProviders.find((p) => p.id === entry.id);
+      const row = this.extraProviders().find((p) => p.id === entry.id);
       if (row && models.length > 0) {
         row.models = models;
+        row.discoverError = null;
         if (row.model) {
           row.contextTokens =
             models.find((m) => m.id === row.model)?.context_tokens ?? row.contextTokens;
         }
       }
     } catch (e: unknown) {
-      this.log.warn(
-        `openrouter catalog discovery failed: ${e instanceof Error ? e.message : String(e)}`
-      );
+      const msg = e instanceof Error ? e.message : String(e);
+      // Same classification contract as the local card (discovery.rs sentinels).
+      const row = this.extraProviders().find((p) => p.id === entry.id);
+      if (row) row.discoverError = classifyDiscoveryFailure(msg);
+      this.log.warn(`openrouter catalog discovery failed: ${msg}`);
     } finally {
       entry.discovering = false;
+      this.extraProviders.set([...this.extraProviders()]);
       this.cdr.markForCheck();
     }
+  }
+
+  /**
+   * Inline error for a remote row's failed catalog discovery. The `auth`
+   * sentinel maps to the shared key message; anything else gets a generic hint.
+   * @param entry - The remote provider row.
+   */
+  protected extraDiscoveryErrorMessage(entry: ExtraProviderEdit): string {
+    const failure = entry.discoverError;
+    if (!failure) return '';
+    if (failure.reason === 'auth') return AUTH_FAILURE_MESSAGE;
+    return failure.status
+      ? `Model discovery failed — the server returned HTTP ${failure.status}.`
+      : 'Model discovery failed — check the network connection and try again.';
   }
 
   /**
@@ -921,6 +1035,7 @@ export class LlmProviderComponent implements OnInit {
   onExtraModelSelect(entry: ExtraProviderEdit, modelId: string): void {
     entry.model = modelId;
     entry.contextTokens = entry.models?.find((m) => m.id === modelId)?.context_tokens ?? null;
+    this.extraProviders.set([...this.extraProviders()]);
   }
 
   /**
@@ -949,116 +1064,121 @@ export class LlmProviderComponent implements OnInit {
   onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
     entry.keyInput = value;
     entry.keyTouched = true;
+    // A new key invalidates the previous failure (mirrors onBaseUrlInput).
+    entry.discoverError = null;
+    this.extraProviders.set([...this.extraProviders()]);
   }
 
   /**
    * Placeholder model name per provider. Anthropic derives it from the SSOT
    * catalog (latest everyday Sonnet); empty while loading to avoid a stale id.
    */
-  modelPlaceholder(): string {
-    if (this.provider === 'anthropic') {
+  readonly modelPlaceholder = computed<string>(() => {
+    if (this.provider() === 'anthropic') {
       return this.anthropicModels.latestEverydayModelId() ?? '';
     }
     return 'llama3.3';
-  }
+  });
 
-  /**
-   * Human-readable reason discovery failed, shown inline under the Model field
-   * to explain the fallback to a free-text input.
-   */
+  /** Human-readable reason the discovery probe failed, shown inline under the discover button. */
   discoveryFailureMessage(): string {
-    if (this.discoveryState.kind !== 'failed') return '';
-    const url = this.discoveryState.url;
+    const s = this.discoveryState();
+    if (s.kind !== 'failed') return '';
+    const url = s.url;
     const label = this.providerDisplayLabel();
-    switch (this.discoveryState.reason) {
+    switch (s.reason) {
       case 'offline':
         return `${label} server not reachable at ${url}. Make sure it's running and the local server is enabled.`;
+      case 'auth':
+        return AUTH_FAILURE_MESSAGE;
+      case 'server-error': {
+        const code = s.status;
+        return code
+          ? `${label} at ${url} is reachable but returned HTTP ${code}.`
+          : `${label} at ${url} is reachable but returned an unexpected (non-JSON) response.`;
+      }
       case 'unsupported':
-        return `${label} does not support model discovery — type the model name manually.`;
+        return `${label} does not support model discovery. Switch to a provider with an OpenAI-compatible /v1/models endpoint.`;
       case 'other':
         return `${label} at ${url} returned no models (the server is up but no model is loaded).`;
     }
   }
 
   /** Returns the UI-friendly label for the current provider. */
-  private providerDisplayLabel(): string {
-    return this.provider === 'local' ? 'Local LLM server' : 'Provider';
-  }
+  private readonly providerDisplayLabel = computed<string>(() =>
+    this.provider() === 'local' ? 'Local LLM server' : 'Provider'
+  );
 
   /**
    * Provider-dropdown change. Resets baseUrl (per-provider default ports),
    * re-probes against the new default, and bumps the counter to drop stale probes.
    */
   async onProviderChange(): Promise<void> {
-    if (this.provider === this.lastKnownProvider) {
+    const provider = this.provider();
+    if (provider === this.lastKnownProvider) {
       // Guard against redundant ngModelChange fires — no-op.
       return;
     }
     // Cache the URL per provider to restore on switch back in the same session.
     const previousProvider = this.lastKnownProvider;
-    if (previousProvider !== 'anthropic' && this.baseUrl) {
-      this.baseUrlByProvider[previousProvider] = this.baseUrl;
+    const previousBaseUrl = this.baseUrl();
+    if (previousProvider !== 'anthropic' && previousBaseUrl) {
+      this.baseUrlByProvider[previousProvider] = previousBaseUrl;
     }
     // Snapshot the anthropic model when leaving the card so it is restored below.
-    if (previousProvider === 'anthropic' && this.model) {
-      this.loadedAnthropicModel = this.model;
-    }
-    this.lastKnownProvider = this.provider;
+    this.snapshotAnthropicModel(previousProvider);
+    this.lastKnownProvider = provider;
     this.discoveryCounter++;
     // Clear state now; model is provider-specific and restored from snapshot.
-    this.model =
-      this.provider === 'anthropic'
+    this.model.set(
+      provider === 'anthropic'
         ? (this.loadedAnthropicModel ?? '')
-        : (this.loadedLocalEntry?.model ?? '');
-    this.discoveryState = { kind: 'idle' };
-    this.providerChange.emit(this.provider);
+        : (this.loadedLocalEntry?.model ?? '')
+    );
+    this.discoveryState.set({ kind: 'idle' });
+    this.providerChange.emit(provider);
     this.cdr.markForCheck();
     // Fetch backend-authoritative default if not cached (compose.rs is SSOT).
-    if (this.provider !== 'anthropic' && !this.defaultBaseUrlsByProvider[this.provider]) {
+    if (provider !== 'anthropic' && !this.defaultBaseUrlsByProvider[provider]) {
       try {
         const freshDefault = await this.tauri.invoke<string | null>('get_default_base_url', {
-          provider: this.provider,
+          provider,
         });
         if (freshDefault) {
-          this.defaultBaseUrlsByProvider[this.provider] = freshDefault;
+          this.defaultBaseUrlsByProvider[provider] = freshDefault;
         }
       } catch {
         // Not in Tauri or unknown provider — cache stays empty for this provider.
       }
     }
-    this.defaultBaseUrl = this.defaultBaseUrlsByProvider[this.provider] ?? '';
+    const defaultBaseUrl = this.defaultBaseUrlsByProvider[provider] ?? '';
+    this.defaultBaseUrl.set(defaultBaseUrl);
     // Restore the cached URL for this provider if we have one; otherwise fall
     // back to the provider's backend-authoritative default. Anthropic has no baseUrl.
-    const cached = this.baseUrlByProvider[this.provider];
-    this.baseUrl = this.provider === 'anthropic' ? '' : cached || this.defaultBaseUrl;
-    // discoverModels self-gates on anthropic and empty URL — no outer guard needed.
-    if (this.baseUrl) {
-      await this.discoverModels(false);
-    }
+    const cached = this.baseUrlByProvider[provider];
+    this.baseUrl.set(provider === 'anthropic' ? '' : cached || defaultBaseUrl);
+    // No auto-probe on switch — discovery is explicit (the discover button only).
   }
 
   /**
-   * Probes the local LLM server for models. Fires only on explicit intent
-   * (blur, Refresh, initial load with persisted baseUrl), never on switch.
+   * Probes the local LLM server for models. Fires only from the explicit
+   * "Discover models" button — never automatically (no blur/load/switch probes).
    * @param isRefresh When true, bypass the same-URL dedupe to force a re-probe.
    */
   async discoverModels(isRefresh: boolean): Promise<void> {
-    if (this.provider === 'anthropic') return;
-    const effectiveUrl = this.baseUrl || this.defaultBaseUrl;
+    const provider = this.provider();
+    if (provider === 'anthropic') return;
+    const effectiveUrl = this.baseUrl() || this.defaultBaseUrl();
     if (!effectiveUrl) return;
 
     // Dedupe: skip same-URL non-refresh triggers while a probe is in-flight.
-    if (
-      !isRefresh &&
-      this.discoveryState.kind === 'in-flight' &&
-      this.discoveryState.url === effectiveUrl
-    ) {
+    const current = this.discoveryState();
+    if (!isRefresh && current.kind === 'in-flight' && current.url === effectiveUrl) {
       return;
     }
 
     const id = ++this.discoveryCounter;
-    this.discoveryState = { kind: 'in-flight', url: effectiveUrl, id };
-    this.cdr.markForCheck();
+    this.discoveryState.set({ kind: 'in-flight', url: effectiveUrl, id });
 
     try {
       // Tri-state via `LlmConfigUpdate.api_key` (see types.rs).
@@ -1067,49 +1187,42 @@ export class LlmProviderComponent implements OnInit {
         baseUrl: string;
         apiKey?: string | null;
         customHeaders?: string | null;
-      } = { provider: this.provider, baseUrl: effectiveUrl };
-      if (this.apiKeyTouched) {
-        args.apiKey = nullIfEmpty(this.apiKey);
+      } = { provider, baseUrl: effectiveUrl };
+      if (this.apiKeyTouched()) {
+        args.apiKey = nullIfEmpty(this.apiKey());
       }
-      if (this.customHeadersTouched) {
-        args.customHeaders = nullIfEmpty(this.customHeaders);
+      if (this.customHeadersTouched()) {
+        args.customHeaders = nullIfEmpty(this.customHeaders());
       }
       const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
         args,
       });
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
-      if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
+      const live = this.discoveryState();
+      if (live.kind !== 'in-flight' || live.id !== id) return;
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
       // so a resolved Ok always carries a non-empty array.
-      this.discoveryState = { kind: 'ready', url: effectiveUrl, models: result.models };
-      this.messagesEndpointOk = result.messages_endpoint_ok ?? null;
+      this.discoveryState.set({ kind: 'ready', url: effectiveUrl, models: result.models });
+      this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
       // Auto-select only when blank (a3): a restored-but-unlisted model is a
       // deliberate choice — keep it (the template offers a "not on server" option).
-      if (!this.model && result.models[0]?.id) {
-        this.model = result.models[0].id;
+      if (!this.model() && result.models[0]?.id) {
+        this.model.set(result.models[0].id);
       }
     } catch (e: unknown) {
-      if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
+      const live = this.discoveryState();
+      if (live.kind !== 'in-flight' || live.id !== id) return;
       const msg = e instanceof Error ? e.message : String(e);
-      let reason: 'offline' | 'unsupported' | 'other' = 'offline';
-      if (msg === 'unsupported') {
-        reason = 'unsupported';
-      } else if (msg === 'empty') {
-        reason = 'other';
-      }
-      this.discoveryState = { kind: 'failed', url: effectiveUrl, reason };
-      // No errorOccurred.emit — discovery failure is silent degradation
-      // (UI falls back to the free-text input).
-    } finally {
-      // Always mark for check, even when early-returning via stale-discard.
-      this.cdr.markForCheck();
+      const { reason, status } = classifyDiscoveryFailure(msg);
+      this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason, status });
+      // No errorOccurred.emit — discovery failure is silent degradation.
     }
   }
 
   /** Collapsed-row summary of the local server URL. */
-  baseUrlByProviderView(): string {
-    return this.baseUrl || this.baseUrlByProvider['local'] || '';
-  }
+  readonly baseUrlByProviderView = computed<string>(
+    () => this.baseUrl() || this.baseUrlByProvider['local'] || ''
+  );
 
   /** Loads the current Anthropic authentication status from the backend. */
   async loadAuthStatus(): Promise<void> {
@@ -1117,8 +1230,8 @@ export class LlmProviderComponent implements OnInit {
     if (!project) return;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      this.apiKeyConfigured = status.api_key_configured;
-      this.oauthAuthenticated = status.oauth_authenticated;
+      this.apiKeyConfigured.set(status.api_key_configured);
+      this.oauthAuthenticated.set(status.oauth_authenticated);
       this.projectState.applyAuthStatus(status);
     } catch {
       // Auth status check failed — container may not be running.
@@ -1129,26 +1242,27 @@ export class LlmProviderComponent implements OnInit {
   /** Saves the Anthropic API key to the project's secrets directory. */
   async saveAnthropicApiKey(): Promise<void> {
     const project = this.activeProject();
-    if (!project || !this.anthropicApiKeyInput) return;
-    this.anthropicApiKeySaving = true;
-    this.anthropicApiKeySaved = false;
+    const apiKey = this.anthropicApiKeyInput();
+    if (!project || !apiKey) return;
+    this.anthropicApiKeySaving.set(true);
+    this.anthropicApiKeySaved.set(false);
     this.errorOccurred.emit('');
     try {
       await this.tauri.invoke('save_api_key', {
         project,
-        apiKey: this.anthropicApiKeyInput,
+        apiKey,
       });
-      this.anthropicApiKeySaved = true;
-      this.anthropicApiKeyInput = '';
+      this.anthropicApiKeySaved.set(true);
+      this.anthropicApiKeyInput.set('');
       await this.loadAuthStatus();
       setTimeout(() => {
-        this.anthropicApiKeySaved = false;
+        this.anthropicApiKeySaved.set(false);
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-    this.anthropicApiKeySaving = false;
+    this.anthropicApiKeySaving.set(false);
     this.cdr.markForCheck();
   }
 
@@ -1167,12 +1281,48 @@ export class LlmProviderComponent implements OnInit {
   }
 
   /**
-   * OAuth terminal completion — refresh the status pills.
-   * @param _success - whether the login succeeded (status reload decides).
+   * Auto-selects + saves Anthropic on OAuth success, unconditionally: the
+   * prior active provider may still be routing live, so saveConfig must run
+   * even if the card was already showing Anthropic.
+   * @param _success - login hint; the reloaded auth state is authoritative.
    */
   async onOAuthDone(_success: boolean): Promise<void> {
     await this.loadAuthStatus();
+    if (this.oauthAuthenticated()) {
+      this.selectedTarget.set('anthropic');
+      this.provider.set('anthropic');
+      // Force a full restart: the saved `active` may already read 'anthropic'
+      // while the running container still routes to a stale provider, so the
+      // proxy-reload discriminator would otherwise skip the needed claude restart.
+      await this.saveConfig(true);
+    }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Removes the project's Anthropic credentials and clears the active provider,
+   * leaving the user with no provider, then refreshes the status.
+   * @param project - the project to log out of.
+   */
+  async anthropicLogout(project: string): Promise<void> {
+    this.loggingOut.set(true);
+    try {
+      await this.tauri.invoke<void>('anthropic_logout', { project });
+      await this.tauri.invoke<void>('clear_active_llm_provider');
+      // Deliberate action — bypass applyAuthStatus's never-downgrade guard so
+      // a live chat view blanks to the no_provider screen.
+      this.projectState.forceUnconfigured();
+      await this.loadAuthStatus();
+      // The poll self-stopped while authenticated; restart it so a subsequent
+      // external-terminal re-login on this same project is detected again.
+      this.oauthWatcher.startPoll();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.error(`anthropic_logout failed: ${msg}`);
+    } finally {
+      this.loggingOut.set(false);
+      this.cdr.markForCheck();
+    }
   }
 
   /**
@@ -1183,9 +1333,10 @@ export class LlmProviderComponent implements OnInit {
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
     // Resolve the active target once — it's stable for this invocation.
     const target = this.effectiveTarget();
+    const model = this.model();
     // Anthropic card active → `this.model`; else the load-time snapshot, so
     // an explicit Anthropic model survives activating another provider.
-    const anthropicModel = target === 'anthropic' ? this.model : this.loadedAnthropicModel;
+    const anthropicModel = target === 'anthropic' ? model : this.loadedAnthropicModel;
     const providers: LlmProviderEntry[] = [
       {
         id: 'anthropic',
@@ -1201,23 +1352,23 @@ export class LlmProviderComponent implements OnInit {
       providers.push({ ...this.loadedLocalEntry });
     } else {
       const localUrl = editingLocal
-        ? this.baseUrl || this.defaultBaseUrl
+        ? this.baseUrl() || this.defaultBaseUrl()
         : this.baseUrlByProvider['local'] || '';
       if (localUrl) {
         providers.push({
           id: 'local',
           kind: 'local',
           base_url: localUrl,
-          model: (editingLocal ? this.model : this.loadedLocalEntry?.model) || null,
-          has_api_key: this.hasApiKey || (this.apiKeyTouched && this.apiKey.trim() !== ''),
+          model: (editingLocal ? model : this.loadedLocalEntry?.model) || null,
+          has_api_key: this.hasApiKey() || (this.apiKeyTouched() && this.apiKey().trim() !== ''),
           has_custom_headers:
-            this.hasCustomHeaders ||
-            (this.customHeadersTouched && this.customHeaders.trim() !== ''),
+            this.hasCustomHeaders() ||
+            (this.customHeadersTouched() && this.customHeaders().trim() !== ''),
           context_tokens: this.resolveContextTokensForSave(),
         });
       }
     }
-    for (const extra of this.extraProviders) {
+    for (const extra of this.extraProviders()) {
       // Only configured rows persist; hasKey drops when the field is cleared.
       const hasKey = extra.keyTouched ? extra.keyInput.trim() !== '' : extra.hasKey;
       const configured = hasKey || extra.model.trim() !== '';
@@ -1240,12 +1391,68 @@ export class LlmProviderComponent implements OnInit {
    * Resolves the radio state to a concrete target id. With no matching extra
    * row, the cards win — `provider` decides (covers programmatic mutation).
    */
-  private effectiveTarget(): string {
-    if (this.extraProviders.some((p) => p.id === this.selectedTarget)) {
-      return this.selectedTarget;
+  private readonly effectiveTarget = computed<ProviderTarget>(() => {
+    const selectedTarget = this.selectedTarget();
+    if (this.extraProviders().some((p) => p.id === selectedTarget)) {
+      return selectedTarget;
     }
-    return this.provider === 'anthropic' ? 'anthropic' : 'local';
+    return this.provider() === 'anthropic' ? 'anthropic' : 'local';
+  });
+
+  /** Whole-form fingerprint of dirty-relevant fields, compared to `loadedFormSnapshot` for `canSave`. */
+  private computeFormSnapshot(): string {
+    const extras = this.extraProviders()
+      .map((e) => `${e.id}:${e.model}:${e.keyTouched}`)
+      .join(',');
+    return [
+      this.selectedTarget(),
+      this.provider(),
+      this.authMethod(),
+      this.apiKeyConfigured(),
+      this.model(),
+      this.oauthAuthenticated(),
+      this.baseUrl(),
+      this.apiKeyTouched(),
+      this.customHeadersTouched(),
+      extras,
+    ].join('|');
   }
+
+  /**
+   * Snapshots once both load legs settle, whichever finishes second.
+   * With no active project, `authStatus` is vacuously satisfied since it never fires.
+   * @param half - Which load leg just completed.
+   */
+  private maybeSnapshotInitialLoad(half: 'config' | 'authStatus'): void {
+    if (half === 'config') {
+      this.initialConfigLoaded = true;
+    } else {
+      this.initialAuthStatusLoaded = true;
+    }
+    const authHalfDone = this.initialAuthStatusLoaded || !this.activeProject();
+    if (this.initialConfigLoaded && authHalfDone) {
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
+    }
+  }
+
+  /** True once the live form differs from the snapshot captured at load/save. */
+  protected readonly isDirty = computed<boolean>(
+    () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
+  );
+
+  /**
+   * Save is allowed only when the active non-anthropic provider has a model
+   * AND the user has actually changed something since load/last save.
+   */
+  protected readonly canSave = computed<boolean>(() => {
+    if (!this.isDirty()) return false;
+    const target = this.effectiveTarget();
+    // Anthropic needs no model but DOES need credentials (oauth or api key).
+    if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
+    const extra = this.extraProviders().find((p) => p.id === target);
+    if (extra) return !!extra.model.trim();
+    return !!this.model().trim();
+  });
 
   /**
    * Finds a permanent remote row by exact id, falling back to kind so legacy
@@ -1255,10 +1462,8 @@ export class LlmProviderComponent implements OnInit {
    * @returns The matching row, or undefined.
    */
   private findExtraRow(id: string, kind?: LlmProviderKind): ExtraProviderEdit | undefined {
-    return (
-      this.extraProviders.find((r) => r.id === id) ??
-      (kind ? this.extraProviders.find((r) => r.kind === kind) : undefined)
-    );
+    const rows = this.extraProviders();
+    return rows.find((r) => r.id === id) ?? (kind ? rows.find((r) => r.kind === kind) : undefined);
   }
 
   /**
@@ -1271,16 +1476,49 @@ export class LlmProviderComponent implements OnInit {
     return model.includes('/');
   }
 
+  /**
+   * Snapshots the anthropic-card model before leaving the card, so a later
+   * Save doesn't fall back to a stale snapshot (F2/a1). Foreign ids never stick.
+   * @param fromTarget - The target being left (defaults to the current one).
+   */
+  private snapshotAnthropicModel(fromTarget: string = this.effectiveTarget()): void {
+    const model = this.model();
+    if (fromTarget === 'anthropic' && model && !this.isForeignModel(model)) {
+      this.loadedAnthropicModel = model;
+    }
+  }
+
+  /**
+   * Narrows a persisted flat provider to the typed target domain: cards pass
+   * through, remote ids land on their fixed row (id first, then kind for
+   * legacy generated ids), anything unknown falls back to the local card.
+   * @param raw - Persisted flat provider string.
+   * @param kind - Kind of the matching provider entry, when known.
+   */
+  private narrowFlatProvider(raw: string, kind?: LlmProviderKind): ProviderTarget {
+    if (raw === 'anthropic' || raw === 'local') return raw;
+    return this.findExtraRow(raw, kind)?.id ?? 'local';
+  }
+
+  /**
+   * Value of an input/select/textarea change event target — the one typed
+   * narrowing point for template event bindings (no `$any` casts).
+   * @param e - The DOM event from the template.
+   */
+  protected inputValue(e: Event): string {
+    return (e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
+  }
+
   /** The active selection Save will persist, derived from the radio state. */
   private buildActive(): LlmActive {
     const target = this.effectiveTarget();
-    const extra = this.extraProviders.find((p) => p.id === target);
+    const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) {
       return { provider_id: extra.id, model: extra.model || null };
     }
     return {
       provider_id: target,
-      model: this.model || null,
+      model: this.model() || null,
     };
   }
 
@@ -1303,34 +1541,39 @@ export class LlmProviderComponent implements OnInit {
     return `${providerId}|${model ?? ''}|${kind}|${customHeaders}`;
   }
 
-  /** Persists the LLM provider configuration to the backend. */
-  async saveConfig(): Promise<void> {
+  /**
+   * Persists the LLM provider configuration to the backend.
+   * @param forceRestart - Force a full restart even if `active` is unchanged,
+   *   so a running container can't stay routed to a stale provider.
+   */
+  async saveConfig(forceRestart = false): Promise<void> {
     // Surface the model-required error at Save time; compose::apply_llm_config
     // also rejects it but only at container start (no immediate feedback).
+    const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
-    if (this.provider !== 'anthropic' && !this.model && localIsActive) {
+    if (provider !== 'anthropic' && !this.model() && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
       return;
     }
-    const activeExtra = this.extraProviders.find((p) => p.id === this.effectiveTarget());
+    const activeExtra = this.extraProviders().find((p) => p.id === this.effectiveTarget());
     if (activeExtra && !activeExtra.model.trim()) {
       this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a model name`);
       return;
     }
-    this.saving = true;
-    this.saved = false;
+    this.saving.set(true);
+    this.saved.set(false);
     try {
       const active = this.buildActive();
       // Fall back to provider default if baseUrl blank; compose injects ANTHROPIC_BASE_URL.
       const effectiveBaseUrl =
-        active.provider_id === 'local' ? this.baseUrl || this.defaultBaseUrl || null : null;
+        active.provider_id === 'local' ? this.baseUrl() || this.defaultBaseUrl() || null : null;
       // Input signal — the single project source (drives the restart below).
       const project = this.activeProject();
       // Reuse the cached auth state (loadAuthStatus) — no redundant round-trip.
-      const anthropicHasApiKey = this.apiKeyConfigured;
+      const anthropicHasApiKey = this.apiKeyConfigured();
       // Flat fields mirror v2 providers/active for backend routing; remote row active = remote id.
-      const activeIsRemote = this.extraProviders.some((p) => p.id === active.provider_id);
-      const flatProvider = activeIsRemote ? active.provider_id : this.provider;
+      const activeIsRemote = this.extraProviders().some((p) => p.id === active.provider_id);
+      const flatProvider = activeIsRemote ? active.provider_id : provider;
       const update: {
         provider: string;
         model: string | null;
@@ -1348,14 +1591,14 @@ export class LlmProviderComponent implements OnInit {
         providers: this.buildProviderSet(anthropicHasApiKey),
         active,
       };
-      if (this.apiKeyTouched) {
-        update.api_key = nullIfEmpty(this.apiKey);
+      if (this.apiKeyTouched()) {
+        update.api_key = nullIfEmpty(this.apiKey());
       }
-      if (this.customHeadersTouched) {
-        update.custom_headers = nullIfEmpty(this.customHeaders);
+      if (this.customHeadersTouched()) {
+        update.custom_headers = nullIfEmpty(this.customHeaders());
       }
       // Write keys before config so a failure prevents the config commit (ADR-073).
-      const touchedExtras = this.extraProviders.filter((e) => e.keyTouched);
+      const touchedExtras = this.extraProviders().filter((e) => e.keyTouched);
       for (const extra of touchedExtras) {
         await this.tauri.invoke('set_llm_provider_key', {
           providerId: extra.id,
@@ -1372,25 +1615,28 @@ export class LlmProviderComponent implements OnInit {
         extra.keyInput = '';
         extra.keyTouched = false;
       }
-      this.saved = true;
+      this.extraProviders.set([...this.extraProviders()]);
+      this.saved.set(true);
       // Reset touched flags; update the has_* flags from persisted values.
-      if (this.apiKeyTouched) {
-        this.hasApiKey = !!update.api_key;
-        this.apiKey = '';
-        this.apiKeyTouched = false;
+      if (this.apiKeyTouched()) {
+        this.hasApiKey.set(!!update.api_key);
+        this.apiKey.set('');
+        this.apiKeyTouched.set(false);
       }
-      if (this.customHeadersTouched) {
-        this.hasCustomHeaders = !!update.custom_headers;
-        this.customHeaders = '';
-        this.customHeadersTouched = false;
+      if (this.customHeadersTouched()) {
+        this.hasCustomHeaders.set(!!update.custom_headers);
+        this.customHeaders.set('');
+        this.customHeadersTouched.set(false);
       }
       // Push context tokens so the chat footer updates immediately.
       void this.chatState.refreshLlmConfigCache();
-      this.providerChange.emit(this.provider);
+      this.providerChange.emit(provider);
       // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
       // need a full restart; proxy-path-only changes (base_url) = proxy reload.
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      if (activeKey === this.loadedActiveKey && project) {
+      if (!forceRestart && activeKey === this.loadedActiveKey && project) {
+        // Only base_url changed (same provider/model/kind) — hot-reload the
+        // proxy instead of a full claude restart.
         try {
           await this.tauri.invoke('restart_llm_proxy', { project });
         } catch (e: unknown) {
@@ -1402,29 +1648,22 @@ export class LlmProviderComponent implements OnInit {
           this.projectState.requestRestart();
         }
       } else {
+        // forceRestart, a changed active key, or a fresh no_provider project —
+        // requestRestart starts containers when they were never running.
         this.projectState.requestRestart();
       }
       this.loadedActiveKey = activeKey;
+      // Touched flags are already cleared above, so this reflects the saved state.
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
       setTimeout(() => {
-        this.saved = false;
+        this.saved.set(false);
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-    this.saving = false;
+    this.saving.set(false);
     this.cdr.markForCheck();
-  }
-
-  /**
-   * True when `url` matches the backend-authoritative default for `provider`
-   * (cache via `get_default_base_url`). Gates startup auto-probe (SSRF mitigation).
-   * @param provider The selected provider (e.g. `ollama`, `lmstudio`, `llamacpp`).
-   * @param url The base URL to check against the provider's cached default.
-   */
-  private isDefaultBaseUrl(provider: string, url: string): boolean {
-    const def = this.defaultBaseUrlsByProvider[provider];
-    return !!def && url === def;
   }
 
   private async loadConfig(): Promise<void> {
@@ -1434,28 +1673,33 @@ export class LlmProviderComponent implements OnInit {
       // Legacy provider names (`ollama`/`lmstudio`/`llamacpp`) show the `local`
       // card + banner; persisted value rewritten only on next Save (downgrade-safe).
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
-        this.legacyMigrationProvider = persistedProvider;
-        this.provider = 'local';
+        this.legacyMigrationProvider.set(persistedProvider);
+        this.provider.set('local');
       } else {
-        this.legacyMigrationProvider = null;
-        this.provider = persistedProvider;
+        this.legacyMigrationProvider.set(null);
+        const persistedKind = (config.providers ?? []).find(
+          (p) => p.id === persistedProvider
+        )?.kind;
+        this.provider.set(this.narrowFlatProvider(persistedProvider, persistedKind));
       }
-      this.model = config.model || '';
-      this.baseUrl = config.base_url || '';
-      this.defaultBaseUrl = config.default_base_url || '';
+      const provider = this.provider();
+      const baseUrl = config.base_url || '';
+      const defaultBaseUrl = config.default_base_url || '';
+      this.model.set(config.model || '');
+      this.baseUrl.set(baseUrl);
+      this.defaultBaseUrl.set(defaultBaseUrl);
       // Seed the context cache so a save preserves the persisted value without discovery.
       this.loadedLocalContextTokens =
-        this.provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
-      this.hasApiKey = !!config.has_api_key;
-      this.hasCustomHeaders = !!config.has_custom_headers;
-      this.lastKnownProvider = this.provider;
-      // Seed the cache with the backend-authoritative default for isDefaultBaseUrl.
-      if (this.provider !== 'anthropic' && this.defaultBaseUrl) {
-        this.defaultBaseUrlsByProvider[this.provider] = this.defaultBaseUrl;
+        provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
+      this.hasApiKey.set(!!config.has_api_key);
+      this.hasCustomHeaders.set(!!config.has_custom_headers);
+      this.lastKnownProvider = provider;
+      if (provider !== 'anthropic' && defaultBaseUrl) {
+        this.defaultBaseUrlsByProvider[provider] = defaultBaseUrl;
       }
       // Seed the URL cache so switching away and back preserves the user's URL.
-      if (this.provider !== 'anthropic' && this.baseUrl) {
-        this.baseUrlByProvider[this.provider] = this.baseUrl;
+      if (provider !== 'anthropic' && baseUrl) {
+        this.baseUrlByProvider[provider] = baseUrl;
       }
 
       // v2 provider list: anthropic/local on cards, the rest become remote rows (ADR-073).
@@ -1470,14 +1714,14 @@ export class LlmProviderComponent implements OnInit {
         anthropicEntry?.model ??
         (config.active?.provider_id === 'anthropic' ? (config.active?.model ?? null) : null) ??
         // Legacy/v1 response with no providers[]: fall back to the flat model.
-        (this.provider === 'anthropic' ? this.model || null : null);
+        (provider === 'anthropic' ? this.model() || null : null);
       this.loadedAnthropicModel = candidate && !this.isForeignModel(candidate) ? candidate : null;
-      if (this.provider === 'anthropic') {
-        this.model = this.loadedAnthropicModel ?? '';
+      if (provider === 'anthropic') {
+        this.model.set(this.loadedAnthropicModel ?? '');
       }
       // Overlay persisted entries onto the two permanent rows (id first,
       // then kind so entries saved under older generated ids still land).
-      this.extraProviders = fixedExtraRows();
+      this.extraProviders.set(fixedExtraRows());
       for (const p of config.providers ?? []) {
         if (p.kind !== 'open_router') {
           continue;
@@ -1495,7 +1739,7 @@ export class LlmProviderComponent implements OnInit {
       const activeEntry = (config.providers ?? []).find((p) => p.id === activeId);
       const activeRow = activeId ? this.findExtraRow(activeId, activeEntry?.kind) : undefined;
       if (activeRow) {
-        this.selectedTarget = activeRow.id;
+        this.selectedTarget.set(activeRow.id);
         this.expandedExtraId = activeRow.id;
         // Entry wins (mirror Rust effective_active_model): the row already
         // carries the entry model; use active.model only as a fallback.
@@ -1504,15 +1748,17 @@ export class LlmProviderComponent implements OnInit {
           void this.discoverExtraModels(activeRow);
         }
       } else {
-        this.selectedTarget = this.provider === 'anthropic' ? 'anthropic' : 'local';
+        this.selectedTarget.set(provider === 'anthropic' ? 'anthropic' : 'local');
       }
-      const loadedProviderId = config.active?.provider_id ?? this.selectedTarget;
+      // Publish the row mutations applied above into the signal.
+      this.extraProviders.set([...this.extraProviders()]);
+      const loadedProviderId = config.active?.provider_id ?? this.selectedTarget();
       this.loadedActiveKey = this.computeActiveKey(
         loadedProviderId,
         config.active?.model ?? config.model ?? null,
         config.providers ?? []
       );
-      this.providerChange.emit(this.provider);
+      this.providerChange.emit(provider);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       // Silently ignore the common "not in Tauri" case (browser dev mode).
@@ -1521,15 +1767,10 @@ export class LlmProviderComponent implements OnInit {
         this.log.error(`loadConfig: unexpected error loading LLM config: ${msg}`);
       }
     }
+    // Always mark this half done, even on error — else the join hangs forever
+    // and isDirty()/canSave() get stuck wrong (see maybeSnapshotInitialLoad).
+    this.maybeSnapshotInitialLoad('config');
     this.cdr.markForCheck();
-    // Auto-probe only defaults; user-supplied URLs need an explicit trigger (SSRF mitigation).
-    const effectiveUrl = this.baseUrl || this.defaultBaseUrl;
-    const isSafeToAutoProbe =
-      this.provider !== 'anthropic' &&
-      !!effectiveUrl &&
-      (this.baseUrl === '' || this.isDefaultBaseUrl(this.provider, this.baseUrl));
-    if (isSafeToAutoProbe) {
-      await this.discoverModels(false);
-    }
+    // No auto-probe on load — a saved model renders from config; discovery is explicit.
   }
 }

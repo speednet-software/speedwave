@@ -99,7 +99,7 @@ describe('ShellComponent', () => {
   it('shows rebuilding overlay when reconcile in progress', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'rebuilding';
+    projectState.status.set('rebuilding');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -110,7 +110,7 @@ describe('ShellComponent', () => {
 
   it('shows checking overlay when containers checking', async () => {
     await component.ngOnInit();
-    projectState.status = 'checking';
+    projectState.status.set('checking');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -121,7 +121,7 @@ describe('ShellComponent', () => {
 
   it('shows starting overlay when containers starting', async () => {
     await component.ngOnInit();
-    projectState.status = 'starting';
+    projectState.status.set('starting');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -145,12 +145,27 @@ describe('ShellComponent', () => {
   it('hides overlay when ready', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'ready';
+    projectState.status.set('ready');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="blocking-error"]')).toBeNull();
+  });
+
+  it('does not overlay no_provider (chat renders its own choose-provider surface)', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status.set('no_provider');
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
+  });
+
+  it('statusMessage returns the no-provider copy', () => {
+    projectState.status.set('no_provider');
+    expect(component.statusMessage).toBe('No LLM provider selected.');
   });
 
   it('cleans up subscription on destroy', async () => {
@@ -183,7 +198,7 @@ describe('ShellComponent', () => {
   it('shows fullscreen blocking overlay on check_failed', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'check_failed';
+    projectState.status.set('check_failed');
     projectState.error = 'WSL2 is not available';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -197,7 +212,7 @@ describe('ShellComponent', () => {
   it('check_failed overlay shows only Retry button, no Dismiss', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'check_failed';
+    projectState.status.set('check_failed');
     projectState.error = 'prereq failure';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -218,7 +233,7 @@ describe('ShellComponent', () => {
   it('shows spinner with system check message during system_check', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'system_check';
+    projectState.status.set('system_check');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -229,7 +244,7 @@ describe('ShellComponent', () => {
 
   it('does not show blocking overlay when auth_required', async () => {
     await component.ngOnInit();
-    projectState.status = 'auth_required';
+    projectState.status.set('auth_required');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -242,7 +257,7 @@ describe('ShellComponent', () => {
   it('keeps the Chat nav link visible when status is auth_required', async () => {
     // Chat icon persists in nav even when auth is required; auth surfaces inline.
     await component.ngOnInit();
-    projectState.status = 'auth_required';
+    projectState.status.set('auth_required');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -263,7 +278,7 @@ describe('ShellComponent', () => {
   it('shows Chat nav link when status is ready', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'ready';
+    projectState.status.set('ready');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -284,7 +299,7 @@ describe('ShellComponent', () => {
   it('shows Chat nav link when status is error', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'error';
+    projectState.status.set('error');
     projectState.error = 'something failed';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -320,7 +335,7 @@ describe('ShellComponent', () => {
     beforeEach(async () => {
       await component.ngOnInit();
       await fixture.whenStable();
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       component['cdr'].markForCheck();
       fixture.detectChanges();
     });
@@ -339,7 +354,7 @@ describe('ShellComponent', () => {
 
     it('shows overlay when needsRestart is true and status is auth_required', () => {
       // Restart prompt must surface in auth_required, not only in ready.
-      projectState.status = 'auth_required';
+      projectState.status.set('auth_required');
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
       fixture.detectChanges();
@@ -368,7 +383,7 @@ describe('ShellComponent', () => {
         'checking',
         'starting',
       ] as const) {
-        projectState.status = status;
+        projectState.status.set(status);
         component['cdr'].markForCheck();
         fixture.detectChanges();
 
@@ -381,7 +396,7 @@ describe('ShellComponent', () => {
 
     it('hides overlay when status is error', () => {
       projectState.needsRestart = true;
-      projectState.status = 'error';
+      projectState.status.set('error');
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
