@@ -202,6 +202,19 @@ export async function sendMessageAndWait(text: string, responseTimeoutMs = 180_0
   await waitForTurnComplete(responseTimeoutMs);
 }
 
+/** True when the usage-dashboard table rows for `model` all show "—" (unpriced).
+ *  Targets the per-model row cost, not the project-wide total (which also sums
+ *  any priced provider the project used earlier). */
+export async function modelRowsUnpriced(model: string): Promise<boolean> {
+  const rows = await $$(`[data-testid="llm-usage-row"][data-model="${model}"]`).getElements();
+  if (rows.length === 0) return false; // model must appear to be assertable
+  for (const row of rows) {
+    const cost = await row.$('[data-testid="llm-usage-row-cost"]').getText();
+    if (!cost.includes('—')) return false;
+  }
+  return true;
+}
+
 /** Numeric USD from a `$X.XXXX` element, or null when unpriced (`—`) / absent. */
 export async function readUsd(selector: string): Promise<number | null> {
   const el = await $(selector);
@@ -284,6 +297,31 @@ export async function lastAssistantText(): Promise<string> {
     parts.push(await block.getText());
   }
   return parts.join('\n').trim();
+}
+
+/** Count of rendered assistant message bubbles in the current chat window. */
+export async function assistantMessageCount(): Promise<number> {
+  return (await $$('[data-testid="chat-message"][data-role="assistant"]').getElements()).length;
+}
+
+/** Concatenated text of ALL assistant messages currently in the window. */
+export async function conversationText(): Promise<string> {
+  const messages = await $$('[data-testid="chat-message"]').getElements();
+  const parts: string[] = [];
+  for (const msg of messages) {
+    parts.push(await msg.getText());
+  }
+  return parts.join('\n');
+}
+
+/** Waits until the window holds at least `min` assistant messages (a resumed
+ *  transcript has loaded prior turns), proving a real conversation is open. */
+export async function waitForConversationLoaded(min = 1, timeoutMs = 30_000): Promise<void> {
+  await browser.waitUntil(async () => (await assistantMessageCount()) >= min, {
+    timeout: timeoutMs,
+    interval: 500,
+    timeoutMsg: `chat window never loaded ${min}+ prior assistant message(s)`,
+  });
 }
 
 /** Opens the conversations sidebar (history list). */

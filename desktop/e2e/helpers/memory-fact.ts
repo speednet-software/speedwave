@@ -5,9 +5,15 @@
  */
 
 /** A fact stated in conversation and recalled later — kept in sync across specs.
- *  Phrased as a plain statement (NOT "remember this") so the model answers in
- *  text rather than reaching for a memory/Write tool. */
-export const MEMORY_FACT = 'For this chat, my favourite number is 42.';
+ *  Phrased as a plain in-conversation statement (NOT "remember this" / not
+ *  "your favourite") so the model reads it back from the transcript rather than
+ *  reaching for a memory/Read tool. */
+export const MEMORY_FACT = 'Note this number for later in our chat: 42.';
 
 /** Substring the model's recall answer must contain. */
 export const MEMORY_ANSWER = '42';
+
+/** Recall prompt that points the model at the conversation history explicitly,
+ *  so it answers from context instead of probing a memory file. */
+export const MEMORY_RECALL_PROMPT =
+  'Earlier in this conversation I gave you a number to note. Reply with only that number, nothing else.';

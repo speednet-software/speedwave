@@ -13,7 +13,7 @@
  */
 
 import { openChat, sendMessageAndWait, lastAssistantText } from '../helpers/llm';
-import { MEMORY_FACT, MEMORY_ANSWER } from '../helpers/memory-fact';
+import { MEMORY_FACT, MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
 
 describe('Chat Conversation (OpenRouter)', function () {
   before(async function () {
@@ -36,7 +36,7 @@ describe('Chat Conversation (OpenRouter)', function () {
 
   it('recalls the fact within the same open window', async function () {
     this.timeout(180_000);
-    await sendMessageAndWait('What is my favourite number? Reply with just the number, nothing else.');
+    await sendMessageAndWait(MEMORY_RECALL_PROMPT);
 
     const answer = await lastAssistantText();
     expect(answer).toContain(MEMORY_ANSWER);

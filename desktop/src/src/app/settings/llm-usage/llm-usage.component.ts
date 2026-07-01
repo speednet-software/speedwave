@@ -271,7 +271,11 @@ export const DAILY_CHART_DAYS = 30;
             </thead>
             <tbody>
               @for (row of rows(); track row.day + '|' + row.model) {
-                <tr class="border-t border-[var(--line)]">
+                <tr
+                  class="border-t border-[var(--line)]"
+                  data-testid="llm-usage-row"
+                  [attr.data-model]="row.model"
+                >
                   <td class="py-1 pr-3 whitespace-nowrap">{{ row.day }}</td>
                   <td class="py-1 pr-3 break-all">{{ row.model }}</td>
                   <td class="py-1 pr-3 text-right">{{ num(row.bucket.requests) }}</td>
@@ -287,7 +291,7 @@ export const DAILY_CHART_DAYS = 30;
                       —
                     }
                   </td>
-                  <td class="py-1 text-right">
+                  <td class="py-1 text-right" data-testid="llm-usage-row-cost">
                     {{ row.bucket.cost_usd !== null ? usd(row.bucket.cost_usd) : '—' }}
                   </td>
                 </tr>

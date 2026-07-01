@@ -26,12 +26,16 @@ import {
   configureOpenRouter,
   sendMessageAndWait,
   lastAssistantText,
+  conversationText,
+  waitForConversationLoaded,
   resumeNewestConversation,
+  startNewConversation,
   requireLocalLlm,
   requireOpenrouterKey,
   isUnpriced,
+  modelRowsUnpriced,
 } from '../helpers/llm';
-import { MEMORY_ANSWER } from '../helpers/memory-fact';
+import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -56,18 +60,28 @@ describe('Local Provider + Resume', function () {
 
   it('recalls the fact by continuing the open window (a)', async function () {
     this.timeout(240_000);
-    // Provider switch triggers a full container restart — wait for chat ready.
+    // Continuity across a provider switch is only meaningful with a real open
+    // conversation in the window. Spec 10's project round-trip cleared the live
+    // session (a project switch never resumes the prior project), so re-open the
+    // prior conversation first, assert its turns actually loaded, THEN continue
+    // it with the now-local model — mirroring: open chat → prior chat visible →
+    // keep chatting.
     await openChat();
-    await sendMessageAndWait('What is my favourite number? Reply with just the number, nothing else.');
+    await resumeNewestConversation();
+    await waitForConversationLoaded(2);
+    expect(await conversationText()).toContain(MEMORY_ANSWER);
+
+    await sendMessageAndWait(MEMORY_RECALL_PROMPT);
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
   });
 
   it('recalls the fact by resuming from history (b)', async function () {
     this.timeout(240_000);
-    // Only one conversation exists on e2e-test here (the continuous 08/09/11a
-    // one), so the newest history row is it — resume it through the sidebar UI.
+    // The same continuous conversation, re-entered fresh from the sidebar list.
+    await startNewConversation();
     await resumeNewestConversation();
-    await sendMessageAndWait('Again, what is my favourite number? Reply with just the number, nothing else.');
+    await waitForConversationLoaded(2);
+    await sendMessageAndWait(`Again: ${MEMORY_RECALL_PROMPT}`);
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
   });
 
@@ -78,10 +92,13 @@ describe('Local Provider + Resume', function () {
     expect(await $('[data-testid="meta-cost"]').isExisting()).toBe(false);
   });
 
-  it('does not price a local model on the usage dashboard', async function () {
+  it('does not price the local model on the usage dashboard', async function () {
     this.timeout(30_000);
+    // The project-wide card sums every provider (incl. the earlier priced
+    // OpenRouter turns), so it is NOT the unpriced signal. The local model's own
+    // per-model rows must show "—" — that is the ADR-073 invariant-6 assertion.
     await openUsage();
-    expect(await isUnpriced('[data-testid="llm-usage-card-cost"]')).toBe(true);
+    expect(await modelRowsUnpriced(requireLocalLlm().model)).toBe(true);
   });
 
   it('switches back to OpenRouter (provider change works both ways)', async function () {
