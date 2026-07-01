@@ -216,10 +216,37 @@ export async function sendMessageAndWait(text: string, responseTimeoutMs = 180_0
  *  Targets the per-model row cost, not the project-wide total (which also sums
  *  any priced provider the project used earlier). The usage JSONL stores the
  *  model as `<provider_kind>/<model>` (e.g. `local/unsloth/…`), so match on the
- *  data-model SUFFIX rather than an exact string. */
-export async function modelRowsUnpriced(model: string): Promise<boolean> {
-  const rows = await $$(`[data-testid="llm-usage-row"][data-model$="${model}"]`).getElements();
-  if (rows.length === 0) return false; // model must appear to be assertable
+ *  data-model SUFFIX. The dashboard aggregates async, so wait for the model's
+ *  row(s) to appear (a `nav-usage` re-click re-fetches on each poll) before
+ *  asserting cost — a missing row is a not-yet-loaded dashboard, not a verdict. */
+export async function modelRowsUnpriced(model: string, timeoutMs = 30_000): Promise<boolean> {
+  const sel = `[data-testid="llm-usage-row"][data-model$="${model}"]`;
+  try {
+    await browser.waitUntil(
+      async () => {
+        if ((await $$(sel).getElements()).length > 0) return true;
+        // The dashboard fetches once per mount (effect on the project input), so
+        // re-mount it — nav away then back — to re-run get_llm_usage.
+        await (await $('[data-testid="nav-chat"]')).click();
+        await (await $('[data-testid="nav-usage"]')).click();
+        await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
+        return (await $$(sel).getElements()).length > 0;
+      },
+      { timeout: timeoutMs, interval: 2_000, timeoutMsg: 'no row' }
+    );
+  } catch {
+    // Surface the data-model values that DID render, so a format/timing mismatch
+    // is diagnosable from the failure instead of a bare boolean.
+    const all = await $$('[data-testid="llm-usage-row"]').getElements();
+    const models: (string | null)[] = [];
+    for (const r of all) {
+      models.push(await r.getAttribute('data-model'));
+    }
+    throw new Error(
+      `usage dashboard never showed a row ending in "${model}". Rendered data-model values: ${JSON.stringify(models)}`
+    );
+  }
+  const rows = await $$(sel).getElements();
   for (const row of rows) {
     const cost = await row.$('[data-testid="llm-usage-row-cost"]').getText();
     if (!cost.includes('—')) return false;
