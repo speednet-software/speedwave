@@ -2555,7 +2555,7 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.model).toBe('claude-opus-4-6');
     });
 
-    it('queueMessage no-ops without a session id', async () => {
+    it('queueMessage before any session id fills the local slot and defers the backend', async () => {
       service._setState({ sessionStats: null });
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -2564,8 +2564,74 @@ describe('ChatStateService', () => {
       };
       const prior = await service.queueMessage('next');
       expect(prior).toBeNull();
+      // No silent drop: the slot (and chip) exist immediately, backend waits.
       expect(calls).not.toContain('queue_message');
+      expect(service.pendingQueue?.text).toBe('next');
+    });
+
+    it('deferred queue flushes to the backend when SystemInit delivers the session id', async () => {
+      service._setState({ sessionStats: null });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+      await service.queueMessage('early bird');
+      expect(calls).toEqual([]);
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'late-1' },
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([
+          { cmd: 'queue_message', args: { sessionId: 'late-1', text: 'early bird' } },
+        ])
+      );
+      expect(service.pendingQueue?.text).toBe('early bird');
+    });
+
+    it('deferred queue flushes when the first Result delivers the session id', async () => {
+      service._setState({ sessionStats: null });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+      await service.queueMessage('early bird');
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'res-1', total_cost: 0.01 },
+      });
+      await vi.waitFor(() =>
+        expect(calls.filter((c) => c.cmd === 'queue_message')).toEqual([
+          { cmd: 'queue_message', args: { sessionId: 'res-1', text: 'early bird' } },
+        ])
+      );
+    });
+
+    it('cancelling a deferred queue clears the slot and never reaches the backend', async () => {
+      service._setState({ sessionStats: null });
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await service.queueMessage('doomed');
+      await service.cancelQueuedMessage();
       expect(service.pendingQueue).toBeNull();
+
+      // A late session id must NOT resurrect the cancelled message.
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'm', session_id: 'late-2' },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(calls).not.toContain('queue_message');
     });
 
     it('queueMessage no-ops on empty text', async () => {
@@ -2628,7 +2694,7 @@ describe('ChatStateService', () => {
       expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'next' }]);
     });
 
-    it('queueMessage swallows backend errors and leaves slot untouched', async () => {
+    it('queueMessage swallows backend errors and keeps the visible slot', async () => {
       setSession('s-1');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'queue_message') throw new Error('backend down');
@@ -2638,7 +2704,8 @@ describe('ChatStateService', () => {
       const prior = await service.queueMessage('next');
       warnSpy.mockRestore();
       expect(prior).toBeNull();
-      expect(service.pendingQueue).toBeNull();
+      // The chip must not vanish on a failed registration — no silent drop.
+      expect(service.pendingQueue?.text).toBe('next');
     });
 
     it('resetForNewConversation clears pendingQueue', () => {

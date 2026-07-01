@@ -110,6 +110,8 @@ export class ChatStateService {
 
   /** ADR-045 — current queued message (null when slot is empty). */
   private _pendingQueue: QueuedMessage | null = null;
+  /** Queue accepted before the session id was known; flushed on first seed. */
+  private _queueAwaitingSession = false;
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
     return this._pendingQueue;
@@ -714,7 +716,10 @@ export class ChatStateService {
         if (chunk.data.model) this._model = chunk.data.model;
         // ADR-045: seed the session id at stream start so queue/retry work
         // during the FIRST turn (before any Result carries it).
-        if (chunk.data.session_id) this.seedSessionId(chunk.data.session_id);
+        if (chunk.data.session_id) {
+          this.seedSessionId(chunk.data.session_id);
+          void this.flushDeferredQueue(chunk.data.session_id);
+        }
         break;
 
       case 'RateLimit':
@@ -790,7 +795,10 @@ export class ChatStateService {
           total_output_tokens: this._totalOutputTokens,
         });
         // Durable id so a later container restart (model switch) can resume this session.
-        if (chunk.data.session_id) this._lastKnownSessionId = chunk.data.session_id;
+        if (chunk.data.session_id) {
+          this._lastKnownSessionId = chunk.data.session_id;
+          void this.flushDeferredQueue(chunk.data.session_id);
+        }
         if (typeof chunk.data.usage?.input_tokens === 'number') {
           this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
         }
@@ -836,6 +844,7 @@ export class ChatStateService {
       case 'QueueDrained': {
         // ADR-045: backend sent the queued payload to stdin; mirror to local state.
         this._pendingQueue = null;
+        this._queueAwaitingSession = false;
         this._messages = [
           ...this._messages,
           {
@@ -876,6 +885,7 @@ export class ChatStateService {
     this.log.debug('[chat-state] resetForNewConversation');
     this.resetCoreStreamState();
     this._pendingQueue = null;
+    this._queueAwaitingSession = false;
     this.initialized = false;
     this.startingSession = false;
     this.clearSessionTracking();
@@ -921,29 +931,54 @@ export class ChatStateService {
   }
 
   /**
-   * Queue a message as the next turn (ADR-045); replace semantics.
+   * Queue a message as the next turn (ADR-045); replace semantics. The local
+   * slot fills immediately; before the first session id (init not yet parsed)
+   * the backend registration is deferred to {@link flushDeferredQueue} so an
+   * early queue is never silently dropped.
    * @param text - The message to queue.
    * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
+    if (!text) return null;
+    const prior = this._pendingQueue?.text ?? null;
+    this._pendingQueue = { text, queued_at: Date.now() };
+    this.notifyChange();
     const sessionId = this._sessionStats()?.session_id;
-    if (!sessionId || !text) return null;
+    if (!sessionId) {
+      this._queueAwaitingSession = true;
+      return prior;
+    }
     try {
-      const prior = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
+      const displaced = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
         'queue_message',
         { sessionId, text }
       );
-      this._pendingQueue = { text, queued_at: Date.now() };
-      this.notifyChange();
-      return prior?.text ?? null;
+      return displaced?.text ?? prior;
     } catch (err) {
       this.log.warn(`[chat-state] queueMessage: backend invoke failed: ${String(err)}`);
-      return null;
+      return prior;
+    }
+  }
+
+  /**
+   * Registers a deferred queued message once the session id becomes known.
+   * @param sessionId - Session id from the first SystemInit or Result seed.
+   */
+  private async flushDeferredQueue(sessionId: string): Promise<void> {
+    if (!this._queueAwaitingSession) return;
+    this._queueAwaitingSession = false;
+    const queued = this._pendingQueue;
+    if (!queued) return;
+    try {
+      await this.tauri.invoke('queue_message', { sessionId, text: queued.text });
+    } catch (err) {
+      this.log.warn(`[chat-state] flushDeferredQueue: backend invoke failed: ${String(err)}`);
     }
   }
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
+    this._queueAwaitingSession = false;
     const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
       // No session yet — clear the local slot anyway.
