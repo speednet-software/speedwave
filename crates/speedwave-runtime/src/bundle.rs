@@ -694,6 +694,11 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
+/// Host build-output dir names that are never image content — skipped from digests here,
+/// pruned by bundle-build-context.{sh,ps1}, and ignored via `containers/.dockerignore`
+/// (alignment test-enforced).
+pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+
 fn collect_directory_entries(
     dir: &Path,
     prefix: &str,
@@ -720,12 +725,11 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // Host-side build outputs are not image content: node_modules is never
-        // staged, target/ is .dockerignore'd, dist/ is rebuilt in-image.
         if child.is_dir()
             && child
                 .file_name()
-                .is_some_and(|n| n == "node_modules" || n == "target" || n == "dist")
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| HOST_BUILD_OUTPUT_DIRS.contains(&n))
         {
             continue;
         }
@@ -808,6 +812,63 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+        let ps1 = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+            .expect("bundle-build-context.ps1 should exist");
+        let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
+            .expect("containers/.dockerignore should exist");
+
+        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
+        let sh_line = sh
+            .lines()
+            .find(|l| l.contains("-prune"))
+            .expect("-prune find line should exist in .sh");
+        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
+        let mut sh_names: Vec<&str> = sh_tokens
+            .windows(2)
+            .filter(|w| w[0] == "-name")
+            .map(|w| w[1])
+            .collect();
+        sh_names.sort_unstable();
+
+        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
+        let ps1_line = ps1
+            .lines()
+            .find(|l| l.contains(" -in "))
+            .expect("-in prune line should exist in .ps1");
+        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
+        ps1_names.sort_unstable();
+
+        let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
+        expected.sort_unstable();
+
+        assert_eq!(
+            sh_names, expected,
+            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        assert_eq!(
+            ps1_names, expected,
+            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        for name in HOST_BUILD_OUTPUT_DIRS {
+            assert!(
+                dockerignore
+                    .lines()
+                    .any(|l| l.trim() == format!("**/{name}/")),
+                "containers/.dockerignore must contain '**/{name}/' (HOST_BUILD_OUTPUT_DIRS)"
+            );
+        }
     }
 
     #[test]

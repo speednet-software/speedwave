@@ -67,6 +67,20 @@ Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
 
+# Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
+# (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
+function Remove-BuildOutputs {
+    param([string]$root)
+    foreach ($dir in Get-ChildItem -Path $root -Directory -Force) {
+        if ($dir.Name -in 'target', 'dist', 'node_modules') {
+            Remove-Item -Recurse -Force $dir.FullName
+        } else {
+            Remove-BuildOutputs $dir.FullName
+        }
+    }
+}
+Remove-BuildOutputs "$dest\build-context\containers"
+
 # Strip CR from every .sh. UTF-8 without BOM — a BOM before the shebang
 # breaks Linux exec just like CRLF would.
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)

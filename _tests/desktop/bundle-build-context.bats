@@ -46,6 +46,26 @@ teardown() {
     [ -f "$DEST/build-context/containers/Containerfile.claude" ]
 }
 
+@test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
+    # Plant a dirty source tree; the trap removes it even on assertion failure.
+    local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"
+    trap 'rm_with_retry "$marker"' RETURN
+    # Non-empty dirs pin the prune to a recursive delete.
+    mkdir -p "$marker/target" "$marker/dist" "$marker/node_modules"
+    echo x > "$marker/target/blob"
+    echo x > "$marker/dist/blob"
+    echo x > "$marker/node_modules/blob"
+    echo x > "$marker/keep.txt"
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    # Sibling content survives; the three build-output dirs do not.
+    [ -f "$DEST/build-context/containers/.bats-prune-check/keep.txt" ]
+    [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
+    [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
+    [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+}
+
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
