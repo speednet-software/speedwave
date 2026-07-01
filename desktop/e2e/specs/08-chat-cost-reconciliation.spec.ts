@@ -24,7 +24,12 @@
  * UX-volatile text content.
  */
 
-import { openChat, sendMessageAndWait, waitForUsd, waitForDashboardUsd } from '../helpers/llm';
+import {
+  openChat,
+  sendMessageAndWait,
+  waitForDashboardUsd,
+  waitForFooterToReconcile,
+} from '../helpers/llm';
 
 describe('Chat Cost Reconciliation', function () {
   before(async function () {
@@ -48,37 +53,26 @@ describe('Chat Cost Reconciliation', function () {
     // (chat-state.service.ts DEFERRED_RECONCILE_BACKOFF_MS); allow headroom.
     this.timeout(180_000);
 
-    // Poll the session-stats footer until the deferred OpenRouter cost resolves
-    // to a priced (non-em-dash) value, mirroring reconcileFooterCost's patience.
-    const footerCost = await waitForUsd('[data-testid="session-stats"]', {
-      timeout: 90_000,
-      interval: 3_000,
-      timeoutMsg: 'Chat footer cost never resolved to a priced value (reconcileFooterCost)',
-    });
-    expect(footerCost).toBeGreaterThan(0);
-
-    // Cross-check against the global usage dashboard's aggregate cost card,
-    // which reads the same proxy usage JSONL + host cost sidecar (invariant 6).
-    // The dashboard only fetches on mount, so remount each poll until the
-    // sidecar-enriched cost is picked up.
+    // The usage dashboard reads the proxy SSOT cost (sidecar) and re-polls the
+    // deferred enrichment itself — take it as the source of truth. Remount each
+    // round so it refetches (it fetches on mount / project change only).
     const dashboardCost = await waitForDashboardUsd({
-      timeout: 60_000,
+      timeout: 90_000,
       interval: 3_000,
       timeoutMsg: 'Usage dashboard cost card never resolved to a priced value',
     });
+    expect(dashboardCost).toBeGreaterThan(0);
 
-    // get_conversation_cost (footer) sums only response_ids from turns loaded
-    // in-memory in this conversation; get_llm_usage (dashboard) sums every
-    // proxied request ever recorded for the whole project. This spec is the
-    // first chat turn sent anywhere in the suite (specs 01-06 never invoke
-    // chat), so for the fresh e2e-test project the two scopes coincide.
-    expect(dashboardCost).toBeGreaterThanOrEqual(footerCost);
-
-    // Both read the same sidecar-enriched cost_usd (ADR-073 invariant 6), but
-    // at different display precision: the footer always shows 4 decimals,
-    // the dashboard rounds to 2 once cost >= $0.10 (max +/-0.005 rounding
-    // error). 0.015 gives headroom above that bound while still catching a
-    // genuine reconciliation mismatch.
-    expect(Math.abs(dashboardCost - footerCost)).toBeLessThan(0.015);
+    // The footer first shows Claude Code's live-preview cost (priced with
+    // Anthropic rates, wrong for a proxied provider), then reconcileFooterCost
+    // overwrites it with the same proxy SSOT. Wait for the footer to converge
+    // on the dashboard value rather than reading the transient live preview.
+    await openChat();
+    const footerCost = await waitForFooterToReconcile(dashboardCost, 0.015, {
+      timeout: 90_000,
+      interval: 3_000,
+      timeoutMsg: 'Chat footer cost never reconciled to the proxy SSOT value',
+    });
+    expect(footerCost).toBeGreaterThan(0);
   });
 });

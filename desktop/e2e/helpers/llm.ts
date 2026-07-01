@@ -230,6 +230,30 @@ export async function waitForDashboardUsd(
   }
 }
 
+/** Polls the chat footer cost until it reconciles to within `tol` of `target`.
+ *  The footer first shows Claude Code's live-preview cost (mispriced for a
+ *  proxied provider), then reconcileFooterCost overwrites it with the proxy
+ *  SSOT — this waits for that convergence. Requires being on /chat. */
+export async function waitForFooterToReconcile(
+  target: number,
+  tol: number,
+  opts: { timeout: number; interval: number; timeoutMsg: string }
+): Promise<number> {
+  let resolved: number | null = null;
+  await browser.waitUntil(
+    async () => {
+      const value = await readUsd('[data-testid="session-stats"]');
+      if (value === null) return false;
+      if (Math.abs(value - target) > tol) return false;
+      resolved = value;
+      return true;
+    },
+    opts
+  );
+  if (resolved === null) throw new Error(opts.timeoutMsg);
+  return resolved;
+}
+
 /** True when a `$X.XXXX`/`—` cost element shows no priced value (unpriced). */
 export async function isUnpriced(selector: string): Promise<boolean> {
   return (await readUsd(selector)) === null;
