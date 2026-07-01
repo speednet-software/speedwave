@@ -392,6 +392,13 @@ impl ContainerRuntime for WslRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
+        // No compose.yml → nothing was ever started (deferred no-provider
+        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
+        // Check the host-side Windows path, not the /mnt/c engine path.
+        if super::compose_down_is_noop(&super::compose_file_path(project)?) {
+            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            return Ok(());
+        }
         super::compose_down_and_cleanup(
             &*self.runner,
             "wsl.exe",

@@ -298,6 +298,12 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
+        // No compose.yml → nothing was ever started (deferred no-provider
+        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
+        if super::compose_down_is_noop(&compose_file) {
+            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            return Ok(());
+        }
         compose_down_and_cleanup_with_retry(
             &*self.runner,
             "limactl",
@@ -1539,6 +1545,22 @@ mod tests {
 
     #[test]
     fn test_compose_down_runs_compose_command() {
+        // compose_down short-circuits when no compose.yml exists; create one so
+        // this test exercises the real command path (cleaned up after).
+        let compose_file = crate::runtime::compose_file_path("testproject").unwrap();
+        let compose_path = std::path::PathBuf::from(&compose_file);
+        if let Some(parent) = compose_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&compose_path, "services: {}").unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_path);
+
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
         rt.compose_down("testproject").unwrap();
