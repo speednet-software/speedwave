@@ -1638,10 +1638,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
       // need a full restart; proxy-path-only changes (base_url) = proxy reload.
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      if (forceRestart) {
-        // Login self-heal: the discriminator can't see container drift, so force it.
-        this.projectState.requestRestart();
-      } else if (activeKey === this.loadedActiveKey && project) {
+      if (!forceRestart && activeKey === this.loadedActiveKey && project) {
+        // Only base_url changed (same provider/model/kind) — hot-reload the
+        // proxy instead of a full claude restart.
         try {
           await this.tauri.invoke('restart_llm_proxy', { project });
         } catch (e: unknown) {
@@ -1653,6 +1652,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           this.projectState.requestRestart();
         }
       } else {
+        // forceRestart, a changed active key, or a fresh no_provider project —
+        // requestRestart starts containers when they were never running.
         this.projectState.requestRestart();
       }
       this.loadedActiveKey = activeKey;

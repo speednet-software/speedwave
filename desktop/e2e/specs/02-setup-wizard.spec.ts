@@ -21,6 +21,7 @@
 
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
 import { openSettings, configureOpenRouter, requireOpenrouterKey } from '../helpers/llm';
+import { waitForShellReady } from '../helpers/shell';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
@@ -222,8 +223,11 @@ describe('Setup Wizard — Full Flow', function () {
   });
 
   it('should configure an OpenRouter provider so containers can start', async function () {
-    this.timeout(60_000);
+    this.timeout(180_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
+    // Saving the first provider starts the containers; wait for the project to
+    // return to ready before the container-health spec inspects it.
+    await waitForShellReady(150_000);
   });
 });

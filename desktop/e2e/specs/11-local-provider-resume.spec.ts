@@ -21,6 +21,7 @@ import { confirmRestartAndWait } from '../helpers/shell';
 import {
   openSettings,
   openChat,
+  openUsage,
   configureLocalProvider,
   configureOpenRouter,
   sendMessageAndWait,
@@ -79,9 +80,7 @@ describe('Local Provider + Resume', function () {
 
   it('does not price a local model on the usage dashboard', async function () {
     this.timeout(30_000);
-    await (await $('[data-testid="nav-usage"]')).click();
-    await $('[data-testid="usage-title"]').waitForExist({ timeout: 10_000 });
-    await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
+    await openUsage();
     expect(await isUnpriced('[data-testid="llm-usage-card-cost"]')).toBe(true);
   });
 

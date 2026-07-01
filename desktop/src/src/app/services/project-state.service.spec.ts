@@ -523,6 +523,30 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('requestRestart', () => {
+    it('flags a restart when the project is already running', () => {
+      service.status.set('ready');
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      expect(service.needsRestart).toBe(true);
+      expect(ensureSpy).not.toHaveBeenCalled();
+    });
+
+    it('starts containers instead of flagging when the project has no provider', () => {
+      service.status.set('no_provider');
+      service.needsRestart = false;
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      // no_provider hides the restart overlay — start rather than set a dead flag.
+      expect(ensureSpy).toHaveBeenCalled();
+      expect(service.needsRestart).toBe(false);
+    });
+  });
+
   describe('reconcile status', () => {
     it('sets rebuilding when reconcile in_progress', async () => {
       await service.init();

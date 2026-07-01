@@ -471,6 +471,12 @@ export class ProjectStateService {
 
   /** Marks that pending changes require a container restart. */
   requestRestart(): void {
+    // On a not-yet-started project (no_provider) the restart overlay never
+    // renders, so needsRestart is a dead flag — start the containers instead.
+    if (this.status() === 'no_provider') {
+      void this.ensureContainersRunning();
+      return;
+    }
     this.needsRestart = true;
     this.notifyChange();
   }

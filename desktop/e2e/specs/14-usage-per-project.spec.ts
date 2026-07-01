@@ -11,16 +11,10 @@
  */
 
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
+import { openUsage } from '../helpers/llm';
 
 const FIRST_PROJECT = 'e2e-test';
 const SECOND_PROJECT = 'e2e-second';
-
-/** Navigates to the usage dashboard and waits for it to mount. */
-async function openUsage(): Promise<void> {
-  await (await $('[data-testid="nav-usage"]')).click();
-  await $('[data-testid="usage-title"]').waitForExist({ timeout: 10_000 });
-  await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
-}
 
 describe('Per-Project Usage Isolation', function () {
   before(async function () {

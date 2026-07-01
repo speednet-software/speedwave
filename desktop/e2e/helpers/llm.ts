@@ -125,6 +125,13 @@ export async function openChat(timeoutMs = 180_000): Promise<void> {
   await $('[data-testid="chat-view"]').waitForExist({ timeout: timeoutMs });
 }
 
+/** Navigates to the usage dashboard and waits for it to mount. */
+export async function openUsage(): Promise<void> {
+  await (await $('[data-testid="nav-usage"]')).click();
+  await $('[data-testid="usage-title"]').waitForExist({ timeout: 10_000 });
+  await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
+}
+
 /** Types `text` and clicks send; does not wait for the turn to finish. */
 export async function sendMessageNoWait(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');

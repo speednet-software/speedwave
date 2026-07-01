@@ -344,6 +344,21 @@ describe('LlmProviderComponent', () => {
     expect(projectState.needsRestart).toBe(false);
   });
 
+  it('starts containers (not just restart) when the project had no provider', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.status.set('no_provider');
+    projectState.needsRestart = false;
+    const ensureSpy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+
+    await component.saveConfig();
+
+    // First provider on a fresh project: start containers, don't just flag a restart.
+    expect(ensureSpy).toHaveBeenCalled();
+    expect(projectState.needsRestart).toBe(false);
+  });
+
   it('sends null for empty optional fields', async () => {
     let invokedArgs: Record<string, unknown> = {};
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
