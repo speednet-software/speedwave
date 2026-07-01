@@ -73,7 +73,7 @@ describe('ProjectStateService', () => {
     it('loads active project and sets status to ready', async () => {
       await service.init();
 
-      expect(service.activeProject).toBe('test');
+      expect(service.activeProject()).toBe('test');
       expect(service.status()).toBe('ready');
     });
 
@@ -293,7 +293,7 @@ describe('ProjectStateService', () => {
     });
 
     it('sets error when no active project', async () => {
-      service.activeProject = null;
+      service.activeProject.set(null);
 
       await service.ensureContainersRunning();
 
@@ -732,7 +732,7 @@ describe('ProjectStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(service.status()).toBe('ready');
-      expect(service.activeProject).toBe('new-project');
+      expect(service.activeProject()).toBe('new-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('');
     });
@@ -775,7 +775,7 @@ describe('ProjectStateService', () => {
       });
 
       expect(service.status()).toBe('error');
-      expect(service.activeProject).toBe('old-project');
+      expect(service.activeProject()).toBe('old-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('container crash');
     });
@@ -787,7 +787,7 @@ describe('ProjectStateService', () => {
       });
 
       expect(service.status()).toBe('error');
-      expect(service.activeProject).toBeNull();
+      expect(service.activeProject()).toBeNull();
     });
   });
 
@@ -891,7 +891,7 @@ describe('ProjectStateService', () => {
       };
       service.status.set('error');
       service.error = 'old error';
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       await service.dismissError();
       expect(service.error).toContain('Containers are not running');
     });
@@ -935,7 +935,7 @@ describe('ProjectStateService', () => {
     });
 
     it('clears error when retrying', async () => {
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       service.error = 'previous error';
       const statuses: string[] = [];
       service.onChange(() => statuses.push(service.status()));
@@ -1093,7 +1093,7 @@ describe('ProjectStateService', () => {
     });
 
     it('retryAuth sets error (NOT auth_required) and logs when the auth check throws', async () => {
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       service.status.set('auth_required');
       const failed = vi.fn();
       const settled = vi.fn();
@@ -1131,7 +1131,7 @@ describe('ProjectStateService', () => {
             return undefined;
         }
       };
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       service.status.set('ready');
 
       await service.retryAuth();
@@ -1152,7 +1152,7 @@ describe('ProjectStateService', () => {
             return undefined;
         }
       };
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       service.status.set('ready');
 
       await service.retryAuth();
@@ -1483,7 +1483,7 @@ describe('ProjectStateService', () => {
     });
 
     it('restartContainers is no-op when no active project', async () => {
-      service.activeProject = null;
+      service.activeProject.set(null);
       service.requestRestart();
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
@@ -1634,7 +1634,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
       // activeProject must be set for restartContainers to proceed.
-      (service as unknown as { activeProject: string }).activeProject = 'p';
+      service.activeProject.set('p');
       await service.restartContainers();
       expect(order).toEqual(['begin', 'restart']);
     });
@@ -1648,7 +1648,7 @@ describe('ProjectStateService', () => {
         if (cmd === 'restart_integration_containers') order.push('restart');
         return undefined;
       };
-      (service as unknown as { activeProject: string }).activeProject = 'p';
+      service.activeProject.set('p');
       await service.restartContainers();
       expect(order).toEqual(['restart']); // restart still ran despite the rejecting hook
     });

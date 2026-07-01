@@ -32,7 +32,7 @@ import { LlmUsageComponent } from '../settings/llm-usage/llm-usage.component';
     <!-- Scrollable content -->
     <div class="flex-1 overflow-y-auto p-4 md:p-6">
       <div class="mx-auto max-w-3xl">
-        @if (projectState.activeProject; as project) {
+        @if (projectState.activeProject(); as project) {
           <p class="mb-3 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
             Requests routed through the project's LLM proxy, aggregated per day and model.
             Subscription traffic shows token counts; API-priced models also show cost.

@@ -75,7 +75,7 @@ describe('ChatComponent', () => {
 
   describe('resumeConversation loading flag', () => {
     it('sets loadingTranscript true during fetch and false after it resolves', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
 
       let releaseGetConversation: (() => void) | null = null;
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -100,7 +100,7 @@ describe('ChatComponent', () => {
     });
 
     it('clears loadingTranscript even when get_conversation fails', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') throw new Error('boom');
         return undefined;
@@ -112,7 +112,7 @@ describe('ChatComponent', () => {
     });
 
     it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       // Wrap the real disposer so we can assert when the start-in-progress flag
       // is released (the disposer replaces the old endStartingSession method).
       const dispose = vi.fn();
@@ -146,7 +146,7 @@ describe('ChatComponent', () => {
 
   describe('shell composition', () => {
     it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       projectState.status.set('ready');
       await component.ngOnInit();
       fixture.detectChanges();
@@ -156,7 +156,7 @@ describe('ChatComponent', () => {
     });
 
     it('renders the choose-a-provider surface when status is no_provider', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       projectState.status.set('no_provider');
       await component.ngOnInit();
       fixture.detectChanges();
@@ -175,7 +175,7 @@ describe('ChatComponent', () => {
     });
 
     it('keeps the project pill reachable when status is auth_required', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       projectState.status.set('auth_required');
       await component.ngOnInit();
       fixture.detectChanges();
@@ -401,7 +401,7 @@ describe('ChatComponent', () => {
       const mockConversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
       ];
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return mockConversations;
         return undefined;
@@ -414,7 +414,7 @@ describe('ChatComponent', () => {
     });
 
     it('handles missing active project by setting empty conversations', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
 
       await component.loadConversations();
 
@@ -422,7 +422,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets historyError on backend failure', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') throw new Error('network error');
         return undefined;
@@ -438,7 +438,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets historyLoading while loading', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       let capturedLoading = false;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') {
@@ -478,7 +478,7 @@ describe('ChatComponent', () => {
 
   describe('resumeConversation', () => {
     it('calls resume_conversation and closes the sidebar', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       uiState.toggleSidebar();
       const invokeCalls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -493,7 +493,7 @@ describe('ChatComponent', () => {
     });
 
     it('shows error message when resume fails', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation') throw new Error('container not running');
         return undefined;
@@ -510,7 +510,7 @@ describe('ChatComponent', () => {
     });
 
     it('does not leave the failed session marked active', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation') throw new Error('container not running');
         return undefined;
@@ -524,7 +524,7 @@ describe('ChatComponent', () => {
 
     it('routes auth error in resumeConversation to retryAuth', async () => {
       const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation')
@@ -542,7 +542,7 @@ describe('ChatComponent', () => {
 
   describe('deleteConversation', () => {
     it('calls delete_conversation and removes the row locally', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       component.conversations = [
         { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
         { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
@@ -563,14 +563,14 @@ describe('ChatComponent', () => {
     });
 
     it('does nothing when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.deleteConversation('s1');
       expect(invokeSpy).not.toHaveBeenCalled();
     });
 
     it('sets historyError when backend fails and keeps the row', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       component.conversations = [
         { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
       ];
@@ -589,7 +589,7 @@ describe('ChatComponent', () => {
     });
 
     it('resets live chat when deleting the active session', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       chatState._setState({
         messages: [],
         currentBlocks: [],
@@ -639,7 +639,7 @@ describe('ChatComponent', () => {
 
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         return undefined;
@@ -655,7 +655,7 @@ describe('ChatComponent', () => {
 
   describe('toggleMemory', () => {
     it('toggles showMemory boolean', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return 'memory content';
         return undefined;
@@ -671,7 +671,7 @@ describe('ChatComponent', () => {
 
   describe('loadProjectMemory', () => {
     it('logs error on failure', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -686,7 +686,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets projectMemory on success', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return '# Project Memory\nSome content';
         return undefined;
@@ -698,7 +698,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets empty string on backend failure without throwing', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('file not found');
         return undefined;
@@ -710,7 +710,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets empty string when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
 
       await component.loadProjectMemory();
 
@@ -718,7 +718,7 @@ describe('ChatComponent', () => {
     });
 
     it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -731,7 +731,7 @@ describe('ChatComponent', () => {
     });
 
     it('clears memoryError on a subsequent successful load', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       let shouldFail = true;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') {
@@ -752,7 +752,7 @@ describe('ChatComponent', () => {
     });
 
     it('does not set memoryError when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
       component.memoryError = 'stale';
 
       await component.loadProjectMemory();
@@ -849,7 +849,7 @@ describe('ChatComponent', () => {
 
   describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         if (cmd === 'list_projects')
@@ -877,7 +877,7 @@ describe('ChatComponent', () => {
       const newConversations = [
         { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
       ];
-      projectState.activeProject = 'other-project';
+      projectState.activeProject.set('other-project');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return newConversations;
         return undefined;

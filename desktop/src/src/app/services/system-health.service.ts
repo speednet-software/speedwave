@@ -38,7 +38,7 @@ export class SystemHealthService implements OnDestroy {
 
   /** Force a fetch outside the regular cadence (e.g. after a manual action). */
   async refresh(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     try {
       const report = await this.tauri.invoke<HealthReport>('get_health', { project });

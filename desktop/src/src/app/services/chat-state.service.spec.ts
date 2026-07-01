@@ -611,7 +611,7 @@ describe('ChatStateService', () => {
     });
 
     it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       // get_conversation_cost is the SSOT total (no frontend delta sum); the
       // footer mirrors whatever the aggregator returns.
       let aggregatorTotal = 0.2;
@@ -643,7 +643,7 @@ describe('ChatStateService', () => {
     });
 
     it('sends all conversation response_ids (both turns) to get_conversation_cost', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       let sentIds: string[] = [];
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -672,7 +672,7 @@ describe('ChatStateService', () => {
     });
 
     it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
         if (cmd === 'get_usage_for_response') return null; // proxy hasn't recorded this turn yet
@@ -691,7 +691,7 @@ describe('ChatStateService', () => {
     });
 
     it('reconcile hides the per-message cost when the proxy SSOT is free/null', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
         // Local is free → null cost (rendered "—"), never $0.00.
         if (cmd === 'get_usage_for_response') return { cost_usd: null, cost_source: 'free' };
@@ -709,7 +709,7 @@ describe('ChatStateService', () => {
     });
 
     it('subscription (null aggregator total) yields null footer ("—"), not CC estimate', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
         // The turn's line is present (unpriced); the session aggregator returns
@@ -730,7 +730,7 @@ describe('ChatStateService', () => {
     });
 
     it('local provider suppresses the live CC cost preview (no $0.00x flicker)', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
       // Simulate an active local provider (no real cost).
       (service as unknown as { _currentProvider: string | null })._currentProvider = 'local';
@@ -749,7 +749,7 @@ describe('ChatStateService', () => {
     it('re-reconciles a deferred OpenRouter cost once /generation prices it later', async () => {
       vi.useFakeTimers();
       try {
-        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
         // First read: OpenRouter cost deferred (null); later reads priced
         // (actual). Footer aggregator follows the same arc.
         let priced = false;
@@ -800,7 +800,7 @@ describe('ChatStateService', () => {
     it('deferred reconcile keeps the visible preview cost instead of blanking it (#31)', async () => {
       vi.useFakeTimers();
       try {
-        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
         let priced = false;
         vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
           if (cmd === 'get_usage_for_response') {
@@ -841,7 +841,7 @@ describe('ChatStateService', () => {
     it('picks up an OpenRouter cost that /generation prices only after ~30s', async () => {
       vi.useFakeTimers();
       try {
-        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
         // OpenRouter can take far longer than the early backoff to price a
         // large generation; the retry window must outlast that.
         let elapsed = 0;
@@ -886,7 +886,7 @@ describe('ChatStateService', () => {
     it('stops re-reconciling a deferred turn once a newer turn supersedes it', async () => {
       vi.useFakeTimers();
       try {
-        TestBed.inject(ProjectStateService).activeProject = 'proj';
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
         let calls = 0;
         vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
           if (cmd === 'get_usage_for_response') {
@@ -1318,7 +1318,7 @@ describe('ChatStateService', () => {
     });
 
     it('re-reconciles the last assistant turn from the proxy SSOT on reload', async () => {
-      TestBed.inject(ProjectStateService).activeProject = 'proj';
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
       vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
         if (cmd === 'get_usage_for_response') {
           return { cost_usd: 0.0858, cost_source: 'actual' };
@@ -1644,7 +1644,7 @@ describe('ChatStateService', () => {
     it('surfaces auth error as auth_required status', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       // Bypass normal init — set ready directly so startChatSession fires
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       projectState.status.set('ready');
 
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1661,7 +1661,7 @@ describe('ChatStateService', () => {
 
     it('routes auth error in sendMessage retry to auth_required', async () => {
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       projectState.status.set('ready');
 
       let callCount = 0;
@@ -2948,7 +2948,7 @@ describe('ChatStateService', () => {
       // projectState.init() wires the Tauri listeners that translate
       // project_switch_started → 'switching' for the switch-clears-id test.
       await projectState.init();
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       await service.init();
     });
 

@@ -308,7 +308,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
           type="button"
           class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="logs-export"
-          [disabled]="diagnosticsExporting() || !projectState.activeProject"
+          [disabled]="diagnosticsExporting() || !projectState.activeProject()"
           (click)="exportDiagnostics()"
           appTooltip="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
           placement="bottom"
@@ -768,7 +768,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   protected async refresh(silent = false): Promise<void> {
     // Skip silent ticks while a fetch is in flight — slow nerdctl shouldn't fan out.
     if (silent && this.refreshInFlight) return;
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) {
       // Project transiently null during shell boot — quiet loading, no banner.
       if (this.projectState.status() === 'loading') {
@@ -826,7 +826,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * to the error banner so the toolbar stays calm.
    */
   protected async exportDiagnostics(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     this.diagnosticsExporting.set(true);
     this.diagnosticsPath.set('');

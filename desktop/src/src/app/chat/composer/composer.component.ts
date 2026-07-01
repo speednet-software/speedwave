@@ -347,7 +347,7 @@ export class ComposerComponent implements AfterViewInit {
    */
   constructor() {
     this.projectState.onProjectReady(() => {
-      const id = this.projectState.activeProject;
+      const id = this.projectState.activeProject();
       if (id) void this.slashService.refresh(id);
     });
     // Enable/disable the FormControl when the `disabled` input changes.
@@ -517,7 +517,7 @@ export class ComposerComponent implements AfterViewInit {
       // Non-image drop/paste is silently ignored.
       return;
     }
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) {
       this.attachmentError.set('Wybierz projekt przed wklejeniem obrazka.');
       return;
@@ -675,7 +675,7 @@ export class ComposerComponent implements AfterViewInit {
       this.slashQuery.set(match[2] ?? '');
       if (!this.slashOpen()) {
         this.setSlashOpen(true);
-        const project = this.projectState.activeProject;
+        const project = this.projectState.activeProject();
         if (project && this.slashService.commands().length === 0) {
           void this.slashService.refresh(project);
         }

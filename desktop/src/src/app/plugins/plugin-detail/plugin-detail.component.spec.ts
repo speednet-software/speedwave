@@ -160,7 +160,7 @@ describe('PluginDetailComponent', () => {
 
     // Set activeProject on the SSOT so loadActiveProject() picks it up
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test-project';
+    projectState.activeProject.set('test-project');
     projectState.status.set('ready'); // credential saves/uninstalls happen on a ready project
 
     const fixture = TestBed.createComponent(PluginDetailComponent);
@@ -1022,7 +1022,7 @@ describe('PluginDetailComponent', () => {
       });
 
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       return { component: fixture.componentInstance, fixture, mockTauri };
@@ -1081,7 +1081,7 @@ describe('PluginDetailComponent', () => {
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
       projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
@@ -1339,7 +1339,7 @@ describe('PluginDetailComponent', () => {
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;
       await initAndDetect(component, fixture);
@@ -1385,7 +1385,7 @@ describe('PluginDetailComponent', () => {
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
       projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);

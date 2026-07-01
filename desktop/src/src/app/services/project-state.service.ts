@@ -74,7 +74,7 @@ export function authStatusToProjectStatus(
 /** SSOT for project lifecycle state (switching, adding, container lifecycle, reconcile). */
 @Injectable({ providedIn: 'root' })
 export class ProjectStateService {
-  activeProject: string | null = null;
+  readonly activeProject = signal<string | null>(null);
   targetProject: string | null = null;
   /** All configured projects from `~/.speedwave/config.json`. */
   projects: ProjectEntry[] = [];
@@ -202,7 +202,7 @@ export class ProjectStateService {
     await this.setupListeners();
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
+      this.activeProject.set(result.active_project);
       this.projects = result.projects;
 
       // Check reconcile state before checking containers
@@ -243,10 +243,10 @@ export class ProjectStateService {
 
   /** Resolves post-switch status via `get_auth_status` (no_provider vs ready vs auth_required). */
   private async resolveSwitchSucceededStatus(): Promise<void> {
-    if (!this.activeProject) return;
+    if (!this.activeProject()) return;
     try {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       this.status.set(authStatusToProjectStatus(auth));
       this.applyPendingRestartOnSettle();
@@ -271,7 +271,7 @@ export class ProjectStateService {
     ) {
       return; // guard: already in progress
     }
-    if (!this.activeProject) {
+    if (!this.activeProject()) {
       this.status.set('error');
       this.error = 'No active project selected.';
       this.notifyChange();
@@ -296,18 +296,18 @@ export class ProjectStateService {
     this.notifyChange();
     try {
       const running = await this.tauri.invoke<boolean>('check_containers_running', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       if (!running) {
         this.status.set('starting');
         this.notifyChange();
         // Backend ensure_images_ready() blocks up to 600s (RECONCILE_WAIT_TIMEOUT in containers_cmd.rs).
         // The 'starting' overlay stays visible for the duration.
-        await this.tauri.invoke('start_containers', { project: this.activeProject });
+        await this.tauri.invoke('start_containers', { project: this.activeProject() });
       }
       // Phase 3: verify Claude authentication before declaring ready
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       const next = authStatusToProjectStatus(auth);
       if (next === 'ready') {
@@ -361,7 +361,7 @@ export class ProjectStateService {
     for (;;) {
       try {
         const report = await this.tauri.invoke<HealthReport | undefined>('get_health', {
-          project: this.activeProject,
+          project: this.activeProject(),
         });
         // No report = health unverifiable (non-Tauri/test harness) — pass through.
         if (!report) return;
@@ -381,10 +381,10 @@ export class ProjectStateService {
 
   /** Re-checks Claude auth status after user completes authentication. */
   async retryAuth(): Promise<void> {
-    if (!this.activeProject) return;
+    if (!this.activeProject()) return;
     try {
       const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       const next = authStatusToProjectStatus(auth);
       if (next === 'ready') {
@@ -459,7 +459,7 @@ export class ProjectStateService {
   async dismissError(): Promise<void> {
     try {
       const running = await this.tauri.invoke<boolean>('check_containers_running', {
-        project: this.activeProject,
+        project: this.activeProject(),
       });
       if (running) {
         this.status.set('ready');
@@ -518,8 +518,8 @@ export class ProjectStateService {
 
   /** Restarts integration containers; backend rebuilds missing worker images. */
   async restartContainers(): Promise<void> {
-    if (!this.activeProject || this.restarting) return;
-    const project = this.activeProject;
+    if (!this.activeProject() || this.restarting) return;
+    const project = this.activeProject();
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
@@ -611,7 +611,7 @@ export class ProjectStateService {
       });
 
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
-        this.activeProject = event.payload.project;
+        this.activeProject.set(event.payload.project);
         this.targetProject = null;
         this.error = '';
         // A no-provider project has no containers to start — status must
@@ -623,7 +623,7 @@ export class ProjectStateService {
       });
 
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
-        this.activeProject = event.payload.project;
+        this.activeProject.set(event.payload.project);
         this.targetProject = null;
         this.status.set('error');
         this.error = event.payload.error;

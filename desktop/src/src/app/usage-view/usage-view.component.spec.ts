@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { UsageViewComponent } from './usage-view.component';
 import { ProjectStateService } from '../services/project-state.service';
@@ -36,7 +37,7 @@ describe('UsageViewComponent', () => {
   async function setup(activeProject: string | null) {
     const invoke = vi.fn().mockResolvedValue(emptySummary());
     const projectState = {
-      activeProject,
+      activeProject: signal(activeProject),
       projects: activeProject ? [{ name: activeProject }] : [],
       onChange: () => () => undefined,
       onProjectReady: () => () => undefined,
@@ -69,5 +70,29 @@ describe('UsageViewComponent', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="usage-no-project"]')).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith('get_llm_usage', expect.anything());
+  });
+
+  // Real service on purpose: an in-place switch mutates state from a Tauri event
+  // callback (no user event in this subtree), so only a reactive read propagates.
+  it('refetches usage when the active project changes in place', async () => {
+    const invoke = vi.fn().mockResolvedValue(emptySummary());
+    await TestBed.configureTestingModule({
+      imports: [UsageViewComponent],
+      providers: [{ provide: TauriService, useValue: { invoke, listen: vi.fn() } }],
+    }).compileComponents();
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('alpha');
+
+    const fixture = TestBed.createComponent(UsageViewComponent);
+    fixture.autoDetectChanges();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    expect(invoke).toHaveBeenCalledWith('get_llm_usage', { project: 'alpha' });
+
+    projectState.activeProject.set('beta');
+    await fixture.whenStable();
+    await flushMicrotasks();
+    await fixture.whenStable();
+    expect(invoke).toHaveBeenCalledWith('get_llm_usage', { project: 'beta' });
   });
 });

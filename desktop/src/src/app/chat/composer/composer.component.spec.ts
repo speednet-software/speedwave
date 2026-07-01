@@ -6,7 +6,7 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
-  activeProject: string | null = null;
+  readonly activeProject = signal<string | null>(null);
   onProjectReady(_cb: () => void): () => void {
     return () => undefined;
   }

@@ -171,7 +171,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param force - Skip the TTL check (used after a project switch).
    */
   private async refreshGitBranch(force = false): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) {
       this.gitBranch.set(null);
       return;
@@ -288,7 +288,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.historyError = '';
     this.cdr.markForCheck();
     try {
-      const project = this.projectState.activeProject;
+      const project = this.projectState.activeProject();
       if (!project) {
         this.conversations = [];
         return;
@@ -322,7 +322,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param sessionId - session UUID to delete.
    */
   async deleteConversation(sessionId: string): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     const wasActive = this.currentViewSessionId === sessionId;
     this.historyError = '';
@@ -363,7 +363,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   async loadProjectMemory(): Promise<void> {
     this.memoryError = '';
     try {
-      const project = this.projectState.activeProject;
+      const project = this.projectState.activeProject();
       if (!project) {
         this.projectMemory = '';
         return;

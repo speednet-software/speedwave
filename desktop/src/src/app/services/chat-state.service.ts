@@ -317,7 +317,7 @@ export class ChatStateService {
   }
 
   private async startChatSession(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     // A resume owns the session; a remount must not clobber it with a fresh start.
     // newConversation/delete null _lastKnownSessionId, so this gates only resume.
     if (this._resumeInProgress || this._lastKnownSessionId) {
@@ -1091,7 +1091,7 @@ export class ChatStateService {
     this._lastKnownSessionId = sessionId;
 
     try {
-      const project = this.projectState.activeProject;
+      const project = this.projectState.activeProject();
       if (!project) return;
 
       // Run transcript fetch and resume_conversation in parallel; both independent.
@@ -1147,7 +1147,7 @@ export class ChatStateService {
    */
   private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
     if (!assistantUuid) return;
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     // A newer turn (or a stop) bumps `_turnId`; abandon a stale deferred retry.
     const capturedTurn = this._turnId;

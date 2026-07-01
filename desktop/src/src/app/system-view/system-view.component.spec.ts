@@ -58,7 +58,7 @@ describe('SystemViewComponent', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test';
+    projectState.activeProject.set('test');
 
     fixture = TestBed.createComponent(SystemViewComponent);
     component = fixture.componentInstance;
@@ -181,7 +181,7 @@ describe('SystemViewComponent', () => {
   });
 
   it('shows an empty-project error when activeProject is null', async () => {
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
 
     await component.ngOnInit();
     fixture.detectChanges();

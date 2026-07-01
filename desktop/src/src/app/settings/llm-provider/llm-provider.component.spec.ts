@@ -386,7 +386,7 @@ describe('LlmProviderComponent', () => {
     // T10 regression: saveConfig reads the active project from the activeProject() input, not ProjectStateService.
     fixture.componentRef.setInput('activeProject', 'proj-from-input');
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'wrong-project';
+    projectState.activeProject.set('wrong-project');
 
     let restartProject: unknown = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {

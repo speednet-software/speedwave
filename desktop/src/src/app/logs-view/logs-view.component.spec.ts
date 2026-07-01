@@ -39,7 +39,7 @@ describe('LogsViewComponent', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test';
+    projectState.activeProject.set('test');
 
     fixture = TestBed.createComponent(LogsViewComponent);
     component = fixture.componentInstance;
@@ -243,7 +243,7 @@ describe('LogsViewComponent', () => {
   });
 
   it('shows "No active project" error when activeProject is null and the lifecycle has settled', async () => {
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
     // Mark the lifecycle as settled (any non-loading status) so the banner can surface.
     projectState.status.set('error');
 
@@ -255,7 +255,7 @@ describe('LogsViewComponent', () => {
   });
 
   it('stays in loading state without an error when project lifecycle is still booting', async () => {
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
     projectState.status.set('loading');
 
     await component.ngOnInit();
@@ -268,13 +268,13 @@ describe('LogsViewComponent', () => {
 
   it('refetches logs once the project lifecycle settles after mount', async () => {
     // Boot race: component mounts before `activeProject` loads; picks it up on `onProjectSettled`.
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
     projectState.status.set('loading');
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.lines()).toHaveLength(0);
 
-    projectState.activeProject = 'test';
+    projectState.activeProject.set('test');
     projectState.status.set('ready');
     // Emulate a settled event by calling all registered onProjectSettled callbacks.
     (projectState as unknown as { settledListeners: Array<() => void> }).settledListeners.forEach(
@@ -657,7 +657,7 @@ describe('LogsViewComponent — status bar layout', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'demo';
+    projectState.activeProject.set('demo');
 
     fixture = TestBed.createComponent(LogsViewComponent);
     component = fixture.componentInstance;
