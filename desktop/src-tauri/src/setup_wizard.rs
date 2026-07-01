@@ -290,6 +290,13 @@ pub fn build_images() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
+    // No provider is a valid state ("choose a provider" screen) — every
+    // caller must skip starting rather than let render_compose bail.
+    if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
+        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        return defer_container_start_gated(project, true);
+    }
+
     let rt = runtime::detect_runtime();
 
     log::info!("ensuring runtime is ready");
@@ -2922,6 +2929,23 @@ networks:
         assert!(
             probe_pos < state_pos,
             "ensure_exec_healthy must come BEFORE containers_started = true"
+        );
+    }
+
+    /// No-provider check must precede rt.ensure_ready() (else render_compose bails).
+    #[test]
+    fn start_containers_checks_no_provider_before_ensure_ready() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub fn start_containers(");
+        let check_pos = body
+            .find("project_llm_is_unconfigured(project)")
+            .expect("start_containers must pre-check for a missing provider");
+        let ready_pos = body
+            .find("rt.ensure_ready()")
+            .expect("start_containers must call ensure_ready");
+        assert!(
+            check_pos < ready_pos,
+            "no-provider check must precede ensure_ready/render_compose"
         );
     }
 
