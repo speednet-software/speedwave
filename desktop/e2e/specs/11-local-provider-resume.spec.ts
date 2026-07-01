@@ -31,7 +31,7 @@ import {
   requireOpenrouterKey,
   isUnpriced,
 } from '../helpers/llm';
-import { MEMORY_ANSWER } from './09-chat-conversation.spec';
+import { MEMORY_ANSWER } from '../helpers/memory-fact';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 

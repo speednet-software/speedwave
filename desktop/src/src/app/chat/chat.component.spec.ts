@@ -167,7 +167,23 @@ describe('ChatComponent', () => {
       const link = view.querySelector('a');
       expect(link).toBeTruthy();
       expect(link.getAttribute('href')).toBe('/settings');
-      // No composer/header in this state — only the choose-provider prompt.
+      // Header (with project pill) stays available so the user can switch away;
+      // the composer is still gone since there is no conversation.
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
+    });
+
+    it('keeps the project pill reachable when status is auth_required', async () => {
+      projectState.activeProject = 'test';
+      projectState.status.set('auth_required');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const view = fixture.nativeElement.querySelector('[data-testid="chat-view-blocked"]');
+      expect(view).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
     });
   });

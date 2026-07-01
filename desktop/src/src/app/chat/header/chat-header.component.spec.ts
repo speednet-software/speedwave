@@ -43,6 +43,29 @@ describe('ChatHeaderComponent', () => {
     expect(pill).not.toBeNull();
   });
 
+  // ── Compact mode — blocked chat states ────────────────────────────────
+
+  it('shows conversation controls in full (default) mode', () => {
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="chat-header-history"]')
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="chat-header-memory"]')
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).not.toBeNull();
+  });
+
+  it('hides conversation controls in compact mode but keeps title + pill', () => {
+    fixture.componentRef.setInput('compact', true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-history"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-memory"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('app-project-pill')).not.toBeNull();
+  });
+
   // ── Toggle buttons — emission ────────────────────────────────────────
 
   it('emits toggleMemory when memory button is clicked', () => {

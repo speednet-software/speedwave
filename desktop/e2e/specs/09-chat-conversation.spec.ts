@@ -13,13 +13,7 @@
  */
 
 import { openChat, sendMessageAndWait, lastAssistantText } from '../helpers/llm';
-
-/** A fact stated in conversation and recalled later — kept in sync across specs.
- *  Phrased as a plain statement (NOT "remember this") so the model answers in
- *  text rather than reaching for a memory/Write tool. */
-export const MEMORY_FACT = 'For this chat, my favourite number is 42.';
-/** Substring the model's recall answer must contain. */
-export const MEMORY_ANSWER = '42';
+import { MEMORY_FACT, MEMORY_ANSWER } from '../helpers/memory-fact';
 
 describe('Chat Conversation (OpenRouter)', function () {
   before(async function () {
