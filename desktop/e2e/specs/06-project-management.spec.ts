@@ -144,9 +144,27 @@ describe('Project Management', function () {
       await pill.click();
     });
 
-    it('should report healthy containers for the new project', async function () {
-      this.timeout(150_000);
-      await waitForHealthy(SECOND_PROJECT_NAME);
+    it('leaves the new no-provider project without running containers', async function () {
+      this.timeout(30_000);
+      // e2e-second has no LLM provider, so add_project defers container start
+      // (the choose-a-provider state). Confirm nothing came up rather than
+      // waiting for health that will never arrive.
+      expect(await activeProjectSlug()).toBe(SECOND_PROJECT_NAME);
+      const running = await browser.executeAsync(
+        (project: string, done: (r: boolean) => void) => {
+          (
+            window as unknown as {
+              __TAURI_INTERNALS__: {
+                invoke: (cmd: string, args: unknown) => Promise<boolean>;
+              };
+            }
+          ).__TAURI_INTERNALS__.invoke('check_containers_running', { project })
+            .then((r) => done(r))
+            .catch(() => done(false));
+        },
+        SECOND_PROJECT_NAME
+      );
+      expect(running).toBe(false);
     });
   });
 
