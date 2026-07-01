@@ -699,6 +699,24 @@ pub async fn start_containers(
     Ok(())
 }
 
+/// Wizard step 4 for a project with no LLM provider yet — marks the step
+/// done without starting containers. See `setup_wizard::defer_container_start`.
+#[tauri::command]
+pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        check_project(&project)?;
+        setup_wizard::defer_container_start(&project).map_err(|e| {
+            log::error!("defer_container_start: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {

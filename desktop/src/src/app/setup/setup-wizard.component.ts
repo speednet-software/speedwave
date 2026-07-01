@@ -341,6 +341,7 @@ export class SetupWizardComponent {
           break;
         case 4: // Start Containers — deferred: a fresh project has no
           // provider yet, so this would only bail. Settings starts it later.
+          await this.tauri.invoke('defer_container_start', { project: this.projectName() });
           this.setStep(4, 'done', 'Deferred until a provider is chosen');
           break;
         case 5: // Finalize

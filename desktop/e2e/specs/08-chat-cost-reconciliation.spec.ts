@@ -150,13 +150,18 @@ describe('Chat Cost Reconciliation', function () {
       timeoutMsg: 'Usage dashboard cost card never resolved to a priced value',
     });
 
-    // The dashboard aggregates every proxied request for the project (this
-    // conversation is currently the only one in the fresh e2e-test project),
-    // so it must be at least the footer's conversation-scoped total.
+    // get_conversation_cost (footer) sums only response_ids from turns loaded
+    // in-memory in this conversation; get_llm_usage (dashboard) sums every
+    // proxied request ever recorded for the whole project. This spec is the
+    // first chat turn sent anywhere in the suite (specs 01-06 never invoke
+    // chat), so for the fresh e2e-test project the two scopes coincide.
     expect(dashboardCost).toBeGreaterThanOrEqual(footerCost);
 
-    // Both numbers come from the same sidecar-enriched source (ADR-073
-    // invariant 6); for a single-conversation project they must match closely.
-    expect(Math.abs(dashboardCost - footerCost)).toBeLessThan(0.01);
+    // Both read the same sidecar-enriched cost_usd (ADR-073 invariant 6), but
+    // at different display precision: the footer always shows 4 decimals,
+    // the dashboard rounds to 2 once cost >= $0.10 (max +/-0.005 rounding
+    // error). 0.015 gives headroom above that bound while still catching a
+    // genuine reconciliation mismatch.
+    expect(Math.abs(dashboardCost - footerCost)).toBeLessThan(0.015);
   });
 });

@@ -25,6 +25,7 @@ describe('SetupWizardComponent', () => {
         case 'init_vm':
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
         case 'create_project':
           return undefined;
@@ -96,6 +97,7 @@ describe('SetupWizardComponent', () => {
     await component.onProjectCreated({ name: 'test-proj', dir: '/tmp/test' });
 
     expect(invokeSpy).not.toHaveBeenCalledWith('start_containers', expect.anything());
+    expect(invokeSpy).toHaveBeenCalledWith('defer_container_start', { project: 'test-proj' });
     expect(component.steps[4].status).toBe('done');
     expect(component.steps[4].detail).toBe('Deferred until a provider is chosen');
   });
@@ -179,6 +181,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -210,6 +213,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -238,6 +242,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -266,6 +271,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:

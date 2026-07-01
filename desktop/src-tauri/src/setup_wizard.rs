@@ -14,6 +14,8 @@ pub struct SetupState {
     pub project_created: Option<String>,
     pub tokens_configured: Vec<String>,
     pub images_built: bool,
+    /// True once step 4 is done — containers actually started, or
+    /// legitimately deferred pending an LLM provider choice.
     pub containers_started: bool,
     pub cli_linked: bool,
 }
@@ -348,6 +350,26 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     state.containers_started = true;
     state.save()?;
 
+    Ok(())
+}
+
+/// Marks step 4 done without starting containers, for a project with no LLM
+/// provider yet. Refuses if a provider IS configured (must start for real).
+pub fn defer_container_start(project: &str) -> anyhow::Result<()> {
+    let unconfigured =
+        crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)?;
+    defer_container_start_gated(project, unconfigured)
+}
+
+/// Testable core of [`defer_container_start`] — takes the unconfigured check
+/// as a plain bool so tests don't need real disk-backed config/state.
+fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow::Result<()> {
+    if !llm_unconfigured {
+        anyhow::bail!("project '{project}' has a configured LLM provider — call start_containers");
+    }
+    let mut state = SetupState::load();
+    state.containers_started = true;
+    state.save()?;
     Ok(())
 }
 
@@ -1498,6 +1520,18 @@ mod tests {
         );
         assert!(state.runtime_ready);
         assert!(!state.vm_ready);
+    }
+
+    // ── defer_container_start_gated ─────────────────────────────────────────
+
+    #[test]
+    fn defer_container_start_gated_refuses_when_provider_configured() {
+        let result = defer_container_start_gated("proj", false);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("configured LLM provider"));
     }
 
     // ── is_setup_complete logic ─────────────────────────────────────────────
