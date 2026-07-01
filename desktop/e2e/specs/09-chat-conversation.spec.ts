@@ -14,8 +14,10 @@
 
 import { openChat, sendMessageAndWait, lastAssistantText } from '../helpers/llm';
 
-/** The fact planted here and recalled in spec 11 — kept in sync across specs. */
-export const MEMORY_FACT = 'The magic number is 42.';
+/** A fact stated in conversation and recalled later — kept in sync across specs.
+ *  Phrased as a plain statement (NOT "remember this") so the model answers in
+ *  text rather than reaching for a memory/Write tool. */
+export const MEMORY_FACT = 'For this chat, my favourite number is 42.';
 /** Substring the model's recall answer must contain. */
 export const MEMORY_ANSWER = '42';
 
@@ -25,9 +27,9 @@ describe('Chat Conversation (OpenRouter)', function () {
     await openChat();
   });
 
-  it('plants a memorable fact and gets a response', async function () {
+  it('states a fact and gets a text response', async function () {
     this.timeout(180_000);
-    await sendMessageAndWait(`Please remember this for later: ${MEMORY_FACT}`);
+    await sendMessageAndWait(`${MEMORY_FACT} Just acknowledge in one short sentence.`);
 
     const messages = await $$(
       '[data-testid="chat-message"][data-role="assistant"]'
@@ -40,7 +42,7 @@ describe('Chat Conversation (OpenRouter)', function () {
 
   it('recalls the fact within the same open window', async function () {
     this.timeout(180_000);
-    await sendMessageAndWait('What number did I ask you to remember? Reply with just the number.');
+    await sendMessageAndWait('What is my favourite number? Reply with just the number, nothing else.');
 
     const answer = await lastAssistantText();
     expect(answer).toContain(MEMORY_ANSWER);
