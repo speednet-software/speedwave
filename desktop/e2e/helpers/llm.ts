@@ -204,9 +204,11 @@ export async function sendMessageAndWait(text: string, responseTimeoutMs = 180_0
 
 /** True when the usage-dashboard table rows for `model` all show "—" (unpriced).
  *  Targets the per-model row cost, not the project-wide total (which also sums
- *  any priced provider the project used earlier). */
+ *  any priced provider the project used earlier). The usage JSONL stores the
+ *  model as `<provider_kind>/<model>` (e.g. `local/unsloth/…`), so match on the
+ *  data-model SUFFIX rather than an exact string. */
 export async function modelRowsUnpriced(model: string): Promise<boolean> {
-  const rows = await $$(`[data-testid="llm-usage-row"][data-model="${model}"]`).getElements();
+  const rows = await $$(`[data-testid="llm-usage-row"][data-model$="${model}"]`).getElements();
   if (rows.length === 0) return false; // model must appear to be assertable
   for (const row of rows) {
     const cost = await row.$('[data-testid="llm-usage-row-cost"]').getText();

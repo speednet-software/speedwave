@@ -145,13 +145,15 @@ describe('LlmUsageComponent', () => {
     expect(costCell?.textContent).not.toContain('—');
   });
 
-  it('tags each table row with its model and exposes the per-row cost cell', async () => {
+  it('tags each table row with its provider-prefixed model and exposes the per-row cost cell', async () => {
+    // Usage JSONL stores the model as `<provider_kind>/<model>` — assert both the
+    // full data-model and a suffix match (how the E2E helper targets a row).
     const { fixture } = await setup(
       summary({
         totals: bucket({ requests: 2, cost_usd: 0.01 }),
         days: {
           '2026-06-12': {
-            'unsloth/Qwen3.6-35B-A3B': bucket({ requests: 1, cost_usd: null }),
+            'local/unsloth/Qwen3.6-35B-A3B': bucket({ requests: 1, cost_usd: null }),
             'openrouter/openai/gpt-4o': bucket({ requests: 1, cost_usd: 0.01 }),
           },
         },
@@ -159,9 +161,10 @@ describe('LlmUsageComponent', () => {
     );
     const el: HTMLElement = fixture.nativeElement;
     const localRow = el.querySelector(
-      '[data-testid="llm-usage-row"][data-model="unsloth/Qwen3.6-35B-A3B"]'
+      '[data-testid="llm-usage-row"][data-model$="unsloth/Qwen3.6-35B-A3B"]'
     );
     expect(localRow).not.toBeNull();
+    expect(localRow?.getAttribute('data-model')).toBe('local/unsloth/Qwen3.6-35B-A3B');
     // The unpriced local model shows "—" in its own per-row cost cell.
     expect(localRow?.querySelector('[data-testid="llm-usage-row-cost"]')?.textContent).toContain(
       '—'
