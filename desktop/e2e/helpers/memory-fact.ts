@@ -17,3 +17,10 @@ export const MEMORY_ANSWER = '42';
  *  so it answers from context instead of probing a memory file. */
 export const MEMORY_RECALL_PROMPT =
   'Earlier in this conversation I gave you a number to note. Reply with only that number, nothing else.';
+
+/** A prompt that reliably produces a long, purely-textual stream (no tool use),
+ *  so the streaming window stays open long enough to exercise stop/queue. Asking
+ *  to "count" tempts models into a task/tool call; a plain-prose essay does not. */
+export const LONG_STREAM_PROMPT =
+  'Write a detailed 300-word description of a walk through a forest in autumn. ' +
+  'Reply with prose only — no lists, no tools, no code.';

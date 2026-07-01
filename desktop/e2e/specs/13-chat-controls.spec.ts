@@ -14,11 +14,13 @@ import {
   openChat,
   sendMessageAndWait,
   sendMessageNoWait,
+  queueMessageViaEnter,
   waitForTurnStart,
   waitForTurnComplete,
   startNewConversation,
   openHistory,
 } from '../helpers/llm';
+import { LONG_STREAM_PROMPT } from '../helpers/memory-fact';
 
 describe('Chat Controls', function () {
   before(async function () {
@@ -39,7 +41,7 @@ describe('Chat Controls', function () {
 
   it('stops a streaming turn', async function () {
     this.timeout(120_000);
-    await sendMessageNoWait('Count slowly from 1 to 50, one number per line.');
+    await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
 
     await (await $('[data-testid="chat-stop"]')).click();
@@ -50,11 +52,12 @@ describe('Chat Controls', function () {
 
   it('queues a message sent while streaming', async function () {
     this.timeout(180_000);
-    await sendMessageNoWait('Count slowly from 1 to 50, one number per line.');
+    await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
 
-    // A second send while streaming queues instead of dispatching.
-    await sendMessageNoWait('This one should be queued.');
+    // While streaming, the send button is replaced by Stop — Enter is the only
+    // submit path, and ADR-045 routes it to the queue instead of a new turn.
+    await queueMessageViaEnter('This one should be queued.');
     await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000 });
     expect(await $('[data-testid="composer-queued-text"]').isExisting()).toBe(true);
 

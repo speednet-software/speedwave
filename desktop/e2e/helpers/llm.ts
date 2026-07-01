@@ -172,6 +172,16 @@ export async function sendMessageNoWait(text: string): Promise<void> {
   await sendBtn.click();
 }
 
+/** Types `text` and submits with Enter. While a turn streams the send button is
+ *  replaced by Stop (ADR-045), so Enter is the only way to queue — this routes
+ *  to queueRequested instead of clicking a (hidden) send button. */
+export async function queueMessageViaEnter(text: string): Promise<void> {
+  const input = await $('[data-testid="chat-input"]');
+  await input.waitForExist({ timeout: 15_000 });
+  await input.setValue(text);
+  await browser.keys('Enter');
+}
+
 /** Waits until the current turn stops streaming and the send button returns. */
 export async function waitForTurnComplete(responseTimeoutMs = 180_000): Promise<void> {
   await browser.waitUntil(
