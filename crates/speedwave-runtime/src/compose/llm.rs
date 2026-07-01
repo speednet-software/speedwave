@@ -14,12 +14,18 @@ pub(crate) fn apply_llm_config_in(
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
-    // Logout (active cleared) must not fall through to the Anthropic default —
-    // guide the user to pick a provider. Dangling active falls back (not a logout).
+    // Gate (SSOT: LlmConfig::is_unconfigured) — never-touched project, explicit
+    // logout, and dangling active (entry missing) all refuse to start. Logout
+    // gets distinct wording, checked first so it doesn't shadow the wider gate.
     if llm.is_logged_out() {
         anyhow::bail!(
             "No LLM provider selected. Run `speedwave login` to use your Anthropic \
              subscription, or choose a provider in Desktop Settings → LLM providers."
+        );
+    } else if llm.is_unconfigured() {
+        anyhow::bail!(
+            "No LLM provider configured for this project. Open Speedwave Desktop → \
+             Settings → LLM providers to choose one."
         );
     }
     if llm.proxy_enabled.unwrap_or(true) {
@@ -41,12 +47,6 @@ pub(crate) fn apply_llm_config_in(
                 entry.id
             );
         }
-    } else if llm.active.is_some() {
-        // Kill-switch + dangling active: not a logout, so render did not bail —
-        // fall back to the Anthropic account default rather than failing the start.
-        log::warn!(
-            "llm: kill-switch with a dangling active selection — using the direct default path"
-        );
     }
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
@@ -474,9 +474,10 @@ mod tests {
     }
 
     #[test]
-    fn dangling_active_renders_legacy_default_not_a_bail() {
-        // Dangling active is NOT a logout: render falls back to the legacy
-        // Anthropic default instead of bailing (kill-switch regression guard).
+    fn dangling_active_bails_no_provider_configured() {
+        // Dangling active (points at a missing entry) is unconfigured (SSOT
+        // gate): render must refuse rather than silently fall back to the
+        // Anthropic default for a config naming a provider id that doesn't exist.
         let tmp = tempfile::tempdir().unwrap();
         for proxy in [Some(true), Some(false), None] {
             let llm = crate::config::LlmConfig {
@@ -489,35 +490,261 @@ mod tests {
                 proxy_enabled: proxy,
                 ..Default::default()
             };
-            let rendered = apply_llm_config_in(
+            let err = apply_llm_config_in(
                 tmp.path(),
                 "services:\n  claude:\n    environment: []\n",
                 &llm,
                 "proj",
             )
-            .unwrap_or_else(|e| panic!("proxy={proxy:?}: dangling active must render, got: {e}"));
+            .unwrap_err()
+            .to_string();
             assert!(
-                rendered.contains("ANTHROPIC_"),
-                "proxy={proxy:?}: anthropic default injected: {rendered}"
+                err.contains("No LLM provider configured"),
+                "proxy={proxy:?}: {err}"
             );
         }
     }
 
     #[test]
-    fn fresh_legacy_config_still_defaults_to_anthropic() {
-        // schema_version None → not "explicitly unconfigured"; legacy path renders.
+    fn fresh_config_bails_no_provider_configured() {
+        // Never-touched project (no llm override at all) must refuse to start
+        // rather than silently default to Anthropic with no credentials.
         let tmp = tempfile::tempdir().unwrap();
-        let llm = crate::config::LlmConfig::default();
+        for proxy in [Some(true), Some(false), None] {
+            let llm = crate::config::LlmConfig {
+                proxy_enabled: proxy,
+                ..Default::default()
+            };
+            let err = apply_llm_config_in(
+                tmp.path(),
+                "services:\n  claude:\n    environment: []\n",
+                &llm,
+                "proj",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("No LLM provider configured"),
+                "proxy={proxy:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v1_config_with_provider_still_renders() {
+        // A real legacy v1 config (provider explicitly set), migrated the way
+        // every production caller does before render_compose, still renders.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut llm = crate::config::LlmConfig {
+            provider: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, false);
         let rendered = apply_llm_config_in(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
             "proj",
         )
-        .expect("fresh config must render (anthropic default)");
+        .expect("legacy v1 config must render (anthropic default)");
         assert!(
             rendered.contains("ANTHROPIC_"),
             "anthropic env injected: {rendered}"
+        );
+    }
+
+    #[test]
+    fn unmigrated_legacy_v1_config_bails_until_migrated() {
+        // The flip side of the above: render_compose's contract requires
+        // migrate_llm to run first. A raw, never-migrated flat `provider` has
+        // no resolvable active provider and must bail, not silently render.
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let err = apply_llm_config_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("No LLM provider configured"),
+            "unmigrated legacy config must bail until migrate_llm runs: {err}"
+        );
+    }
+
+    /// Defense-in-depth: this shape is unreachable in production since
+    /// `migrate_llm` always normalises `provider` first.
+    #[test]
+    fn legacy_in_rejects_unsupported_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("openrouter".to_string()),
+            model: Some("some-model".to_string()),
+            base_url: Some("http://host.docker.internal:9999".to_string()),
+            ..Default::default()
+        };
+        let err = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Unsupported LLM provider") && err.contains("openrouter"),
+            "Error must mention unsupported provider, got: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_in_rejects_custom_provider_after_removal() {
+        // Regression guard: provider="custom" removed end-to-end; falls
+        // through to the unknown-provider path, not its own bespoke error.
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("custom".to_string()),
+            model: Some("my-model".to_string()),
+            base_url: Some("http://host.docker.internal:9999".to_string()),
+            ..Default::default()
+        };
+        let err = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Unsupported LLM provider") && err.contains("custom"),
+            "Error must treat 'custom' as unsupported, got: {err}"
+        );
+        assert!(
+            !err.contains("Custom provider requires a base_url"),
+            "The legacy 'custom requires base_url' error must be gone, got: {err}"
+        );
+    }
+
+    /// Bypasses `migrate_llm` to exercise the legacy per-alias default port,
+    /// which a migrated config would never hit.
+    #[test]
+    fn legacy_in_lmstudio_uses_its_own_default_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("lmstudio".to_string()),
+            model: Some("qwen2.5-coder".to_string()),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap();
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("lmstudio").unwrap()
+        );
+        assert!(
+            rendered.contains(&expected),
+            "LM Studio must set {expected}, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn legacy_in_llamacpp_uses_its_own_default_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("llamacpp".to_string()),
+            model: Some("deepseek-r1".to_string()),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap();
+        let expected = format!(
+            "ANTHROPIC_BASE_URL={}",
+            default_base_url("llamacpp").unwrap()
+        );
+        assert!(
+            rendered.contains(&expected),
+            "llama.cpp must set {expected}, got: {rendered}"
+        );
+    }
+
+    /// The per-alias display label (llama.cpp/LM Studio) is v1-only too:
+    /// post-migration it collapses to the generic "Local" label.
+    #[test]
+    fn legacy_in_llamacpp_uses_its_own_display_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("llamacpp".to_string()),
+            model: Some("deepseek-r1".to_string()),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=deepseek-r1 (llama.cpp)"),
+            "llamacpp display name must use 'llama.cpp' label, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn legacy_in_lmstudio_uses_its_own_display_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("lmstudio".to_string()),
+            model: Some("qwen2.5-coder".to_string()),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=qwen2.5-coder (LM Studio)"),
+            "lmstudio display name must use 'LM Studio' label, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn legacy_in_ollama_uses_its_own_display_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_legacy_in(
+            tmp.path(),
+            "services:\n  claude:\n    environment: []\n",
+            &llm,
+            "proj",
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Ollama)"),
+            "ollama display name must use 'Ollama' label, got: {rendered}"
         );
     }
 }

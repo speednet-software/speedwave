@@ -58,9 +58,8 @@ export interface AuthStatusResponse {
 }
 
 /**
- * Collapses the four auth flags into the terminal project status (SSOT for the
- * gate ordering). no_provider wins first; then credentials decide ready vs auth.
- * @param auth - Backend auth status.
+ * no_provider always wins over the credential flags; see AuthStatusResponse for field meanings.
+ * @param auth - Raw auth status from the backend.
  */
 export function authStatusToProjectStatus(
   auth: AuthStatusResponse
@@ -152,7 +151,7 @@ export class ProjectStateService {
 
   /**
    * Subscribe to fire (and be awaited) BEFORE a container restart begins.
-   * @param cb - The callback to invoke before restart; returning a rejected promise does not block.
+   * @param cb - Listener invoked before restart; unsubscribe via the returned function.
    */
   onRestartBegin(cb: () => Promise<void>): () => void {
     this.restartBeginListeners.push(cb);
@@ -238,6 +237,25 @@ export class ProjectStateService {
     } catch {
       // Non-fatal — keep the stale list.
     }
+  }
+
+  /** Resolves post-switch status via `get_auth_status` (no_provider vs ready vs auth_required). */
+  private async resolveSwitchSucceededStatus(): Promise<void> {
+    if (!this.activeProject) return;
+    try {
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      this.status.set(authStatusToProjectStatus(auth));
+    } catch (err) {
+      this.status.set('error');
+      this.error = String(err);
+    }
+    this.notifyChange();
+    if (this.status() === 'ready') {
+      this.notifyReady();
+    }
+    this.notifySettled();
   }
 
   /** Checks OS prereqs, then verifies containers are running, starting them if not. */
@@ -412,10 +430,7 @@ export class ProjectStateService {
     this.notifyChange();
   }
 
-  /**
-   * Forces the no_provider status, bypassing applyAuthStatus's never-downgrade
-   * guard — for a deliberate user action (e.g. logout), not a passive probe.
-   */
+  /** Force-sets status to no_provider, skipping the never-downgrade guard. */
   forceUnconfigured(): void {
     this.status.set('no_provider');
     this.notifyChange();
@@ -569,11 +584,10 @@ export class ProjectStateService {
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
         this.activeProject = event.payload.project;
         this.targetProject = null;
-        this.status.set('ready');
         this.error = '';
-        this.notifyChange();
-        this.notifyReady();
-        this.notifySettled();
+        // A no-provider project has no containers to start — status must
+        // reflect that, not be hardcoded to 'ready'.
+        void this.resolveSwitchSucceededStatus();
         // Fire-and-forget list refresh so consumers eventually see added/renamed
         // entries; a stale list for one tick is acceptable.
         void this.refreshProjectList();

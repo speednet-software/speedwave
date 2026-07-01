@@ -200,7 +200,12 @@ describe('SettingsComponent', () => {
             active_project: 'other-project',
           };
         case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: false };
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
         default:
           return undefined;
       }

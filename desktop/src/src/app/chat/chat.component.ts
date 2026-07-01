@@ -97,10 +97,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     return this.ui.memoryOpen();
   }
 
-  /**
-   * Active live-chat session id — backend value when present, otherwise the
-   * optimistic stamp set on resume (both owned by ChatStateService).
-   */
+  /** Active live-chat session id; state owned by ChatStateService. */
   get currentViewSessionId(): string | null {
     return this.chat.sessionStats?.session_id ?? this.chat.optimisticSessionId;
   }
@@ -310,9 +307,9 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Resumes a session from the history drawer. Closes the sidebar (UI), then
-   * delegates to the service which owns the resume (works while unmounted too).
-   * @param sessionId - session UUID to resume.
+   * Delegates to the service, which owns resume so it keeps working
+   * even if this component unmounts mid-resume.
+   * @param sessionId - Session to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
     this.ui.closeSidebar();
@@ -415,10 +412,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.contextOverflowOpen.set(false);
   }
 
-  /**
-   * Shows a confirm dialog when history exceeds the target window; resolves with
-   * the user's choice or `'fresh'` on programmatic close (destroy or Esc).
-   */
+  /** Resolves `'fresh'` on programmatic close (destroy or Esc), not just user choice. */
   promptResumeOrFresh(): Promise<'resume' | 'fresh'> {
     this.contextOverflowResolve?.('fresh');
     return new Promise<'resume' | 'fresh'>((resolve) => {

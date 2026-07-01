@@ -626,14 +626,56 @@ describe('ProjectStateService', () => {
       expect(service.error).toBe('');
     });
 
-    it('project_switch_succeeded sets ready state', () => {
+    it('project_switch_succeeded sets ready state', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
       mockTauri.dispatchEvent('project_switch_started', { project: 'new-project' });
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'new-project' });
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(service.status()).toBe('ready');
       expect(service.activeProject).toBe('new-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('');
+    });
+
+    it('project_switch_succeeded resolves no_provider when the project has no LLM provider', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: false,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'fresh-project' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('project_switch_succeeded sets error state when get_auth_status throws', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') throw new Error('container not ready');
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('error');
+      expect(service.error).toBe('Error: container not ready');
     });
 
     it('project_switch_failed sets error state with rollback', () => {
@@ -670,7 +712,9 @@ describe('ProjectStateService', () => {
       expect(cb).toHaveBeenCalledTimes(1);
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
-      expect(cb).toHaveBeenCalledTimes(2);
+      await new Promise((r) => setTimeout(r, 0));
+      // 1 (started) + 1 (resolveSwitchSucceededStatus) + 1 (refreshProjectList).
+      expect(cb).toHaveBeenCalledTimes(3);
     });
 
     it('returns working unsubscribe function', async () => {
@@ -694,6 +738,7 @@ describe('ProjectStateService', () => {
       expect(cb).not.toHaveBeenCalled();
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).toHaveBeenCalledTimes(1);
     });
 
@@ -704,6 +749,7 @@ describe('ProjectStateService', () => {
       unsub();
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).not.toHaveBeenCalled();
     });
   });
@@ -729,6 +775,7 @@ describe('ProjectStateService', () => {
       service.onProjectSettled(cb);
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).toHaveBeenCalledTimes(1);
 
       mockTauri.dispatchEvent('project_switch_failed', {

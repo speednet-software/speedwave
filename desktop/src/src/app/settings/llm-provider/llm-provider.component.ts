@@ -753,10 +753,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   constructor() {
     effect(() => {
       if (this.activeProject()) {
-        // Only the first firing races loadConfig() (ngOnInit); join it into the
-        // initial-load snapshot. Later firings (project switch) are refreshes —
-        // re-snapshotting there would mask real dirty state (see saveAnthropicApiKey
-        // and friends below, which never join either).
+        // Only the first firing races the initial load; later firings are
+        // refreshes, and re-snapshotting there would mask real dirty state.
         const isInitialLoad = !this.initialAuthStatusLoaded;
         void this.loadAuthStatus().then(() => {
           if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
@@ -767,9 +765,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Polls until an external-terminal OAuth login completes, then runs the same
-   * autosave as the embedded terminal. Self-expires after OAUTH_POLL_MAX_TICKS so
-   * an idle Settings page does not probe forever; restarts on switch/logout.
+   * Self-expires after OAUTH_POLL_MAX_TICKS so an idle Settings page
+   * does not probe forever.
    */
   private startOauthCompletionPoll(): void {
     this.stopOauthCompletionPoll();
@@ -1321,12 +1318,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * OAuth terminal completion — refresh status, then auto-select + save Anthropic
-   * so the user isn't stranded not knowing to click Save. Saves unconditionally
-   * once authenticated (even when already on the Anthropic card): the prior active
-   * may be another provider whose routing is still live, so saveConfig must run to
-   * commit `active=anthropic` and reload the container; computeActiveKey then picks
-   * full-restart vs. proxy-reload, and a no-op key change only triggers a light reload.
+   * Auto-selects + saves Anthropic on OAuth success, unconditionally: the
+   * prior active provider may still be routing live, so saveConfig must run
+   * even if the card was already showing Anthropic.
    * @param _success - login hint; the reloaded auth state is authoritative.
    */
   async onOAuthDone(_success: boolean): Promise<void> {
@@ -1442,11 +1436,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return this.provider() === 'anthropic' ? 'anthropic' : 'local';
   });
 
-  /**
-   * Whole-form fingerprint of every dirty-relevant live value, compared
-   * against `loadedFormSnapshot` to gate `canSave`. String-concat mirrors
-   * the existing `computeActiveKey` idiom rather than a deep-equal dependency.
-   */
+  /** Whole-form fingerprint of dirty-relevant fields, compared to `loadedFormSnapshot` for `canSave`. */
   private computeFormSnapshot(): string {
     const extras = this.extraProviders()
       .map((e) => `${e.id}:${e.model}:${e.keyTouched}`)
@@ -1466,13 +1456,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Marks one half of the initial-load join done and snapshots once both
-   * `loadConfig()` and the first `loadAuthStatus()` have settled — whichever
-   * finishes second triggers it, so neither a half-seeded form nor a stale
-   * auth flag gets frozen into `loadedFormSnapshot`. With no active project
-   * the constructor effect never calls `loadAuthStatus()` at all, so that
-   * half is satisfied vacuously rather than left waiting on a call that will
-   * never fire.
+   * Snapshots once both load legs settle, whichever finishes second.
+   * With no active project, `authStatus` is vacuously satisfied since it never fires.
    * @param half - Which load leg just completed.
    */
   private maybeSnapshotInitialLoad(half: 'config' | 'authStatus'): void {
@@ -1562,10 +1547,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Persists the LLM provider configuration to the backend.
-   * @param forceRestart - Skip the proxy-reload-vs-restart discriminator and always
-   *   request a full restart. Used by the OAuth-login path to self-heal a config
-   *   whose `active` already matched but whose running container still routed to a
-   *   stale provider (the pre-fix auto-save gap left this drift on disk).
+   * @param forceRestart - Force a full restart even if `active` is unchanged,
+   *   so a running container can't stay routed to a stale provider.
    */
   async saveConfig(forceRestart = false): Promise<void> {
     // Surface the model-required error at Save time; compose::apply_llm_config

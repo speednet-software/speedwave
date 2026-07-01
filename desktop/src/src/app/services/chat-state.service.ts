@@ -61,8 +61,8 @@ const SESSION_START_TIMEOUT_MS = 30_000;
 const SESSION_START_POLL_MS = 500;
 
 /**
- * Best-effort: friendly message for a known context-overflow error, else null.
- * @param raw - Raw error string from the backend.
+ * Returns null for anything but the two known backend phrasings.
+ * @param raw - Raw error message from the backend.
  */
 export function mapContextOverflowError(raw: string): string | null {
   if (/exceeds the available context size/i.test(raw) || /context length exceeded/i.test(raw)) {
@@ -72,9 +72,8 @@ export function mapContextOverflowError(raw: string): string | null {
 }
 
 /**
- * Best-effort: friendly message for Claude Code's own "not logged in" error,
- * pointing at Speedwave Settings instead of its `/login` slash command.
- * @param raw - Raw error string from the backend.
+ * Claude Code's own message points at `/login`, which doesn't apply here.
+ * @param raw - Raw error message from the backend.
  */
 export function mapNotLoggedInError(raw: string): string | null {
   if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
@@ -169,9 +168,8 @@ export class ChatStateService {
   }
 
   /**
-   * Registers (or clears) the overflow-prompt callback. A mounted ChatComponent
-   * sets it so the resume/fresh dialog can appear; cleared on destroy → auto-resume.
-   * @param cb - Dialog opener returning the user's choice, or null to unregister.
+   * Unregistering (null) makes overflow default to auto-resume.
+   * @param cb - Decider callback, or null to unregister.
    */
   setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
     this._resumeDecider = cb;
@@ -1042,10 +1040,7 @@ export class ChatStateService {
     });
   }
 
-  /**
-   * Resume-on-restart, owned here so it survives ChatComponent being destroyed
-   * on /settings. Fires only on restart-complete, never on a project-switch ready.
-   */
+  /** Resumes the conversation only after a restart, not a project-switch. */
   private setupRestartResumeListeners(): void {
     this.projectState.onRestartBegin(async () => {
       if (this.isStreaming) await this.stopConversation();
@@ -1071,9 +1066,7 @@ export class ChatStateService {
   }
 
   /**
-   * Clears the live conversation and starts a brand-new session (the "fresh"
-   * choice on a context-overflow restart). Resets tracking so the start isn't
-   * gated by the lingering durable id.
+   * Resets tracking first so the new session isn't gated by the stale durable id.
    */
   private async startFreshSession(): Promise<void> {
     this.resetForNewConversation();
@@ -1081,8 +1074,7 @@ export class ChatStateService {
   }
 
   /**
-   * Resumes a session in live chat mode: clears state, fetches transcript, re-attaches.
-   * Service-level so it works whether or not a ChatComponent is mounted.
+   * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
    * @param sessionId - session UUID to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
@@ -1649,10 +1641,10 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
 }
 
 /**
- * Whether prior history fits the target model's context window. Unknown history
- * → safe to resume; unknown window (e.g. local, no discovery) → ask, don't auto-resume.
- * @param historyTokens - Tokens used by the prior turn, or null if unknown.
- * @param windowTokens - Target context window, or null if unknown.
+ * Null handling is asymmetric: unknown history defaults to fits (resume),
+ * unknown window defaults to doesn't fit (ask) — local models with no discovery.
+ * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
+ * @param windowTokens - Target model's context window, or null if undiscovered.
  */
 export function historyFitsTarget(
   historyTokens: number | null,

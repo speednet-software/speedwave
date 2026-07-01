@@ -402,19 +402,26 @@ fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
 
+/// Makes Anthropic active on `project`'s `llm` config, creating the override
+/// when absent (fresh project) so login also escapes the no-provider guard.
+/// No-op (returns `false`) when `project` has no entry in `user_config` at all.
+fn select_anthropic_in(user_config: &mut config::SpeedwaveUserConfig, project: &str) -> bool {
+    let Some(entry) = user_config.find_project_mut(project) else {
+        return false;
+    };
+    let claude = entry.claude.get_or_insert_with(Default::default);
+    let llm = claude.llm.get_or_insert_with(Default::default);
+    llm.set_active_to_anthropic()
+}
+
 /// After a successful `speedwave login`, makes Anthropic active so a
-/// logout-emptied config is usable again. No-op when there's no v2 llm config.
+/// logout-emptied OR never-configured project is usable again. No-op when
+/// the project has no entry in `user_config` (nothing to attach `llm` to).
 fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
-        if let Some(llm) = user_config
-            .find_project_mut(project)
-            .and_then(|p| p.claude.as_mut())
-            .and_then(|c| c.llm.as_mut())
-        {
-            if llm.set_active_to_anthropic() {
-                config::save_user_config(&user_config)?;
-            }
+        if select_anthropic_in(&mut user_config, project) {
+            config::save_user_config(&user_config)?;
         }
         Ok(())
     })
@@ -1639,6 +1646,158 @@ mod tests {
             block.contains("Login failed: could not select Anthropic")
                 && block.contains("std::process::exit(1)"),
             "login select failure must exit non-zero, not warn-and-continue"
+        );
+    }
+
+    fn user_config_with_project(
+        project: &str,
+        claude: Option<config::ClaudeOverrides>,
+    ) -> config::SpeedwaveUserConfig {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        user_config.projects.push(config::ProjectUserEntry {
+            name: project.to_string(),
+            dir: "/tmp/proj".to_string(),
+            claude,
+            integrations: None,
+            plugin_settings: None,
+        });
+        user_config
+    }
+
+    /// Happy path: a never-configured project (no `claude` override at all)
+    /// gets an `llm` override created and Anthropic selected.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_for_fresh_project() {
+        let mut user_config = user_config_with_project("proj", None);
+        assert!(select_anthropic_in(&mut user_config, "proj"));
+        let llm = user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert!(!llm.is_unconfigured());
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            "anthropic",
+            "fresh project must select anthropic, not just stop being fresh"
+        );
+    }
+
+    /// Edge case: `claude` exists but `llm` is `None` (partial override) —
+    /// same fresh-llm creation path applies.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_when_claude_present_but_llm_absent() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: None,
+            }),
+        );
+        assert!(select_anthropic_in(&mut user_config, "proj"));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Explicit logout (v2 shape, providers present, active cleared) must be
+    /// reactivated — the original no-op-when-absent behavior is preserved
+    /// when there IS an llm config, just no longer the only path.
+    #[test]
+    fn select_anthropic_in_reactivates_explicit_logout() {
+        let llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.is_unconfigured(),
+            "precondition: logged-out is unconfigured"
+        );
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(select_anthropic_in(&mut user_config, "proj"));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Error path: a project absent from `user_config` entirely is a no-op —
+    /// there is nothing to attach an `llm` override to.
+    #[test]
+    fn select_anthropic_in_noop_when_project_not_found() {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        assert!(!select_anthropic_in(&mut user_config, "ghost-project"));
+        assert!(user_config.find_project_mut("ghost-project").is_none());
+    }
+
+    /// State transition: already-active Anthropic is idempotent (no spurious
+    /// `true` that would trigger an unnecessary config write).
+    #[test]
+    fn select_anthropic_in_idempotent_when_already_anthropic() {
+        let mut llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.set_active_to_anthropic(),
+            "first activation changes state"
+        );
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(
+            !select_anthropic_in(&mut user_config, "proj"),
+            "already-active anthropic must not report a change"
         );
     }
 

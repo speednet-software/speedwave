@@ -644,12 +644,27 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
 // Application entry point
 // ---------------------------------------------------------------------------
 
+/// Logs a sanitized panic message via `log_fn`, falling back to `eprintln!`
+/// if `log_fn` itself panics — a panic during unwind is an unconditional
+/// process abort, so the fern/tauri-plugin-log sink (which can panic on a
+/// broken stdout pipe) must never run un-isolated from the panic hook.
+fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
+        // Sanctioned panic-hook stderr fallback (logging.md) — the log
+        // sink itself panicked, so bypass it entirely.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("PANIC: {sanitized} (log sink also panicked)");
+        }
+    }
+}
+
 fn main() {
-    // Panic hook — sanitize panic payload before logging
+    // Panic hook — sanitize panic payload before logging.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
-        log::error!("PANIC: {sanitized}");
+        log_panic_with_fallback(&sanitized, || log::error!("PANIC: {sanitized}"));
         #[cfg(debug_assertions)]
         default_hook(info);
         #[cfg(not(debug_assertions))]
@@ -1328,6 +1343,24 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    // -- log_panic_with_fallback --
+
+    #[test]
+    fn log_panic_with_fallback_runs_log_fn_when_it_succeeds() {
+        let ran = std::cell::Cell::new(false);
+        log_panic_with_fallback("msg", || ran.set(true));
+        assert!(ran.get(), "log_fn must run on the happy path");
+    }
+
+    /// Regression guard: a panic inside `log_fn` (e.g. the fern/tauri-plugin-log
+    /// sink panicking on a broken pipe) must not propagate — it must be caught
+    /// and handled by the eprintln fallback instead of escalating to abort().
+    #[test]
+    fn log_panic_with_fallback_survives_a_panicking_log_fn() {
+        log_panic_with_fallback("msg", || panic!("simulated log sink panic"));
+        // Reaching this line proves the panic did not propagate out of the call.
     }
 
     #[test]

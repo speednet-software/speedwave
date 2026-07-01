@@ -12,6 +12,7 @@ export const config = {
     './specs/04-navigation.spec.ts',
     './specs/05-settings.spec.ts',
     './specs/06-project-management.spec.ts',
+    './specs/08-chat-cost-reconciliation.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,

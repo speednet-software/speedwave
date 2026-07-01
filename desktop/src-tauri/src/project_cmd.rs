@@ -86,6 +86,14 @@ pub(crate) async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
             check_project(proj)?;
+            // No provider is a valid state ("choose a provider" screen) —
+            // skip starting containers rather than let render_compose bail.
+            if containers_cmd::project_llm_is_unconfigured(proj)? {
+                log::info!(
+                    "switch_project: '{proj}' has no LLM provider — skipping container start"
+                );
+                return Ok(());
+            }
             // Lazy build for the destination project (ADR-057).
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
@@ -322,6 +330,30 @@ mod tests {
         assert!(
             !body.contains("compose_up_recreate"),
             "switch must NOT force-recreate (nerdctl config-hash handles it)"
+        );
+    }
+
+    /// Structural: switch_project's closure must check for a missing LLM
+    /// provider BEFORE building images / rendering compose — otherwise
+    /// render_compose bails and teardown_only may run against a stale or
+    /// missing compose.yml. Mirrors add_project's same pre-check.
+    #[test]
+    fn switch_checks_no_provider_before_render() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let check_pos = body
+            .find("project_llm_is_unconfigured(proj)")
+            .expect("switch_project closure must pre-check for a missing provider");
+        let render_pos = body
+            .find("render_and_save_compose")
+            .expect("switch must render compose");
+        assert!(
+            check_pos < render_pos,
+            "no-provider check must precede compose render"
         );
     }
 

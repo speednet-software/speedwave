@@ -190,21 +190,30 @@ fn add_project_with_validated_dir(
     user_config.projects.push(entry);
     user_config.active_project = Some(name.to_string());
 
-    // Resolve config and render compose (still no I/O)
+    // Resolve config and render compose (still no I/O). A brand-new project
+    // has no LLM provider yet — that is a valid, first-class state (the
+    // Desktop "no_provider" screen), so registration must not fail just
+    // because compose can't route an LLM yet; `start_containers` renders
+    // compose again once a provider is chosen.
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
-    let rt = runtime::detect_runtime();
-    let rt_ref: Option<&runtime::LockedRuntime> = if rt.is_available() { Some(&rt) } else { None };
-    // Reconstruct host-bridge env from disk (ADR-074) so project-add never
-    // renders a worker without an already-configured bridge's env vars.
-    let host_bridges = compose::host_bridges_from_disk();
-    let yaml = compose::render_compose(
-        name,
-        &canonical_str,
-        &resolved,
-        &integrations,
-        rt_ref,
-        &host_bridges,
-    )?;
+    let yaml = if resolved.llm.is_unconfigured() {
+        None
+    } else {
+        let rt = runtime::detect_runtime();
+        let rt_ref: Option<&runtime::LockedRuntime> =
+            if rt.is_available() { Some(&rt) } else { None };
+        // Reconstruct host-bridge env from disk (ADR-074) so project-add never
+        // renders a worker without an already-configured bridge's env vars.
+        let host_bridges = compose::host_bridges_from_disk();
+        Some(compose::render_compose(
+            name,
+            &canonical_str,
+            &resolved,
+            &integrations,
+            rt_ref,
+            &host_bridges,
+        )?)
+    };
 
     // ── Phase 2: commit (all writes) ─────────────────────────────────────
 
@@ -215,9 +224,11 @@ fn add_project_with_validated_dir(
         return Err(e);
     }
 
-    if let Err(e) = save_compose_in(name, &yaml, data_dir) {
-        cleanup_project_dirs_in(name, data_dir);
-        return Err(e);
+    if let Some(yaml) = yaml {
+        if let Err(e) = save_compose_in(name, &yaml, data_dir) {
+            cleanup_project_dirs_in(name, data_dir);
+            return Err(e);
+        }
     }
 
     Ok(())
@@ -345,6 +356,37 @@ mod tests {
             &data_dir,
         );
         assert!(result.is_err());
+    }
+
+    /// A brand-new project has no LLM provider chosen yet — that must not
+    /// block registration (the "no_provider" state is first-class); compose
+    /// generation is deferred to `start_containers`.
+    #[test]
+    fn add_project_succeeds_without_llm_provider_and_defers_compose() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let project_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let dir = std::fs::canonicalize(&project_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        add_project_with_data_dir("myproject", &dir, &data_dir).unwrap();
+
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(cfg.find_project("myproject").is_some());
+        assert_eq!(cfg.active_project.as_deref(), Some("myproject"));
+        assert!(
+            !data_dir
+                .join("compose")
+                .join("myproject")
+                .join("compose.yml")
+                .exists(),
+            "compose.yml must not be written before a provider is chosen"
+        );
+        assert!(data_dir.join("compose").join("myproject").is_dir());
     }
 
     #[test]
@@ -773,14 +815,16 @@ mod tests {
         assert_eq!(entry.dir, unc_canonical_str);
         assert_eq!(cfg.active_project.as_deref(), Some("luke-helm"));
 
-        // Verify compose file written.
+        // No LLM provider was ever chosen for this fixture — compose.yml is
+        // deferred to `start_containers` (a fresh project is a valid,
+        // provider-less state; see `add_project_with_validated_dir`).
         let compose_path = data_dir
             .join("compose")
             .join("luke-helm")
             .join("compose.yml");
         assert!(
-            compose_path.exists(),
-            "compose.yml must be written at {compose_path:?}"
+            !compose_path.exists(),
+            "compose.yml must not be written before a provider is chosen, found {compose_path:?}"
         );
 
         // Verify project dirs initialized (compose dir + claude-home dir).

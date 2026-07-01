@@ -60,6 +60,21 @@ pub async fn anthropic_logout(project: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Migrates the project's `claude.llm` to current schema before
+/// `is_unconfigured()` checks it — a raw legacy-v1 shape would misclassify.
+fn migrated_llm_for(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+    has_anthropic_secret: bool,
+) -> Option<speedwave_runtime::config::LlmConfig> {
+    let mut llm = user_config
+        .find_project(project)
+        .and_then(|p| p.claude.as_ref())
+        .and_then(|c| c.llm.clone())?;
+    speedwave_runtime::config::migrate_llm(&mut llm, has_anthropic_secret);
+    Some(llm)
+}
+
 #[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
@@ -76,14 +91,12 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        // Migrated (not raw) shape — must agree with needs_anthropic_auth, which
+        // itself already evaluates the equivalent post-migration answer.
+        let migrated = migrated_llm_for(&user_config, &project, api_key_configured);
         // False for an explicit v2 logout/dangling AND for a fresh project with
         // no llm override at all ("choose a provider" in both cases).
-        let provider_configured = user_config
-            .find_project(&project)
-            .and_then(|p| p.claude.as_ref())
-            .and_then(|c| c.llm.as_ref())
-            .map(|llm| !llm.is_explicitly_unconfigured())
-            .unwrap_or(false);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
         Ok(AuthStatusResponse {
             api_key_configured,
             oauth_authenticated,
@@ -321,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn get_auth_status_derives_provider_configured_from_explicitly_unconfigured() {
+    fn get_auth_status_derives_provider_configured_from_is_unconfigured() {
         // provider_configured defaults to FALSE for fresh/missing (no provider
         // chosen yet), same as an explicit v2 logout.
         let source = include_str!("auth_commands.rs");
@@ -334,16 +347,154 @@ mod tests {
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
-            fn_body.contains("is_explicitly_unconfigured"),
-            "get_auth_status must derive provider_configured from is_explicitly_unconfigured"
+            fn_body.contains("!llm.is_unconfigured()"),
+            "get_auth_status must derive provider_configured from the SSOT is_unconfigured gate"
         );
         assert!(
-            fn_body.contains(".unwrap_or(false)"),
-            "fresh/missing project must default provider_configured to false — no provider was ever chosen"
+            fn_body.contains("migrated_llm_for"),
+            "provider_configured must evaluate a migrated shape, not the raw stored config"
         );
         assert!(
             fn_body.contains("provider_configured,"),
             "get_auth_status must return the provider_configured field"
+        );
+    }
+
+    /// A never-migrated `LlmConfig::default()` must yield
+    /// `provider_configured == false` via `get_auth_status`.
+    #[test]
+    fn provider_configured_is_false_for_fresh_llm_default() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig::default()),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(&user_config, "proj", false);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        assert!(
+            !provider_configured,
+            "a never-touched LlmConfig::default() must read as not configured"
+        );
+    }
+
+    /// State transition: once an active provider is selected, the same
+    /// derivation flips to `true` — proves the expression isn't vacuously false.
+    #[test]
+    fn provider_configured_is_true_once_active_provider_resolves() {
+        let mut llm = speedwave_runtime::config::LlmConfig::default();
+        assert!(llm.set_active_to_anthropic());
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(llm),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(&user_config, "proj", false);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        assert!(provider_configured);
+    }
+
+    /// Edge case: project exists but `claude` is `None` entirely — must not
+    /// panic, defaults to not-configured (mirrors the `.is_some_and(false)` path).
+    #[test]
+    fn provider_configured_is_false_when_claude_override_absent() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(&user_config, "proj", false);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        assert!(!provider_configured);
+    }
+
+    /// Legacy v1 config with a saved API key must still migrate to
+    /// "configured", not just the OAuth (no-key) path.
+    #[test]
+    fn migrated_llm_for_reads_configured_for_legacy_v1_with_api_key() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig {
+                        provider: Some("anthropic".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(&user_config, "proj", true);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        assert!(provider_configured);
+    }
+
+    /// Edge case: unknown project name must not panic — mirrors
+    /// `find_project` returning `None` for a name absent from `projects`.
+    #[test]
+    fn migrated_llm_for_returns_none_for_unknown_project() {
+        let user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        assert!(migrated_llm_for(&user_config, "missing", false).is_none());
+    }
+
+    /// An unmigrated legacy v1 raw config must not make `provider_configured`
+    /// and `needs_anthropic_auth` disagree in the same response.
+    #[test]
+    fn migrated_llm_for_reconciles_legacy_v1_raw_contradiction() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig {
+                        provider: Some("anthropic".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+
+        let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");
+        assert!(needs_anthropic_auth, "legacy v1 anthropic needs OAuth");
+
+        let migrated = migrated_llm_for(&user_config, "proj", false);
+        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        assert!(
+            provider_configured,
+            "a legacy v1 anthropic config must read as configured once migrated, \
+             matching needs_anthropic_auth's already-correct 'true'"
         );
     }
 

@@ -89,6 +89,17 @@ describe('SetupWizardComponent', () => {
     expect(component.steps[3].status).toBe('done');
   });
 
+  it('defers start_containers — a fresh project has no LLM provider yet', async () => {
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+    await component.startSetup();
+    await component.onProjectCreated({ name: 'test-proj', dir: '/tmp/test' });
+
+    expect(invokeSpy).not.toHaveBeenCalledWith('start_containers', expect.anything());
+    expect(component.steps[4].status).toBe('done');
+    expect(component.steps[4].detail).toBe('Deferred until a provider is chosen');
+  });
+
   it('should navigate with replaceUrl on completion', async () => {
     vi.useFakeTimers();
     const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);

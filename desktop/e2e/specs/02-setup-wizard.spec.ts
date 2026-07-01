@@ -6,8 +6,10 @@
  *   2. Auto steps: check environment → start virtual machine → build images
  *   3. Create-project modal opens → mock the OS folder picker, fill name,
  *      click `create-project-submit`
- *   4. Auto steps: start containers → finalize
+ *   4. Auto steps: start containers (deferred — no LLM provider yet) → finalize
  *   5. Success message → auto-redirect to `/settings`
+ *   6. Configure an OpenRouter provider (OPENROUTER_API_KEY env) so
+ *      container-health (spec 03) has something to start against.
  *
  * Every step MUST succeed. If any step fails, the test fails with the
  * actual error message — no conditional branching that silently accepts errors.
@@ -18,6 +20,8 @@
  */
 
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
+
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
@@ -215,5 +219,46 @@ describe('Setup Wizard — Full Flow', function () {
     // The shell is identified by the project pill in the header.
     const projectPill = await $('[data-testid="project-pill"]');
     await projectPill.waitForExist({ timeout: 15_000 });
+  });
+
+  it('should configure an OpenRouter provider so containers can start', async function () {
+    this.timeout(60_000);
+    if (!OPENROUTER_API_KEY) {
+      throw new Error('OPENROUTER_API_KEY is not set — export it (e.g. `set -a && source .env`)');
+    }
+
+    const nav = await $('[data-testid="nav-settings"]');
+    await nav.waitForExist({ timeout: 15_000 });
+    await nav.click();
+    await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
+
+    const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
+    await selectBtn.waitForExist({ timeout: 10_000 });
+    await selectBtn.click();
+
+    const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
+    await keyInput.waitForExist({ timeout: 5_000 });
+    await keyInput.setValue(OPENROUTER_API_KEY);
+
+    const refreshBtn = await $('[data-testid="settings-llm-extra-refresh-openrouter"]');
+    await refreshBtn.click();
+
+    const modelSelect = await $('[data-testid="settings-llm-extra-model-openrouter"]');
+    await modelSelect.waitForExist({ timeout: 30_000 });
+    await browser.waitUntil(
+      async () => (await modelSelect.$$('option').length) > 1,
+      { timeout: 30_000, timeoutMsg: 'OpenRouter model catalog never populated' },
+    );
+    await modelSelect.selectByIndex(1);
+
+    const saveBtn = await $('[data-testid="settings-llm-save"]');
+    await browser.waitUntil(async () => await saveBtn.isEnabled(), {
+      timeout: 5_000,
+      timeoutMsg: 'Save button did not become enabled',
+    });
+    await saveBtn.click();
+
+    const saved = await $('[data-testid="settings-llm-saved"]');
+    await saved.waitForExist({ timeout: 15_000 });
   });
 });

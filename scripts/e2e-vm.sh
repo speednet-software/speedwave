@@ -115,9 +115,10 @@ windows_ps() {
     tmpname="e2e-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # Inject $WINDOWS_WSL_DISTRO so PS heredocs can reference it without
-    # switching to unquoted heredocs (which would require escaping all PS $vars).
-    local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'"
+    # Inject vars so PS heredocs can reference them without unquoting
+    # (SSH does not forward local env vars to the remote shell).
+    local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'
+\$env:OPENROUTER_API_KEY = '${OPENROUTER_API_KEY:-}'"
     # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
     # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
     # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
@@ -849,7 +850,9 @@ SCRIPT
 # Expects the .app to be installed at /Applications/Speedwave.app and E2E
 # suite to be in /tmp/speedwave-e2e.
 run_macos_e2e() {
-    macos_ssh bash <<'SCRIPT'
+    # SSH does not forward local env vars — export the key via a locally
+    # expanded prefix line ahead of the quoted (non-expanding) heredoc body.
+    { printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"; cat <<'SCRIPT'
 set -euo pipefail
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -907,6 +910,7 @@ trap - EXIT
 
 exit $E2E_EXIT
 SCRIPT
+    } | macos_ssh bash
 }
 
 # -- Preview mode: install & launch app for manual testing ---------------------
