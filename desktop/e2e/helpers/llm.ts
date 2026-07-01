@@ -37,14 +37,27 @@ export async function openSettings(): Promise<void> {
 }
 
 /** Picks `value` in a <select> and dispatches a native change so Angular's
- *  (change) handler runs and the form becomes dirty. */
+ *  (change) handler runs and the form becomes dirty. Tolerates single-model
+ *  catalogs (the component auto-selects the sole model, so no <option> count
+ *  threshold is assumed — we wait for the target value to be present). */
 async function selectModel(testid: string, value: string): Promise<void> {
   const select = await $(`[data-testid="${testid}"]`);
   await select.waitForExist({ timeout: 30_000 });
-  await browser.waitUntil(async () => (await select.$$('option').length) > 1, {
-    timeout: 30_000,
-    timeoutMsg: `model catalog never populated for ${testid}`,
-  });
+  await browser.waitUntil(
+    async () =>
+      await browser.execute(
+        (id: string, v: string) => {
+          const el = document.querySelector<HTMLSelectElement>(`[data-testid="${id}"]`);
+          return !!el && Array.from(el.options).some((o) => o.value === v);
+        },
+        testid,
+        value
+      ),
+    {
+      timeout: 30_000,
+      timeoutMsg: `model catalog never offered ${value} for ${testid}`,
+    }
+  );
   await select.selectByAttribute('value', value);
   // WDIO's selectByAttribute may not fire a native change in this Angular
   // build; dispatch one explicitly so onModelSelect / isDirty run.
