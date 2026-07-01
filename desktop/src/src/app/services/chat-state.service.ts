@@ -1331,9 +1331,14 @@ export class ChatStateService {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
-        // Metadata-only chunks never mutate _messages / _currentBlocks and
-        // are legitimate between or after turns (e.g. trailing RateLimit).
-        if (chunk.chunk_type === 'SystemInit' || chunk.chunk_type === 'RateLimit') {
+        // Chunks legitimate between/after turns: metadata (SystemInit,
+        // trailing RateLimit) and QueueDrained — the drain fires right AFTER
+        // Result flipped isStreaming=false and itself starts the next turn.
+        if (
+          chunk.chunk_type === 'SystemInit' ||
+          chunk.chunk_type === 'RateLimit' ||
+          chunk.chunk_type === 'QueueDrained'
+        ) {
           this.handleStreamChunk(chunk);
           return;
         }

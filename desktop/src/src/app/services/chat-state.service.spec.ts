@@ -1846,6 +1846,46 @@ describe('ChatStateService', () => {
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
     });
 
+    it('QueueDrained after Result dispatches the queued turn (not-streaming gate must pass it)', async () => {
+      // Real dispatch order: Result flips isStreaming=false, THEN the backend
+      // drain emits QueueDrained; dropping it strands the chip + the new turn.
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service._setState({ pendingQueue: { text: 'queued follow-up', queued_at: 1 } });
+      service.isStreaming = true;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Result',
+        data: {
+          session_id: 's-q',
+          total_cost: 0.01,
+          usage: { output_tokens: 5 },
+          result_text: null,
+          context_window_size: 200_000,
+        },
+      });
+      expect(service.isStreaming).toBe(false);
+
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'QueueDrained',
+        data: { session_id: 's-q', text: 'queued follow-up' },
+      });
+      expect(service.pendingQueue).toBeNull();
+      expect(service.isStreaming).toBe(true);
+      const lastUser = [...service.messages].reverse().find((m) => m.role === 'user');
+      expect(
+        lastUser?.blocks.some((b) => b.type === 'text' && b.content === 'queued follow-up')
+      ).toBe(true);
+
+      // The dispatched turn's content must now flow (it used to be dropped).
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Text',
+        data: { content: 'ACK' },
+      });
+      expect(service.currentBlocks.some((b) => b.type === 'text' && b.content === 'ACK')).toBe(
+        true
+      );
+    });
+
     it('late content chunks arriving after stopConversation are dropped via _turnId guard', async () => {
       mockTauri.isRunningInTauri = () => true;
       await service.init();
