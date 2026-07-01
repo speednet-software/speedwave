@@ -711,7 +711,10 @@ export class ChatStateService {
       }
 
       case 'SystemInit':
-        this._model = chunk.data.model;
+        if (chunk.data.model) this._model = chunk.data.model;
+        // ADR-045: seed the session id at stream start so queue/retry work
+        // during the FIRST turn (before any Result carries it).
+        if (chunk.data.session_id) this.seedSessionId(chunk.data.session_id);
         break;
 
       case 'RateLimit':
@@ -895,10 +898,11 @@ export class ChatStateService {
   }
 
   /**
-   * Seeds the session id after a resume so retry / queue can run before the first `Result`.
-   * @param sessionId - Resumed JSONL session uuid.
+   * Seeds the session id (resume or stream-start SystemInit) so retry / queue
+   * can run before the first `Result`.
+   * @param sessionId - Session uuid from a resume or a SystemInit chunk.
    */
-  seedResumedSession(sessionId: string): void {
+  seedSessionId(sessionId: string): void {
     if (!sessionId) return;
     this._lastKnownSessionId = sessionId;
     const cur = this._sessionStats();
@@ -1142,7 +1146,7 @@ export class ChatStateService {
         ]);
       }
       // Seed session id immediately so retry/queue work without waiting for live Result.
-      this.seedResumedSession(sessionId);
+      this.seedSessionId(sessionId);
     } catch (err) {
       // Drop the optimistic accent so a failed resume isn't shown as active.
       this._optimisticSessionId = null;

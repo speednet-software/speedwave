@@ -615,7 +615,7 @@ describe('ChatComponent', () => {
     it('clears the durable restart-resume id when deleting that session even if it is not the viewed one', async () => {
       projectState.activeProject.set('test');
       // Durable id points at an older session; the live view shows a different one.
-      chatState.seedResumedSession('s-old');
+      chatState.seedSessionId('s-old');
       chatState._setState({
         sessionStats: {
           session_id: 's-live',

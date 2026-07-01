@@ -32,7 +32,7 @@ export type StreamChunk =
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
-  | { chunk_type: 'SystemInit'; data: { model: string } }
+  | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };

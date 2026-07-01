@@ -1142,8 +1142,8 @@ describe('ChatStateService', () => {
       expect(service.sessionStatsFromState()).toBe(service.sessionStats);
     });
 
-    it('updates reactively on seedResumedSession', () => {
-      service.seedResumedSession('11111111-1111-1111-1111-111111111111');
+    it('updates reactively on seedSessionId', () => {
+      service.seedSessionId('11111111-1111-1111-1111-111111111111');
       expect(service.sessionStatsFromState()?.session_id).toBe(
         '11111111-1111-1111-1111-111111111111'
       );
@@ -2516,6 +2516,45 @@ describe('ChatStateService', () => {
       expect(service.pendingQueue?.text).toBe('newer');
     });
 
+    it('SystemInit session_id enables queueMessage during the first turn (ADR-045)', async () => {
+      service._setState({ sessionStats: null });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'init-1' },
+      });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+
+      const prior = await service.queueMessage('follow-up');
+      expect(prior).toBeNull();
+      expect(calls).toEqual([
+        { cmd: 'queue_message', args: { sessionId: 'init-1', text: 'follow-up' } },
+      ]);
+      expect(service.pendingQueue?.text).toBe('follow-up');
+    });
+
+    it('SystemInit with empty model seeds the session id without clobbering the model', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: '', session_id: 'init-2' },
+      });
+      expect(service.sessionStats?.session_id).toBe('init-2');
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      expect(service.sessionStats?.model).toBe('claude-opus-4-6');
+    });
+
     it('queueMessage no-ops without a session id', async () => {
       service._setState({ sessionStats: null });
       const calls: string[] = [];
@@ -2663,10 +2702,10 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('seedResumedSession', () => {
+  describe('seedSessionId', () => {
     it('stamps the session id when none is set so retry/queue work pre-Result', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
-      service.seedResumedSession('resumed-sess-1');
+      service.seedSessionId('resumed-sess-1');
       expect(service.sessionStats?.session_id).toBe('resumed-sess-1');
       expect(service.sessionStats?.total_cost).toBeNull();
       expect(service.sessionStats?.total_output_tokens).toBe(0);
@@ -2684,7 +2723,7 @@ describe('ChatStateService', () => {
         },
       });
       const before = service.sessionStats;
-      service.seedResumedSession('sess-x');
+      service.seedSessionId('sess-x');
       // Same reference — nothing replaced.
       expect(service.sessionStats).toBe(before);
       expect(service.sessionStats?.total_cost).toBe(0.123);
@@ -2692,7 +2731,7 @@ describe('ChatStateService', () => {
 
     it('refuses an empty session id', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
-      service.seedResumedSession('');
+      service.seedSessionId('');
       expect(service.sessionStats).toBeNull();
     });
   });
@@ -2972,7 +3011,7 @@ describe('ChatStateService', () => {
 
     it('resumes the durable session with NO ChatComponent mounted (key regression)', async () => {
       // No decider registered (component never mounted) → service auto-resumes.
-      service.seedResumedSession('sess-1');
+      service.seedSessionId('sess-1');
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
@@ -2995,7 +3034,7 @@ describe('ChatStateService', () => {
     });
 
     it('auto-resumes when unmounted even if history does not fit the target window', async () => {
-      service.seedResumedSession('sess-2');
+      service.seedSessionId('sess-2');
       // History exceeds the window → would prompt if mounted; unmounted ⇒ resume.
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
@@ -3013,7 +3052,7 @@ describe('ChatStateService', () => {
 
     it('starts a fresh session (not resume) when a decider returns "fresh" and history does not fit', async () => {
       projectState.status.set('ready');
-      service.seedResumedSession('sess-3');
+      service.seedSessionId('sess-3');
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('fresh'));
@@ -3032,7 +3071,7 @@ describe('ChatStateService', () => {
     });
 
     it('resumes when the decider returns "resume" and history does not fit', async () => {
-      service.seedResumedSession('sess-4');
+      service.seedSessionId('sess-4');
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('resume'));
@@ -3049,7 +3088,7 @@ describe('ChatStateService', () => {
     });
 
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
-      service.seedResumedSession('sess-window');
+      service.seedSessionId('sess-window');
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       // Stale cache from the PREVIOUS model: too small — would wrongly ask.
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
@@ -3071,7 +3110,7 @@ describe('ChatStateService', () => {
     });
 
     it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
-      service.seedResumedSession('sess-shrunk');
+      service.seedSessionId('sess-shrunk');
       (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
       // Stale cache from the PREVIOUS model: big — would wrongly auto-resume.
       (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
@@ -3106,7 +3145,7 @@ describe('ChatStateService', () => {
     });
 
     it('does not resume on a bare ready (project switch, no restart-complete)', async () => {
-      service.seedResumedSession('sess-5');
+      service.seedSessionId('sess-5');
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
@@ -3120,7 +3159,7 @@ describe('ChatStateService', () => {
     });
 
     it('clears the durable id on a project switch (switching) so it cannot resume later', async () => {
-      service.seedResumedSession('sess-6');
+      service.seedSessionId('sess-6');
       expect(service.lastKnownSessionId).toBe('sess-6');
 
       mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
@@ -3144,7 +3183,7 @@ describe('ChatStateService', () => {
     });
 
     it('adopts a changed session_id from a post-resume Result (fork guard)', () => {
-      service.seedResumedSession('old');
+      service.seedSessionId('old');
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -3157,7 +3196,7 @@ describe('ChatStateService', () => {
       // Regression: resetForNewConversation zeroed `initialized`, so the remount
       // init() started a fresh start_chat that clobbered the in-flight resume.
       projectState.status.set('ready');
-      service.seedResumedSession('sess-mid');
+      service.seedSessionId('sess-mid');
       let releaseResume: (() => void) | null = null;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -3199,7 +3238,7 @@ describe('ChatStateService', () => {
 
     it('a remount init() just after resume completes still does not start_chat', async () => {
       projectState.status.set('ready');
-      service.seedResumedSession('sess-done');
+      service.seedSessionId('sess-done');
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);

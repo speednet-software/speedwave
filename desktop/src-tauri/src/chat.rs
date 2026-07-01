@@ -71,8 +71,13 @@ pub enum StreamChunk {
     },
     /// Error from the Claude subprocess.
     Error { content: String },
-    /// Session init metadata — model name from system init message.
-    SystemInit { model: String },
+    /// Session init metadata — model + session id from the system init message.
+    /// `session_id` lets the frontend queue/retry during the FIRST turn (ADR-045).
+    SystemInit {
+        model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Rate limit event — utilization and reset info.
     RateLimit {
         status: String,
@@ -988,9 +993,13 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // ── Extract model from system init message ──
+        // ── Extract model + session id from system init message ──
         // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
+            let session_id = parsed["session_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     // Cache the model for subsequent result chunks.
@@ -1002,12 +1011,25 @@ impl StreamParser {
                     return (
                         Some(StreamChunk::SystemInit {
                             model: model.to_string(),
+                            session_id,
                         }),
                         log_entry,
                     );
                 }
             }
-            // "init" subtype but model missing/empty — fall through to text logic.
+            // Model missing/empty — still surface the session id (ADR-045 first-turn queue).
+            if session_id.is_some() {
+                return (
+                    Some(StreamChunk::SystemInit {
+                        model: String::new(),
+                        session_id,
+                    }),
+                    Some(LogEntry {
+                        prefix: "SYSTEM",
+                        message: "init".to_string(),
+                    }),
+                );
+            }
         }
 
         // System messages carry text in either `message` or `content`
@@ -3339,39 +3361,51 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "claude-opus-4-6");
+                assert!(session_id.is_none());
+            }
             other => panic!("expected SystemInit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_system_init_with_extra_fields() {
+    fn parse_system_init_extracts_session_id_with_model() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6","session_id":"abc","tools":["Read","Write"],"mcp_servers":[],"message":""}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "claude-opus-4-6");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+            }
             other => panic!("expected SystemInit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_system_init_without_model_falls_through() {
+    fn parse_system_init_without_model_still_surfaces_session_id() {
+        // ADR-045: the first-turn queue needs the session id even when the
+        // init line lacks a model.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init without model field should fall through and produce None"
-        );
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+            }
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_system_init_with_empty_model_falls_through() {
+    fn parse_system_init_with_empty_model_and_no_session_falls_through() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":""}"#;
         assert!(
             parse_line_str(&mut parser, line).is_none(),
-            "init with empty model should fall through and produce None"
+            "init with empty model and no session id should fall through and produce None"
         );
     }
 
@@ -3408,8 +3442,10 @@ mod tests {
 
     #[test]
     fn stream_chunk_system_init_round_trips() {
+        // No session id → field omitted (wire shape unchanged for old events).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
+            session_id: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
@@ -3418,9 +3454,23 @@ mod tests {
         );
         let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
         match deserialized {
-            StreamChunk::SystemInit { model } => assert_eq!(model, "test"),
+            StreamChunk::SystemInit { model, session_id } => {
+                assert_eq!(model, "test");
+                assert!(session_id.is_none());
+            }
             other => panic!("expected SystemInit after round-trip, got {other:?}"),
         }
+
+        // With session id → serialized for the frontend (ADR-045 first-turn queue).
+        let chunk = StreamChunk::SystemInit {
+            model: "test".to_string(),
+            session_id: Some("abc".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
+        );
     }
 
     #[test]

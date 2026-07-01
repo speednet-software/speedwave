@@ -50,6 +50,18 @@ describe('Chat Controls', function () {
     expect(await $('[data-testid="chat-stop"]').isExisting()).toBe(false);
   });
 
+  it('stops a streaming turn with the Escape key', async function () {
+    this.timeout(120_000);
+    // Esc goes through the document-level handler in chat.component, a
+    // separate code path from the chat-stop button click.
+    await sendMessageNoWait(LONG_STREAM_PROMPT);
+    await waitForTurnStart();
+
+    await browser.keys('Escape');
+    await waitForTurnComplete(30_000);
+    expect(await $('[data-testid="chat-stop"]').isExisting()).toBe(false);
+  });
+
   it('queues a message sent while streaming', async function () {
     this.timeout(180_000);
     await sendMessageNoWait(LONG_STREAM_PROMPT);
@@ -65,6 +77,36 @@ describe('Chat Controls', function () {
     await (await $('[data-testid="composer-queued-cancel"]')).click();
     await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000, reverse: true });
     await waitForTurnComplete();
+  });
+
+  it('dispatches the queued message as the next turn (ADR-045)', async function () {
+    this.timeout(300_000);
+    // Fresh conversation on purpose: a FIRST-turn queue needs the SystemInit
+    // session-id seed (it used to be dropped until the first Result).
+    await startNewConversation();
+    await sendMessageNoWait(LONG_STREAM_PROMPT);
+    await waitForTurnStart();
+
+    await queueMessageViaEnter('Reply with exactly the single word ACK.');
+    await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000 });
+
+    // Turn 1 ends → backend drains the slot to stdin with no user action:
+    // the chip disappears and the queued text becomes the next user message.
+    await $('[data-testid="composer-queued"]').waitForExist({
+      timeout: 240_000,
+      reverse: true,
+      timeoutMsg: 'queued slot never drained after the streaming turn ended',
+    });
+    await waitForTurnComplete(120_000);
+
+    const users = await $$('[data-testid="chat-message"][data-role="user"]').getElements();
+    expect(users.length).toBeGreaterThanOrEqual(2);
+    const lastUser = users[users.length - 1];
+    expect(await lastUser.getText()).toContain('ACK');
+    const assistants = await $$(
+      '[data-testid="chat-message"][data-role="assistant"]'
+    ).getElements();
+    expect(assistants.length).toBeGreaterThanOrEqual(2);
   });
 
   it('deletes a conversation from history', async function () {
