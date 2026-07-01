@@ -36,6 +36,34 @@ export async function openSettings(): Promise<void> {
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
 }
 
+/** Picks `value` in a <select> and dispatches a native change so Angular's
+ *  (change) handler runs and the form becomes dirty. */
+async function selectModel(testid: string, value: string): Promise<void> {
+  const select = await $(`[data-testid="${testid}"]`);
+  await select.waitForExist({ timeout: 30_000 });
+  await browser.waitUntil(async () => (await select.$$('option').length) > 1, {
+    timeout: 30_000,
+    timeoutMsg: `model catalog never populated for ${testid}`,
+  });
+  await select.selectByAttribute('value', value);
+  // WDIO's selectByAttribute may not fire a native change in this Angular
+  // build; dispatch one explicitly so onModelSelect / isDirty run.
+  await browser.execute(
+    (id: string, v: string) => {
+      const el = document.querySelector<HTMLSelectElement>(`[data-testid="${id}"]`);
+      if (!el) return;
+      el.value = v;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+    testid,
+    value
+  );
+  await browser.waitUntil(async () => (await select.getValue()) === value, {
+    timeout: 5_000,
+    timeoutMsg: `select ${testid} did not settle on ${value}`,
+  });
+}
+
 /** Selects OpenRouter, enters the key, discovers models, picks OPENROUTER_MODEL, saves. */
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
@@ -48,13 +76,7 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
 
   await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
 
-  const modelSelect = await $('[data-testid="settings-llm-extra-model-openrouter"]');
-  await modelSelect.waitForExist({ timeout: 30_000 });
-  await browser.waitUntil(async () => (await modelSelect.$$('option').length) > 1, {
-    timeout: 30_000,
-    timeoutMsg: 'OpenRouter model catalog never populated',
-  });
-  await modelSelect.selectByAttribute('value', requireOpenrouterModel());
+  await selectModel('settings-llm-extra-model-openrouter', requireOpenrouterModel());
 
   await saveProvider();
 }
@@ -79,13 +101,7 @@ export async function configureLocalProvider(
 
   await (await $('[data-testid="settings-llm-refresh"]')).click();
 
-  const modelSelect = await $('[data-testid="settings-llm-model"]');
-  await modelSelect.waitForExist({ timeout: 30_000 });
-  await browser.waitUntil(async () => (await modelSelect.$$('option').length) > 1, {
-    timeout: 30_000,
-    timeoutMsg: 'Local model catalog never populated',
-  });
-  await modelSelect.selectByAttribute('value', model);
+  await selectModel('settings-llm-model', model);
 
   await saveProvider();
 }
