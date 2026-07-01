@@ -12,7 +12,7 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------------------
 
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
-/// Adaptive from [`crate::resources`]: host_ram / 2, clamped 8–32 GiB.
+/// Adaptive from [`crate::resources`]: host_ram / 2, clamped 4–32 GiB.
 #[cfg(any(target_os = "macos", test))]
 pub fn desired_lima_vm_memory() -> String {
     let gib = crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
@@ -89,6 +89,11 @@ fn limactl_command() -> std::process::Command {
     crate::binary::command("limactl")
 }
 
+/// Netplan drop-in filename; presence marks a config that already carries the
+/// VPN-aware provision script (see `lima_config` and lima-vm/lima#2984).
+#[cfg(any(target_os = "macos", test))]
+const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
+
 /// Returns `true` if the Lima config needs regenerating: the VPN netplan
 /// drop-in is missing, or `memory`/`cpus` drifted from the SSOT formulas.
 /// Unparseable values are treated as no-drift (don't touch a hand-mangled file).
@@ -110,7 +115,7 @@ pub fn lima_vm_config_needs_update_with(
     // existing pre-update installs (including ones with the old `ip route del`
     // provision) need the new netplan-based fix injected on next boot.
     // See `lima_config()` doc and lima-vm/lima#2984.
-    if !config_content.contains("99-speedwave-prefer-vznat.yaml") {
+    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL) {
         return true;
     }
     // Whether a `prefix` line exists at all (regardless of parseability).
@@ -134,9 +139,52 @@ pub fn lima_vm_config_needs_update_with(
     needs_update("memory:", desired_gib) || needs_update("cpus:", desired_cpus)
 }
 
-/// Regenerates `lima.yaml` from [`lima_config`] when it drifts from the SSOT
-/// (memory, cpus, or VPN netplan drop-in), rewrites source + instance config,
-/// and restarts the VM if running. No-op on fresh install or no drift. ADR-068.
+/// Rewrites only the managed `memory:`/`cpus:` values in an existing lima.yaml,
+/// preserving every other line (user mounts, disk size). `None` when either
+/// managed line is absent — the caller falls back to full regeneration.
+#[cfg(any(target_os = "macos", test))]
+pub fn update_lima_managed_fields(
+    content: &str,
+    desired_gib: u32,
+    desired_cpus: u32,
+) -> Option<String> {
+    let with_memory =
+        rewrite_first_line(content, "memory:", &format!("memory: \"{desired_gib}GiB\""))?;
+    rewrite_first_line(&with_memory, "cpus:", &format!("cpus: {desired_cpus}"))
+}
+
+/// Replaces the first line whose trimmed form starts with `prefix` (same match
+/// rule as the drift check), keeping indentation and line ending. `None` if no
+/// line matches.
+#[cfg(any(target_os = "macos", test))]
+fn rewrite_first_line(content: &str, prefix: &str, replacement: &str) -> Option<String> {
+    let mut replaced = false;
+    let mut out = String::with_capacity(content.len() + 16);
+    for line in content.split_inclusive('\n') {
+        if !replaced && line.trim_start().starts_with(prefix) {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let ending = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            out.push_str(indent);
+            out.push_str(replacement);
+            out.push_str(ending);
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    replaced.then_some(out)
+}
+
+/// Updates the managed `memory`/`cpus` fields of `lima.yaml` (or regenerates
+/// it from [`lima_config`] when the VPN netplan drop-in or a managed line is
+/// missing), rewrites source + instance config, and restarts the VM if running.
+/// No-op on fresh install or no drift. ADR-068.
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     use crate::binary;
@@ -154,7 +202,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     }
 
     log::info!(
-        "Lima VM config migration: regenerating from SSOT (memory {}, cpus {}; host_ram/2 + host_cores/2)",
+        "Lima VM config migration: applying SSOT values (memory {}, cpus {}; host_ram/2 + host_cores/2)",
         desired_lima_vm_memory(),
         desired_lima_vm_cpus()
     );
@@ -192,15 +240,32 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Full regeneration from the SSOT `lima_config()`.
-    let regenerated = lima_config();
-    if content.trim() != regenerated.trim() {
+    // Surgical rewrite of the managed fields; full template regeneration only
+    // when the VPN provision block or a managed line is missing.
+    let desired_gib =
+        crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
+    let desired_cpus = desired_lima_vm_cpus();
+    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL) {
+        match update_lima_managed_fields(&content, desired_gib, desired_cpus) {
+            Some(u) => (u, true),
+            None => {
+                log::warn!(
+                    "lima.yaml at {} has no managed memory/cpus lines — regenerating \
+                     from the SSOT template; any manual edits are discarded",
+                    source_template.display()
+                );
+                (lima_config(), false)
+            }
+        }
+    } else {
         log::warn!(
-            "Lima VM config at {} is regenerated from the SSOT template — any manual edits are discarded",
+            "lima.yaml at {} pre-dates the VPN netplan provision — regenerating \
+             from the SSOT template; any manual edits are discarded",
             source_template.display()
         );
-    }
-    std::fs::write(&source_template, &regenerated)?;
+        (lima_config(), false)
+    };
+    std::fs::write(&source_template, &updated)?;
 
     // Update instance config too (may not exist if VM was never created).
     let instance_config = data_dir
@@ -208,7 +273,22 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         .join(consts::lima_vm_name())
         .join("lima.yaml");
     if instance_config.exists() {
-        std::fs::write(&instance_config, &regenerated)?;
+        let instance_updated = if surgical {
+            let instance_content = std::fs::read_to_string(&instance_config)?;
+            update_lima_managed_fields(&instance_content, desired_gib, desired_cpus).unwrap_or_else(
+                || {
+                    log::warn!(
+                        "instance lima.yaml at {} has no managed memory/cpus lines — \
+                         replacing with the migrated source config",
+                        instance_config.display()
+                    );
+                    updated.clone()
+                },
+            )
+        } else {
+            updated.clone()
+        };
+        std::fs::write(&instance_config, instance_updated)?;
     }
 
     // Restart VM if it existed
@@ -265,13 +345,24 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
     let status_str = String::from_utf8_lossy(&info_output.stdout);
 
     if !status_str.trim().eq_ignore_ascii_case("running") {
-        let output = limactl_command()
-            .args(["start", consts::lima_vm_name()])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("limactl start failed: {}", stderr.trim());
-        }
+        // Provisioning-grade timeout: this start may first download the guest
+        // nerdctl-full archive (first start under a newly bundled Lima).
+        use crate::runtime::CommandRunner as _;
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
+        log::info!(
+            "starting Lima VM '{}' — a one-time download of container tooling \
+             (nerdctl-full) may run before boot (timeout: {}s)",
+            consts::lima_vm_name(),
+            timeout.as_secs()
+        );
+        crate::runtime::RealRunner
+            .run_with_timeout("limactl", &["start", consts::lima_vm_name()], timeout)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "limactl start failed: {e}. {}",
+                    consts::LIMA_START_PROVISION_HINT
+                )
+            })?;
     }
 
     // Wait for containerd to be ready inside VM (up to 30s)
@@ -339,30 +430,6 @@ fn nerdctl_sha256_for_arch() -> anyhow::Result<&'static str> {
         "aarch64" => Ok(consts::NERDCTL_FULL_SHA256_ARM64),
         arch => anyhow::bail!("Unsupported architecture for nerdctl-full: {}", arch),
     }
-}
-
-/// Returns the path to a bundled resource file, if it exists.
-/// Checks `SPEEDWAVE_RESOURCES_DIR` env var first (development/testing),
-/// then the standard Tauri resource directory (production).
-#[cfg(target_os = "windows")]
-fn find_bundled_resource(relative_path: &str) -> Option<PathBuf> {
-    // Check SPEEDWAVE_RESOURCES_DIR env var (development/testing)
-    if let Ok(resources_dir) = std::env::var("SPEEDWAVE_RESOURCES_DIR") {
-        let path = PathBuf::from(&resources_dir).join(relative_path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // Check next to the current executable (Tauri production layout)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let path = exe_dir.join(relative_path);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 /// Verifies SHA256 of a file using PowerShell. Returns `true` if the hash matches.
@@ -630,7 +697,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     // Try bundled rootfs first (offline install from NSIS bundle)
     let mut have_valid_rootfs = false;
 
-    if let Some(bundled) = find_bundled_resource("wsl/ubuntu-rootfs.tar.gz") {
+    if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::UBUNTU_ROOTFS_ASSET) {
         if verify_sha256_ps(&bundled, expected_sha256) {
             // Copy bundled rootfs to the cache location for wsl --import
             std::fs::copy(&bundled, &rootfs_path)?;
@@ -1043,9 +1110,141 @@ fn nerdctl_version_matches_pin(version_line: &str) -> bool {
 
 /// `true` when a failed version probe means nerdctl is genuinely absent (vs a
 /// transient wsl.exe transport error that must not trigger reinstall).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(any(target_os = "windows", test))]
 fn probe_indicates_absent(code: Option<i32>, stderr: &str) -> bool {
     code == Some(127) || stderr.contains("not found") || stderr.contains("No such file")
+}
+
+/// In-process half of the nerdctl install lock; the cross-process half is the
+/// `<data_dir>/nerdctl-install.lock` file (see [`with_nerdctl_install_lock_in`]).
+#[cfg(any(target_os = "windows", test))]
+static NERDCTL_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serializes the nerdctl ensure/install sequence across processes (Desktop
+/// `ensure_ready` + CLI startup). The loser re-probes the pin under the lock
+/// (first step of `install_nerdctl_full`) and skips if already aligned.
+#[cfg(any(target_os = "windows", test))]
+fn with_nerdctl_install_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    let lock_path = data_dir.join(consts::NERDCTL_INSTALL_LOCK_FILE);
+    crate::runtime::compose_locks::with_file_lock_in(&NERDCTL_INSTALL_LOCK, &lock_path, f)
+}
+
+/// Persisted download-backoff marker (`consts::NERDCTL_DOWNLOAD_BACKOFF_FILE`);
+/// written after a failed in-distro download so short-lived CLI processes back
+/// off instead of restarting the full download on every invocation.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct NerdctlDownloadBackoff {
+    /// Unix epoch seconds of the last failed download attempt.
+    last_failure_epoch_secs: u64,
+    /// Count of consecutive failed download attempts.
+    consecutive_failures: u32,
+}
+
+/// Current Unix time in whole seconds (0 on a pre-epoch clock).
+#[cfg(any(target_os = "windows", test))]
+fn epoch_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `true` when the last download failure is recent enough to skip a retry.
+#[cfg(any(target_os = "windows", test))]
+fn download_backoff_active(state: Option<&NerdctlDownloadBackoff>, now_epoch_secs: u64) -> bool {
+    state.is_some_and(|s| {
+        now_epoch_secs.saturating_sub(s.last_failure_epoch_secs)
+            < consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS
+    })
+}
+
+/// Loads the backoff marker; absent or unparseable → `None` (treated as fresh).
+#[cfg(any(target_os = "windows", test))]
+fn load_download_backoff(path: &std::path::Path) -> Option<NerdctlDownloadBackoff> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Records a failed download attempt (state-change log; best-effort persist).
+#[cfg(any(target_os = "windows", test))]
+fn record_download_failure(path: &std::path::Path, now_epoch_secs: u64) {
+    let state = NerdctlDownloadBackoff {
+        last_failure_epoch_secs: now_epoch_secs,
+        consecutive_failures: load_download_backoff(path)
+            .map_or(1, |prev| prev.consecutive_failures.saturating_add(1)),
+    };
+    let write = serde_json::to_string(&state)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, json).map_err(anyhow::Error::from)
+        });
+    match write {
+        Ok(()) => log::warn!(
+            "nerdctl-full download failed ({} consecutive failure(s)); \
+             next retry no sooner than {}s from now",
+            state.consecutive_failures,
+            consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS
+        ),
+        Err(e) => log::warn!("could not persist nerdctl download backoff marker: {e}"),
+    }
+}
+
+/// Removes the backoff marker; logs only when a marker actually existed.
+#[cfg(any(target_os = "windows", test))]
+fn clear_download_backoff(path: &std::path::Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => log::info!("cleared nerdctl download backoff after successful alignment"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("could not remove nerdctl download backoff marker: {e}"),
+    }
+}
+
+/// Waits for `child` (piped stdout/stderr) at most `timeout`, draining pipes
+/// on threads; kills the child and errors on expiry.
+#[cfg(any(target_os = "windows", test))]
+fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = pipe {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if start.elapsed() >= timeout => {
+                if let Err(e) = child.kill() {
+                    log::warn!("wait_with_output_timeout: kill failed: {e}");
+                }
+                let _ = child.wait();
+                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1059,13 +1258,17 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             "--version",
         ])
         .output()?;
+    let backoff_path = consts::data_dir().join(consts::NERDCTL_DOWNLOAD_BACKOFF_FILE);
+    let drift;
     if nerdctl_check.status.success() {
         let version_line = String::from_utf8_lossy(&nerdctl_check.stdout);
         if nerdctl_version_matches_pin(&version_line) {
+            // Already aligned (possibly by the other lock holder) — drop any stale backoff.
+            clear_download_backoff(&backoff_path);
             return Ok(());
         }
-        log::info!(
-            "in-distro nerdctl is not the pinned {} (got: {}); reinstalling",
+        drift = format!(
+            "in-distro nerdctl is not the pinned {} (got: {})",
             consts::NERDCTL_FULL_VERSION,
             version_line.trim()
         );
@@ -1080,17 +1283,18 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
                 stderr.trim()
             );
         }
-        log::info!(
-            "in-distro nerdctl absent; installing {}",
+        drift = format!(
+            "in-distro nerdctl absent; need {}",
             consts::NERDCTL_FULL_VERSION
         );
     }
 
-    // Try bundled nerdctl-full tarball first (offline install from NSIS bundle).
+    // Try bundled nerdctl-full tarball first (offline install from the bundle).
     let expected_sha256 = nerdctl_sha256_for_arch()?;
     let mut bundled_wsl_path: Option<String> = None;
+    let mut bundled_rejected: Option<PathBuf> = None;
 
-    if let Some(bundled) = find_bundled_resource("wsl/nerdctl-full.tar.gz") {
+    if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::NERDCTL_TARBALL_ASSET) {
         if verify_sha256_ps(&bundled, expected_sha256) {
             // Translate the bundled tarball's host path to WSL via the SSOT.
             match crate::engine_path::to_engine_path(&bundled) {
@@ -1099,7 +1303,45 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
                     "could not translate bundled nerdctl path to WSL ({e}); will download instead"
                 ),
             }
+        } else {
+            bundled_rejected = Some(bundled);
         }
+    }
+
+    // Download path only: back off after a recent failure instead of re-pulling
+    // the full archive on every CLI invocation (state-change logging only).
+    let downloading = bundled_wsl_path.is_none();
+    if downloading
+        && download_backoff_active(
+            load_download_backoff(&backoff_path).as_ref(),
+            epoch_secs_now(),
+        )
+    {
+        log::debug!(
+            "{drift}; skipping download retry (recent failure, retry delay {}s)",
+            consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS
+        );
+        return Ok(());
+    }
+    if let Some(rejected) = bundled_rejected {
+        log::warn!(
+            "bundled nerdctl tarball at {} does not match the pinned {} SHA256; \
+             falling back to in-distro download",
+            rejected.display(),
+            consts::NERDCTL_FULL_VERSION
+        );
+    }
+    if downloading {
+        log::info!(
+            "{drift}; downloading nerdctl-full {} inside the distro (large archive, bounded by {}s)",
+            consts::NERDCTL_FULL_VERSION,
+            consts::NERDCTL_DOWNLOAD_MAX_TIME_SECS
+        );
+    } else {
+        log::info!(
+            "{drift}; installing {} from the bundled tarball",
+            consts::NERDCTL_FULL_VERSION
+        );
     }
 
     // Build install script: use bundled file if available, otherwise download
@@ -1110,8 +1352,11 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             escaped
         )
     } else {
-        "mkdir -p /tmp/nerdctl-install\ncurl -fsSL \"$URL\" -o \"/tmp/nerdctl-install/${TARBALL}\""
-            .to_string()
+        format!(
+            "mkdir -p /tmp/nerdctl-install\ncurl -fsSL --connect-timeout {} --max-time {} \"$URL\" -o \"/tmp/nerdctl-install/${{TARBALL}}\"",
+            consts::NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS,
+            consts::NERDCTL_DOWNLOAD_MAX_TIME_SECS
+        )
     };
 
     let install_script = format!(
@@ -1201,20 +1446,34 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         source_commands = source_commands
     );
     // Write the install script via stdin to avoid wsl.exe arg length/escaping.
-    let install = crate::binary::system_command("wsl.exe")
+    let mut child = crate::binary::system_command("wsl.exe")
         .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     use std::io::Write;
-    let mut child = install;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(install_script.as_bytes())?;
         // Drop stdin to close the pipe and let bash finish
     }
-    let output = child.wait_with_output()?;
+    // Bounded host-side wait — a stalled in-distro download must not hang startup.
+    let output = match wait_with_output_timeout(
+        child,
+        std::time::Duration::from_secs(consts::NERDCTL_INSTALL_TIMEOUT_SECS),
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            if downloading {
+                record_download_failure(&backoff_path, epoch_secs_now());
+            }
+            return Err(e);
+        }
+    };
     if !output.status.success() {
+        if downloading {
+            record_download_failure(&backoff_path, epoch_secs_now());
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         log::error!(
@@ -1230,17 +1489,20 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         );
     }
 
+    clear_download_backoff(&backoff_path);
     Ok(())
 }
 
 /// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-072).
-/// Warn-only, once-per-process: a failed reinstall must not churn on retry.
+/// Warn-only, once-per-process; Desktop and CLI serialize on the cross-process
+/// install lock, and the loser re-probes the pin under it.
 #[cfg(target_os = "windows")]
 pub fn ensure_nerdctl_version() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if let Err(e) = install_nerdctl_full() {
+        let result = with_nerdctl_install_lock_in(consts::data_dir(), install_nerdctl_full);
+        if let Err(e) = result {
             log::warn!("could not align in-distro nerdctl to the pin: {e}");
         }
     });
@@ -1533,6 +1795,248 @@ mod tests {
             lima_vm_config_needs_update_with(config, 12, 4),
             "configs missing the VPN-aware provision script must be migrated"
         );
+    }
+
+    /// SSOT guard: the sentinel checked by the drift/migration paths must be
+    /// the filename the template actually provisions.
+    #[test]
+    fn lima_config_contains_vpn_provision_sentinel() {
+        assert!(lima_config().contains(LIMA_VPN_PROVISION_SENTINEL));
+    }
+
+    /// Drift interaction: an 8 GiB host that ran v0.13.3 (`memory: "4GiB"`)
+    /// must NOT be migrated up to a VM sized at 100% of host RAM.
+    #[test]
+    fn small_host_existing_4gib_vm_is_not_migrated_up() {
+        let desired = crate::resources::desired_vm_memory_gib(8);
+        assert_eq!(desired, 4, "8 GiB host must keep a 4 GiB VM");
+        let config =
+            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"4GiB\"\ndisk: \"50GiB\"\n");
+        assert!(
+            !lima_vm_config_needs_update_with(&config, desired, 4),
+            "existing 4 GiB VM on an 8 GiB host must be drift-free"
+        );
+    }
+
+    // ── update_lima_managed_fields (surgical migration, no user-edit clobber) ─
+
+    #[test]
+    fn managed_fields_update_rewrites_only_memory_and_cpus() {
+        let config = with_provision_sentinel(
+            "vmType: vz\ncpus: 4\nmemory: \"4GiB\"\ndisk: \"100GiB\"\nmounts:\n  - location: \"~/extra\"\n    writable: true\n",
+        );
+        let updated = update_lima_managed_fields(&config, 8, 6).expect("managed lines present");
+        assert!(updated.contains("cpus: 6"), "cpus updated: {updated}");
+        assert!(updated.contains("memory: \"8GiB\""), "memory updated");
+        assert!(!updated.contains("cpus: 4"));
+        assert!(!updated.contains("\"4GiB\""));
+        // User edits preserved (no template clobber).
+        assert!(updated.contains("disk: \"100GiB\""), "user disk size kept");
+        assert!(updated.contains("~/extra"), "user mount kept");
+        assert!(updated.contains(LIMA_VPN_PROVISION_SENTINEL));
+    }
+
+    #[test]
+    fn managed_fields_update_converges_and_is_idempotent() {
+        let config = with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"4GiB\"\n");
+        let updated = update_lima_managed_fields(&config, 8, 8).unwrap();
+        assert!(
+            !lima_vm_config_needs_update_with(&updated, 8, 8),
+            "post-migration config must be drift-free"
+        );
+        assert_eq!(
+            update_lima_managed_fields(&updated, 8, 8).unwrap(),
+            updated,
+            "re-running the update must be a no-op"
+        );
+    }
+
+    #[test]
+    fn managed_fields_update_replaces_first_match_and_keeps_indent() {
+        let config = "  cpus: 2\n  memory: \"2GiB\"\nscript: |\n  memory: \"9GiB\"\n";
+        let updated = update_lima_managed_fields(config, 8, 4).unwrap();
+        assert!(updated.contains("  cpus: 4\n"), "indent kept: {updated}");
+        assert!(updated.contains("  memory: \"8GiB\"\n"), "indent kept");
+        assert!(
+            updated.contains("memory: \"9GiB\""),
+            "later matches must stay untouched"
+        );
+    }
+
+    #[test]
+    fn managed_fields_update_missing_lines_return_none() {
+        // Absent managed lines must fall back to full regeneration.
+        assert!(update_lima_managed_fields("vmType: vz\n", 8, 4).is_none());
+        assert!(update_lima_managed_fields("cpus: 4\n", 8, 4).is_none());
+        assert!(update_lima_managed_fields("memory: \"4GiB\"\n", 8, 4).is_none());
+        assert!(update_lima_managed_fields("", 8, 4).is_none());
+    }
+
+    #[test]
+    fn managed_fields_update_handles_crlf_and_no_trailing_newline() {
+        let crlf = update_lima_managed_fields("cpus: 4\r\nmemory: \"4GiB\"\r\n", 8, 6).unwrap();
+        assert!(crlf.contains("cpus: 6\r\n"), "CRLF kept: {crlf:?}");
+        assert!(crlf.contains("memory: \"8GiB\"\r\n"));
+        let bare = update_lima_managed_fields("memory: \"4GiB\"\ncpus: 4", 8, 6).unwrap();
+        assert!(bare.ends_with("cpus: 6"), "no newline appended: {bare:?}");
+    }
+
+    #[test]
+    fn managed_fields_update_full_template_round_trip() {
+        // The real template must be updatable in place and converge.
+        let template = lima_config();
+        let updated = update_lima_managed_fields(&template, 32, 8).unwrap();
+        assert!(updated.contains("memory: \"32GiB\""));
+        assert!(updated.contains("cpus: 8"));
+        assert!(!lima_vm_config_needs_update_with(&updated, 32, 8));
+        assert!(
+            updated.contains("netplan apply"),
+            "provision script must survive the rewrite"
+        );
+    }
+
+    /// Structural pins for `ensure_lima_vm_config` (macOS-only fs+process code):
+    /// surgical update first, full regeneration only as loud fallback.
+    #[test]
+    fn ensure_lima_vm_config_prefers_surgical_update() {
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn ensure_lima_vm_config")
+            .expect("ensure_lima_vm_config must exist");
+        let end = src[start..]
+            .find("pub fn init_vm_macos")
+            .map(|i| start + i)
+            .expect("init_vm_macos follows ensure_lima_vm_config");
+        let body = &src[start..end];
+        assert!(
+            body.contains("update_lima_managed_fields"),
+            "migration must go through the surgical field update"
+        );
+        assert!(
+            body.contains("manual edits are discarded"),
+            "full-regeneration fallback must warn loudly"
+        );
+        assert!(
+            body.contains("LIMA_VPN_PROVISION_SENTINEL"),
+            "full regeneration must be gated on the missing provision sentinel"
+        );
+    }
+
+    /// Structural pin: the migration restart (`init_vm_macos` start path) runs
+    /// under the provisioning-grade timeout with the download hint, not an
+    /// untimed `.output()`.
+    #[test]
+    fn init_vm_macos_start_is_timed_and_names_download_cause() {
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn init_vm_macos")
+            .expect("init_vm_macos must exist");
+        let end = src[start..]
+            .find("// -----")
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(
+            body.contains("LIMA_VM_PROVISION_START_TIMEOUT_SECS"),
+            "limactl start must use the provisioning-grade timeout"
+        );
+        assert!(
+            body.contains("LIMA_START_PROVISION_HINT"),
+            "start failure must carry the download cause + remedy hint"
+        );
+    }
+
+    // ── nerdctl download backoff + install lock ──
+
+    #[test]
+    fn download_backoff_active_only_within_retry_delay() {
+        assert!(!download_backoff_active(None, 1_000), "no marker = fresh");
+        let s = NerdctlDownloadBackoff {
+            last_failure_epoch_secs: 1_000,
+            consecutive_failures: 1,
+        };
+        assert!(download_backoff_active(
+            Some(&s),
+            1_000 + consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS - 1
+        ));
+        assert!(!download_backoff_active(
+            Some(&s),
+            1_000 + consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS
+        ));
+        // A clock jump backwards must not underflow (stays backed off).
+        assert!(download_backoff_active(Some(&s), 0));
+    }
+
+    #[test]
+    fn download_backoff_marker_round_trip_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(consts::NERDCTL_DOWNLOAD_BACKOFF_FILE);
+        assert_eq!(load_download_backoff(&path), None, "absent marker is fresh");
+        record_download_failure(&path, 42);
+        let first = load_download_backoff(&path).expect("marker persisted");
+        assert_eq!(first.last_failure_epoch_secs, 42);
+        assert_eq!(first.consecutive_failures, 1);
+        record_download_failure(&path, 43);
+        assert_eq!(
+            load_download_backoff(&path).unwrap().consecutive_failures,
+            2,
+            "consecutive failures accumulate"
+        );
+        clear_download_backoff(&path);
+        assert_eq!(load_download_backoff(&path), None);
+        clear_download_backoff(&path); // absent → silent no-op
+    }
+
+    #[test]
+    fn download_backoff_unparseable_marker_treated_as_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(consts::NERDCTL_DOWNLOAD_BACKOFF_FILE);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(load_download_backoff(&path), None);
+        record_download_failure(&path, 7);
+        assert_eq!(
+            load_download_backoff(&path).unwrap().consecutive_failures,
+            1
+        );
+    }
+
+    #[test]
+    fn nerdctl_install_lock_returns_value_and_propagates_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = with_nerdctl_install_lock_in(dir.path(), || Ok(7)).unwrap();
+        assert_eq!(value, 7);
+        assert!(
+            dir.path().join(consts::NERDCTL_INSTALL_LOCK_FILE).exists(),
+            "cross-process lock file created under data_dir"
+        );
+        let err =
+            with_nerdctl_install_lock_in(dir.path(), || Err::<(), _>(anyhow::anyhow!("boom")))
+                .unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_output_timeout_returns_output_and_kills_on_expiry() {
+        let fast = std::process::Command::new("sh")
+            .args(["-c", "echo out"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = wait_with_output_timeout(fast, std::time::Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
+
+        let slow = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let err =
+            wait_with_output_timeout(slow, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 
     #[test]
@@ -2060,6 +2564,120 @@ mod tests {
         fn empty_path_returns_empty() {
             let p = Path::new("");
             assert_eq!(ps_escape(p), "");
+        }
+    }
+
+    // ── nerdctl download backoff + install lock + child timeout ────────────
+
+    mod nerdctl_backoff {
+        use super::super::*;
+
+        fn tmp() -> tempfile::TempDir {
+            tempfile::tempdir().expect("tempdir")
+        }
+
+        #[test]
+        fn epoch_secs_now_is_post_epoch() {
+            assert!(epoch_secs_now() > 0);
+        }
+
+        #[test]
+        fn backoff_inactive_without_marker() {
+            assert!(!download_backoff_active(None, 1_000));
+        }
+
+        #[test]
+        fn backoff_active_within_retry_delay_and_expires_after() {
+            let state = NerdctlDownloadBackoff {
+                last_failure_epoch_secs: 1_000,
+                consecutive_failures: 1,
+            };
+            assert!(download_backoff_active(Some(&state), 1_001));
+            let after = 1_000 + consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS;
+            assert!(!download_backoff_active(Some(&state), after));
+        }
+
+        #[test]
+        fn record_then_load_roundtrips_and_counts_consecutive_failures() {
+            let dir = tmp();
+            let path = dir.path().join("nested").join("backoff.json");
+            assert!(load_download_backoff(&path).is_none());
+
+            record_download_failure(&path, 42);
+            let first = load_download_backoff(&path).expect("marker after first failure");
+            assert_eq!(first.last_failure_epoch_secs, 42);
+            assert_eq!(first.consecutive_failures, 1);
+
+            record_download_failure(&path, 43);
+            let second = load_download_backoff(&path).expect("marker after second failure");
+            assert_eq!(second.consecutive_failures, 2);
+        }
+
+        #[test]
+        fn load_unparseable_marker_treated_as_fresh() {
+            let dir = tmp();
+            let path = dir.path().join("backoff.json");
+            std::fs::write(&path, "not json").unwrap();
+            assert!(load_download_backoff(&path).is_none());
+        }
+
+        #[test]
+        fn clear_removes_marker_and_tolerates_absence() {
+            let dir = tmp();
+            let path = dir.path().join("backoff.json");
+            record_download_failure(&path, 7);
+            clear_download_backoff(&path);
+            assert!(load_download_backoff(&path).is_none());
+            clear_download_backoff(&path); // absent → no-op, no panic
+        }
+
+        #[test]
+        fn install_lock_runs_closure_and_propagates_result() {
+            let dir = tmp();
+            let out = with_nerdctl_install_lock_in(dir.path(), || Ok(41 + 1)).expect("locked run");
+            assert_eq!(out, 42);
+            let err = with_nerdctl_install_lock_in(dir.path(), || {
+                anyhow::bail!("boom") as anyhow::Result<i32>
+            });
+            assert!(err.unwrap_err().to_string().contains("boom"));
+        }
+
+        fn spawn_shell(script: &str) -> std::process::Child {
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").arg(script);
+                c
+            } else {
+                let mut c = std::process::Command::new("sh");
+                c.arg("-c").arg(script);
+                c
+            };
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn shell child")
+        }
+
+        #[test]
+        fn wait_with_output_timeout_captures_fast_child_output() {
+            let child = spawn_shell("echo drained");
+            let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
+                .expect("fast child");
+            assert!(out.status.success());
+            assert!(String::from_utf8_lossy(&out.stdout).contains("drained"));
+        }
+
+        #[test]
+        fn wait_with_output_timeout_kills_and_errors_on_expiry() {
+            let script = if cfg!(windows) {
+                "ping -n 30 127.0.0.1 >NUL"
+            } else {
+                "sleep 30"
+            };
+            let child = spawn_shell(script);
+            let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
+                .expect_err("must time out");
+            assert!(err.to_string().contains("timed out"));
         }
     }
 }
