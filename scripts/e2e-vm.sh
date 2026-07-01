@@ -118,7 +118,11 @@ windows_ps() {
     # Inject vars so PS heredocs can reference them without unquoting
     # (SSH does not forward local env vars to the remote shell).
     local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'
-\$env:OPENROUTER_API_KEY = '${OPENROUTER_API_KEY:-}'"
+\$env:OPENROUTER_API_KEY = '${OPENROUTER_API_KEY:-}'
+\$env:OPENROUTER_MODEL = '${OPENROUTER_MODEL:-}'
+\$env:LOCAL_LLM_BASE_URL = '${LOCAL_LLM_BASE_URL:-}'
+\$env:LOCAL_LLM_API_KEY = '${LOCAL_LLM_API_KEY:-}'
+\$env:LOCAL_LLM_MODEL = '${LOCAL_LLM_MODEL:-}'"
     # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
     # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
     # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
@@ -850,9 +854,15 @@ SCRIPT
 # Expects the .app to be installed at /Applications/Speedwave.app and E2E
 # suite to be in /tmp/speedwave-e2e.
 run_macos_e2e() {
-    # SSH does not forward local env vars — export the key via a locally
-    # expanded prefix line ahead of the quoted (non-expanding) heredoc body.
-    { printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"; cat <<'SCRIPT'
+    # SSH does not forward local env vars — export the LLM test config via
+    # locally expanded prefix lines ahead of the quoted heredoc body.
+    {
+        printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
+        printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
+        printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
+        printf 'export LOCAL_LLM_MODEL=%q\n' "${LOCAL_LLM_MODEL:-}"
+        cat <<'SCRIPT'
 set -euo pipefail
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"

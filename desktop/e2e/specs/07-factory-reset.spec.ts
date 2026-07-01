@@ -56,8 +56,10 @@ describe('Factory Reset', function () {
       timeoutMsg: 'Settings page heading not found',
     });
     expect(await title.isDisplayed()).toBe(true);
+    // Earlier specs may leave either e2e-test or e2e-second active; reset is
+    // project-agnostic, so assert a project exists, not which one.
     const { activeProjectSlug } = await import('../helpers/projects');
-    expect(await activeProjectSlug()).toBe('e2e-test');
+    expect(await activeProjectSlug()).not.toBeNull();
   });
 
   it('should wipe state and restart the app', async function () {
