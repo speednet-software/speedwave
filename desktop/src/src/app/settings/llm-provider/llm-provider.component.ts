@@ -1098,7 +1098,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           : `${label} at ${url} is reachable but returned an unexpected (non-JSON) response.`;
       }
       case 'unsupported':
-        return `${label} does not support model discovery — type the model name manually.`;
+        return `${label} does not support model discovery. Switch to a provider with an OpenAI-compatible /v1/models endpoint.`;
       case 'other':
         return `${label} at ${url} returned no models (the server is up but no model is loaded).`;
     }
@@ -1161,8 +1161,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Probes the local LLM server for models. Fires only on explicit intent
-   * (blur, Refresh, initial load with persisted baseUrl), never on switch.
+   * Probes the local LLM server for models. Fires only from the explicit
+   * "Discover models" button — never automatically (no blur/load/switch probes).
    * @param isRefresh When true, bypass the same-URL dedupe to force a re-probe.
    */
   async discoverModels(isRefresh: boolean): Promise<void> {
