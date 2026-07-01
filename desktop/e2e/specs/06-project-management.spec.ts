@@ -254,7 +254,7 @@ describe('Project Management', function () {
   });
 
   describe('Remove Project', function () {
-    it('rejects removing the active project with an inline error', async function () {
+    it('guards the active project: no remove button, backend rejects direct removal', async function () {
       this.timeout(60_000);
       await waitForShellReady();
       const pill = await $('[data-testid="project-pill"]');
@@ -268,17 +268,23 @@ describe('Project Management', function () {
         { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' },
       );
 
-      await (await $('[data-testid="project-switcher-remove-e2e-test"]')).click();
-      const confirmYes = await $('[data-testid="project-switcher-confirm-yes-e2e-test"]');
-      await confirmYes.waitForExist({ timeout: 10_000 });
-      await confirmYes.click();
+      // UI guard: the active row renders no remove button; inactive rows do.
+      expect(await $('[data-testid="project-switcher-remove-e2e-test"]').isExisting()).toBe(false);
+      expect(
+        await $(`[data-testid="project-switcher-remove-${SECOND_PROJECT_NAME}"]`).isExisting(),
+      ).toBe(true);
 
-      const error = await $('[data-testid="project-switcher-remove-error-e2e-test"]');
-      await error.waitForExist({
-        timeout: 15_000,
-        timeoutMsg: 'removing the ACTIVE project was not rejected with an inline error',
+      // Backend guard (defense in depth): direct remove_project must reject.
+      const rejection = await browser.executeAsync((done: (r: string | null) => void) => {
+        (
+          window as unknown as {
+            __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<void> };
+          }
+        ).__TAURI_INTERNALS__.invoke('remove_project', { name: 'e2e-test' })
+          .then(() => done(null))
+          .catch((e: unknown) => done(String(e)));
       });
-      expect((await error.getText()).trim().length).toBeGreaterThan(0);
+      expect(rejection).not.toBeNull();
 
       // The project survived the rejected removal.
       expect(await activeProjectSlug()).toBe('e2e-test');
@@ -331,6 +337,8 @@ describe('Project Management', function () {
         },
         { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never reopened' },
       );
+      // The remove button is hover-revealed (opacity-0) — hover the row first.
+      await (await $(`[data-testid="project-switcher-item-${THIRD_PROJECT_NAME}"]`)).moveTo();
       await (
         await $(`[data-testid="project-switcher-remove-${THIRD_PROJECT_NAME}"]`)
       ).click();
