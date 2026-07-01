@@ -153,6 +153,23 @@ This is a one-time migration. See ADR-049 for the rationale.
 
 ---
 
+## `speedwave self-update`: "Installed Speedwave Desktop resources are vX"
+
+**Symptom:** After `speedwave self-update`, the CLI reports that the installed
+Desktop resources belong to an older version and skips the container rebuild.
+Project commands may also fail with _"installed Desktop resources are vX but
+this binary is vY … Update Speedwave Desktop"_.
+
+**Cause:** The CLI binary was updated ahead of the Desktop app. Container
+images are built from the Desktop's bundled resources, and an older resource
+tree does not contain the new version's build inputs.
+
+**Recovery:** Update (or relaunch) the Speedwave Desktop app, then run
+`speedwave update`. The Desktop app re-links the CLI on every startup, so both
+end up on the same version.
+
+---
+
 ## Calendar / Reminders / Mail / Notes permission previously denied
 
 **Symptom:** Enabling an OS integration shows a toast like:

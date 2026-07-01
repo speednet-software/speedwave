@@ -1119,7 +1119,7 @@ mod tests {
             has_custom_headers: true,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
@@ -1193,7 +1193,7 @@ mod tests {
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -1277,7 +1277,7 @@ mod tests {
             has_custom_headers: true,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let resolved = ResolvedClaudeConfig {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
@@ -1351,7 +1351,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm
     }
 
@@ -2628,6 +2628,7 @@ services:
         let service = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            std::path::Path::new("/nonexistent/plugins/legacy"),
             "test-project",
             "speedwave_test-project_network",
             tokens_dir,
@@ -3276,7 +3277,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3314,7 +3315,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -3406,7 +3407,7 @@ services:
             base_url: base_url.map(str::to_string),
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm
     }
 
@@ -3700,7 +3701,7 @@ services:
             has_custom_headers: true,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: default_flags(),
@@ -3910,7 +3911,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4114,7 +4115,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let result1 =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let result2 = apply_llm_config_in(data_dir.path(), &result1, &llm, "test-project").unwrap();
@@ -4611,7 +4612,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4642,7 +4643,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4662,7 +4663,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm_blank, false);
+        crate::config::migrate_llm(&mut llm_blank, crate::config::AnthropicEvidence::None);
         let rendered_blank = apply_llm_config_in(
             data_dir.path(),
             COMPOSE_TEMPLATE,
@@ -4757,7 +4758,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
@@ -4788,7 +4789,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm_ollama, false);
+        crate::config::migrate_llm(&mut llm_ollama, crate::config::AnthropicEvidence::None);
         let llm_anthropic = configured_anthropic_llm();
 
         let with_ollama = apply_llm_config_in(
@@ -7725,6 +7726,7 @@ services:
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "test",
             "speedwave_test_network",
             &tokens_dir,
@@ -7775,6 +7777,7 @@ services:
         let svc = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-svc"),
             "proj",
             "net",
             std::path::Path::new("/tokens/proj"),
@@ -7875,6 +7878,7 @@ services:
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -11012,7 +11016,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -11082,7 +11086,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
@@ -11253,7 +11257,7 @@ services:
             has_custom_headers: false,
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
@@ -11300,7 +11304,7 @@ services:
         };
         // has_custom_headers routes to the direct path regardless of the
         // kill-switch (the proxy would consume headers meant for the LLM server).
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
 

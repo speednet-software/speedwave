@@ -3000,6 +3000,27 @@ networks:
         );
     }
 
+    /// Structural test: the post-setup migration block (VM stop/start, possible
+    /// long tooling download) must not run on the Tauri main thread.
+    #[test]
+    fn post_setup_migrations_run_off_the_main_thread() {
+        let source = include_str!("main.rs");
+        let anchor = source
+            .find("Post-setup migrations")
+            .expect("post-setup migration block must exist in main.rs");
+        let window = &source[anchor..anchor + 700];
+        let spawn = window
+            .find("std::thread::spawn")
+            .expect("migration block must spawn a worker thread");
+        let lima = window
+            .find("ensure_lima_vm_config()")
+            .expect("lima migration inside the block");
+        assert!(
+            spawn < lima,
+            "VM migrations must run inside the spawned thread, not on the main thread"
+        );
+    }
+
     // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(), and
     // reset_vm() errors must be non-fatal (log::warn and continue).
     // These tests verify the non-fatal wrapper pattern used in factory_reset

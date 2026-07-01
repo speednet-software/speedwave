@@ -136,13 +136,19 @@ const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
 ];
 
+/// Bundle-relative path of the nerdctl-full tarball (Windows offline install).
+pub const NERDCTL_TARBALL_ASSET: &str = "wsl/nerdctl-full.tar.gz";
+
+/// Bundle-relative path of the Ubuntu WSL rootfs tarball (Windows offline install).
+pub const UBUNTU_ROOTFS_ASSET: &str = "wsl/ubuntu-rootfs.tar.gz";
+
 const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
-        path: "wsl/nerdctl-full.tar.gz",
+        path: NERDCTL_TARBALL_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
-        path: "wsl/ubuntu-rootfs.tar.gz",
+        path: UBUNTU_ROOTFS_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
@@ -261,6 +267,7 @@ pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
 /// root instead of reading `SPEEDWAVE_RESOURCES_DIR` from env.
 pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<BundleManifest> {
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
+    let mut resources_version = None;
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
@@ -268,12 +275,35 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
+        resources_version = Some(manifest.app_version);
     }
     generate_bundle_manifest(
         env!("CARGO_PKG_VERSION"),
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
+    .map_err(|e| {
+        // An older Desktop's tree lacks new image inputs — name the real remedy.
+        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+            Some(v) => anyhow::anyhow!(
+                "installed Desktop resources are v{v} but this binary is v{}: {e}. \
+                 Update Speedwave Desktop, then run `speedwave update`.",
+                env!("CARGO_PKG_VERSION")
+            ),
+            None => e,
+        }
+    })
+}
+
+/// App version stamped in the on-disk manifest; `None` when absent/unreadable.
+/// Never regenerates — safe on incomplete (older-Desktop) trees.
+pub fn manifest_app_version_in(build_root: &Path) -> Option<String> {
+    let data = std::fs::read_to_string(build_root.join(BUNDLE_MANIFEST_FILE)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&data)
+        .ok()?
+        .get("app_version")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Per-image hashes cover each image's declared `hash_inputs` + build args;
@@ -456,6 +486,57 @@ pub fn validate_bundled_runtime_assets(
         validate_bundled_asset(resources_root, asset, allow_stubs)?;
     }
     Ok(())
+}
+
+/// Finds a bundled asset by bundle-relative path across every known resources
+/// root (env var, exe dir, Tauri Windows `resources/` layout, Desktop marker).
+pub fn find_bundled_asset(relative_path: &str) -> Option<PathBuf> {
+    let roots = bundled_resource_roots(
+        std::env::var(consts::BUNDLE_RESOURCES_ENV)
+            .ok()
+            .map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+        resources_marker_dir(consts::data_dir()),
+    );
+    find_bundled_asset_in(&roots, relative_path)
+}
+
+/// Candidate resources roots in priority order; pure core of [`find_bundled_asset`].
+/// The exe parent covers a binary living one level inside the resources root.
+fn bundled_resource_roots(
+    env_root: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    marker_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.extend(env_root);
+    if let Some(dir) = exe_dir {
+        roots.push(dir.clone());
+        roots.push(dir.join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR));
+        if let Some(parent) = dir.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.extend(marker_root);
+    roots
+}
+
+/// Reads the Desktop-written resources marker under `data_dir`; absolute only.
+fn resources_marker_dir(data_dir: &Path) -> Option<PathBuf> {
+    let marker = data_dir.join(consts::RESOURCES_MARKER);
+    let content = std::fs::read_to_string(marker).ok()?;
+    let path = PathBuf::from(content.trim());
+    path.is_absolute().then_some(path)
+}
+
+/// First root that actually contains `relative_path`.
+fn find_bundled_asset_in(roots: &[PathBuf], relative_path: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(relative_path))
+        .find(|candidate| candidate.exists())
 }
 
 fn bundle_state_path() -> anyhow::Result<PathBuf> {
@@ -1268,6 +1349,110 @@ mod tests {
             "legacy manifest must be discarded and regenerated from the tree"
         );
         assert_ne!(manifest.bundle_id, "legacy0123456789");
+    }
+
+    /// Regeneration over an OLDER Desktop's incomplete tree must name the
+    /// real remedy (update the Desktop app), not a bare digest error.
+    #[test]
+    fn stale_resources_regeneration_error_names_desktop_update() {
+        let temp = tempfile::tempdir().unwrap();
+        // Legacy manifest + no build tree: digesting the new catalogue fails.
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Update Speedwave Desktop"),
+            "error must name the remedy: {msg}"
+        );
+        assert!(msg.contains("v0.1.0"), "error must name the stale version");
+    }
+
+    /// Same failure with a matching app_version keeps the raw error (a real
+    /// corruption, not a version skew).
+    #[test]
+    fn same_version_regeneration_error_stays_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            format!(
+                r#"{{"app_version": "{}", "bundle_id": "x0123456789abcd", "claude_resources_hash": "cafebabe"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        assert!(!err.to_string().contains("Update Speedwave Desktop"));
+    }
+
+    #[test]
+    fn manifest_app_version_reads_without_regenerating() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.13.3", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_app_version_in(temp.path()).as_deref(),
+            Some("0.13.3")
+        );
+        std::fs::write(temp.path().join(BUNDLE_MANIFEST_FILE), "not json").unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+    }
+
+    #[test]
+    fn bundled_resource_roots_priority_and_layouts() {
+        let roots = bundled_resource_roots(
+            Some(PathBuf::from("/env")),
+            Some(PathBuf::from("/install/bin")),
+            Some(PathBuf::from("/marker")),
+        );
+        assert_eq!(roots[0], PathBuf::from("/env"), "env override wins");
+        assert!(roots.contains(&PathBuf::from("/install/bin")));
+        assert!(
+            roots.contains(
+                &PathBuf::from("/install/bin").join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR)
+            ),
+            "Tauri Windows resources/ layout covered"
+        );
+        assert!(roots.contains(&PathBuf::from("/install")));
+        assert_eq!(roots.last().unwrap(), &PathBuf::from("/marker"));
+        assert!(bundled_resource_roots(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn find_bundled_asset_in_returns_first_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(b.join("wsl")).unwrap();
+        std::fs::write(b.join(NERDCTL_TARBALL_ASSET), "x").unwrap();
+        assert_eq!(
+            find_bundled_asset_in(&[a.clone(), b.clone()], NERDCTL_TARBALL_ASSET),
+            Some(b.join(NERDCTL_TARBALL_ASSET))
+        );
+        assert_eq!(find_bundled_asset_in(&[a], NERDCTL_TARBALL_ASSET), None);
+        assert_eq!(find_bundled_asset_in(&[], NERDCTL_TARBALL_ASSET), None);
+    }
+
+    #[test]
+    fn resources_marker_dir_requires_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "missing marker");
+        std::fs::write(dir.path().join(consts::RESOURCES_MARKER), "relative/path").unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "relative rejected");
+        let abs = dir.path().join("resources");
+        std::fs::write(
+            dir.path().join(consts::RESOURCES_MARKER),
+            abs.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), Some(abs));
     }
 
     #[test]

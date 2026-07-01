@@ -60,19 +60,31 @@ pub async fn anthropic_logout(project: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Migrates the project's `claude.llm` to current schema before
-/// `is_unconfigured()` checks it — a raw legacy-v1 shape would misclassify.
+/// Migrates the project's `claude.llm` (default shape when absent) so
+/// `is_unconfigured()` sees the post-migration, evidence-aware answer.
 fn migrated_llm_for(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
-    has_anthropic_secret: bool,
-) -> Option<speedwave_runtime::config::LlmConfig> {
+    evidence: speedwave_runtime::config::AnthropicEvidence,
+) -> speedwave_runtime::config::LlmConfig {
     let mut llm = user_config
         .find_project(project)
         .and_then(|p| p.claude.as_ref())
-        .and_then(|c| c.llm.clone())?;
-    speedwave_runtime::config::migrate_llm(&mut llm, has_anthropic_secret);
-    Some(llm)
+        .and_then(|c| c.llm.clone())
+        .unwrap_or_default();
+    speedwave_runtime::config::migrate_llm(&mut llm, evidence);
+    llm
+}
+
+/// True when the project's migrated LLM config resolves an active provider.
+/// Shared by `get_auth_status` and the reconcile restore guard.
+pub(crate) fn project_llm_configured_in(
+    data_dir: &std::path::Path,
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+) -> bool {
+    let evidence = speedwave_runtime::config::AnthropicEvidence::detect_in(data_dir, project);
+    !migrated_llm_for(user_config, project, evidence).is_unconfigured()
 }
 
 #[tauri::command]
@@ -91,12 +103,19 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        let evidence = if api_key_configured {
+            speedwave_runtime::config::AnthropicEvidence::ApiKey
+        } else if oauth_authenticated {
+            speedwave_runtime::config::AnthropicEvidence::Oauth
+        } else {
+            speedwave_runtime::config::AnthropicEvidence::None
+        };
         // Migrated (not raw) shape — must agree with needs_anthropic_auth, which
         // itself already evaluates the equivalent post-migration answer.
-        let migrated = migrated_llm_for(&user_config, &project, api_key_configured);
-        // False for an explicit v2 logout/dangling AND for a fresh project with
-        // no llm override at all ("choose a provider" in both cases).
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(&user_config, &project, evidence);
+        // False for explicit v2 logout/dangling and credential-less fresh; a
+        // blockless project WITH credentials fabricates (v0.13.3 default population).
+        let provider_configured = !migrated.is_unconfigured();
         Ok(AuthStatusResponse::from_flags(
             api_key_configured,
             oauth_authenticated,
@@ -347,7 +366,7 @@ mod tests {
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
-            fn_body.contains("!llm.is_unconfigured()"),
+            fn_body.contains("!migrated.is_unconfigured()"),
             "get_auth_status must derive provider_configured from the SSOT is_unconfigured gate"
         );
         assert!(
@@ -378,8 +397,12 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
             });
-        let migrated = migrated_llm_for(&user_config, "proj", false);
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
         assert!(
             !provider_configured,
             "a never-touched LlmConfig::default() must read as not configured"
@@ -406,13 +429,17 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
             });
-        let migrated = migrated_llm_for(&user_config, "proj", false);
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
         assert!(provider_configured);
     }
 
     /// Edge case: project exists but `claude` is `None` entirely — must not
-    /// panic, defaults to not-configured (mirrors the `.is_some_and(false)` path).
+    /// panic, defaults to not-configured (no credentials, no llm block).
     #[test]
     fn provider_configured_is_false_when_claude_override_absent() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -425,8 +452,12 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
             });
-        let migrated = migrated_llm_for(&user_config, "proj", false);
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
         assert!(!provider_configured);
     }
 
@@ -451,8 +482,12 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
             });
-        let migrated = migrated_llm_for(&user_config, "proj", true);
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::ApiKey,
+        );
+        let provider_configured = !migrated.is_unconfigured();
         assert!(provider_configured);
     }
 
@@ -461,7 +496,37 @@ mod tests {
     #[test]
     fn migrated_llm_for_returns_none_for_unknown_project() {
         let user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
-        assert!(migrated_llm_for(&user_config, "missing", false).is_none());
+        assert!(migrated_llm_for(
+            &user_config,
+            "missing",
+            speedwave_runtime::config::AnthropicEvidence::None
+        )
+        .is_unconfigured());
+    }
+
+    /// Upgrade rescue: a project with no `claude.llm` block but on-disk
+    /// Anthropic credentials must read as configured (v0.13.3 default population).
+    #[test]
+    fn blockless_project_with_oauth_evidence_reads_configured() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::Oauth,
+        );
+        assert!(!migrated.is_unconfigured());
+        let entry = migrated.active_provider().expect("active entry");
+        assert_eq!(entry.id, "anthropic");
+        assert!(!entry.has_api_key);
     }
 
     /// An unmigrated legacy v1 raw config must not make `provider_configured`
@@ -489,8 +554,12 @@ mod tests {
         let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");
         assert!(needs_anthropic_auth, "legacy v1 anthropic needs OAuth");
 
-        let migrated = migrated_llm_for(&user_config, "proj", false);
-        let provider_configured = migrated.is_some_and(|llm| !llm.is_unconfigured());
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
         assert!(
             provider_configured,
             "a legacy v1 anthropic config must read as configured once migrated, \

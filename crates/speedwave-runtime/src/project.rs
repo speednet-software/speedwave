@@ -20,6 +20,8 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         "secrets",
         "snapshots",
         crate::consts::OAUTH_SUBDIR,
+        // Legacy: retired host_exec state (pre-removal releases) goes with the project.
+        crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
     ] {
         let dir = data_dir.join(sub).join(project);
         if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -865,7 +867,12 @@ mod tests {
         .unwrap();
 
         // Seed long-lived per-project dirs alongside the ones add_project created.
-        for sub in &["secrets", "snapshots", crate::consts::OAUTH_SUBDIR] {
+        for sub in &[
+            "secrets",
+            "snapshots",
+            crate::consts::OAUTH_SUBDIR,
+            crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
+        ] {
             let d = data_dir.join(sub).join("alpha");
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("secret"), b"x").unwrap();
@@ -884,6 +891,7 @@ mod tests {
             "secrets",
             "snapshots",
             crate::consts::OAUTH_SUBDIR,
+            crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
         ] {
             assert!(
                 !data_dir.join(sub).join("alpha").exists(),
@@ -891,6 +899,51 @@ mod tests {
             );
         }
         assert!(dir_a.exists(), "user's source tree must NOT be deleted");
+    }
+
+    #[test]
+    fn remove_project_removes_legacy_host_exec_dir_preserving_siblings() {
+        // Cleanup must scope to <project> even for the legacy host-exec tree:
+        // another project's leftovers stay behind for the startup sweep.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let canon_a = std::fs::canonicalize(&dir_a).unwrap();
+        let canon_b = std::fs::canonicalize(&dir_b).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        add_project_with_validated_dir(
+            "alpha",
+            canon_a.clone(),
+            canon_a.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        add_project_with_validated_dir(
+            "beta",
+            canon_b.clone(),
+            canon_b.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        let he_root = data_dir.join(crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR);
+        for project in ["alpha", "beta"] {
+            let d = he_root.join(project);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("auth-token"), b"tok").unwrap();
+        }
+
+        remove_project_with_data_dir("alpha", &data_dir).unwrap();
+
+        assert!(!he_root.join("alpha").exists(), "alpha leftovers removed");
+        assert!(
+            he_root.join("beta").join("auth-token").exists(),
+            "beta leftovers preserved"
+        );
     }
 
     #[test]

@@ -219,9 +219,34 @@ impl LlmConfig {
     }
 }
 
+/// Anthropic credential evidence for the v1→v2 lift: which credential the
+/// project demonstrably uses on disk (an API key beats OAuth when both exist).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicEvidence {
+    /// No Anthropic credential on disk.
+    None,
+    /// `secrets/<project>/anthropic_api_key` exists.
+    ApiKey,
+    /// Claude Code OAuth credentials exist in the project's claude-home.
+    Oauth,
+}
+
+impl AnthropicEvidence {
+    /// Detects on-disk evidence for `project` under `data_dir`.
+    pub fn detect_in(data_dir: &Path, project: &str) -> Self {
+        if anthropic_secret_exists_in(data_dir, project) {
+            Self::ApiKey
+        } else if crate::claude_home::has_anthropic_oauth_credentials(data_dir, project) {
+            Self::Oauth
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// Migrates an `LlmConfig` to [`LLM_SCHEMA_VERSION`] (lift v1, drop invalid ids,
-/// quarantine foreign). Idempotent; `true` if changed. `has_anthropic_secret` = key vs OAuth.
-pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
+/// quarantine foreign). Idempotent; `true` if changed. `evidence`: see [`AnthropicEvidence`].
+pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
     let snapshot_before = serde_json::to_string(&*llm).ok();
     if llm.schema_version.is_none() && llm.providers.is_empty() {
         let legacy_provider = llm.provider.as_deref();
@@ -229,7 +254,12 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
             llm.providers.push(LlmProviderEntry {
                 id: "local".to_string(),
                 kind: LlmProviderKind::Local,
-                base_url: llm.base_url.clone(),
+                // v0.13.3 filled the per-alias default port at render time; an
+                // unset base_url must keep that identity through the lift.
+                base_url: llm
+                    .base_url
+                    .clone()
+                    .or_else(|| legacy_provider.and_then(crate::compose::default_base_url)),
                 model: llm.model.clone(),
                 has_api_key: llm.has_api_key,
                 context_tokens: llm.context_tokens,
@@ -239,11 +269,10 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
                 provider_id: "local".to_string(),
                 model: llm.model.clone(),
             });
-        } else if legacy_provider.is_some() {
-            // A real legacy v1 value (e.g. `anthropic`) — migrate as before.
-            // `None` (truly fresh, never configured) intentionally falls
-            // through untouched: render must refuse to start, not fabricate.
-            let kind = if has_anthropic_secret {
+        } else if legacy_provider.is_some() || evidence != AnthropicEvidence::None {
+            // v0.13.3 defaulted an unset provider to anthropic, so credentialed
+            // upgraders migrate; truly fresh (no creds) falls through (render refuses).
+            let kind = if evidence == AnthropicEvidence::ApiKey {
                 LlmProviderKind::AnthropicApiKey
             } else {
                 LlmProviderKind::AnthropicOauth
@@ -253,7 +282,7 @@ pub fn migrate_llm(llm: &mut LlmConfig, has_anthropic_secret: bool) -> bool {
                 kind,
                 base_url: None,
                 model: llm.model.clone(),
-                has_api_key: has_anthropic_secret,
+                has_api_key: evidence == AnthropicEvidence::ApiKey,
                 context_tokens: llm.context_tokens,
                 has_custom_headers: false,
             });
@@ -722,6 +751,8 @@ pub(crate) fn resolve_project_config_in(
             apply_integrations_layer(&mut integrations, &repo_integrations);
         }
     }
+    // Captured pre-user-layer so the documented repo suggestion survives migration.
+    let repo_model_suggestion = llm.model.clone();
 
     // Layer 2: user config (highest priority)
     if let Some(user) = user_config.find_project(project_name) {
@@ -737,7 +768,11 @@ pub(crate) fn resolve_project_config_in(
     }
 
     // Migrate to the current LLM schema (ADR-073).
-    migrate_llm(&mut llm, anthropic_secret_exists_in(data_dir, project_name));
+    migrate_llm(
+        &mut llm,
+        AnthropicEvidence::detect_in(data_dir, project_name),
+    );
+    apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
 
     // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
     // disk-sync below — otherwise the sync re-derives has_api_key from the (still
@@ -759,9 +794,37 @@ pub(crate) fn resolve_project_config_in(
     (claude, integrations)
 }
 
+/// Repo model suggestion (docs contract): fills the resolved model only when
+/// the active entry has none of its own. In-memory only, never persisted.
+fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) {
+    let Some(model) = suggestion
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    if llm.effective_active_model().is_some() {
+        return;
+    }
+    let Some(entry) = llm.active_provider() else {
+        return;
+    };
+    if entry.kind.is_anthropic() && is_foreign_anthropic_model(&model) {
+        log::warn!("llm config: ignoring foreign repo model suggestion under anthropic provider");
+        return;
+    }
+    let id = entry.id.clone();
+    if let Some(e) = llm.providers.iter_mut().find(|p| p.id == id) {
+        e.model = Some(model.clone());
+    }
+    if let Some(active) = &mut llm.active {
+        active.model = Some(model.clone());
+    }
+    // Flat mirror for the legacy (proxy_enabled=false) renderer.
+    llm.model = Some(model);
+}
+
 /// True when `secrets/<project>/anthropic_api_key` exists under `data_dir`.
-/// Used by the v1→v2 LLM migration to classify legacy `anthropic` configs;
-/// tests call [`migrate_llm`] directly with an explicit bool.
 fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
     data_dir
         .join("secrets")
@@ -928,11 +991,19 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
         let mut config = load_user_config_from(&config_path)?;
         let mut changed = false;
         for project in &mut config.projects {
-            if let Some(claude) = &mut project.claude {
-                if let Some(llm) = &mut claude.llm {
-                    let has_secret = anthropic_secret_exists_in(data_dir, &project.name);
-                    changed |= migrate_llm(llm, has_secret);
+            let evidence = AnthropicEvidence::detect_in(data_dir, &project.name);
+            let has_llm = project.claude.as_ref().is_some_and(|c| c.llm.is_some());
+            if has_llm {
+                if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+                    changed |= migrate_llm(llm, evidence);
                 }
+            } else if evidence != AnthropicEvidence::None {
+                // v0.13.3 default population: no llm block but working Anthropic
+                // credentials — fabricate the entry so the project keeps chatting.
+                let mut llm = LlmConfig::default();
+                migrate_llm(&mut llm, evidence);
+                project.claude.get_or_insert_with(Default::default).llm = Some(llm);
+                changed = true;
             }
         }
         if changed {
@@ -1722,7 +1793,7 @@ mod tests {
             model: Some("claude-opus-4-8".into()),
             ..Default::default()
         };
-        migrate_llm(&mut llm, true);
+        migrate_llm(&mut llm, AnthropicEvidence::ApiKey);
         assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
         let entry = llm.active_provider().expect("entry");
         assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
@@ -1737,7 +1808,7 @@ mod tests {
             provider: Some("anthropic".into()),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         assert_eq!(
             llm.active_provider().unwrap().kind,
             LlmProviderKind::AnthropicOauth
@@ -1746,7 +1817,7 @@ mod tests {
         // truly fresh (provider unset) → no-op, stays unconfigured. Render
         // must refuse to start rather than fabricate an Anthropic session.
         let mut llm = LlmConfig::default();
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         assert!(llm.active_provider().is_none());
         assert!(llm.providers.is_empty());
         assert!(llm.is_unconfigured());
@@ -1766,7 +1837,7 @@ mod tests {
                 has_custom_headers: true,
                 ..Default::default()
             };
-            migrate_llm(&mut llm, false);
+            migrate_llm(&mut llm, AnthropicEvidence::None);
             let entry = llm
                 .active_provider()
                 .unwrap_or_else(|| panic!("alias '{alias}' must migrate to an active entry"));
@@ -1788,9 +1859,9 @@ mod tests {
             base_url: Some("http://host.docker.internal:8080".into()),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         let first = serde_json::to_string(&llm).unwrap();
-        migrate_llm(&mut llm, true); // even with secret flag flipped
+        migrate_llm(&mut llm, AnthropicEvidence::ApiKey); // even with secret flag flipped
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
     }
 
@@ -1976,7 +2047,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
         let anthropic = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
         assert_eq!(anthropic.model, None, "foreign anthropic model cleared");
@@ -1992,7 +2063,7 @@ mod tests {
 
         // Idempotent: a second pass is a no-op (byte-identical).
         let first = serde_json::to_string(&llm).unwrap();
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
     }
 
@@ -2051,6 +2122,209 @@ mod tests {
         let after_first = std::fs::read_to_string(&config_path).unwrap();
         heal_llm_config_in(dir.path()).unwrap();
         assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// Upgrade rescue: unset provider + on-disk OAuth credentials must fabricate an
+    /// anthropic entry (v0.13.3 defaulted provider=None to anthropic).
+    #[test]
+    fn migrate_llm_fabricates_anthropic_for_unset_provider_with_oauth_evidence() {
+        let mut llm = LlmConfig::default();
+        assert!(migrate_llm(&mut llm, AnthropicEvidence::Oauth));
+        let entry = llm.active_provider().expect("active entry");
+        assert_eq!(entry.id, ANTHROPIC_PROVIDER_ID);
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicOauth);
+        assert!(!entry.has_api_key);
+        assert!(!llm.is_unconfigured());
+    }
+
+    #[test]
+    fn migrate_llm_fabricates_api_key_kind_for_unset_provider_with_key_evidence() {
+        let mut llm = LlmConfig::default();
+        assert!(migrate_llm(&mut llm, AnthropicEvidence::ApiKey));
+        let entry = llm.active_provider().expect("active entry");
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
+        assert!(entry.has_api_key);
+    }
+
+    /// Truly fresh (no provider, no credentials) must stay unconfigured so the
+    /// render gate routes to provider setup instead of fabricating (R7).
+    #[test]
+    fn migrate_llm_leaves_unset_provider_unconfigured_without_evidence() {
+        let mut llm = LlmConfig::default();
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert!(llm.providers.is_empty());
+        assert!(llm.is_unconfigured());
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+    }
+
+    /// A v1 local config without base_url relied on the per-alias default
+    /// port — the lift must materialize it (proxy routes need an explicit URL).
+    #[test]
+    fn migrate_llm_fills_per_alias_default_base_url() {
+        let host = crate::consts::HOST_GATEWAY_ALIAS;
+        for (alias, port) in [
+            ("ollama", 11434),
+            ("lmstudio", 1234),
+            ("llamacpp", 8080),
+            ("local", 11434),
+        ] {
+            let mut llm = LlmConfig {
+                provider: Some(alias.into()),
+                model: Some("m".into()),
+                ..Default::default()
+            };
+            migrate_llm(&mut llm, AnthropicEvidence::None);
+            let entry = llm.active_provider().expect("active entry");
+            assert_eq!(
+                entry.base_url.as_deref(),
+                Some(format!("http://{host}:{port}").as_str()),
+                "alias '{alias}'"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_llm_keeps_explicit_base_url_over_alias_default() {
+        let mut llm = LlmConfig {
+            provider: Some("lmstudio".into()),
+            base_url: Some("http://192.168.1.5:9999".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(
+            llm.active_provider().unwrap().base_url.as_deref(),
+            Some("http://192.168.1.5:9999")
+        );
+    }
+
+    #[test]
+    fn anthropic_evidence_detect_precedence_and_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::None
+        );
+        let home = dir
+            .path()
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("p")
+            .join(".claude");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".credentials.json"), "{}").unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::Oauth
+        );
+        let secrets = dir.path().join("secrets").join("p");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "k").unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::ApiKey,
+            "api key beats oauth"
+        );
+    }
+
+    /// Heal fabricates the llm block for a credentialed project with no
+    /// claude.llm at all (v0.13.3 default population); fresh stays untouched.
+    #[test]
+    fn heal_fabricates_llm_for_credentialed_blockless_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let proj = |name: &str, project_dir: &str| ProjectUserEntry {
+            name: name.into(),
+            dir: project_dir.into(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+        };
+        let config = SpeedwaveUserConfig {
+            projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+        let home = dir
+            .path()
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("with-creds")
+            .join(".claude");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".credentials.json"), "{}").unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+        let healed = load_user_config_from(&config_path).unwrap();
+        let llm = healed.projects[0]
+            .claude
+            .as_ref()
+            .expect("claude block fabricated")
+            .llm
+            .as_ref()
+            .expect("llm block fabricated");
+        assert!(!llm.is_unconfigured());
+        assert_eq!(llm.active_provider().unwrap().id, ANTHROPIC_PROVIDER_ID);
+        assert!(
+            healed.projects[1].claude.is_none(),
+            "credential-less project untouched"
+        );
+
+        // Idempotent: a second heal leaves the file byte-identical.
+        let after_first = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// F10: the documented repo `.speedwave.json` model suggestion fills a
+    /// model-less active entry after migration.
+    #[test]
+    fn repo_model_suggestion_fills_modelless_active_entry() {
+        let mut llm = LlmConfig::default();
+        assert!(llm.set_active_to_anthropic());
+        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            llm.model.as_deref(),
+            Some("claude-opus-4-6"),
+            "flat mirror for the legacy renderer"
+        );
+    }
+
+    #[test]
+    fn repo_model_suggestion_never_overrides_entry_model() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        llm.set_active_to_anthropic();
+        apply_repo_model_suggestion(&mut llm, Some("claude-haiku-4-5".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn repo_model_suggestion_foreign_shape_ignored_under_anthropic() {
+        let mut llm = LlmConfig::default();
+        llm.set_active_to_anthropic();
+        apply_repo_model_suggestion(&mut llm, Some("openrouter/z-ai/glm-5.2".into()));
+        assert_eq!(llm.effective_active_model(), None);
+        assert_eq!(llm.model, None);
+    }
+
+    #[test]
+    fn repo_model_suggestion_noop_when_unconfigured() {
+        let mut llm = LlmConfig::default();
+        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        assert!(llm.is_unconfigured());
+        assert_eq!(llm.model, None);
     }
 
     /// I2: heal skips projects with no claude/llm config, leaves a clean config
@@ -2151,7 +2425,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         // Flat masquerade must not carry the OR id (downgrade-safe).
         assert_eq!(llm.model, None);
 
@@ -2160,7 +2434,7 @@ mod tests {
             provider_id: "anthropic".into(),
             model: None,
         });
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
 
         let anthropic_entry = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
         assert_eq!(
@@ -2208,7 +2482,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         assert_eq!(llm.providers.len(), 1);
         assert_eq!(llm.providers[0].id, "good-id");
         assert_eq!(
@@ -2237,7 +2511,7 @@ mod tests {
             base_url: Some("http://host.docker.internal:9000".into()),
             ..Default::default()
         };
-        migrate_llm(&mut llm, false);
+        migrate_llm(&mut llm, AnthropicEvidence::None);
         let json = serde_json::to_string(&llm).unwrap();
         let v1: LlmConfigV1 = serde_json::from_str(&json).expect("v1 must parse v2 output");
         assert_eq!(v1.provider.as_deref(), Some("local"));

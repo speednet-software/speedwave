@@ -370,13 +370,29 @@ fn run_self_update() -> anyhow::Result<()> {
 
     if status.updated() {
         out!("Updated to version {}.", status.version());
-        out!("Rebuilding container images...");
-        if let Err(e) = run_rebuild(&exe_path) {
-            let e = redact_err(&e);
-            err!("Binary updated successfully, but container rebuild failed: {e}");
-            std::process::exit(1);
+        // Older Desktop resources cannot digest the new image catalogue —
+        // skip the rebuild with guidance instead of bricking every invocation.
+        let resources_version = speedwave_runtime::build::resolve_build_root()
+            .ok()
+            .and_then(|root| speedwave_runtime::bundle::manifest_app_version_in(&root));
+        let new_version = status.version().trim_start_matches('v').to_string();
+        match resources_version {
+            Some(v) if v.trim_start_matches('v') != new_version => {
+                out!(
+                    "Installed Speedwave Desktop resources are v{v}. Update the Desktop \
+                     app, then run `speedwave update` to rebuild container images."
+                );
+            }
+            _ => {
+                out!("Rebuilding container images...");
+                if let Err(e) = run_rebuild(&exe_path) {
+                    let e = redact_err(&e);
+                    err!("Binary updated successfully, but container rebuild failed: {e}");
+                    std::process::exit(1);
+                }
+                out!("Container images rebuilt successfully.");
+            }
         }
-        out!("Container images rebuilt successfully.");
     } else {
         out!("Already up to date ({}).", current);
     }
@@ -403,15 +419,22 @@ fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
 }
 
 /// Makes Anthropic active on `project`'s `llm` config, creating the override
-/// when absent (fresh project) so login also escapes the no-provider guard.
-/// No-op (returns `false`) when `project` has no entry in `user_config` at all.
-fn select_anthropic_in(user_config: &mut config::SpeedwaveUserConfig, project: &str) -> bool {
+/// when absent; `false` when `project` has no entry in `user_config` at all.
+fn select_anthropic_in(
+    user_config: &mut config::SpeedwaveUserConfig,
+    project: &str,
+    evidence: config::AnthropicEvidence,
+) -> bool {
     let Some(entry) = user_config.find_project_mut(project) else {
         return false;
     };
     let claude = entry.claude.get_or_insert_with(Default::default);
     let llm = claude.llm.get_or_insert_with(Default::default);
-    llm.set_active_to_anthropic()
+    // Lift v1 BEFORE selecting — set_active_to_anthropic on a raw v1 shape
+    // stamps schema_version and would permanently disable the lift (data loss).
+    let migrated = config::migrate_llm(llm, evidence);
+    let selected = llm.set_active_to_anthropic();
+    selected || migrated
 }
 
 /// After a successful `speedwave login`, makes Anthropic active so a
@@ -420,7 +443,8 @@ fn select_anthropic_in(user_config: &mut config::SpeedwaveUserConfig, project: &
 fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
-        if select_anthropic_in(&mut user_config, project) {
+        let evidence = config::AnthropicEvidence::detect_in(consts::data_dir().as_path(), project);
+        if select_anthropic_in(&mut user_config, project, evidence) {
             config::save_user_config(&user_config)?;
         }
         Ok(())
@@ -540,6 +564,12 @@ fn main() -> anyhow::Result<()> {
 
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
+
+    // Persist the LLM schema migration for CLI-first upgrades (Desktop heals at
+    // its own startup); non-fatal — resolve still migrates in-memory.
+    if let Err(e) = config::heal_llm_config_on_disk() {
+        log::warn!("llm config heal failed: {}", redact_err(&e));
+    }
 
     // Hard-fail on tampered plugins, except for recovery actions.
     if !skip_plugin_audit(&action) {
@@ -1669,7 +1699,11 @@ mod tests {
     #[test]
     fn select_anthropic_in_creates_llm_override_for_fresh_project() {
         let mut user_config = user_config_with_project("proj", None);
-        assert!(select_anthropic_in(&mut user_config, "proj"));
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
         let llm = user_config
             .find_project_mut("proj")
             .unwrap()
@@ -1699,7 +1733,11 @@ mod tests {
                 llm: None,
             }),
         );
-        assert!(select_anthropic_in(&mut user_config, "proj"));
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
         assert!(!user_config
             .find_project_mut("proj")
             .unwrap()
@@ -1743,7 +1781,11 @@ mod tests {
                 llm: Some(llm),
             }),
         );
-        assert!(select_anthropic_in(&mut user_config, "proj"));
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
         assert!(!user_config
             .find_project_mut("proj")
             .unwrap()
@@ -1756,12 +1798,107 @@ mod tests {
             .is_unconfigured());
     }
 
+    /// Selecting Anthropic on a RAW v1 local config must lift it first —
+    /// stamping schema_version pre-lift would erase the local provider forever.
+    #[test]
+    fn select_anthropic_in_preserves_raw_v1_local_config() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some("lmstudio".into()),
+                    base_url: Some("http://localhost:1234".into()),
+                    model: Some("qwen".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::Oauth
+        ));
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        let local = llm
+            .providers
+            .iter()
+            .find(|p| p.id == "local")
+            .expect("local entry must survive the lift");
+        assert_eq!(local.base_url.as_deref(), Some("http://localhost:1234"));
+        assert_eq!(local.model.as_deref(), Some("qwen"));
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            config::ANTHROPIC_PROVIDER_ID
+        );
+    }
+
+    /// A raw v1 anthropic config keeps its pinned model through
+    /// login (the lift runs before the entry is fabricated model-less).
+    #[test]
+    fn select_anthropic_in_preserves_v1_pinned_anthropic_model() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some(config::ANTHROPIC_PROVIDER_ID.to_string()),
+                    model: Some("claude-opus-4-6".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::Oauth);
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    /// After a self-update, the rebuild must be gated on the installed
+    /// Desktop resources version — an older tree cannot digest the new catalogue.
+    #[test]
+    fn run_self_update_checks_resources_version_before_rebuild() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let probe = fn_body
+            .find("manifest_app_version_in")
+            .expect("run_self_update must probe the installed resources version");
+        let rebuild = fn_body
+            .find("run_rebuild(")
+            .expect("run_self_update must call run_rebuild()");
+        assert!(probe < rebuild, "version gate must precede the rebuild");
+    }
+
+    /// The CLI must persist the LLM migration on startup (Desktop
+    /// heals at its own startup; CLI-first upgrades need parity).
+    #[test]
+    fn main_heals_llm_config_before_project_actions() {
+        let source = include_str!("main.rs");
+        let heal = source
+            .find("heal_llm_config_on_disk")
+            .expect("CLI must persist the LLM schema migration");
+        let audit = source
+            .find("plugin::audit_all")
+            .expect("plugin audit anchor");
+        assert!(heal < audit, "heal must run before project actions");
+    }
+
     /// Error path: a project absent from `user_config` entirely is a no-op —
     /// there is nothing to attach an `llm` override to.
     #[test]
     fn select_anthropic_in_noop_when_project_not_found() {
         let mut user_config = config::SpeedwaveUserConfig::default();
-        assert!(!select_anthropic_in(&mut user_config, "ghost-project"));
+        assert!(!select_anthropic_in(
+            &mut user_config,
+            "ghost-project",
+            config::AnthropicEvidence::None
+        ));
         assert!(user_config.find_project_mut("ghost-project").is_none());
     }
 
@@ -1787,6 +1924,8 @@ mod tests {
             llm.set_active_to_anthropic(),
             "first activation changes state"
         );
+        // Normalize (flat-mirror sync) so only the selection itself is measured.
+        config::migrate_llm(&mut llm, config::AnthropicEvidence::None);
         let mut user_config = user_config_with_project(
             "proj",
             Some(config::ClaudeOverrides {
@@ -1796,7 +1935,7 @@ mod tests {
             }),
         );
         assert!(
-            !select_anthropic_in(&mut user_config, "proj"),
+            !select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::None),
             "already-active anthropic must not report a change"
         );
     }

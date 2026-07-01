@@ -912,33 +912,37 @@ fn main() {
                 Err(e) => log::warn!("auto-check handle mutex poisoned: {e}"),
             }
 
-            // Re-link CLI binary on every startup to keep it in sync after updates.
+            // Post-setup migrations + CLI re-link + reconcile, ordered, off the
+            // main thread — the VM migrations can stop/start the VM (long downloads).
             if setup_started {
-                #[cfg(target_os = "macos")]
-                if let Err(e) = setup_wizard::ensure_lima_vm_config() {
-                    log::warn!("Lima VM config migration failed: {e}");
-                }
-
-                #[cfg(target_os = "windows")]
-                if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
-                    log::warn!(".wslconfig VPN-compat migration failed: {e}");
-                }
-
-                // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
-                #[cfg(target_os = "windows")]
-                {
-                    use setup_wizard::TerminateOnChange;
-                    if let Err(e) =
-                        setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
-                    {
-                        log::warn!("wsl.conf metadata migration failed: {e}");
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    if let Err(e) = setup_wizard::ensure_lima_vm_config() {
+                        log::warn!("Lima VM config migration failed: {e}");
                     }
-                }
 
-                if let Err(e) = setup_wizard::link_cli() {
-                    log::warn!("CLI re-link on startup failed: {e}");
-                }
-                reconcile::reconcile_bundle_update(app.handle());
+                    #[cfg(target_os = "windows")]
+                    if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
+                        log::warn!(".wslconfig VPN-compat migration failed: {e}");
+                    }
+
+                    // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
+                    #[cfg(target_os = "windows")]
+                    {
+                        use setup_wizard::TerminateOnChange;
+                        if let Err(e) =
+                            setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
+                        {
+                            log::warn!("wsl.conf metadata migration failed: {e}");
+                        }
+                    }
+
+                    if let Err(e) = setup_wizard::link_cli() {
+                        log::warn!("CLI re-link on startup failed: {e}");
+                    }
+                    reconcile::reconcile_bundle_update(&app_handle);
+                });
             }
 
             // Build system tray from the managed `TrayMenuState`.

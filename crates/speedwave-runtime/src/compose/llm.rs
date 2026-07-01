@@ -534,7 +534,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             ..Default::default()
         };
-        crate::config::migrate_llm(&mut llm, false);
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered = apply_llm_config_in(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",

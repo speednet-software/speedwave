@@ -109,15 +109,16 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
                     );
                     continue;
                 };
-                if let Err(e) = super::llm::validate_base_url(base_url) {
+                // Normalize BEFORE validating — v1 configs persisted the raw form
+                // (`…/v1/`), and the forwarder appends `/v1/messages` itself.
+                let base_url = super::llm::strip_trailing_v1(base_url);
+                if let Err(e) = super::llm::validate_base_url(&base_url) {
                     log::warn!(
                         "proxy config: provider '{}' has invalid base_url — skipped: {e}",
                         entry.id
                     );
                     continue;
                 }
-                // Forwarder appends `/v1/messages`; strip a trailing `/v1` to avoid doubling.
-                let base_url = super::llm::strip_trailing_v1(base_url);
                 let auth = if entry.has_api_key {
                     RouteAuth::Swap {
                         swap_env: spw_key_env_name(&entry.id),
@@ -361,10 +362,33 @@ mod tests {
         ));
     }
 
+    /// v0.13.3 persisted the raw form (`…/v1/`, `…/`); the route must
+    /// normalize-then-validate instead of dropping it.
+    #[test]
+    fn render_accepts_v1_persisted_trailing_slash_base_url() {
+        for stored in [
+            "http://host.docker.internal:9000/v1/",
+            "http://host.docker.internal:9000/",
+        ] {
+            let llm = LlmConfig {
+                providers: vec![LlmProviderEntry {
+                    base_url: Some(stored.into()),
+                    ..entry("local", LlmProviderKind::Local)
+                }],
+                ..Default::default()
+            };
+            let json = render_proxy_config(&llm);
+            assert!(
+                json.contains(r#""prefix":"local","base_url":"http://host.docker.internal:9000""#),
+                "stored '{stored}' must normalize to a live route: {json}"
+            );
+        }
+    }
+
     #[test]
     fn render_strips_trailing_v1_so_forwarder_does_not_double_it() {
         // Forwarder appends `/v1/messages`; a base_url ending in `/v1` must not
-        // survive or the URL becomes `…/v1/v1/messages` → 404 (trailing `/` is rejected upstream).
+        // survive or the URL becomes `…/v1/v1/messages` → 404.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 base_url: Some("http://host.docker.internal:9000/v1".into()),
