@@ -42,3 +42,16 @@ export async function switchToProject(slug: string, timeoutMs = 180_000): Promis
   // 'switching' so callers act on a ready project (no_provider returns at once).
   await waitForShellReady(timeoutMs);
 }
+
+/** Reads whether a project's containers are running, via the Tauri command. */
+export async function containersRunning(project: string): Promise<boolean> {
+  return browser.executeAsync((proj: string, done: (r: boolean) => void) => {
+    (
+      window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<boolean> };
+      }
+    ).__TAURI_INTERNALS__.invoke('check_containers_running', { project: proj })
+      .then((r) => done(r))
+      .catch(() => done(false));
+  }, project);
+}

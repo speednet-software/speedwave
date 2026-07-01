@@ -107,4 +107,38 @@ describe('Factory Reset', function () {
     // Poll until the restarted app binds port 4445 again.
     await waitForPort(browser.options.port ?? 4445, 150_000);
   });
+
+  it('should land on the setup wizard with all state wiped', async function () {
+    this.timeout(120_000);
+
+    // The old WebDriver session died with the old process — attach a new one.
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await browser.reloadSession();
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+    }
+    if (lastErr) throw lastErr;
+
+    // A reset that restarts but fails to wipe ~/.speedwave would skip the wizard.
+    await $('[data-testid="setup-wizard"]').waitForExist({
+      timeout: 60_000,
+      timeoutMsg: 'setup wizard not shown after factory reset — state was not wiped',
+    });
+
+    const setupComplete: boolean = await browser.executeAsync(
+      (done: (result: boolean) => void) => {
+        (window as any).__TAURI_INTERNALS__
+          .invoke('is_setup_complete')
+          .then((result: boolean) => done(result))
+          .catch(() => done(true));
+      },
+    );
+    expect(setupComplete).toBe(false);
+  });
 });

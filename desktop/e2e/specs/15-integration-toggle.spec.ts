@@ -17,34 +17,13 @@
  * All assertions use data-testid attributes, never UX-volatile text.
  */
 
-import { switchToProject, activeProjectSlug } from '../helpers/projects';
+import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
 import { confirmRestartAndWait } from '../helpers/shell';
-import { openIntegrations, toggleIntegration } from '../helpers/llm';
+import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const NO_LLM_PROJECT = 'e2e-second';
 const LLM_PROJECT = 'e2e-test';
 const SERVICE = 'context7';
-
-/** Reads whether a project's containers are running, via the Tauri command. */
-async function containersRunning(project: string): Promise<boolean> {
-  return browser.executeAsync((proj: string, done: (r: boolean) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<boolean> };
-      }
-    ).__TAURI_INTERNALS__.invoke('check_containers_running', { project: proj })
-      .then((r) => done(r))
-      .catch(() => done(false));
-  }, project);
-}
-
-/** The status pill text for a service row (running / starting / disabled). */
-async function rowStatus(service: string): Promise<string> {
-  const status = await $(`[data-testid="integrations-row-${service}"]`).$(
-    '[data-testid="integrations-row-status"]'
-  );
-  return (await status.getText()).trim();
-}
 
 describe('Integration Toggle', function () {
   describe('no-provider project defers (no containers, no overlay)', function () {

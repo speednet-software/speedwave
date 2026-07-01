@@ -151,6 +151,14 @@ export async function openIntegrations(): Promise<void> {
   await $('[data-testid="integrations-body"]').waitForExist({ timeout: 15_000 });
 }
 
+/** The status pill text for a service row (running / starting / disabled). */
+export async function rowStatus(service: string): Promise<string> {
+  const status = await $(`[data-testid="integrations-row-"]`).$(
+    '[data-testid="integrations-row-status"]'
+  );
+  return (await status.getText()).trim();
+}
+
 /** Clicks the enable/disable toggle for an integration service row. */
 export async function toggleIntegration(service: string): Promise<void> {
   const toggle = await $(`[data-testid="integrations-row-toggle-${service}"]`);

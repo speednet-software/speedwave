@@ -20,6 +20,8 @@ export const config = {
     './specs/13-chat-controls.spec.ts',
     './specs/14-usage-per-project.spec.ts',
     './specs/15-integration-toggle.spec.ts',
+    './specs/16-restart-deferral.spec.ts',
+    './specs/17-logs-diagnostics.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,

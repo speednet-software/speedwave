@@ -109,6 +109,87 @@ describe('Chat Controls', function () {
     expect(assistants.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('opens the slash menu on "/" and inserts the selected command', async function () {
+    this.timeout(60_000);
+    const input = await $('[data-testid="chat-input"]');
+    await input.waitForExist({ timeout: 15_000 });
+    await input.setValue('/');
+
+    // Discovery is container-backed (list_slash_commands); core skills are
+    // always linked, so at least one item must appear.
+    await $('[data-testid="slash-menu"]').waitForExist({ timeout: 15_000 });
+    await browser.waitUntil(
+      async () => (await $$('[data-testid="slash-menu-item"]').getElements()).length > 0,
+      { timeout: 15_000, timeoutMsg: 'slash menu never listed any commands' }
+    );
+
+    const items = await $$('[data-testid="slash-menu-item"]').getElements();
+    await items[0].click();
+    await $('[data-testid="slash-menu"]').waitForExist({ timeout: 10_000, reverse: true });
+
+    // Selection replaces the token with "/<name> " (trailing space, caret after).
+    const value = await input.getValue();
+    expect(value).toMatch(/^\/\S+ $/);
+
+    // Clear the composer so later tests start from an empty input.
+    await browser.execute(() => {
+      const ta = document.querySelector(
+        '[data-testid="chat-input"]'
+      ) as HTMLTextAreaElement | null;
+      if (!ta) return;
+      ta.value = '';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+
+  it('attaches a pasted image and sends it (ADR-065)', async function () {
+    this.timeout(240_000);
+    const input = await $('[data-testid="chat-input"]');
+    await input.waitForExist({ timeout: 15_000 });
+
+    // WebDriver cannot drive the OS clipboard — dispatch a synthetic paste
+    // event carrying a real PNG File, which reaches the same handler.
+    await browser.execute(() => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      if (!ta) return;
+      const b64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const file = new File([bytes], 'e2e-paste.png', { type: 'image/png' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: dt });
+      ta.dispatchEvent(ev);
+    });
+
+    await $('[data-testid="composer-attachment-strip"]').waitForExist({
+      timeout: 20_000,
+      timeoutMsg: 'attachment strip never appeared after the synthetic paste',
+    });
+
+    // The preview thumbnail is a blob: URL — a broken image here is the CSP
+    // img-src regression this test exists to catch.
+    await browser.waitUntil(
+      async () =>
+        await browser.execute(() => {
+          const img = document.querySelector(
+            '[data-testid="composer-attachment-strip"] img'
+          ) as HTMLImageElement | null;
+          return !!img && img.complete && img.naturalWidth > 0;
+        }),
+      { timeout: 20_000, timeoutMsg: 'attachment thumbnail never rendered (broken blob: image)' }
+    );
+
+    await sendMessageNoWait('Reply with the single word RECEIVED.');
+    await $('[data-testid="user-message-image"]').waitForExist({
+      timeout: 15_000,
+      timeoutMsg: 'sent message did not render the image attachment pill',
+    });
+    await waitForTurnStart();
+    await waitForTurnComplete(180_000);
+  });
+
   it('deletes a conversation from history', async function () {
     this.timeout(60_000);
     await openHistory();
