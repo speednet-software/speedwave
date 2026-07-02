@@ -11123,19 +11123,17 @@ services:
             &bridges,
         )
         .unwrap();
+        // No `{yaml}` in any panic message: the render carries the auth token,
+        // which must never reach a log/panic (CodeQL rust/cleartext-logging).
         assert!(
             yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
-            "EXAMPLE_PLUGIN_BRIDGE_URL must be injected, got:\n{yaml}"
+            "EXAMPLE_PLUGIN_BRIDGE_URL must be injected"
         );
         assert!(
             yaml.contains("EXAMPLE_PLUGIN_BRIDGE_TOKEN"),
-            "EXAMPLE_PLUGIN_BRIDGE_TOKEN must be injected, got:\n{yaml}"
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN must be injected"
         );
-        assert!(
-            yaml.contains("54321"),
-            "port must appear in URL, got:\n{yaml}"
-        );
-        // No `{yaml}` here: a token-bearing render must not land in panic output.
+        assert!(yaml.contains("54321"), "port must appear in URL");
         assert!(yaml.contains("test-token-abc"), "token must appear in env");
     }
 
@@ -11341,9 +11339,10 @@ services:
             &bridges,
         )
         .unwrap();
+        // No `{yaml}`: this render carries the bridge auth token (cleartext-logging).
         assert!(
             yaml.contains("ws://host.docker.internal:54321/"),
-            "URL must use host.docker.internal alias, got:\n{yaml}"
+            "URL must use host.docker.internal alias"
         );
     }
 
@@ -11445,9 +11444,10 @@ services:
             &[vp],
         )
         .unwrap();
+        // No `{yaml}`: the bridges list carries an auth token (cleartext-logging).
         assert!(
             !yaml.contains("SOMETHING_URL"),
-            "plugin without host_bridge manifest must NOT receive bridge env, got:\n{yaml}"
+            "plugin without host_bridge manifest must NOT receive bridge env"
         );
     }
 
@@ -11489,9 +11489,10 @@ services:
             &[vp],
         )
         .unwrap();
+        // No `{yaml}`: the bridges list carries an auth token (cleartext-logging).
         assert!(
             !yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
-            "example-plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
+            "example-plugin declares host_bridge but no registration matches its slug"
         );
     }
 

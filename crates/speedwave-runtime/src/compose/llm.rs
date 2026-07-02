@@ -559,10 +559,8 @@ mod tests {
             "proj",
         )
         .expect("legacy v1 config must render (anthropic default)");
-        assert!(
-            rendered.contains("ANTHROPIC_"),
-            "anthropic env injected: {rendered}"
-        );
+        // No `{rendered}`: the proxy path injects the caller-auth token (cleartext-logging).
+        assert!(rendered.contains("ANTHROPIC_"), "anthropic env injected");
     }
 
     #[test]
