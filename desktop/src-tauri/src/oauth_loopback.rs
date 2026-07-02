@@ -151,7 +151,6 @@ pub(crate) async fn read_callback_request(
     }
 }
 
-/// Verifies CSRF `state` and extracts `code` from the callback query.
 /// Outcome of parsing a `/callback` query against the expected CSRF state.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CallbackOutcome {
