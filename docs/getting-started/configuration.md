@@ -33,21 +33,12 @@ The user-level config file stores project definitions, the active project, and I
         "atlassian": { "enabled": false },
         "office": { "enabled": false },
         "playwright": { "enabled": false },
+        "context7": { "enabled": false },
         "os": {
           "reminders": { "enabled": true },
           "calendar": { "enabled": true },
           "mail": { "enabled": false },
           "notes": { "enabled": false }
-        },
-        "hostExec": {
-          "enabled": false,
-          "commands": [
-            {
-              "name": "gradle_test",
-              "exec": "./gradlew",
-              "args": ["test"]
-            }
-          ]
         }
       }
     }
@@ -58,6 +49,35 @@ The user-level config file stores project definitions, the active project, and I
 }
 ```
 
+#### `claude.llm` schema v3 (ADR-073)
+
+The example above shows the legacy flat `llm` shape, which is still read and auto-migrated. Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) the Settings UI writes a provider **list** with an `active` selection and `schema_version: 3` (v3 adds provenance quarantine — a foreign model under an Anthropic entry is cleared on migration). A typical block (with the equivalent flat fields the app also writes for one-release downgrade) looks like:
+
+```json
+"llm": {
+  "schema_version": 3,
+  "providers": [
+    { "id": "anthropic", "kind": "anthropic_oauth", "model": null },
+    {
+      "id": "local",
+      "kind": "local",
+      "base_url": "http://host.docker.internal:11434",
+      "model": "qwen3",
+      "has_api_key": false
+    },
+    { "id": "openrouter", "kind": "open_router", "has_api_key": true }
+  ],
+  "active": { "provider_id": "local", "model": "qwen3" },
+  "proxy_enabled": true,
+  "provider": "local",
+  "model": "qwen3",
+  "base_url": "http://host.docker.internal:11434",
+  "context_tokens": null
+}
+```
+
+Key VALUES never appear here — only the `has_api_key` presence flag; the secret lives at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key`. The `active` block is the routing source of truth; the trailing flat fields are the auto-written downgrade mirror.
+
 ### `ui.beta_enabled`
 
 Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). When `true`, the Desktop app reveals hidden / work-in-progress UI surfaces and shows a small `BETA` badge in the corner. Default is off. Toggle it from the tray-icon menu → **Beta features** (the item appears once initial setup is complete), or edit this field directly. This is a UI surface gate only — it is **not** a security control and does not unlock any privileged capability. See [ADR-058](../adr/ADR-058-beta-features-toggle.md).
@@ -67,49 +87,26 @@ Optional, top-level, user-only (a checked-in `.speedwave.json` cannot set it). W
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider (`anthropic`, `ollama`, `lmstudio`, `llamacpp`), model name, optional base URL, and optional `context_tokens`. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details and [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery. **`provider` / `base_url` are not merged from the repo file** — only the user config may set them.
-- `integrations` — enable/disable individual integrations per project. **`integrations.hostExec` is the exception: it is ignored in the repo file** — a Host Exec command whitelist is user-config-only (see [`integrations.hostExec`](#integrationshostexec--host-exec-whitelist) below and [ADR-054](../adr/ADR-054-host-exec-worker.md)).
+- `claude.llm` — LLM provider configuration. Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) the schema is a provider **list** (`providers[]` with `id`, `kind`, optional `base_url`, `has_api_key`) plus an `active` selection (`provider_id` + `model`) and `schema_version: 3`; provider kinds are `anthropic_oauth`, `anthropic_api_key`, `local`, `open_router`. The legacy flat fields (`provider`, `model`, `base_url`, `context_tokens`) are still read (auto-migrated on resolve) and still written for one release (downgrade story). `proxy_enabled: false` is the temporary kill-switch restoring pre-proxy direct injection (removal in N+2). See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model discovery. **`provider` / `base_url` / `providers` / `active` / `proxy_enabled` are not merged from the repo file**: only the user config may set them; the repo may suggest `model` only.
+- `integrations` — enable/disable individual integrations per project.
 
 ### `claude.llm.context_tokens`
 
 Optional. When set, this is the persisted context window (in tokens) the chat footer uses to render the `used / max` ratio before any stream-level value lands. Settings populates it automatically from the SSOT (Anthropic — `defaults::ANTHROPIC_MODELS`) or from the live discovery probe (local providers). Clearing it (`null`) lets the chat footer fall back through `live stream → SSOT lookup → previous in-memory value → 200_000`. Zero is rejected at save time to prevent a divide-by-zero in the percentage bar.
 
-### Model auto-discovery (local providers)
+### Model discovery (local providers)
 
-When the selected provider is local (`ollama`, `lmstudio`, `llamacpp`) and a `base_url` is configured (or the provider default is reachable), the Settings → LLM Provider panel probes the server for the list of available models and surfaces both the ids and per-model context windows where the server advertises them:
+When the selected provider is local (`local`, or legacy `ollama` / `lmstudio` / `llamacpp`), the Settings → LLM Provider panel probes the server for the list of available models when you click **Discover models**. Discovery is button-driven only: the panel never probes automatically, not on open, not on provider switch, and not when a `base_url` is configured. A successful probe surfaces both the model ids and per-model context windows where the server advertises them:
 
-- **Ollama** — `GET /api/tags` for the id list, then a parallel fan-out of `POST /api/show` per model to read `model_info.<arch>.context_length`. Models without a recognised arch key fall back to the first numeric `*.context_length` field.
-- **LM Studio** — `GET /api/v0/models` (the extended listing) which carries `max_context_length` per entry. The OpenAI-compat `/v1/models` fallback was removed; users on builds that pre-date the extended API will see an empty list.
-- **llama.cpp** — `GET /v1/models` reads `meta.n_ctx_train` per entry (the runtime `--ctx-size` flag may constrain it lower; we report the trained value as the best-available approximation).
+- **Local providers (`local`, plus legacy `ollama` / `lmstudio` / `llamacpp`)** — a single unified `discover_local` path: one `GET /v1/models` request returns the id list, and the per-model context window is read **inline** from each entry's metadata, trying `meta.n_ctx_train` (llama.cpp / vLLM / Unsloth shape) first, then falling back to `max_context_length` (LM Studio 0.4.1+ shape). The legacy provider names route through this same path for two release cycles; the obsolete Ollama `GET /api/tags` listing is no longer used.
+- **Ollama context fallback** — for entries that expose no inline context window, a single `POST /api/show` **sanity** call is made on the first such entry: a `200` response means the server implements `/api/show`, so the remaining missing entries are fanned out (bounded concurrency) to read their context windows; a `404`/error means the server does not implement it and the remaining entries stay `undefined`. This bounds the worst-case call count for unknown servers instead of issuing one request per model unconditionally.
+- **Anthropic Messages probe** — alongside the model list, a `POST /v1/messages` 1-token sanity probe runs to detect whether the local server speaks the Anthropic Messages endpoint.
 - **Anthropic** — not probed; the catalog comes from the backend SSOT (`speedwave_runtime::defaults::ANTHROPIC_MODELS`, surfaced via the `list_anthropic_models` Tauri command).
 - The probe returns `Vec<DiscoveredModel>` (`{ id, context_tokens? }`); a missing context window stays `undefined` and the chat fallback chain takes over rather than guessing.
-- If the server is offline or returns an unexpected response, the UI gracefully falls back to a free-text input so you can pre-configure the app before starting your server.
-- A Refresh button re-probes on demand (useful after pulling a new model).
+- The model field is a dropdown, shown only after a successful **Discover models** run or when a model was already saved earlier; there is no free-text model input, and **Save** stays disabled until a model is picked.
+- A failed probe renders an inline error under the button instead: authentication failed (check the API key), the server is reachable but returned an HTTP error or an unexpected non-JSON response, or the server is not reachable at the configured URL.
+- Clicking **Discover models** again re-probes on demand (useful after pulling a new model).
 - The same URL validator runs on Save, rejecting `http://169.254.169.254`, `file://`, `http://user:pass@…`, URLs with query strings/fragments, etc. See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for the full SSRF policy.
-
-### `integrations.hostExec` — Host Exec whitelist
-
-`integrations.hostExec` configures **Host Exec** (`host_exec`) for the project — the per-project host-side worker that runs a user-defined whitelist of project-toolchain commands on the host machine. It is **user-config-only**: a `hostExec` block in the repo `.speedwave.json` is **ignored** (an executable command whitelist is a security-class field, like `claude.llm.provider`/`base_url`; see [ADR-054](../adr/ADR-054-host-exec-worker.md)). Edit it via **Service integrations → Host Exec** in the Desktop app — enabling it pops a blocking danger modal, which **is the consent** (there is no per-call confirmation; Claude runs whitelisted recipes unattended, the audit log records every run) — or by hand in `~/.speedwave/config.json`.
-
-| Field      | Type                    | Meaning                                                                                                                       |
-| ---------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`  | `boolean`               | Whether Host Exec is on for this project. Default `false`. With `false`, or with an empty `commands`, Claude can run nothing. |
-| `commands` | array of recipe objects | The whitelist. Default `[]`.                                                                                                  |
-
-Each recipe object:
-
-| Field    | Type                | Meaning                                                                                                                                                                                                                                            |
-| -------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`   | `string`            | `^[a-z][a-z0-9_]{0,63}$` (snake_case), unique. Claude calls it as `host_exec.<camelCase(name)>()`.                                                                                                                                                 |
-| `exec`   | `string`            | The executable. Relative (`./gradlew`, `npm`, `docker`) resolves against the project dir or PATH; absolute is allowed (flagged in the UI). Rejected: shell/eval launchers (`bash`, `sh`, `eval`, `xargs`, …); `..`, NUL, `=`, newlines.            |
-| `args`   | array of strings    | Fixed arguments — literals plus `{name}` parameter tokens (each substitution = one argv element). A literal sub-command is fine (`["run", "build"]`); a bare `{param}` element after a meta-tool (`npm`, `make`, `node`, …) is rejected.           |
-| `cwdSub` | `string` (optional) | Subdirectory to run in (monorepos) — relative, no `..`, no symlink escape.                                                                                                                                                                         |
-| `params` | array (optional)    | `{ name, pattern, maxLen? }` — `name` snake_case unique; `pattern` a regex the supplied value must fully match; `maxLen` ≤ 65536.                                                                                                                  |
-| `env`    | object (optional)   | Literal env vars for the recipe. Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) rejected. **Don't put secrets here** — use a repo `.env`; the snapshot is `0600` and the host log redacts these values, but a `.env` is still the right place. |
-
-There is no per-recipe `confirm` field — enabling Host Exec is the consent. (The Desktop add/edit dialog shows an amber warning when a recipe is a `docker`/`docker-compose`/`podman` lifecycle command or another state-changing one; it's a hint, not blocking.)
-
-The runtime serialises these objects camelCase (`cwdSub`, `maxLen`) in both `~/.speedwave/config.json` and the worker snapshot (`~/.speedwave/host-exec/<project>/config.json`); a stray `confirm` key from an older config is silently ignored. Invalid recipes are rejected by `host_exec::validate_host_exec_config` on save (the Desktop command surfaces a readable error). See [Integrations → Host Exec](../guides/integrations.md#host-exec) for the full guide and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening) for the threat analysis.
 
 ## Environment Variables
 
@@ -119,6 +116,7 @@ Environment variables defined in `claude.env` are passed directly to Claude Code
   1. `claude.env.ANTHROPIC_MODEL` (highest precedence; matches v1 behaviour and works for any provider).
   2. `claude.llm.model` for the `anthropic` provider — the runtime injects it as `ANTHROPIC_MODEL` at compose-render time.
      Empty/whitespace falls through to Claude Code's built-in default.
+     > **Repo override caveat:** `ANTHROPIC_MODEL` is the one Anthropic env key a checked-in repo `.speedwave.json` may set (the deny-list strips `ANTHROPIC_BASE_URL`/`AUTH_TOKEN`/`CUSTOM_HEADERS`). A cloned repo can therefore pin a more expensive model and bill it against your key. Review a repo's `claude.env` before opening it, or set the model in user config (`~/.speedwave/config.json`), which always wins.
 - Custom variables can be used by MCP servers or Claude Code configuration
 - Variables are injected at container start via the compose template
 
@@ -175,5 +173,3 @@ The variable is resolved once per process and cannot change at runtime.
 
 - [ADR-011: User Configuration Passed to Claude Code](../adr/ADR-011-user-configuration-passed-to-claude-code.md)
 - [ADR-031: SPEEDWAVE_DATA_DIR Environment Variable for Instance Isolation](../adr/ADR-031-data-dir-env-var-for-instance-isolation.md)
-- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)
-- [Integrations → Host Exec](../guides/integrations.md#host-exec)

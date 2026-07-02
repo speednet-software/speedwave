@@ -9,17 +9,14 @@ function session(id: string, createdAt: string, audioKept: boolean): TranscriptS
     id,
     created_at: createdAt,
     language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System', app_id: null },
+    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
     status: { state: 'done' },
     live_segments: [],
     final_segments: null,
     audio_path: audioKept ? `/t/${id}/audio.wav` : null,
-    speaker_names: {},
     models_used: {
       live: null,
       finalize: null,
-      diarization_segmentation: null,
-      diarization_embedding: null,
     },
     last_seq: 0,
   } as TranscriptSession;
@@ -31,7 +28,6 @@ describe('SessionListComponent', () => {
   let svc: {
     list: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
-    discardAudio: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -41,7 +37,6 @@ describe('SessionListComponent', () => {
         session('b', '2026-05-12T00:00:00Z', false),
       ]),
       delete: vi.fn(async () => undefined),
-      discardAudio: vi.fn(async () => undefined),
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],
@@ -73,21 +68,6 @@ describe('SessionListComponent', () => {
     expect(svc.delete).toHaveBeenCalledWith('a');
     expect(component.selectedId()).toBeNull();
     expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
-  });
-
-  it("discards a session's audio and refreshes", async () => {
-    await component.ngOnInit();
-    await component.discardAudio('a');
-    expect(svc.discardAudio).toHaveBeenCalledWith('a');
-    expect(svc.list).toHaveBeenCalledTimes(2);
-  });
-
-  it('shows audio-kept vs audio-discarded labels', async () => {
-    await component.ngOnInit();
-    fixture.detectChanges();
-    const body: string = fixture.nativeElement.textContent ?? '';
-    expect(body).toContain('audio kept');
-    expect(body).toContain('audio discarded');
   });
 
   it('surfaces a backend error', async () => {

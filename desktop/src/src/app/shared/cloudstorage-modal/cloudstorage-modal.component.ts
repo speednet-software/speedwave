@@ -7,6 +7,7 @@ import {
 } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { LoggerService } from '../../services/logger.service';
 
 /**
  * Modal shown when a CloudStorage TCC permission failure is detected.
@@ -95,6 +96,7 @@ export class CloudStorageModalComponent {
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
   private readonly cdr = inject(ChangeDetectorRef);
+  private readonly log = inject(LoggerService);
 
   /** Returns " OneDrive" (with leading space) or empty string for template interpolation. */
   providerLabel(): string {
@@ -107,7 +109,7 @@ export class CloudStorageModalComponent {
     try {
       await this.tauri.invoke('open_files_folders_pane');
     } catch (err) {
-      console.warn('[CloudStorageModal] open_files_folders_pane failed:', err);
+      this.log.warn(`[CloudStorageModal] open_files_folders_pane failed: ${String(err)}`);
     }
   }
 

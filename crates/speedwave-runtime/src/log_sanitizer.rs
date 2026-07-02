@@ -1,3 +1,5 @@
+//! SSOT for secret redaction — `sanitize()` masks tokens/keys/paths in logs.
+
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -8,27 +10,21 @@ struct SanitizeRule {
 }
 
 static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
-    // Each tuple: (pattern, replacement). If a regex fails to compile (should never
-    // happen with static literals), a CRITICAL warning is printed to stderr.
+    // Each tuple: (pattern, replacement).
     let definitions: Vec<(&str, &'static str)> = vec![
         // PEM private keys (multi-line: mask entire block)
         (
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             "-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----",
         ),
-        // Home paths: /Users/<name>, /home/<name>, C:\Users\<name>.
-        // Username segment replaced with `<user>`; following path tail preserved.
+        // Home paths: username segment replaced with `<user>`, path tail preserved.
         (
             r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
             "${1}<user>",
         ),
-        // HTTP Cookie / Set-Cookie header values.
-        // Set-Cookie value = `name=value` up to the first `;` (attrs are not
-        // secrets but the name=value pair is). `\S+` would stop at the first
-        // space inside an unusual cookie value and leak the rest.
+        // Set-Cookie value: `name=value` up to the first `;`, attrs preserved.
         (r"(?i)(Set-Cookie:\s*)[^;\r\n]+", "${1}***REDACTED***"),
-        // Cookie request header: anchor at start-of-line/whitespace so
-        // `Set-Cookie:` does not double-match via `\b` on the `-C` boundary.
+        // Cookie request header: anchored at start-of-line/whitespace.
         (r"(?i)(^|\s)(Cookie:\s*)[^\r\n]+", "${1}${2}***REDACTED***"),
         // Bearer tokens: Bearer <token>
         (r"(?i)(Bearer\s+)\S+", "${1}***REDACTED***"),
@@ -39,6 +35,8 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
             "***REDACTED_JWT***",
         ),
+        // Slack rotating tokens (xoxe.xoxp-…, xoxe-1-…) — must run before xox[bpars]-.
+        (r"xoxe[.-][A-Za-z0-9.-]+", "***REDACTED_SLACK_TOKEN***"),
         // Slack tokens: xoxb-, xoxp-, xoxa-, xoxr-, xoxs-
         (r"xox[bpars]-[A-Za-z0-9-]+", "***REDACTED_SLACK_TOKEN***"),
         // GitHub tokens: ghp_, ghs_, gho_, ghu_, github_pat_ prefixed (36+ chars after prefix)
@@ -59,28 +57,23 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         ),
         // Anthropic API keys: sk-ant- prefixed
         (r"sk-ant-[A-Za-z0-9_-]+", "***REDACTED_ANTHROPIC_KEY***"),
-        // Bare sk-prefixed keys: sk-proj-*, sk-test-*, sk-or-* (OpenRouter),
-        // vLLM/LiteLLM/LM Studio user-configured keys. ≥16 trailing chars to
-        // avoid false positives on short identifiers like "sk-short" or words
-        // ending in "sk-…". Order matters: this runs AFTER sk-ant- so Anthropic
-        // keys keep their dedicated marker.
+        // Google API keys (ADR-073): AIza + exactly 35 base64url chars.
+        (r"\bAIza[0-9A-Za-z_-]{35}\b", "***REDACTED_GOOGLE_KEY***"),
+        // Bare sk- keys (≥16 trailing chars); runs after sk-ant- to keep its marker.
         (r"\bsk-[A-Za-z0-9_-]{16,}", "***REDACTED_API_KEY***"),
         // URL userinfo credentials: ://user:password@host — redact password
         (r"(://[^:/@\s]+:)[^@\s]+(@)", "${1}***REDACTED***${2}"),
         // API keys in URL query parameters: ?key=<value> or &key=<value>
         // Also matches token=, secret=, password= in query strings
         (
-            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
+            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
             "${1}***REDACTED***",
         ),
         // Redmine API key header: X-Redmine-API-Key: <value>
         (r"(?i)(X-Redmine-API-Key:\s*)\S+", "${1}***REDACTED***"),
-        // Generic secret assignments: password=<value>, secret=<value>, api_key=<value>
-        // Matches key=value, key="value", and key='value' patterns (not in URLs — no ? or & prefix).
-        // The trailing `"?` catches a lone closing quote that follows an unquoted value
-        // (e.g. password=abc" where the opening quote was on a previous token).
+        // Generic secret assignments: key=value, key="value", key='value' (not in URLs).
         (
-            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
+            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             "${1}***REDACTED***",
         ),
     ];
@@ -89,17 +82,17 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         .into_iter()
         .filter_map(|(pat, replacement)| {
             match Regex::new(pat) {
-                Ok(pattern) => Some(SanitizeRule { pattern, replacement }),
+                Ok(pattern) => Some(SanitizeRule {
+                    pattern,
+                    replacement,
+                }),
                 Err(e) => {
-                    // Safety-critical one-time init warning. The logger may not be
-                    // initialized when LazyLock evaluates, so eprintln! is the only
-                    // reliable channel. A dropped rule means secrets leak unredacted.
-                    #[allow(clippy::print_stderr)]
-                    {
-                        eprintln!(
-                            "[log_sanitizer] CRITICAL: failed to compile sanitizer regex '{pat}': {e}"
-                        );
-                    }
+                    // Logger may be uninitialized during LazyLock eval — write stderr directly.
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[log_sanitizer] CRITICAL: failed to compile sanitizer regex '{pat}': {e}"
+                    );
                     None
                 }
             }
@@ -107,14 +100,8 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Masks known secret patterns in log message content.
-///
-/// This function applies regex-based redaction rules to replace sensitive
-/// data (tokens, keys, passwords, PEM blocks) with `***REDACTED***` markers.
-///
-/// Used in two places:
-/// 1. Real-time in the log pipeline (format callbacks in Desktop/CLI loggers)
-/// 2. In diagnostic export (second pass over container/Lima logs)
+/// Masks secret patterns (tokens, keys, passwords, PEM blocks) in log content
+/// with `***REDACTED***` markers.
 pub fn sanitize(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -129,18 +116,8 @@ pub fn sanitize(input: &str) -> String {
     result
 }
 
-/// Extract a safe string from a `catch_unwind` panic payload.
-///
-/// A `Box<dyn Any + Send>` carries whatever value `panic!` produced — usually
-/// a `String` or `&str`, but in principle anything. We only surface the
-/// `String`/`&str` cases (the common ones for `panic!("…")` / `unwrap_failed`)
-/// and pass them through `sanitize()`. Anything else collapses to
-/// `"unknown panic payload"` so a misbehaving panic value can't leak local
-/// variables into logs via `{:?}` debug format.
-///
-/// This is the helper to use whenever you log a panic — `log::error!("…{e:?}")`
-/// would trip the `rust/cleartext-logging` CodeQL rule because the payload
-/// type is `dyn Any` and the data flow analyzer cannot prove safety.
+/// Extract a sanitized string from a `catch_unwind` panic payload; non-`String`/`&str`
+/// payloads collapse to `"unknown panic payload"`.
 pub fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     let raw = payload
         .downcast_ref::<String>()
@@ -157,10 +134,8 @@ mod tests {
 
     // ── Guard tests — ensure no rules are silently dropped ────────────────
 
-    /// The definitions vec contains exactly this many rules. If a new rule is
-    /// added to the vec but fails to compile, RULES.len() will be less than
-    /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 21;
+    /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
+    const EXPECTED_RULE_COUNT: usize = 23;
 
     #[test]
     fn test_rules_count() {
@@ -177,9 +152,7 @@ mod tests {
 
     #[test]
     fn test_all_static_patterns_are_valid_regex() {
-        // Re-declare the same patterns from the production definitions vec.
-        // If any pattern is invalid, Regex::new will return Err and the test
-        // fails explicitly instead of being silently filtered out.
+        // Re-declared production patterns; each must compile or the test fails explicitly.
         let patterns: &[&str] = &[
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             r"(?i)(/Users/|/home/|[A-Z]:\\Users\\)[^/\\\s]+",
@@ -188,6 +161,7 @@ mod tests {
             r"(?i)(Bearer\s+)\S+",
             r"(?i)(Authorization:\s*)\S+(\s+\S+)?",
             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+            r"xoxe[.-][A-Za-z0-9.-]+",
             r"xox[bpars]-[A-Za-z0-9-]+",
             r"ghp_[A-Za-z0-9]{36,}",
             r"ghs_[A-Za-z0-9]{36,}",
@@ -197,11 +171,12 @@ mod tests {
             r"glpat-[A-Za-z0-9\-]{20,}",
             r"ATATT[A-Za-z0-9_\-]{20,}",
             r"sk-ant-[A-Za-z0-9_-]+",
+            r"\bAIza[0-9A-Za-z_-]{35}\b",
             r"\bsk-[A-Za-z0-9_-]{16,}",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
-            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
+            r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
             r"(?i)(X-Redmine-API-Key:\s*)\S+",
-            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
+            r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
         ];
 
         assert_eq!(
@@ -218,6 +193,26 @@ mod tests {
                 "Static sanitizer pattern failed to compile: '{pat}'"
             );
         }
+    }
+
+    #[test]
+    fn test_google_api_key_redacted() {
+        // 35 chars after AIza per Google's documented key shape.
+        let input = "Gemini key: AIzaSyA1234567890abcdefghijklmnopqrstu7 in use";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("AIzaSy"),
+            "Google API key should be redacted: {output}"
+        );
+        assert!(output.contains("***REDACTED_GOOGLE_KEY***"));
+    }
+
+    #[test]
+    fn test_google_key_lookalike_not_redacted() {
+        // Too short (10 chars after AIza) — a normal identifier, not a key.
+        let input = "symbol AIzaShortName is fine";
+        let output = sanitize(input);
+        assert_eq!(output, input, "short AIza-prefixed words must pass through");
     }
 
     #[test]
@@ -318,6 +313,44 @@ mod tests {
     }
 
     #[test]
+    fn test_slack_xoxe_refresh_token_redaction() {
+        let input = "refresh with xoxe-1-A1B2C3D4E5";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_SLACK_TOKEN***"),
+            "Slack xoxe refresh token not redacted: {output}"
+        );
+        assert!(
+            !output.contains("xoxe-1-"),
+            "Slack xoxe prefix should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_slack_xoxe_rotated_access_token_redacted_in_full() {
+        let input = "rotated access xoxe.xoxp-FAKE-TOKEN-VALUE done";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_SLACK_TOKEN***"),
+            "rotated access token not redacted: {output}"
+        );
+        // The whole token must be consumed — no bare `xoxe.` prefix left over.
+        assert!(
+            !output.contains("xoxe."),
+            "xoxe. prefix should be consumed by the rotating-token rule: {output}"
+        );
+    }
+
+    #[test]
+    fn test_slack_bare_xoxe_word_not_redacted() {
+        let output = sanitize("the xoxe prefix marks rotating tokens");
+        assert!(
+            output.contains("xoxe prefix"),
+            "bare xoxe word must not be redacted: {output}"
+        );
+    }
+
+    #[test]
     fn test_api_key_in_url_redaction() {
         let input = "GET https://api.example.com/data?key=secret123&format=json";
         let output = sanitize(input);
@@ -377,6 +410,57 @@ mod tests {
             !output.contains("hidden_value_123"),
             "Secret value should not appear: {output}"
         );
+    }
+
+    #[test]
+    fn test_worker_auth_token_uuid_redaction() {
+        // Bare-UUID worker token, no sk-/xox- prefix — only the *_token rule catches it.
+        let input = "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("550e8400-e29b-41d4-a716-446655440000"),
+            "worker UUID auth token must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_auth_token_redaction() {
+        let input = "ANTHROPIC_AUTH_TOKEN=f1e2d3c4-0000-1111-2222-333344445555";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("f1e2d3c4-0000-1111-2222-333344445555"),
+            "ANTHROPIC_AUTH_TOKEN value must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_api_key_suffix_env_redaction() {
+        // *_API_KEY= is covered by the existing `api_key` substring keyword.
+        let input = "OPENROUTER_API_KEY=opaque-value-xyz";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("opaque-value-xyz"),
+            "*_API_KEY assignment value must be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_uuid_not_redacted() {
+        // A UUID outside a *_token= assignment must survive.
+        let input = "request_id 550e8400-e29b-41d4-a716-446655440000 completed";
+        let output = sanitize(input);
+        assert_eq!(
+            output, input,
+            "bare UUID outside an assignment must not be redacted: {output}"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_not_redacted() {
+        // `_key` suffix is not a rule; only `_token` suffix is redacted.
+        let input = "cache_key=user_123";
+        let output = sanitize(input);
+        assert_eq!(output, input, "cache_key must not be redacted: {output}");
     }
 
     #[test]
@@ -873,8 +957,7 @@ mod tests {
 
     #[test]
     fn test_atlassian_basic_auth_header_redaction() {
-        // base64("bot@acme.com:ATATT3xSecret") — must not leak through the
-        // existing Authorization: header rule.
+        // base64("bot@acme.com:ATATT3xSecret") must not leak through the Authorization rule.
         let input = "header set: Authorization: Basic Ym90QGFjbWUuY29tOkFUQVRUM3hTZWNyZXQ=";
         let output = sanitize(input);
         assert!(
@@ -918,16 +1001,27 @@ mod tests {
 
     #[test]
     fn test_bare_sk_proj_key_redaction() {
-        // OpenAI project-scoped key shape, also used by self-hosted servers.
+        // sk-proj- inside a *_AUTH_TOKEN= assignment: marker collapses, key body is gone.
         let input = "ANTHROPIC_AUTH_TOKEN=sk-proj-abc123def456ghi789xyz";
         let output = sanitize(input);
         assert!(
-            output.contains("***REDACTED_API_KEY***"),
+            output.contains("***REDACTED"),
             "bare sk-proj- key not redacted: {output}"
         );
         assert!(
             !output.contains("abc123def456ghi789xyz"),
             "key body should not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bare_sk_proj_key_redaction_no_assignment() {
+        // Without a *_token= assignment, the `sk-` rule keeps its specific marker.
+        let input = "got key sk-proj-abc123def456ghi789xyz from env";
+        let output = sanitize(input);
+        assert!(
+            output.contains("***REDACTED_API_KEY***"),
+            "bare sk-proj- key must keep its API_KEY marker: {output}"
         );
     }
 
@@ -1046,13 +1140,9 @@ mod tests {
 
     #[test]
     fn test_redmine_api_key_header_false_positive() {
-        // "X-Redmine-API-Key-Length: 40" — not a key value, just a header name
-        // containing the prefix. The regex matches `\S+` after the colon, so
-        // "40" will be redacted. This is acceptable (security > false negatives).
+        // Different header name (no colon after "Key") — must not match the rule.
         let input = "X-Redmine-API-Key-Length: 40";
         let output = sanitize(input);
-        // The regex pattern `X-Redmine-API-Key:\s*` won't match because the
-        // header name is "X-Redmine-API-Key-Length" (no colon after "Key").
         assert_eq!(
             output, input,
             "X-Redmine-API-Key-Length should not be redacted (different header name)"
@@ -1087,17 +1177,13 @@ mod tests {
 
     #[test]
     fn panic_payload_unknown_type_collapses_to_placeholder() {
-        // A panic that produced an arbitrary struct (rare but legal). We must
-        // NOT leak its Debug representation — collapse to a placeholder so a
-        // misbehaving panic value can't smuggle local-variable contents into
-        // logs and trip the cleartext-logging rule.
+        // An arbitrary struct payload must collapse to a placeholder, not leak its Debug.
         #[derive(Debug)]
         struct SecretCarrier {
-            #[allow(dead_code)]
-            token: String,
+            _token: String,
         }
         let payload: Box<dyn std::any::Any + Send> = Box::new(SecretCarrier {
-            token: "ghp_supersecret".to_string(),
+            _token: "ghp_supersecret".to_string(),
         });
         let out = panic_payload_to_string(&*payload);
         assert_eq!(out, "unknown panic payload");
@@ -1106,8 +1192,7 @@ mod tests {
 
     #[test]
     fn panic_payload_string_is_sanitized() {
-        // If a panic message happens to carry a token-shaped substring, the
-        // sanitizer redacts it the same way log lines are redacted.
+        // A token-shaped substring in a panic message is sanitized like a log line.
         let payload: Box<dyn std::any::Any + Send> =
             Box::new("crashed with token xoxb-1234567890-leak".to_string());
         let out = panic_payload_to_string(&*payload);
@@ -1165,9 +1250,7 @@ mod tests {
 
     #[test]
     fn redacts_set_cookie_value_with_embedded_space() {
-        // Non-RFC value with a space — the previous `\S+` regex stopped at the
-        // first space and leaked the trailing token. `[^;\r\n]+` covers the
-        // whole name=value pair up to the attribute separator.
+        // Non-RFC value with a space: whole name=value pair redacted up to the `;`.
         let out = sanitize("Set-Cookie: id=secret extra_data; Path=/");
         assert!(!out.contains("secret"), "first token leaked: {out}");
         assert!(

@@ -1,7 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import type { ChatMessage } from '../../models/chat';
-
-const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
+import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
 
 /**
  * Mono metadata line rendered below each assistant message:
@@ -37,7 +36,7 @@ const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
         <span data-testid="meta-cache">· cache: {{ formatTokens(cache) }}</span>
       }
       @if (hasCost()) {
-        <span data-testid="meta-cost">· \${{ costFormatted() }}</span>
+        <span data-testid="meta-cost">· {{ costFormatted() }}</span>
       }
     </div>
   `,
@@ -50,11 +49,7 @@ export class MessageMetadataComponent {
     const raw = this.entry().meta?.model;
     if (!raw) return '';
     const stripped = raw.replace(/^claude-/, '');
-    // Collapse repeated `[1m]` suffixes. They appear when Claude Code
-    // resolves the `opus`/`sonnet` alias against `ANTHROPIC_DEFAULT_*_MODEL`
-    // (which already carries `[1m]`) and re-appends the suffix on top —
-    // surfaces as `opus-4-7[1m][1m]` in the chat footer. The functional
-    // 1M-context behaviour is unaffected; this is purely a display fix.
+    // Collapse repeated `[1m]` suffixes.
     const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
     return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
   });
@@ -83,14 +78,20 @@ export class MessageMetadataComponent {
     return cache;
   }
 
-  /** Whether meta carries a cost value to render. */
-  hasCost(): boolean {
-    return this.entry().meta?.cost !== undefined;
+  /** Meta cost when it is a finite number (subscription/null → null). */
+  private finiteMetaCost(): number | null {
+    const cost = this.entry().meta?.cost;
+    return typeof cost === 'number' && Number.isFinite(cost) ? cost : null;
   }
 
-  /** Per-turn cost formatted to exactly 3 decimal places. */
+  /** Whether meta carries a finite cost value to render (hides null/NaN). */
+  hasCost(): boolean {
+    return this.finiteMetaCost() !== null;
+  }
+
+  /** Per-turn cost in USD to 3 decimals (guarded by hasCost). */
   costFormatted(): string {
-    return (this.entry().meta?.cost ?? 0).toFixed(3);
+    return formatUsd(this.finiteMetaCost() ?? 0, 3);
   }
 
   /**
@@ -98,6 +99,6 @@ export class MessageMetadataComponent {
    * @param n Raw token count to format.
    */
   formatTokens(n: number): string {
-    return TOKEN_FORMATTER.format(n);
+    return fmtTokens(n);
   }
 }

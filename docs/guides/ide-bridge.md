@@ -12,6 +12,8 @@ Speedwave.app acts as an active MCP proxy between Claude (isolated in a Lima VM 
 4. **IDE Bridge receives events** from Claude (e.g. `openFile`, `getDiagnostics`) and forwards them to the real IDE extension.
 5. **The IDE responds** — VS Code opens files automatically as Claude edits them.
 
+The connection is automatic — you never need to run `/ide` by hand. The container both forces the attempt (`CLAUDE_CODE_AUTO_CONNECT_IDE=true`, for when terminal auto-detection fails) and enables the lock-file detection path (`--ide`). When no lock file is present — CLI-only use without the Desktop app — Claude Code silently skips both.
+
 ### Lock File Format
 
 The Bridge writes a lock file with the following JSON structure:
@@ -41,13 +43,13 @@ Speedwave also detects external IDEs (VS Code, Cursor, JetBrains) that write the
 
 ### `selected_ide` — SSOT for "actively connected"
 
-`get_system_health.ide_bridge.selected_ide` is the single source of truth for whether an IDE is actively routed through the Bridge. The status bar in `/logs` and the IDE Bridge integrations panel both read from it.
+`get_health.ide_bridge.selected_ide` is the single source of truth for whether an IDE is actively routed through the Bridge. The status bar in `/logs` and the IDE Bridge integrations panel both read from it.
 
 The field is `null` in three cases that the UI should treat identically (show "not connected"):
 
 1. The user has not yet selected an IDE via the picker (`select_ide` Tauri command).
 2. The previously selected IDE is no longer detected — for example the editor process exited between health polls, or its lock file was removed. The runtime resolves `selected_ide` by joining the user-config selection against the live `detected_ides` list, so a stale port from a crashed IDE never surfaces.
-3. The backend config read failed (a `log::warn!` is emitted in `health.rs::build_bridge_health` so the regression is traceable).
+3. The backend config read failed (a `log::warn!` is emitted in `health.rs::check_ide_bridge` so the regression is traceable; the resolution logic itself lives in the pure helper `build_ide_bridge_health`).
 
 `detected_ides` may contain multiple entries (the daemon scans every lock file under `~/.claude/ide/`); `selected_ide` always resolves to at most one of them. The top-level `port` and `ws_url` describe the _first_ detected IDE for legacy compatibility — frontends that need the routed-through port should prefer `selected_ide.port` and `selected_ide.ws_url`.
 
@@ -65,7 +67,7 @@ The IDE Bridge uses the same MCP JSON-RPC 2.0 protocol as all editor extensions,
 
 ## Platform Specifics
 
-All platforms use the canonical gateway alias `host.docker.internal`, injected into containers via Compose `extra_hosts` and resolved to the per-platform gateway IP — Lima vzNAT (192.168.5.2) on macOS, WSL2 NAT (192.168.65.1) on Windows.
+All platforms use the canonical gateway alias `host.docker.internal`, injected into containers via Compose `extra_hosts` and resolved to the per-platform gateway IP — Lima vzNAT (192.168.5.2, a stable const) on macOS; on Windows the WSL vEthernet adapter IP (e.g. `172.x.x.1`), detected at runtime by `compose.rs` `host_addressing()` because there is no stable Windows IP and it changes across `wsl --shutdown`.
 
 On all platforms, the Bridge binds to `127.0.0.1` only — the port is never exposed to the LAN.
 

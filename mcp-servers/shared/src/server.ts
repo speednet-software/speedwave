@@ -134,8 +134,7 @@ export interface MCPServer {
  * @returns MCP server instance
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
-  // Default 127.0.0.1 is macOS-only; Windows supervisor always sets MCP_LISTEN_HOST
-  // to the WSL adapter IP (compose::host_bind_address). See ADR-067 / SSOT row.
+  // Windows supervisor sets MCP_LISTEN_HOST to the WSL adapter IP; see ADR-067.
   const {
     name,
     version,
@@ -190,8 +189,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       const header = req.headers.authorization ?? '';
       const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
 
-      // res.locals is set up by Express on real requests, but absent in some
-      // unit-test mocks — guard with an `??=`.
       const locals: Record<string, unknown> = (res.locals ??= {});
       if (provided && safeTokenCompare(provided, token)) {
         locals.caller = '';
@@ -283,9 +280,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       try {
         await options.healthCheck();
       } catch (error) {
-        if (!options.auth) {
-          console.error(`[${name}] Health check failed:`, error);
-        }
+        console.error(`[${name}] Health check failed:`, error);
         res.status(500).json({ status: 'error' });
         return;
       }
@@ -354,6 +349,23 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     // Run onStart hook if provided
     if (options.onStart) {
       await options.onStart();
+    }
+
+    // PID1 ignores default signal dispositions — without a handler, compose
+    // down waits the full 10s kill timeout per container (ADR-072).
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      process.on(signal, () => {
+        const force = setTimeout(() => {
+          // close() waits for keep-alive/in-flight requests — cut them after 1s.
+          console.log(`${ts()} ${signal}: forcing exit with requests in flight`);
+          process.exit(0);
+        }, 1000);
+        force.unref();
+        server?.close(() => {
+          clearTimeout(force);
+          process.exit(0);
+        });
+      });
     }
 
     return new Promise((resolve, reject) => {

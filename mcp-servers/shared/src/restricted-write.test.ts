@@ -62,18 +62,11 @@ describe('writeRestrictedSecret', () => {
   );
 
   it('cleans up the tmp file when rename fails', async () => {
-    // Force rename failure by passing a target inside a non-existent dir.
-    // Tmp file is created in the (existing) parent of `filePath` and rename
-    // would target a sibling — but here we point parent to a missing path
-    // to provoke `fs.open` failure (before tmp is ever created).
-    // To force a rename-time failure instead, point the *target name* to an
-    // existing directory: rename of a file onto a non-empty dir fails on POSIX.
+    // Target resolves to an existing dir so rename fails during atomic write.
     const sub = path.join(tmpDir, 'sub');
     await fs.mkdir(sub, { mode: 0o700 });
     await fs.writeFile(path.join(sub, 'sentinel'), 'x');
 
-    // Target path points to the directory `sub` — rename of a file to an
-    // existing non-empty directory will fail.
     await expect(writeRestrictedSecret(sub, 'data')).rejects.toThrow();
 
     // No leftover tmp files in parent

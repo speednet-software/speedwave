@@ -1,57 +1,36 @@
 # ADR-058: Beta Features Toggle in the Tray Menu
 
-**Status:** Accepted
-
-**Date:** 2026-05-12
-
-## Context
-
-Work-in-progress UI surfaces (new views, experimental panels) need a way to ship behind a switch that a developer or early user can flip at runtime, without rebuilding the app and without exposing the surface to every user. The Desktop app already has a system tray icon with a context menu (`Open / Check for Updates / Quit`) built in `desktop/src-tauri/src/tray.rs`. Putting the switch there keeps it out of the way for ordinary users while remaining a single click away.
-
-The tray menu's variable parts already include an `Install Update vX` item driven by a `Arc<Mutex<Option<String>>>` threaded through two closures (`check_update` handler, `update_available` listener). Adding a second variable input (the beta flag) the same way would mean two parallel ad-hoc states and a real risk that rebuilding the menu for one input drops the other.
+> **Status:** Accepted
+> **Context:** Work-in-progress Desktop UI surfaces need a runtime switch a developer or early adopter can flip without a rebuild, while staying hidden from ordinary users.
 
 ## Decision
 
-### State
+Add a single global "Beta features" check item to the Desktop system-tray menu. Both of the tray menu's variable inputs — the optional "Install Update" version and the beta flag — live in one `TrayMenuState` struct managed by Tauri, and any callsite that changes either mutates the field and then calls one rebuild function. The flag is persisted in user-config only and gates hidden Angular sections behind a signal.
 
-A single `TrayMenuState` struct, managed via `app.manage(...)`, holds both variable inputs:
+## Why
 
-```rust
-pub(crate) struct TrayMenuState {
-    pub update_version: Mutex<Option<String>>,
-    pub beta_enabled: Mutex<bool>,
-}
-```
+- One rebuild path (`refresh_tray_menu`) reading all variable inputs from `TrayMenuState` means a menu rebuild for one input can never silently drop the other — the prior pattern threaded a separate `Arc<Mutex<Option<String>>>` for the update version through two closures.
+- A tray check item keeps the switch out of the way for normal users but one click away for developers/early adopters.
+- Menu shape is produced by a pure spec function so composition is unit-testable without an `AppHandle`.
+- The flag is a UI surface gate only, not a security boundary: anything needing a real permission check (host capability, credential access, network policy) keeps its own enforcement regardless of the flag.
+- It is global (user-wide), not per-project, because beta surfaces are developer/early-adopter features rather than project-scoped configuration.
 
-`refresh_tray_menu(app)` reads both fields plus `setup_wizard::is_setup_complete()` and rebuilds the whole menu. Any callsite that has an `AppHandle` mutates the relevant field then calls `refresh_tray_menu(app)` — there is one rebuild path, so no input can be silently dropped. The `update_version` `Arc` previously threaded through `main.rs` is removed.
+## Where it lives in code
 
-### Menu composition
+- **Tray state + menu** — `desktop/src-tauri/src/tray.rs`: `TrayMenuState` (`update_version`, `beta_enabled`), the pure `tray_menu_spec(update_version, beta_enabled, setup_complete)`, `build_tray_menu` (maps the spec onto Tauri's menu builders, emitting a check item with id `toggle_beta`), and the single `refresh_tray_menu(app)` rebuild path.
+- **Write path** — `desktop/src-tauri/src/ui_prefs_cmd.rs`: `apply_beta_toggle_inner(app, enabled)` is the shared internal write path. It persists the flag under the config lock, updates `TrayMenuState`, calls `refresh_tray_menu`, and emits a `beta-changed` event. Both the `set_beta_enabled` Tauri command and the tray's `toggle_beta` arm call this function; the read path is `get_beta_enabled`. It no-ops when the value is unchanged.
+- **Persistence** — `crates/speedwave-runtime/src/config.rs`: `UiPrefsConfig.beta_enabled: Option<bool>` under `SpeedwaveUserConfig.ui`, read via the `beta_enabled()` getter (defaults to `false`). User-only — a checked-in repo `.speedwave.json` cannot set it. Reads/writes go through `config::with_config_lock` on a blocking task so the UI thread never does synchronous config I/O.
+- **Frontend** — `desktop/src/src/app/services/beta.service.ts`: `BetaService` (`providedIn: 'root'`) holds an Angular signal seeded from `get_beta_enabled` and updated by the `beta-changed` event. Outside Tauri (Karma unit tests) `invoke` throws and the signal stays `false`. `desktop/src/src/app/shell/shell.component.ts` renders a discreet BETA badge when the flag is on; `desktop/src/src/app/guards/beta-enabled.guard.ts` gates beta-only routes.
 
-The visible menu shape is produced by a pure function `tray_menu_spec(update_version, beta_enabled, setup_complete) -> Vec<TrayItemSpec>`, so composition is unit-testable without an `AppHandle`. `build_tray_menu` maps the spec onto Tauri builders.[^1] The beta entry is a `CheckMenuItem`[^2] with id `toggle_beta`, checked when the flag is on.
+## Hidden before setup completion
 
-### Persistence
+The `toggle_beta` item is not added while `setup_wizard::is_setup_complete()` (`desktop/src-tauri/src/setup_wizard.rs`) is `false`. Showing the switch on a fresh install — where a tray click could write user-config and create `~/.speedwave/` — would race the setup wizard for ownership of that directory.
 
-The flag lives in top-level user-config: `SpeedwaveUserConfig.ui.beta_enabled: Option<bool>` (new `UiPrefsConfig` struct), defaulting to `false`. It is **user-only** — a checked-in repo `.speedwave.json` cannot set it, consistent with how privacy- and behaviour-sensitive flags are handled elsewhere. Reads/writes go through the existing `config::with_config_lock` + `tokio::task::spawn_blocking` pattern, so the UI thread never does synchronous config I/O.
+`create_project` is step 4 of the wizard and does **not** refresh the tray. `start_containers` is the final step (step 5): it flips `is_setup_complete()` by persisting `containers_started`, and its Tauri wrapper in `desktop/src-tauri/src/containers_cmd.rs` calls `refresh_tray_menu(app)` right after the wizard's `start_containers` succeeds, so the item appears once setup is genuinely complete. Two structural tests in `containers_cmd.rs` pin this: `start_containers_refreshes_tray_after_setup_completes` asserts `start_containers` calls `refresh_tray_menu`, and `create_project_does_not_refresh_tray_prematurely` asserts `create_project` does not (a premature refresh would rebuild the menu while `is_setup_complete()` is still `false` and drop the toggle).
 
-### Write path
+We chose "hide" over "disable" because a developer-only switch has no reason to be visible on an unconfigured app. The trade-off: a user mid-setup cannot enable beta features until the wizard finishes.
 
-`ui_prefs_cmd::apply_beta_toggle_inner(app, enabled)` is the single internal write path: it persists the flag under the config lock, updates `TrayMenuState.beta_enabled`, calls `refresh_tray_menu(app)`, and emits a `beta-changed` Tauri event. Both the `set_beta_enabled` Tauri command and the tray menu's `toggle_beta` arm call this function — the tray arm does **not** call the command handler. The tray arm spawns the call on the async runtime because the `on_menu_event` closure is synchronous.
+## Rejected alternatives
 
-### Frontend
-
-`BetaService` (`providedIn: 'root'`) holds an Angular `signal<boolean>`, seeded from `get_beta_enabled` on construction and updated by the `beta-changed` event. UI surfaces gate hidden sections with `@if (beta.enabled()) { ... }`. The `ShellComponent` renders a discreet `BETA` badge in the corner whenever the flag is on. When running outside Tauri (Karma unit tests), `invoke` throws and the signal stays `false`.
-
-### Hidden before setup completion
-
-The `toggle_beta` item is **not added** to the tray menu while `is_setup_complete()` is `false`. The toggle writes to user-config, and `save_user_config` creates `~/.speedwave/` if it is missing — showing the switch on a fresh install (or after factory reset) before the setup wizard owns that directory would let a tray click race the wizard. `create_project` (the last wizard step) calls `refresh_tray_menu(app)` after it succeeds, so the item appears once setup is genuinely complete. We chose "hide" over "disable" because a developer-only switch has no reason to be visible on an unconfigured app.
-
-## Consequences
-
-- **Positive:** simple mechanism — no telemetry, no per-project state, no plugin-facing API. `TrayMenuState` centralises the tray menu's variable inputs, replacing the previously scattered `Arc<Mutex>` for the update version. The beta state survives restarts (read from user-config on startup).
-- **Negative — global, not per-project:** the flag is user-wide. Beta surfaces are developer/early-adopter features, not project-scoped configuration, so this is deliberate.
-- **Negative — not a security boundary:** this toggle is purely a UI surface gate. Nothing that requires a real permission check (host capability, credential access, network policy) may be hidden behind it; those must keep their own enforcement regardless of the flag.
-- **Negative — invisible on fresh install:** the tray item does not appear until the setup wizard finishes. A user mid-setup cannot enable beta features; that is the trade-off for not letting a tray click recreate the data dir out from under the wizard.
-
-[^1]: Tauri v2 menu builder API (`MenuBuilder`, `MenuItemBuilder`): https://docs.rs/tauri/latest/tauri/menu/struct.MenuBuilder.html
-
-[^2]: Tauri v2 `CheckMenuItem` — a menu item with a checkmark that toggles: https://docs.rs/tauri/latest/tauri/menu/struct.CheckMenuItem.html
+- **Disable instead of hide before setup** — rejected; a developer-only switch has no reason to be visible on an unconfigured app, and hiding avoids any tray click racing the wizard for the data dir.
+- **Per-project flag** — rejected; beta surfaces are developer/early-adopter features, not project configuration, so a single user-wide flag is intentional.

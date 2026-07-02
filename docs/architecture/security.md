@@ -8,7 +8,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 
 - **Claude container isolation** — no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both macOS and Windows, so no user-namespace remapping is needed; see [ADR-059](../adr/ADR-059-drop-linux-support.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint` and `office` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files; other workers (slack, gitlab, github, redmine, atlassian, playwright) have no `/workspace` access.
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. The `sharepoint`, `office`, and `slack` workers additionally mount the project directory at `/workspace:rw` because their tools read/write project files (slack writes downloaded files there for the office worker and Claude to read — [ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)); other workers (gitlab, github, redmine, atlassian, playwright, context7) have no `/workspace` access.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -27,8 +27,8 @@ All containers follow OWASP container hardening guidelines:
 
 **The `claude` container's `$HOME` is writable by design.** `${CLAUDE_HOME}` is bind-mounted at `/home/speedwave` as `:rw` because Claude Code self-installs there (`entrypoint.sh` writes `~/.local/bin`, `~/.bashrc`, `~/.claude/*`, `~/.claude.json` — Anthropic All-Rights-Reserved, can't be bundled — see [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md)), and `${PROJECT_DIR}` is mounted at `/workspace:rw` because Claude edits code. Consequences:
 
-- A toolchain Claude installs into `$HOME` (e.g. a JDK tarball — `apt`/`sudo` fail in the hardened container, but `curl … | tar -x` into `$HOME` works) **persists per-project** (it's in `claude-home/<project>/`), is **uncontrolled** (whatever a `curl | bash` pulls), but is **confined to the container** plus the Lima / WSL2 / rootless layer — it does not reach the host. It is also re-installed on a fresh project / data-dir reset, and it grows `claude-home/<project>/` unboundedly. It is **not** a substitute for **Host Exec** (no Docker; pollutes `claude-home`; ephemeral).
-- Because `/workspace` is `:rw`, a prompt-injected Claude doesn't need a malicious repo from outside — it can write a malicious `build.gradle` / `package.json` script _itself_ and then (if Host Exec is enabled and a whitelisted recipe runs that toolchain) have it executed on the host. `cwdSub` confinement is cosmetic against this; the real mitigation is the trust decision to enable Host Exec at all and the whitelist the user chose at enable time — there is no per-call confirmation (see [Host Exec → deliberate, scoped weakening](#host-exec--deliberate-scoped-weakening) below).
+- A toolchain Claude installs into `$HOME` (e.g. a JDK tarball — `apt`/`sudo` fail in the hardened container, but `curl … | tar -x` into `$HOME` works) **persists per-project** (it's in `claude-home/<project>/`), is **uncontrolled** (whatever a `curl | bash` pulls), but is **confined to the container** plus the Lima / WSL2 layer — it does not reach the host. It is also re-installed on a fresh project / data-dir reset, and it grows `claude-home/<project>/` unboundedly.
+- Because `/workspace` is `:rw`, a prompt-injected Claude can write a malicious `build.gradle` / `package.json` script into the repo — but it has **no channel to execute that script on the host**. Code in `/workspace` only runs inside the container (or the Lima / WSL2 layer); there is no host-side command-execution path reachable from the container.
 
 Neither the IDE Bridge lock dir (`${IDE_LOCK_DIR}` → `~/.claude/ide/`, mounted `:ro`) nor the clipboard bridge gives the container any further writable host path or a way to make the host execute something.
 
@@ -46,13 +46,15 @@ Each MCP worker container mounts **only its own** service credentials:
 
 **`/tokens` is `:ro` for all workers.** OAuth refresh moved to the host-side `oauth` worker which writes the refreshed `access_token` to the same per-project tokens directory — the worker only ever reads it (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
 
-Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale.
+Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the login-flow rationale. With the proxy forwarder in the inference path ([ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md)) the OAuth `Authorization` header transits the passthrough leg verbatim — the forwarder holds no Anthropic credential of its own, which is exactly what keeps the forwarding transparent.
+
+**LLM provider keys (ADR-073)** follow the worker token regime, not the claude-env regime: values live in `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (0600) and mount `:ro` into the `proxy` container only, where compose injects them as `SPW_KEY_<PROVIDER_ID>` env names the forwarder resolves from `/tokens`. They never enter the `claude` container and never appear in the rendered `proxy.json` (which carries `SPW_KEY_<ID>` env-name references only). The one deliberate exception is the Anthropic API key, which stays on the `claude` container env as before (ADR-040 residual risk) because the passthrough forwards `x-api-key` and that preserves `/model` alias semantics. The `SpeedwaveProxyVolumes` SecurityCheck rule pins the forwarder's mount profile (config `:ro`, llm-tokens `:ro`, usage as the only `:rw`, no host network).
 
 ### Clipboard wrappers (OSC 52)
 
-The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` as five symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it.
+The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe,powershell.exe}` as six symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it. The `powershell.exe` name exists because on Windows hosts Claude Code self-detects platform `wsl` and copies via `Set-Clipboard`; the wrapper routes that to the same write path and fails read-style PowerShell commands (`Get-Clipboard`, `ContainsImage`) with exit 1. A dummy `WAYLAND_DISPLAY` env (injected by `defaults.rs::base_env()`) satisfies Claude Code's clipboard-tool probe — no Wayland/X11 socket is mounted and the wrapper never talks to a display server.
 
-The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
+The wrapper **never issues an OSC 52 query/paste**: an OSC 52 read would require a terminal-side response handshake and would leak host clipboard contents into the container, so that path is deliberately absent. It does serve one host-originated value: when invoked with `-o`/`--out`/`--paste` (e.g. `xclip -t image/png -o`), it reads the image the user pasted in the Desktop UI from `/workspace/.speedwave/pastes/clip.png` (`SPEEDWAVE_CLIP_FILE`) — that file is written by `desktop/src-tauri/src/paste_cmd.rs::save_pasted_image` from the user's clipboard (see [ADR-065](../adr/ADR-065-image-attachments-structured-input.md)). The write path base64-encodes stdin to `/dev/tty`; the read path reads only that one workspace-mounted file. It runs as the unprivileged container user and adds no new mounts. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md).
 
 ## Log Sanitization
 
@@ -81,39 +83,12 @@ Speedwave's threat model includes a non-privileged process running as the same u
 `~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
 
 - Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
-- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
-- `plugin::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
+- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker or the `bridge-token` does not invalidate the digest.
+- `signing::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
 - Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
 - Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
 
 `~/.speedwave/tokens/<project>/<service_id>/<key>` is mode 0600 by `set_owner_only` and lives outside the plugin tree, so token files are not part of the plugin signature surface — but they are also write-protected against unprivileged tampering by filesystem ACLs.
-
-### Host Exec — deliberate, scoped weakening
-
-**Host Exec** (`host_exec`, [ADR-054](../adr/ADR-054-host-exec-worker.md)) is the one place Speedwave deliberately and explicitly relaxes the container-isolation model: it runs a user-defined whitelist of project-toolchain commands (`./gradlew test`, `npm run build`, `docker compose up`, …) **on the host machine, with the user's privileges, in the project folder**, behind the per-project MCP hub. It exists because Claude — running in the hardened, token-free `claude` container — otherwise cannot build/test/lint the project or drive the host's Docker; users were already filling that gap insecurely by hand (an LLM-generated agent on `0.0.0.0` with a token committed to the repo). Host Exec is the safe-as-possible version of that capability, not a removal of the boundary.
-
-**Mitigations (what keeps it as narrow as it can be):**
-
-- **Off by default; the whitelist is empty.** A project with `host_exec` disabled — or enabled with no recipes — lets Claude run nothing. Enabling it requires confirming a **blocking danger modal** in the Desktop UI that spells out the consequences — **and that click is the consent**: there is no per-call confirmation; once enabled, Claude runs any whitelisted recipe (with any param values matching the recipe's regexes) without further prompting, and the audit log is the after-the-fact record (see [ADR-054 §"No per-call confirmation"](../adr/ADR-054-host-exec-worker.md)). Claude Code in the container runs `--dangerously-skip-permissions`, so a per-call prompt would have to be a parallel mechanism (and wouldn't cover the `speedwave` CLI either); the honest model is "deliberate enable + whitelist + per-recipe regex params + the ban lists + the audit log", not per-call human-in-the-loop. If you want a recipe to require your attention each time, don't whitelist it.
-- **User-local config only.** The whitelist lives in `~/.speedwave/config.json` (`integrations.hostExec`). The repo `.speedwave.json` layer **ignores `host_exec` entirely** — an executable command whitelist is a security-class field, like the LLM `provider`/`base_url` (`config::apply_integrations_layer`'s `from_repo` gate). A hostile repo cannot grant itself execution.
-- **Fixed command names + regex-constrained params; an amber warning for the dangerous ones.** Claude calls a recipe by name and supplies only the declared parameters; it never composes a command string. The Desktop add/edit dialog shows an amber inline warning when a recipe matches `host_exec::is_container_lifecycle_recipe` (`exec` basename ∈ {`docker`,`docker-compose`,`podman`} with `up`/`down`/`exec`/`rm`/`prune` in `args` — effectively `docker run` with whatever mounts/privileges a Claude-editable compose file declares, ≈ host root) or the broader state-changing heuristic (DB clients, migrations) — but neither is blocking; enabling `host_exec` is the per-project consent.
-- **Fixed commands, not free-form strings.** `exec` + a fixed `args` list; `{name}` parameter tokens substitute into fixed positions and each substitution is **one** argv element, never re-split. Validation (`host_exec::validate_host_exec_config`) rejects an `exec` whose basename is a **shell/eval launcher** (`bash sh zsh … busybox toybox` — `consts::HOST_EXEC_SHELL_LAUNCHERS`), and rejects a **bare `{param}`** as the whole element after a meta-tool (`node python make npm … awk` — `consts::HOST_EXEC_META_TOOLS`); a literal sub-command (`npm run build`, `make test`) is fine. `shell: false`, always; no `-c`/eval option. **Both lists are by basename and not exhaustive** — a renamed interpreter or another interpreter taking a Claude-controlled program string as a non-bare-param arg (`sed -e '{prog}'`, `git -c core.pager={x}`) is not caught; documented residual.
-- **`127.0.0.1`-only worker; per-(project, app-session) bearer.** Each project gets its own worker process on a dynamic loopback port; the hub→worker auth token (`~/.speedwave/host-exec/<project>/auth-token`, mode 0600, bind-mounted into the hub as `/secrets/host_exec-auth-token:ro`) is a fresh UUIDv4 minted per app session and never appears in the repo. Two projects' workers share nothing.
-- **Recipe child env is a strict allowlist.** Spawned recipes get only `PATH` (the recovered login-shell PATH, not Finder's stub), `HOME`/`USERPROFILE`, `TMPDIR`/`TMP`/`TEMP`, `LANG`/`LC_*`, `JAVA_HOME`, `DOCKER_HOST`, the platform minimum, **plus the recipe's own literal `env` map** — never `HOST_EXEC_AUTH_TOKEN`/`HOST_EXEC_CONFIG_PATH`/`PORT`. Recipe `env` keys that are reserved (`RESERVED_ENV_KEYS`) are rejected.
-- **Config file 0600; host log 0600; log redacts `env` values.** The per-project worker snapshot (`~/.speedwave/host-exec/<project>/config.json`) and the audit log (`~/.speedwave/host-exec/<project>/log`) are both `0600` (the spawner pre-creates the log before launching the worker, and the worker's `appendFile` also asserts `0600`). The snapshot may hold a recipe's `env` literals (possibly secrets — the UI warns against that). The log records the full argv, cwd, exit code, status, duration — **it is the only after-the-fact record (there is no per-call confirmation)**; it **redacts recipe `env` values** (keys only) but logs the **argv verbatim** — so a recipe whose `args` substitute a `{param}` logs whatever value Claude supplied, which may be sensitive (e.g. a credential in a `psql -c '{sql}'` query).
-- **Bounded execution; process-tree kill.** A per-command timeout (≈7 min) kills the **whole process group** (`kill(-pid, SIGKILL)` on Unix / `taskkill /T /F /PID` on Windows) so a runaway Gradle daemon / `docker compose` child can't outlive the call. Per-stream output caps (tail kept, ANSI stripped) bound what comes back.
-- **Fail-closed on whitelist change.** The worker re-reads its config snapshot per tool call, so a removed/disabled recipe stops working immediately regardless of hub-cache state; a whitelist edit also respawns the worker and recreates the project's hub container so the tool set re-discovers.
-
-**Residual risk (documented and accepted — see [ADR-054 §Negative](../adr/ADR-054-host-exec-worker.md)):**
-
-- **A whitelist with build/test means repo code runs on the host.** `npm run`, `make`, `gradle`, `docker compose` all execute repo-controlled code — often via `/bin/sh` themselves. The `shell:false` + launcher/meta-tool bans are **defense-in-depth, not a guarantee**: they close `{"exec":"bash","args":["-c","{cmd}"]}` and "run whatever Claude types through `npm`", not "no repo code ever runs". The ban lists are by **basename** and not exhaustive, so `./node_modules/.bin/node …`, a renamed interpreter, `sed -e '{prog}'`, `git -c core.pager={x}` etc. are not caught.
-- **A `docker compose up` recipe is host root.** It runs `docker-compose.yml`, which Claude can rewrite (`/workspace:rw`) to add `privileged: true` + `volumes: ["/:/host:rw"]` — full host takeover from a "build" recipe. Strictly worse than a `gradlew test` recipe (which runs as the user, no privilege escalation). The UI warns when you add such a recipe; beyond that there is no per-call gate (it's all gated behind the enable consent) — a user who whitelists it has accepted that a recipe can host-root them.
-- **Claude can write the repo then run it.** `/workspace` is `:rw` (Claude edits code), so a prompt-injected Claude can author a malicious `build.gradle`/`package.json`/`docker-compose.yml` and then run a whitelisted recipe over it. `cwdSub` confinement doesn't help. The mitigation is the trust decision to enable Host Exec at all and the whitelist the user chose — **prompt injection is mitigated, not eliminated.**
-- **A recipe child has no cgroup / ulimit.** Unlike the `claude` container's CPU/mem caps, a recipe child is a plain host process; for the up-to-7-min window before the timeout it can consume all CPU/RAM/PIDs (same as the user running the command in a terminal). Accepted residual.
-- **An absolute-path `exec` is a user-chosen footgun.** The editor flags an absolute `exec` ("make sure it's the one you mean"), but a user can choose it.
-- **No per-call confirmation, by design.** This is an accepted property, not a residual to fix — enabling Host Exec is the consent for the whole project's whitelist; if you want a recipe gated each time, don't whitelist it (run it yourself), or split it so the dangerous part isn't a recipe.
-
-In short: treat any enabled Host Exec recipe as "this repository's code, on my machine, with my privileges, runnable by Claude without a prompt" — because that is exactly what it is. Enable it only for repositories you trust, and only whitelist commands you're OK with Claude running unattended.
 
 ### Security Boundaries
 
@@ -199,21 +174,22 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 ### Token / Secret Isolation Rules
 
-| Rule               | Scope   | What it checks                                                                                     |
-| ------------------ | ------- | -------------------------------------------------------------------------------------------------- |
-| `NO_TOKENS_CLAUDE` | claude  | No `TOKEN`, `KEY`, or `SECRET` env vars (allowlist: `CLAUDE_*`, `ANTHROPIC_*`, `IS_SANDBOX`, etc.) |
-| `NO_TOKENS_HUB`    | mcp-hub | No env vars except `WORKER_*_URL`, `PORT`, and `ENABLED_SERVICES`                                  |
+| Rule               | Scope   | What it checks                                                                                                                                                                                                                                                                                                                                 |
+| ------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NO_TOKENS_CLAUDE` | claude  | Flags any env var whose name contains `TOKEN`, `KEY`, or `SECRET` (case-insensitive substring) unless it exactly equals one of four allowlisted names: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `DISABLE_AUTOUPDATER`. Not prefix matching — `IS_SANDBOX` is not allowlisted (it contains none of the patterns) |
+| `NO_TOKENS_HUB`    | mcp-hub | Flags any env var whose name contains `TOKEN`, `KEY`, or `SECRET` unless its name starts with `WORKER_` or `PORT`. Non-matching names (`ENABLED_SERVICES`, `TZ`, …) carry no secret pattern and pass — tokens reach the hub only as `/secrets/*` file mounts, never env vars                                                                   |
 
 ### Network Security Rules
 
-| Rule                          | Scope                     | What it checks                                                                                   |
-| ----------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------ |
-| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                             |
-| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                 |
-| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No `OPENAI_*`, `GEMINI_*`, `DEEPSEEK_*`, `OPENROUTER_*` env vars (these belong in the LLM proxy) |
-| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS   |
+| Rule                          | Scope                     | What it checks                                                                                                                                                                     |
+| ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                                                                                                               |
+| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                                                                                                   |
+| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No external-LLM-provider env vars — blocks 9 prefixes: `OPENAI_`, `AZURE_OPENAI_`, `GEMINI_`, `DEEPSEEK_`, `OPENROUTER_`, `COHERE_`, `MISTRAL_`, `TOGETHER_`, `GROQ_`              |
+| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS                                                                                     |
+| `SpeedwaveProxyVolumes`       | proxy                     | Mount profile is exactly `/config:ro` + `tokens/<project>/llm:/tokens:ro` + `/usage:rw`, and no `network_mode` ([ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md)) |
 
-**Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services by `ensure_host_gateway_extra_host()`. Other built-in workers (slack, github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
+**Host-gateway alias distribution.** `host.docker.internal` is statically present in `extra_hosts` for `claude` and `mcp-playwright` (see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)), and dynamically injected for `mcp-hub` and OAuth-consumer services (sharepoint, slack — ADR-071) by `ensure_host_gateway_extra_host()`. Other built-in workers (github, gitlab, atlassian, redmine, context7, office) have no host-side dependency and therefore no `extra_hosts` entry. The underlying IP routing to the VM gateway exists for every container regardless — the alias only adds DNS convenience.
 
 ### Container User Rule
 
@@ -241,11 +217,12 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 `validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
 
-- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively. The same list also rejects a [Host Exec](#host-exec--deliberate-scoped-weakening) recipe's `env` keys; alongside it, `consts::HOST_EXEC_SHELL_LAUNCHERS` (banned `exec` basenames — shell/eval launchers) and `consts::HOST_EXEC_META_TOOLS` (interpreters/package-script runners that may not take a bare-`{param}` argument) are sibling SSOT lists consumed by `host_exec::validate_host_exec_config` — edit `consts.rs`, not the validators.
+- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The full list (18 entries) is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively.
 - **`token_mount: read_write`** — rejected unconditionally for plugins. No built-in service currently uses `:rw` for tokens — [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) moved SharePoint OAuth refresh to the host-side `oauth` worker. Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
 - **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
 - **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
 - **`settings_schema`** — must be a JSON object ≤ 64 KiB. Full Draft-7 validation of saved settings happens desktop-side in `plugin_save_settings` (the runtime crate has no JSON-Schema dependency).
+- **`oauth` endpoints** — when a plugin declares an `oauth` block, its `token_url` / `authorize_url` / `device_authorization_url` are dialed **by the host** during the Authorize flow and on every worker refresh. Each is therefore run through the shared SSRF validator (`url_validation::validate_url`, https-only, no localhost / private / loopback target) at install and again at use. A signed plugin is **not** exempt — the Ed25519 signature proves the manifest's integrity, not that its declared targets are safe. The grant type is gated against a supported-grants allow-list so a plugin cannot declare a flow the host will not perform. OAuth client secrets and refresh tokens are written **off-mount** to `~/.speedwave/oauth/<project>/<slug>.json` (never `/tokens`), so the `:ro`-everywhere mount invariant is preserved — see [ADR-069](../adr/ADR-069-generic-plugin-oauth2.md).
 
 See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the full rationale and the runtime-invariant model.
 
@@ -263,6 +240,20 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. As of
 | `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
 | `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
 
+### Slack Volume Rules
+
+Identical profile to SharePoint, applied to the built-in Slack service ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)): `/tokens:ro`, `/workspace:rw` (file downloads land in `/workspace/.speedwave/slack/`), plus its per-service oauth bearer — nothing else. The token-mount-mode check re-uses the generic `PLUGIN_TOKEN_MOUNT_MODE`.
+
+| Rule                            | What it checks                                                             |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `SLACK_VOLUME_LONG_FORM`        | Short-form volumes only                                                    |
+| `SLACK_TOKEN_PATH_MISMATCH`     | Token mount path matches expected                                          |
+| `SLACK_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected                                      |
+| `SLACK_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`                                              |
+| `SLACK_NO_EXTRA_VOLUMES`        | Allowlisted extras only: `/tokens`, `/workspace`, per-service oauth bearer |
+| `SLACK_MISSING_TOKENS_MOUNT`    | Token mount present                                                        |
+| `SLACK_MISSING_WORKSPACE_MOUNT` | Workspace mount present                                                    |
+
 ### Host File Security Rules
 
 | Rule                      | Scope                       | What it checks                                                                         |
@@ -273,19 +264,17 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. As of
 
 Sensitive directories must be `0o700` (owner rwx only):
 
-- `~/.speedwave/secrets/<project>/` — worker auth tokens (including the Host Exec hub→worker bearer)
+- `~/.speedwave/secrets/<project>/` — worker auth tokens
 - `~/.speedwave/snapshots/<project>/` — compose rollback snapshots
 - `~/.speedwave/ide-bridge/` — IDE bridge lock files
 - `~/.speedwave/tokens/<project>/` — token parent directory
 - `~/.speedwave/tokens/<project>/<service>/` — per-service token directories
-- `~/.speedwave/host-exec/<project>/` — per-project Host Exec worker state (config snapshot, PID, port, log)
 
 Sensitive files must be `0o600` (owner rw only):
 
 - `~/.speedwave/secrets/<project>/*` — service auth tokens. Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
 - `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
-- `~/.speedwave/host-exec/<project>/auth-token` — the Host Exec hub→worker bearer (a fresh UUIDv4 per app session; bind-mounted into the hub container as `/secrets/host_exec-auth-token:ro`)
-- `~/.speedwave/host-exec/<project>/config.json` — Host Exec recipe whitelist snapshot the worker reads (may contain a recipe's `env` literals; `host_exec_save_settings` writes it `0o600` via `write_host_exec_config_snapshot`)
+- `~/.speedwave/plugin-state/<slug>/bridge-token` — persisted host-bridge auth token (written `0o600` by Desktop's `HostBridge` when the manifest opts into `persistent_token`; read back — symlink-rejected, UUID-validated — by off-Desktop compose renders, ADR-074)
 - `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
 - `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens
 - `~/.speedwave/bundle-state.json` — bundle reconciliation state
@@ -347,7 +336,7 @@ The Desktop app includes two Tauri commands that make HTTP requests to external 
 
 **SSRF mitigations:**
 
-- Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests)
+- Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests; the validator is the SSOT in `speedwave-runtime` since ADR-069, re-exported by desktop)
 - **Blocked:** loopback IPs (127.0.0.0/8, ::1), link-local/metadata IPs (169.254.0.0/16 including cloud metadata endpoint 169.254.169.254)
 - **Allowed with warning:** RFC1918 private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and IPv6 Unique Local Addresses (fc00::/7, RFC 4193) — self-hosted Redmine on private networks is the primary use case
 - Redirects blocked via `reqwest::redirect::Policy::none()`
@@ -394,13 +383,13 @@ The Desktop app includes a Tauri command `discover_llm_models` that probes a loc
 
 ## Host-Side Audio Capture (Meeting Transcription)
 
-Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
+Meeting transcription runs **on the Desktop host** — the Claude container has no audio access (a v1 invariant), so this is a separate threat surface, like the LLM-discovery and Redmine commands. The full design and rationale is [ADR-056](../adr/ADR-056-host-side-audio-transcription.md); the security-relevant points:
 
-- **Opt-in, off by default, no repo override.** The feature is gated behind a top-level user-config flag (`~/.speedwave/config.json`). Repository `.speedwave.json` **cannot** enable it (privacy invariant — a repo must not be able to turn on the user's microphone). With the flag off, no capture code runs.
+- **Beta-gated, no repo override.** The tab is gated behind the beta-features flag (ADR-058); there is no separate per-feature toggle. Repository `.speedwave.json` **cannot** enable host-audio recording (privacy invariant — a repo must not be able to turn on the user's microphone; the repo config carries no transcription field at all). No capture code runs until the user explicitly presses Start.
 - **Capture surface.** When enabled, the app can record the host's system-audio loopback (what the user hears — the other call participants) and the microphone, mixed into one stream (the "Whole meeting" default). Each platform uses its OS primitive: macOS CoreAudio process taps via the bundled `audio-capture-cli` (14.4+), and Windows WASAPI loopback via `cpal`. The bundled macOS CLI is a signed Mach-O (`pl.speedwave.desktop.audio-capture`, embedded `Info.plist`) — see _Binary Authenticity_ below.
 - **OS permission prompts.** The microphone prompt fires via the public `AVCaptureDevice.requestAccess` API. The **system-audio** ("System Audio Recording") prompt has _no public trigger_ on macOS, so `audio-capture-cli` requests it via the private `TCCAccessRequest(kTCCServiceAudioCapture)` API (the AudioCap / AudioTee approach; works on a notarized `.dmg`, not an App Store app). This is the one private-platform-API dependency in the codebase; it is `dlopen`/`dlsym`-guarded — if a future macOS removes the symbol the CLI exits "permission unavailable" and the UI deep-links the user to System Settings, rather than crashing — and isolated to one commented function (the precedent for a guarded private call is `desktop/src-tauri/src/fs_perms.rs`). ADR-056 decision 3 records this; the public alternative (ScreenCaptureKit audio) was rejected for needing the heavyweight Screen Recording permission and having macOS 15 audio-only defects.
-- **Files on disk.** Recordings and transcripts live under `~/.speedwave/transcripts/<id>/` (`audio.wav` + `transcript.json`, `0600`). Models live under `~/.speedwave/models/{whisper,diarization}/` (`0700` dirs, `0600` files), SHA-256-verified on download. There is no auto-retention in v1 — the user deletes recordings manually (the UI also offers "discard audio, keep transcript").
-- **"Local" is true only for inference.** Whisper transcription and sherpa diarization run locally — no audio leaves the machine for inference. **Model downloads use the network** (HTTPS to Hugging Face / GitHub via the model-store's redirect-allowlist + streaming hash — same hardening posture as elsewhere; see ADR-056 decision 9). **"Send to Claude"** uploads the rendered transcript _text_ to the user's configured LLM provider (with a confirm dialog). The UI states both on every relevant surface.
+- **Files on disk.** Recordings and transcripts live under `~/.speedwave/transcripts/<id>/` (`audio.wav` + `transcript.json`, `0600`). Models live under `~/.speedwave/models/whisper/` (`0700` dirs, `0600` files), SHA-256-verified on download. There is no auto-retention — the user deletes recordings manually (a single delete removes audio + transcript together).
+- **"Local" is true only for inference.** Whisper transcription runs locally — no audio leaves the machine for inference. **Model downloads use the network** (HTTPS to Hugging Face / GitHub via the model-store's redirect-allowlist + streaming hash — same hardening posture as elsewhere; see ADR-056 decision 9). **"Send to Claude"** uploads the rendered transcript _text_ to the user's configured LLM provider (with a confirm dialog). The UI states both on every relevant surface.
 
 ## Authentication Gate
 
@@ -414,12 +403,15 @@ chat access. Enforced at two layers:
   stream-json on stdout.
 
 - **Frontend (`ProjectStateService` / `AuthTerminalComponent`):** After
-  containers are running, calls `get_auth_status`. If neither OAuth nor API key
-  is configured, the auth overlay offers two ways to log in:
+  containers are running, calls `get_auth_status`. The gate blocks only when the
+  active provider needs Anthropic auth (`needs_anthropic_auth`, derived from
+  `project_needs_anthropic_auth` — R7) **and** neither OAuth nor API key is
+  configured; a non-anthropic provider (local/openrouter) is never
+  walled. When it does block, the auth overlay offers two ways to log in:
   - **Primary — "Open terminal and log in" (`start_oauth_login`).** Spawns the
     host's terminal application (iTerm2 → Apple Terminal on macOS; PowerShell on
     Windows) running `speedwave login`,
-    so the user types `/login` at Claude Code's prompt. The command string
+    which starts the Anthropic OAuth flow automatically via `claude auth login`. The command string
     handed to the terminal is built by `build_auth_command_for_platform` (same
     renderer as the copy-paste fallback), and every component that flows into it
     is constrained: the project name passes `validate_project_name` and is
@@ -480,11 +472,11 @@ Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-i
 
 ## Windows Host MCP Worker Lifecycle (Job Object)
 
-On Windows, every host MCP worker (`mcp-os`, `host_exec`, `oauth`) is attached at spawn to a Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Parent (`Speedwave.exe`) crash → kernel closes the Job handle → child `node.exe` terminates automatically. The NSIS `NSIS_HOOK_PREINSTALL` sweep is the fallback for orphans that survive the parent (e.g. v0.10.x workers spawned before Job Object support shipped). See [ADR-048](../adr/ADR-048-windows-uninstall-cleanup.md) §"PRE-INSTALL orphan worker sweep" for the architectural decision.
+On Windows, every host MCP worker (`mcp-os`, `oauth`) is attached at spawn to a Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Parent (`Speedwave.exe`) crash → kernel closes the Job handle → child `node.exe` terminates automatically. The NSIS `NSIS_HOOK_PREINSTALL` sweep is the fallback for orphans that survive the parent (e.g. v0.10.x workers spawned before Job Object support shipped). See [ADR-048](../adr/ADR-048-windows-uninstall-cleanup.md) §"PRE-INSTALL orphan worker sweep" for the architectural decision.
 
 ### Accepted residual risks
 
-- **`JOB_OBJECT_LIMIT_BREAKAWAY_OK` permits descendants to escape the job.** A `host_exec` recipe that runs a tool which spawns with `CREATE_BREAKAWAY_FROM_JOB` (UAC elevation prompts, MSI subprocesses, some `cmd /c start /b` patterns) produces a descendant that survives a parent crash. This is intentional — without the flag those legitimate spawns fail with `ERROR_ACCESS_DENIED` and `host_exec` recipes silently break. The NSIS PRE-INSTALL sweep is the safety net: it kills any orphan whose `ExecutablePath` is under `$INSTDIR\nodejs\` regardless of how it escaped.
+- **`JOB_OBJECT_LIMIT_BREAKAWAY_OK` permits descendants to escape the job.** A worker subprocess that spawns with `CREATE_BREAKAWAY_FROM_JOB` (UAC elevation prompts, MSI subprocesses, some `cmd /c start /b` patterns) produces a descendant that survives a parent crash. This is intentional — without the flag those legitimate spawns fail with `ERROR_ACCESS_DENIED`. The NSIS PRE-INSTALL sweep is the safety net: it kills any orphan whose `ExecutablePath` is under `$INSTDIR\nodejs\` regardless of how it escaped.
 - **TOCTOU window between `Command::spawn` and `AssignProcessToJobObject`** (~microseconds, unbounded under heavy scheduler load). Grandchildren spawned in that window inherit no job and survive parent crash. The atomic fix (`PROC_THREAD_ATTRIBUTE_JOB_LIST` in `STARTUPINFOEX`, or `CREATE_SUSPENDED` + `ResumeThread`) requires bypassing `std::process::Command` and is deferred. Mitigations: (a) host MCP workers do not spawn grandchildren during their synchronous startup phase, (b) the NSIS sweep catches any orphan that does slip through.
 - **`AssignProcessToJobObject` failure in nested-job environments** (debugger, Windows Sandbox, MSIX container, PCA compatibility job) returns `ERROR_ACCESS_DENIED`. Parent-crash protection is disabled for that worker; the code logs at error level and the NSIS sweep remains the only orphan defence on next install.
 
@@ -495,5 +487,4 @@ On Windows, every host MCP worker (`mcp-os`, `host_exec`, `oauth`) is attached a
 - [ADR-059: Drop Linux Support](../adr/ADR-059-drop-linux-support.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
 - [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)
-- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)
 - [Release Signing Guide](../contributing/release-signing.md)

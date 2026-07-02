@@ -62,8 +62,8 @@ guard-not-prod-data-dir:
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes \
-        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all setup-e2e-vms \
+        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
+        test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -71,8 +71,7 @@ guard-not-prod-data-dir:
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
-        download-wsl-resources clean-wsl-resources \
-        download-sherpa-onnx
+        download-wsl-resources clean-wsl-resources
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
 
@@ -218,6 +217,7 @@ clean:
 	cargo clean
 	rm -rf desktop/src/dist desktop/src/node_modules/.cache
 	cd mcp-servers && rm -rf node_modules/*/dist */dist
+	rm -rf native/macos/*/.build
 	@echo "✅ Clean"
 
 # ── Install dependencies (alias for setup-dev) ──────────────────────────────
@@ -307,8 +307,8 @@ test-swift:
 bundle-native-assets:
 	@bash scripts/bundle-native-assets.sh
 
-# Copy the static third-party licenses we keep in-repo (whisper.cpp, sherpa-onnx,
-# onnxruntime, cpal, transcription model weights — ADR-056) into the bundled
+# Copy the static third-party licenses we keep in-repo (whisper.cpp,
+# wasapi, cpal, transcription model weights — ADR-056) into the bundled
 # THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
 # download-* targets fetch there. The static dir is VCS-tracked; the bundled
 # dir is generated.
@@ -420,7 +420,11 @@ test-desktop-group-run:
 # shared-path-safe after test-build-phase; the one lane that touches real repo
 # paths is the serial test-desktop-group-run.
 test-run-lanes: test-rust-run test-angular-run test-entrypoint \
-                test-desktop-config test-ci test-desktop-group-run
+                test-desktop-config test-ci test-desktop-group-run test-proxy
+
+test-proxy:
+	cd containers/proxy && cargo test --locked
+	@echo "✅ proxy tests passed"
 
 test-rust:
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
@@ -440,6 +444,19 @@ test-transcription:
 	@# (~100 compose tests at ~5s each), which alone blows past the CI job budget.
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
+
+# Runs the mcp-os upgrade-path test against the *real* bundled worker (not the
+# stub). Gated behind the `mcp-os-bundle-e2e` feature — never `#[ignore]`,
+# which nothing in the pipeline runs. `build-mcp` produces the source dists;
+# `bundle-build-context.sh` stages them into desktop/src-tauri/mcp-os/ with the
+# @speedwave/mcp-shared tree the worker resolves at runtime; then we run only
+# that one test under the feature.
+test-mcp-os-bundle: build-mcp
+	@echo "🧪 Staging the real mcp-os worker bundle..."
+	@bash scripts/bundle-build-context.sh
+	@echo "🧪 Running the mcp-os upgrade-path test against the bundled worker..."
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features mcp-os-bundle-e2e upgrade_path_with_real_bundled_mcp_os)
+	@echo "✅ mcp-os bundle upgrade-path test passed"
 
 test-cli:
 	@echo "🧪 Testing CLI..."
@@ -461,6 +478,11 @@ else
 endif
 	@"$(MAKE)" verify-bundled-assets
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
+	@# The bundle is staged above (bundle-build-context.sh + build-mcp), so run
+	@# the mcp-os upgrade-path test against the real worker here (Unix-only, like
+	@# its `#[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]` gate). Never
+	@# `#[ignore]`d — this is the make invocation that actually runs it.
+	@if [ "$(OS)" != "Windows_NT" ]; then "$(MAKE)" test-mcp-os-bundle; fi
 	@echo "✅ Desktop tests passed"
 
 # ── Angular tests ───────────────────────────────────────────────────────────
@@ -527,9 +549,9 @@ coverage-html: build-mcp
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	bats _tests/e2e/e2e-vm-excludes.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
-	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/host-exec.bats
 
 # Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
@@ -560,7 +582,8 @@ test-desktop-build: build-angular build-mcp
 # Fast config validation — stable, runs in `make test`.
 test-desktop-config:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats
+	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
+	  _tests/desktop/backmerge-alignment.bats
 	@echo "✅ Desktop config tests passed"
 
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
@@ -667,6 +690,11 @@ _e2e-windows:
 test-e2e-all:
 	@bash scripts/e2e-vm.sh all
 
+# Audio-transcription pipeline E2E on the Windows host (ADR-056/ADR-075):
+# wasapi capture + whisper transcription, verified natively (MSVC toolchain).
+test-e2e-audio:
+	@bash scripts/e2e-vm.sh windows-audio
+
 # Provision test machines for E2E testing (one-time setup)
 setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
@@ -674,10 +702,10 @@ setup-e2e-vms:
 # ── Linting ──────────────────────────────────────────────────────────────────
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
-	@# The `audio-transcription` feature is off by default, so the line above
-	@# doesn't lint the `transcription` module — clippy it explicitly too.
-	cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
+	@# `--all-targets` lints test code too. `test-support` + `audio-transcription`
+	@# are off by default, so lint those modules/feature-gated tests explicitly.
+	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
@@ -689,7 +717,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os host_exec oauth; do \
+	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done
@@ -719,10 +747,15 @@ check-angular-lint:
 audit: audit-rust audit-mcp audit-desktop
 	@echo "\n✅ No known vulnerabilities"
 
+# quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update only,
+# parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
+# Remove both when self_update bumps quick-xml to >=0.41.
+AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
-	cargo audit
-	cargo audit --file desktop/src-tauri/Cargo.lock
+	cargo audit $(AUDIT_IGNORE)
+	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
 audit-mcp:
@@ -877,38 +910,18 @@ download-wsl-resources:
 clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
-# ── Windows: pre-fetch sherpa-onnx MD-Release prebuilt for CRT alignment ────
-# See ADR-061. No-op on non-Windows platforms.
-# Writes the resolved lib dir to a cache file so consumers (dev, build-tauri)
-# can read it back as SHERPA_ONNX_LIB_DIR for the cargo invocation.
-# Extracts to a persistent location under target/ (not /tmp — which is wiped on
-# reboot and not visible to cargo as a Windows path).
-SHERPA_LIB_CACHE := desktop/src-tauri/.sherpa-onnx-lib-dir
-SHERPA_FETCH_DIR := $(CURDIR)/target/sherpa-onnx-md
-download-sherpa-onnx:
-ifeq ($(OS),Windows_NT)
-	@echo "Pre-fetching sherpa-onnx MD-Release for Windows CRT alignment (ADR-061)..."
-	@mkdir -p $(SHERPA_FETCH_DIR)
-	@bash scripts/dev-fetch-sherpa-cache.sh "$(SHERPA_FETCH_DIR)" "$(SHERPA_LIB_CACHE)"
-else
-	@echo "  ⬚ download-sherpa-onnx skipped (not Windows)"
-endif
-
 # ── Development ──────────────────────────────────────────────────────────────
-# On Windows, build-cli must see SHERPA_ONNX_LIB_DIR — so the prereq order is:
-# (1) download-sherpa-onnx writes cache file, (2) recipe exports the var and
-# invokes the actual builds explicitly.
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir download-nodejs download-sherpa-onnx download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
-	@sh -c 'export SHERPA_ONNX_LIB_DIR=$$(cat $(SHERPA_LIB_CACHE)); echo "Building with SHERPA_ONNX_LIB_DIR=$$SHERPA_ONNX_LIB_DIR"; "$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp'
+	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 	@"$(MAKE)" verify-bundled-assets
-	@bash scripts/dev-tauri-windows.sh $(SHERPA_LIB_CACHE)
+	@bash scripts/dev-tauri-windows.sh
 else
 dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }

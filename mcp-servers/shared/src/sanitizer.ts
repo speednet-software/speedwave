@@ -1,6 +1,4 @@
-// Mirrors the Rust SSOT (`crates/speedwave-runtime/src/log_sanitizer.rs`).
-// Keep rule list in sync — any new Rust rule needs a counterpart here so
-// secrets don't leak through TS worker stdout before the Rust drain runs.
+// Mirrors the Rust SSOT (`crates/speedwave-runtime/src/log_sanitizer.rs`). Keep rule list in sync.
 
 const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   [
@@ -9,12 +7,13 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   ],
   [/((?:\/Users\/|\/home\/|[A-Z]:\\Users\\))[^/\\\s]+/gi, '$1<user>'],
   [/(Set-Cookie:\s*)[^;\r\n]+/gi, '$1***REDACTED***'],
-  // Cookie request header: anchor at start-of-line/whitespace so `Set-Cookie:`
-  // does not double-match via `\b` on the `-C` boundary.
+  // Cookie request header anchored at start-of-line/whitespace to avoid Set-Cookie double-match.
   [/(^|\s)(Cookie:\s*)[^\r\n]+/gi, '$1$2***REDACTED***'],
   [/(Bearer\s+)\S+/gi, '$1***REDACTED***'],
   [/(Authorization:\s*)\S+(\s+\S+)?/gi, '$1***REDACTED***'],
   [/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '***REDACTED_JWT***'],
+  // Rotating-token formats (xoxe.xoxp-… / xoxe-1-…) ordered before xox[bpars]-.
+  [/xoxe[.-][A-Za-z0-9.-]+/g, '***REDACTED_SLACK_TOKEN***'],
   [/xox[bpars]-[A-Za-z0-9-]+/g, '***REDACTED_SLACK_TOKEN***'],
   [/ghp_[A-Za-z0-9]{36,}/g, '***REDACTED_GITHUB_TOKEN***'],
   [/ghs_[A-Za-z0-9]{36,}/g, '***REDACTED_GITHUB_TOKEN***'],

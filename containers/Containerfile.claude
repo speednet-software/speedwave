@@ -1,7 +1,7 @@
 # OCI Containerfile for Speedwave Claude container
 # Base: node:24-bookworm-slim (Debian)
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 
 # Security: container user is set via compose `user:` field to "1000:1000"
 # (unprivileged; containerd runs as root inside the VM on both supported
@@ -19,13 +19,16 @@ RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 # (layers are disposable) and eliminates the fsync bottleneck in nested virtualization
 # environments (WSL2/Hyper-V inside VMware). Installed files are byte-identical.
 RUN apt-get update -o Acquire::Retries=3 && \
-    apt-get install -y --no-install-recommends \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         -o Dpkg::Options::="--force-unsafe-io" \
         bash \
         ca-certificates \
         curl \
         git \
         ncurses-term \
+        python3 \
+        python3-pip \
+        python3-venv \
         tzdata \
         wget \
     && rm -rf /var/lib/apt/lists/*
@@ -62,16 +65,16 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     rm -f /home/speedwave/.local/bin/claude && \
     ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
 
-# OSC 52 clipboard wrappers — five symlinks redirect to one script emitting
-# the OSC 52 escape sequence. Claude Code's "press c to copy URL" probes for
-# pbcopy/xclip/xsel/wl-copy/clip.exe and pipes the URL through whichever it
-# finds. See ADR-052.
+# OSC 52 clipboard wrappers — six symlinks redirect to one script. Claude Code
+# copies via wl-copy/xclip/xsel (probe gated on WAYLAND_DISPLAY, injected by
+# defaults.rs::base_env) or powershell.exe on Windows hosts. See ADR-052.
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/xclip && \
     ln -s osc52-copy.sh /usr/local/bin/xsel && \
     ln -s osc52-copy.sh /usr/local/bin/wl-copy && \
-    ln -s osc52-copy.sh /usr/local/bin/clip.exe
+    ln -s osc52-copy.sh /usr/local/bin/clip.exe && \
+    ln -s osc52-copy.sh /usr/local/bin/powershell.exe
 
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh

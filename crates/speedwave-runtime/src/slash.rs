@@ -1,15 +1,5 @@
-//! Slash command discovery for Claude Code.
-//!
-//! Runs `claude -p --verbose --output-format=stream-json --max-turns 1 -- /`
-//! inside the project's Claude container and parses the first `system/init`
-//! line to extract the authoritative list of slash commands, plugins, and
-//! agents available in that session. Falls back to a hardcoded built-in list
-//! when discovery times out or the container is unavailable.
-//!
-//! Discovery is cached per project (10-minute staleness cap) because running
-//! `claude -p` costs a live API call (~$0.01–$0.25 per invocation). Callers
-//! should invalidate the cache explicitly when `.claude/` changes or a plugin
-//! is installed / removed.
+//! Slash command discovery: parses the `system/init` line from `claude -p`
+//! for commands, plugins, and agents (cached per project, hardcoded fallback).
 
 use crate::consts;
 use serde::{Deserialize, Serialize};
@@ -24,9 +14,8 @@ use std::time::{Duration, Instant};
 /// before giving up and returning the hardcoded fallback.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a cached discovery result remains valid before we re-run
-/// discovery on the next call. Claude Code installs change rarely; 10
-/// minutes is the sweet spot between freshness and cost.
+/// How long a cached discovery result stays valid before re-running discovery.
+/// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
 /// Polling interval while waiting for the init line.
@@ -38,8 +27,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub enum DiscoverySource {
     /// Discovered from the `system/init` event emitted by `claude -p`.
     Init,
-    /// Returned the hardcoded fallback list because discovery timed out
-    /// or the container was unavailable.
+    /// Hardcoded fallback list: discovery timed out or the container was down.
     Fallback,
 }
 
@@ -86,10 +74,7 @@ pub struct SlashDiscovery {
     pub source: DiscoverySource,
 }
 
-/// Minimal container-enough project view for the discovery function.
-///
-/// Kept distinct from `config::ProjectUserEntry` so that callers can pass
-/// whatever they already have (e.g. a resolved `ProjectUserEntry`).
+/// Minimal project view for the discovery function.
 #[derive(Debug, Clone)]
 pub struct ProjectHandle {
     /// Project name as used in `speedwave_<name>_claude` container names.
@@ -108,17 +93,10 @@ impl ProjectHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
-/// Discovers the slash commands available in `project`'s active Claude
-/// session.
-///
-/// Returns a cached result when one is present and younger than
-/// [`CACHE_STALENESS`]; otherwise runs discovery and caches the result.
-/// Fallback results are cached too so that a stopped container does not
-/// trigger repeated 60-second timeouts on every keystroke.
+/// Discovers slash commands for `project`'s active Claude session. Returns a
+/// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
 pub fn discover_slash_commands(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -143,9 +121,8 @@ pub fn discover_slash_commands(
     Ok(discovery)
 }
 
-/// Invalidates the cached discovery for a single project. Call this when
-/// a plugin is installed / removed, when the active project changes, or
-/// when the user explicitly asks for a refresh.
+/// Invalidates the cached discovery for one project. Call on plugin
+/// install/remove, active-project change, or an explicit refresh.
 pub fn invalidate_cache(project_name: &str) {
     match cache().lock() {
         Ok(mut map) => {
@@ -164,17 +141,18 @@ pub fn invalidate_all_caches() {
     }
 }
 
-/// Surface a poisoned-mutex condition at `warn!` so the diagnostic trail
-/// is visible. The fallback (skip the cache update) is benign — the next
-/// caller re-runs discovery — but a silent `.ok()?` hides every panic in
-/// a worker thread that touched the cache.
+/// True when trimmed `text` is exactly `/` — the slash-menu trigger. SSOT for
+/// the "lone slash" rule (mirrored in TS composer `canSubmit`).
+pub fn is_bare_slash(text: &str) -> bool {
+    text.trim() == "/"
+}
+
+/// Logs a poisoned-mutex condition at `warn!`; the cache update is skipped.
 fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
 }
 
-// ---------------------------------------------------------------------------
 // Cache
-// ---------------------------------------------------------------------------
 
 /// Cache entry tracks when the discovery was stored so we can expire it.
 #[derive(Clone)]
@@ -220,9 +198,7 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Discovery (running claude -p and parsing the init event)
-// ---------------------------------------------------------------------------
 
 /// Raw payload extracted from the first `system/init` line emitted by
 /// `claude -p`.
@@ -297,10 +273,8 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
     })
 }
 
-/// Runs `claude -p --verbose --output-format=stream-json --max-turns 1 -- /`
-/// inside `container`, reads stdout line by line, and returns the first
-/// parsed `system/init` event. Kills the child as soon as that line is
-/// captured so we do not pay for a full turn.
+/// Runs `claude -p ... -- /` in `container` and returns the first parsed
+/// `system/init` event, killing the child once that line is captured.
 fn run_discovery(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
@@ -362,8 +336,7 @@ fn run_discovery(
         }
     }
 
-    // Always kill the child — even on success we do not want a lingering
-    // turn. Ignore kill errors (process may already have exited).
+    // Always kill the child; ignore kill errors (may already have exited).
     let _ = child.kill();
     let _ = child.wait();
 
@@ -381,9 +354,7 @@ fn run_discovery(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Enrichment and filtering
-// ---------------------------------------------------------------------------
 
 /// Frontmatter fields we care about. All fields are optional so missing or
 /// malformed frontmatter degrades gracefully.
@@ -415,16 +386,12 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
             &raw.plugins,
         );
 
-        // Promote Command -> Skill when the matching file lived under a
-        // skills/ directory. Plugin-prefixed entries keep SlashKind::Plugin
-        // (the badge already communicates the source).
+        // Promote Command -> Skill when the file lived under skills/.
         if matches!(origin, Some(FrontmatterOrigin::Skill)) && kind == SlashKind::Command {
             kind = SlashKind::Skill;
         }
 
-        // Skills with `user-invocable: false` are hidden. Note that
-        // `disable-model-invocation: true` is the *opposite* flag and MUST
-        // NOT hide the entry — vibe-kanban mixes these up, we do not.
+        // Hide on `user-invocable: false` only, never `disable-model-invocation`.
         if matches!(frontmatter.user_invocable, Some(false)) {
             continue;
         }
@@ -439,8 +406,7 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
     }
 
     for agent in raw.agents {
-        // Agents sometimes appear both as slash_commands and in `agents`
-        // (e.g. `/agent-name`). Avoid duplicates by key lookup.
+        // Skip agents already present as slash_commands.
         if commands.iter().any(|c| c.name == agent) {
             continue;
         }
@@ -472,9 +438,8 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Classifies a command name based on built-in list, plugin prefix, and
-/// `agents` presence. Default `Command` is the safest fallback; the UI
-/// renders `cmd` for it which matches Claude Code's own terminology.
+/// Classifies a command by built-in list, plugin prefix, and `agents`
+/// presence. Default `Command` is the safest fallback (UI renders `cmd`).
 fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
@@ -485,12 +450,7 @@ fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKi
     if is_builtin_name(name) {
         return SlashKind::Builtin;
     }
-    // Heuristic: if the on-disk file lives under `skills/`, treat it as
-    // a skill; otherwise Command. We don't have that info here, but the
-    // lookup function below records which directory matched — we refine
-    // the classification via a second pass below if needed. For the
-    // simple case (no frontmatter, no plugin prefix, not a known
-    // built-in, not an agent) `Command` is the correct default.
+    // Default; refined to Skill by enrich_and_filter when the file is under skills/.
     SlashKind::Command
 }
 
@@ -513,17 +473,8 @@ fn is_builtin_name(name: &str) -> bool {
     )
 }
 
-/// Searches, in priority order, for the on-disk frontmatter of a slash
-/// command and returns the first hit. Silently returns an empty
-/// frontmatter when nothing matches.
-///
-/// Priority: project `.claude/skills` → project `.claude/commands` →
-/// personal `~/.claude/skills` → personal `~/.claude/commands` →
-/// plugin-provided paths.
-///
-/// Returns the parsed frontmatter and a hint for whether the matched file
-/// lives under `skills/` (so the caller can promote `Command` → `Skill` in
-/// `classify_kind`) — `None` when no file matched.
+/// Returns the first on-disk frontmatter hit and its origin (`None` when no
+/// file matched). Priority: project skills/commands → personal → plugin paths.
 fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
@@ -549,10 +500,7 @@ fn lookup_frontmatter(
             }
         }
     }
-    // Fallback: scan every plugin path for a matching skill/command even
-    // when the command had no explicit plugin prefix (e.g. for plugins
-    // whose skills are exposed without namespacing). Skip plugins already
-    // scanned above to avoid duplicate file reads.
+    // Scan remaining plugin paths for unprefixed skills/commands.
     let already_scanned: Option<&str> = plugin;
     for plugin_entry in plugins {
         if Some(plugin_entry.name.as_str()) == already_scanned {
@@ -569,8 +517,7 @@ fn lookup_frontmatter(
                 if let Some(fm) = parse_frontmatter(&contents) {
                     return (fm, Some(origin));
                 }
-                // The file exists but has no parseable frontmatter — still a
-                // hit for kind classification purposes.
+                // File exists without parseable frontmatter — still a kind hit.
                 return (SlashFrontmatter::default(), Some(origin));
             }
             Err(err) => {
@@ -611,9 +558,8 @@ fn personal_claude_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude"))
 }
 
-/// Parses YAML frontmatter bounded by `---` delimiters at the top of the
-/// file. Returns `None` when there is no frontmatter block or the YAML
-/// is malformed.
+/// Parses YAML frontmatter bounded by `---` delimiters at the file top.
+/// Returns `None` when the block is absent or the YAML is malformed.
 fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     let trimmed = contents.trim_start_matches('\u{feff}');
     let mut lines = trimmed.lines();
@@ -632,9 +578,7 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // Fallback
-// ---------------------------------------------------------------------------
 
 fn fallback_discovery() -> SlashDiscovery {
     let names = [
@@ -670,23 +614,42 @@ fn fallback_description(name: &str) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
+
+    #[test]
+    fn is_bare_slash_matches_lone_slash_with_surrounding_whitespace() {
+        assert!(is_bare_slash("/"));
+        assert!(is_bare_slash("  /  "));
+        assert!(is_bare_slash("\n/\t"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_real_commands_and_text() {
+        // A real slash command and ordinary text are messages, not the trigger.
+        assert!(!is_bare_slash("/code-review"));
+        assert!(!is_bare_slash("/clear"));
+        assert!(!is_bare_slash("what is 2/3?"));
+        assert!(!is_bare_slash("hej"));
+    }
+
+    #[test]
+    fn is_bare_slash_rejects_empty() {
+        // Empty is blank, not the slash trigger — callers handle blank separately.
+        assert!(!is_bare_slash(""));
+        assert!(!is_bare_slash("   "));
+    }
 
     fn sample_init_json() -> String {
         serde_json::json!({
@@ -891,10 +854,7 @@ mod tests {
 
     #[test]
     fn enrich_prefers_project_skill_over_personal() {
-        // We can redirect personal_dir via HOME only if we first ensure the
-        // test does not run concurrently with others touching HOME. Instead,
-        // we verify priority by writing a project skill and checking we
-        // picked up its description.
+        // Verify priority via a project skill's description (no HOME redirect).
         let tmp = tempfile::tempdir().unwrap();
         let project_skill = tmp.path().join(".claude/skills/myskill");
         std::fs::create_dir_all(&project_skill).unwrap();
@@ -1002,8 +962,7 @@ mod tests {
         assert_eq!(first.source, DiscoverySource::Init);
         assert!(first.commands.iter().any(|c| c.name == "my-skill"));
 
-        // Switching to a failing runtime would normally return fallback,
-        // but the cached Init result must be returned instead.
+        // A failing runtime must still return the cached Init result.
         let (failing, _) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
@@ -1025,8 +984,7 @@ mod tests {
 
     #[test]
     fn personal_claude_dir_resolves_to_home() {
-        // The function just concatenates `HOME/.claude`; as long as HOME
-        // is set to a non-empty path the result is Some.
+        // Result is `HOME/.claude` whenever HOME resolves.
         let home = dirs::home_dir();
         let personal = personal_claude_dir();
         assert_eq!(home.map(|h| h.join(".claude")), personal);
@@ -1071,9 +1029,7 @@ mod tests {
 
     #[test]
     fn skills_origin_promotes_command_to_skill_kind() {
-        // A bare /tool name (no plugin prefix, not in agents/builtins) lands
-        // under the project's .claude/skills/<name>/SKILL.md — it must
-        // surface in the UI with kind=Skill, not the default kind=Command.
+        // A bare name under .claude/skills/ must surface as kind=Skill.
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let skill_dir = project.join(".claude/skills/tool");

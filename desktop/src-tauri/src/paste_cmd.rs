@@ -102,7 +102,7 @@ fn save_to_dir(project_dir: &Path, media_type: &str, bytes: &[u8]) -> Result<Sav
     let host_path = pastes_dir.join(&filename);
     std::fs::write(&host_path, bytes)
         .map_err(|e| format!("failed to write {}: {e}", host_path.display()))?;
-    crate::fs_perms::set_owner_only(&host_path)?;
+    speedwave_runtime::fs_perms::set_owner_only(&host_path)?;
 
     let container_path = format!("/workspace/{subdir}/{filename}");
     Ok(SavedPaste {

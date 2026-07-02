@@ -413,8 +413,6 @@ describe('transport', () => {
 
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
-      // Empty string is falsy, so Accept validation is skipped
-      // (same behavior as absent header)
       expect(res.status).not.toHaveBeenCalledWith(406);
     });
 
@@ -491,7 +489,6 @@ describe('transport', () => {
 
     it('handles non-Error thrown value from handler (String() branch in outer catch)', async () => {
       // Covers line 50 false branch: error instanceof Error ? ... : String(error)
-      // When the thrown value is not an Error instance
       const throwingHandler = {
         processRequest: vi.fn().mockRejectedValue('plain string thrown'),
       } as unknown as JSONRPCHandler;

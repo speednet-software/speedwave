@@ -5,67 +5,67 @@ import {
   OnInit,
   ViewChild,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
-import { Router } from '@angular/router';
+import { RouterLink } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
+import { LoggerService } from '../services/logger.service';
 import type { TranscriptSession } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
 import { SessionListComponent } from './session-list/session-list.component';
-import { ModelManagerComponent } from './model-manager/model-manager.component';
 
 /**
- * Meeting transcription tab — opt-in (the empty-state links to Settings until
- * the user toggles it on). When enabled: left pane = recordings + model
- * manager; right pane = recording controls + the live transcript. Audio is
- * transcribed locally; model downloads and "Send to Claude" use the network —
- * the banner says so.
+ * Meeting transcription tab (beta-gated by the route guard). Left pane =
+ * recordings list; right pane = recording controls + the live transcript. Audio
+ * is transcribed locally; the speech model is downloaded in Settings. "Send to
+ * Claude" uses the network — the banner says so. When no model is downloaded
+ * yet, a gate (like the Claude auth gate) points the user to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',
   standalone: true,
-  imports: [
-    RecordingControlsComponent,
-    LiveTranscriptComponent,
-    SessionListComponent,
-    ModelManagerComponent,
-  ],
+  imports: [RouterLink, RecordingControlsComponent, LiveTranscriptComponent, SessionListComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
-      <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-        <div>
-          <h1 class="text-lg font-semibold">Meeting transcription</h1>
-          <p class="text-sm text-[var(--ink-mute)]">
-            Audio is transcribed locally on this machine. Model downloads and "Send to Claude" use
-            the network.
-          </p>
-          <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
-            Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
-            spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
-          </p>
-        </div>
-      </header>
+      @if (modelReady() === false) {
+        <section
+          class="flex flex-1 flex-col items-center justify-center bg-[var(--bg)] p-8"
+          data-testid="model-required-gate"
+        >
+          <div class="mono max-w-md text-center text-[12.5px] text-[var(--ink-dim)]">
+            <p class="text-[var(--amber)]">⬇ model required</p>
+            <p class="mt-2">
+              Download the local speech-recognition model to start transcribing. It runs entirely on
+              this machine.
+            </p>
+            <a
+              routerLink="/settings"
+              fragment="section-transcription"
+              class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
+              data-testid="download-model-link"
+              >download model in settings →</a
+            >
+          </div>
+        </section>
+      } @else {
+        <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
+          <div>
+            <h1 class="text-lg font-semibold">Meeting transcription</h1>
+            <p class="text-sm text-[var(--ink-mute)]">
+              Audio is transcribed locally on this machine. "Send to Claude" uses the network.
+            </p>
+            <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
+              Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
+              spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
+            </p>
+          </div>
+        </header>
 
-      @if (enabled() === false) {
-        <div class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-          <p class="max-w-md text-sm text-[var(--ink-mute)]">
-            Meeting transcription is off. Enable it in Settings to record audio from this machine,
-            transcribe it locally, and optionally send the transcript to Claude.
-          </p>
-          <button
-            type="button"
-            class="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--bg)] hover:opacity-90"
-            data-testid="enable-in-settings"
-            (click)="goToSettings()"
-          >
-            Enable in Settings →
-          </button>
-        </div>
-      } @else if (enabled() === true) {
         @if (error()) {
           <div
             class="mx-6 mt-3 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
@@ -88,7 +88,6 @@ import { ModelManagerComponent } from './model-manager/model-manager.component';
         <div class="flex flex-1 gap-4 overflow-hidden p-6">
           <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
-            <app-model-manager (errorOccurred)="onError($event)" (changed)="onModelsChanged()" />
           </aside>
           <main class="flex flex-1 flex-col gap-4 overflow-hidden">
             <app-recording-controls
@@ -111,16 +110,14 @@ import { ModelManagerComponent } from './model-manager/model-manager.component';
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Left pane's recordings list (refreshed after start/stop/delete). */
   @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
-  /** Recording controls (re-checked when the model list changes). */
-  @ViewChild(RecordingControlsComponent) private recordingControls?: RecordingControlsComponent;
 
-  /** `null` while loading, `true`/`false` once the toggle is known. */
-  readonly enabled = signal<boolean | null>(null);
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
+  /** `null` while loading, `true` if the model is downloaded, `false` shows the gate. */
+  readonly modelReady = signal<boolean | null>(null);
 
   private readonly transcription = inject(TranscriptionService);
-  private readonly router = inject(Router);
+  private readonly log = inject(LoggerService);
 
   /** The active session (live snapshot from the service). */
   readonly active = computed<TranscriptSession | null>(() => this.transcription.active());
@@ -130,24 +127,52 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
   });
 
-  /** Loads the opt-in toggle on first paint. */
-  async ngOnInit(): Promise<void> {
-    try {
-      this.enabled.set(await this.transcription.isEnabled());
-    } catch (err) {
-      console.warn('meeting-transcription init failed:', err);
-      this.enabled.set(false);
-    }
+  /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
+  constructor() {
+    let last: string | undefined;
+    effect(() => {
+      const state = this.transcription.active()?.status.state;
+      if (state && state !== last && (state === 'done' || state === 'failed')) {
+        void this.sessionList?.refresh();
+      }
+      last = state;
+    });
   }
 
-  /** Detaches the live-stream listener when the tab is destroyed. */
+  /** Re-checks model availability when the window/tab regains focus. */
+  private readonly onActivate = (): void => {
+    void this.refreshModelReady();
+  };
+
+  /** Checks model availability on first paint and re-checks on re-activation. */
+  async ngOnInit(): Promise<void> {
+    await this.refreshModelReady();
+    // Clear the gate after a download in Settings without recreating the tab.
+    window.addEventListener('focus', this.onActivate);
+    document.addEventListener('visibilitychange', this.onActivate);
+  }
+
+  /** Detaches the live-stream listener and removes activation listeners. */
   async ngOnDestroy(): Promise<void> {
+    window.removeEventListener('focus', this.onActivate);
+    document.removeEventListener('visibilitychange', this.onActivate);
     await this.transcription.detach();
   }
 
-  /** Navigates to Settings (where the opt-in toggle lives). */
-  goToSettings(): void {
-    void this.router.navigateByUrl('/settings');
+  /**
+   * Lifts the gate when any Whisper model is downloaded — the same predicate
+   * recording-controls uses for `hasModel()`. Fails open on a read error.
+   */
+  private async refreshModelReady(): Promise<void> {
+    if (document.visibilityState === 'hidden') return;
+    try {
+      const ack = await this.transcription.listModels();
+      this.modelReady.set(ack.whisper.some((m) => m.downloaded));
+    } catch (err) {
+      // Don't trap the user behind the gate on a transient read error.
+      this.log.warn(`model-availability check failed: ${String(err)}`);
+      this.modelReady.set(true);
+    }
   }
 
   /**
@@ -172,8 +197,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * After recording starts: the controls already subscribed via `startRecording`,
-   * so we just clear the banner and refresh the recordings list.
+   * After recording starts: clear the banner and refresh the recordings list.
    * @param _sessionId - the new session id (unused — the controls own the stream).
    */
   onStarted(_sessionId: string): void {
@@ -189,18 +213,13 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     void this.sessionList?.refresh();
   }
 
-  /** The model list changed — re-check whether recording is now possible. */
-  onModelsChanged(): void {
-    void this.recordingControls?.refreshModelAvailability();
-  }
-
   /** Deep-links to the macOS Microphone / Audio Recording privacy panes. */
   async openMicrophoneSettings(): Promise<void> {
     try {
       await this.transcription.openMicrophonePrivacyPane();
       await this.transcription.openAudioCapturePrivacyPane();
     } catch (err) {
-      console.warn('open privacy pane failed:', err);
+      this.log.warn(`open privacy pane failed: ${String(err)}`);
     }
   }
 }

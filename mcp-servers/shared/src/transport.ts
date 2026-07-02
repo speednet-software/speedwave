@@ -71,7 +71,7 @@ async function handleMCPPostInner(
   const body = req.body;
   const wantsSSE = req.headers.accept?.includes('text/event-stream') ?? false;
 
-  // Validate MCP-Protocol-Version header (skip for initialize — it negotiates the version)
+  // Validate MCP-Protocol-Version header
   const protocolVersion = req.get('mcp-protocol-version');
   const isInitialize =
     !Array.isArray(body) &&
@@ -90,8 +90,7 @@ async function handleMCPPostInner(
     return;
   }
 
-  // Validate Accept header — client must accept both application/json and
-  // text/event-stream per MCP spec (skip for initialize and absent header)
+  // Validate Accept header per MCP spec
   const acceptHeader = req.headers.accept;
   if (acceptHeader && !isInitialize) {
     const acceptsAll = acceptHeader.includes('*/*');

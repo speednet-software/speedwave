@@ -2,17 +2,19 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
+  ElementRef,
   OnDestroy,
   OnInit,
   inject,
 } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { BetaService } from '../services/beta.service';
-import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
@@ -20,11 +22,7 @@ import { UpdateSectionComponent } from './update-section/update-section.componen
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
 
-/**
- * One theme card in the Appearance accent grid. The preview swatch reads the
- * live `--accent` value per theme via `data-theme`, so it stays correct in
- * both light and dark mode without duplicating CSS hex values here.
- */
+/** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
   /** Theme identifier — drives `ThemeService.setTheme()` and the active-state binding. */
   readonly id: ThemeId;
@@ -34,9 +32,9 @@ interface ThemeCard {
 
 /** Cards rendered in the Appearance section grid — order matches the mockup. */
 const THEME_CARDS: readonly ThemeCard[] = [
+  { id: 'ember', label: 'ember' },
   { id: 'crimson', label: 'crimson' },
   { id: 'mint', label: 'mint' },
-  { id: 'amber', label: 'amber' },
   { id: 'iris', label: 'iris' },
   { id: 'cyan', label: 'cyan' },
   { id: 'sand', label: 'sand' },
@@ -69,7 +67,6 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
   imports: [
     RouterLink,
     LlmProviderComponent,
-    AuthSectionComponent,
     AdvancedSectionComponent,
     TranscriptionSectionComponent,
     UpdateSectionComponent,
@@ -116,17 +113,14 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         }
 
         <app-llm-provider
+          [activeProject]="activeProject"
           (providerChange)="llmProvider = $event"
           (errorOccurred)="error = $event"
         />
 
-        <app-auth-section
-          [activeProject]="activeProject"
-          [llmProvider]="llmProvider"
-          (errorOccurred)="error = $event"
-        />
-
-        <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
+        @if (beta.enabled()) {
+          <app-transcription-section (errorOccurred)="error = $event" />
+        }
 
         <section
           id="section-appearance"
@@ -191,9 +185,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           </div>
         </section>
 
-        @if (beta.enabled()) {
-          <app-transcription-section (errorOccurred)="error = $event" />
-        }
+        <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 
         <app-advanced-section
           (errorOccurred)="error = $event"
@@ -220,10 +212,15 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly beta = inject(BetaService);
 
   private router = inject(Router);
+  private route = inject(ActivatedRoute);
+  private host = inject(ElementRef<HTMLElement>);
+  private destroyRef = inject(DestroyRef);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
+  /** Pending scroll-retry timer; cleared on re-entry and on destroy. */
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Loads project information on component initialization. */
   ngOnInit(): void {
@@ -232,13 +229,50 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.unsubProjectReady = this.projectState.onProjectReady(() => {
       this.loadProjectInfo();
     });
+
+    // Smooth-scroll to the URL fragment (native anchorScrolling can't reach our
+    // nested scroll container). See ADR-056.
+    this.route.fragment
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((fragment) => this.scrollToFragment(fragment));
   }
 
-  /** Unsubscribes from the project ready listener. */
+  /**
+   * Smooth-scrolls the section with `id` into view, retrying while a deferred
+   * (beta-gated) section mounts.
+   * @param id - the section anchor id; null/empty does nothing.
+   * @param attempt - internal retry counter.
+   */
+  private scrollToFragment(id: string | null, attempt = 0): void {
+    // Cancel any retry from a previous fragment so it can't fire post-destroy.
+    if (this.scrollTimer !== null) {
+      clearTimeout(this.scrollTimer);
+      this.scrollTimer = null;
+    }
+    if (!id) return;
+    // CSS.escape guards against a fragment with CSS-special chars throwing
+    // (guarded — not present in every test environment).
+    const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id;
+    const el = this.host.nativeElement.querySelector(`#${safeId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    // Give up after ~1s of retries — the section never mounted (cosmetic).
+    if (attempt < 20) {
+      this.scrollTimer = setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
+    }
+  }
+
+  /** Unsubscribes from the project ready listener and cancels any scroll retry. */
   ngOnDestroy(): void {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
+    }
+    if (this.scrollTimer !== null) {
+      clearTimeout(this.scrollTimer);
+      this.scrollTimer = null;
     }
   }
 

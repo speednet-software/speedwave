@@ -76,6 +76,26 @@ describe('ProgressStepsComponent', () => {
     expect(pills[2].textContent.trim()).toBe('error');
   });
 
+  it('sizes the active-step spinner above the host default so its stroke is not razor-thin', () => {
+    // A bare <app-spin-icon> renders at the 14px host default, whose ~1.75px
+    // stroke shimmers on WKWebView; the active circle pins it to 16px (h-4 w-4).
+    host.steps.set([makeStep('a', 'active')]);
+    fixture.detectChanges();
+    const spinner = fixture.nativeElement.querySelector('app-spin-icon');
+    expect(spinner).toBeTruthy();
+    expect(spinner.classList.contains('h-4')).toBe(true);
+    expect(spinner.classList.contains('w-4')).toBe(true);
+  });
+
+  it('colors the active-step circle with the brand accent to match primary buttons', () => {
+    // The spinner stroke is currentColor, inherited from the circle's color.
+    host.steps.set([makeStep('a', 'active')]);
+    fixture.detectChanges();
+    const circle = fixture.nativeElement.querySelector('app-spin-icon').closest('div');
+    expect(circle.style.color).toBe('var(--accent)');
+    expect(circle.style.borderColor).toBe('var(--accent-dim)');
+  });
+
   it('renders the progress bar only for active steps with progress set', () => {
     host.steps.set([
       makeStep('a', 'active'), // no progress → no bar

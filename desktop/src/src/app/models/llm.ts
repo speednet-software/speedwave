@@ -1,7 +1,6 @@
 /**
  * Frontend mirror of `speedwave_runtime::defaults::AnthropicModelInfo`,
- * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT
- * — bumping a model means editing one const in `defaults.rs`.
+ * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT.
  */
 export interface AnthropicModel {
   /** API alias passed to Claude Code via `ANTHROPIC_MODEL` (e.g. `claude-opus-4-7`). */
@@ -12,25 +11,16 @@ export interface AnthropicModel {
   context_tokens: number;
   /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
+  /** Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint. */
+  premium: boolean;
 }
 
-/**
- * Default fallback context window. Used only when a chat session reports a
- * model the SSOT doesn't yet know about (e.g. running an old snapshot id
- * still accepted by the API). Aligns with the smallest supported window so
- * the percentage bar errs on the side of "your context is fuller than it
- * looks" rather than the other way round.
- */
+/** Default fallback context window for a model the SSOT doesn't know. */
 export const DEFAULT_CONTEXT_TOKENS = 200_000;
 
 /**
  * Frontend mirror of the Rust `DiscoveredModel` DTO returned by
- * `discover_llm_models` (Tauri command). Discovery talks to the local
- * provider's own API (Ollama `/api/tags` + `/api/show`, LM Studio
- * `/api/v0/models`, llama.cpp `/v1/models`) and surfaces the context
- * window directly from the server when it advertises one; otherwise
- * `context_tokens` stays `undefined` and the chat fallback chain takes
- * over.
+ * `discover_llm_models` (Tauri command).
  */
 export interface DiscoveredModel {
   /** Model id as advertised by the local server (e.g. `llama3.3`, `qwen2.5-coder`). */
@@ -39,35 +29,37 @@ export interface DiscoveredModel {
   context_tokens?: number;
 }
 
-/**
- * Result of a `provider="local"` discovery probe. Pairs the model list with
- * a chat-endpoint sanity flag — the UI shows a warning when the server has
- * `/v1/models` but does NOT implement `/v1/messages` (Anthropic Messages).
- * `messages_endpoint_ok === undefined` means "could not determine" (timeout
- * or transport error); treat as "unknown", not "failure".
- */
+/** Result of a `provider="local"` discovery probe. */
 export interface DiscoverResult {
   models: DiscoveredModel[];
   messages_endpoint_ok?: boolean;
 }
 
+/** Fixed provider cards in the Settings section (ADR-073): anthropic + local. */
+export type ProviderCardId = 'anthropic' | 'local';
+
+/** Ids of the permanent remote provider rows rendered under the cards. */
+export type ExtraProviderId = 'openrouter';
+
+/** Radio target of the provider section: a card or a remote row. */
+export type ProviderTarget = ProviderCardId | ExtraProviderId;
+
+/** Legacy local-provider ids still accepted from persisted configs. */
+export type LegacyLocalProviderId = 'ollama' | 'lmstudio' | 'llamacpp';
+
+/** Value domain of the flat `provider` field: targets + unmigrated legacy ids. */
+export type FlatProviderId = ProviderTarget | LegacyLocalProviderId;
+
 /** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */
 export const LOCAL_PROVIDERS: ReadonlyArray<string> = ['ollama', 'lmstudio', 'llamacpp', 'local'];
 
-/**
- * Legacy local-provider names auto-migrated to `local` on Save. Derived
- * from {@link LOCAL_PROVIDERS} so a future rename of the canonical name
- * stays consistent without touching two arrays.
- */
+/** Legacy local-provider names auto-migrated to `local` on Save. */
 export const LEGACY_LOCAL_PROVIDERS: ReadonlyArray<string> = LOCAL_PROVIDERS.filter(
   (p) => p !== 'local'
 );
 
 /**
- * Mirror of `speedwave_runtime::config::is_local_provider`. Frontend uses
- * this to: (a) render the unified "Local" radio card for legacy configs,
- * (b) decide whether the honest context fallback applies (no `DEFAULT_CONTEXT_TOKENS`
- * fallback for local providers — ADR-041 "never guess").
+ * Mirror of `speedwave_runtime::config::is_local_provider`.
  * @param provider - Provider id from `get_llm_config().provider` (may be null).
  */
 export function isLocalProvider(provider: string | null | undefined): boolean {
@@ -75,12 +67,7 @@ export function isLocalProvider(provider: string | null | undefined): boolean {
 }
 
 /**
- * Frontend mirror of the Rust `LlmConfigResponse` returned by the
- * `get_llm_config` Tauri command (`desktop/src-tauri/src/types.rs`). Fields
- * come from `claude.llm` (`speedwave_runtime::config::LlmConfig`) plus the
- * computed `default_base_url`. One-way: backend → frontend; the Rust struct
- * does not derive `Deserialize`.
- *
+ * Mirror of Rust `LlmConfigResponse` (`get_llm_config` Tauri command).
  * Keep in sync with `LlmConfig` in `crates/speedwave-runtime/src/config.rs`.
  */
 export interface LlmConfigResponse {
@@ -88,17 +75,113 @@ export interface LlmConfigResponse {
   model: string | null;
   base_url: string | null;
   default_base_url: string | null;
-  /**
-   * Persisted context window for the active model (in tokens). For Anthropic
-   * the frontend sets this from the SSOT catalog; for local providers it
-   * comes from the discovery probe. The chat footer falls back to this
-   * value when the stream-level `context_window_size` is missing.
-   */
+  /** Persisted context window for the active model (in tokens). */
   context_tokens?: number | null;
   /** True when an api_key file exists for this project. */
   has_api_key?: boolean;
   /** True when a custom_headers file exists for this project. */
   has_custom_headers?: boolean;
+  /** v2 provider list (ADR-073); absent on never-migrated legacy configs. */
+  providers?: LlmProviderEntry[];
+  /** v2 active provider+model selection (ADR-073). */
+  active?: LlmActive | null;
+  /** ADR-073 kill-switch; absent = enabled. */
+  proxy_enabled?: boolean | null;
+}
+
+/**
+ * Provider kind discriminator (ADR-073). Mirror of Rust `LlmProviderKind`;
+ * drift guarded by `llm_provider_kind_matches_ts_union`.
+ */
+export type LlmProviderKind = 'anthropic_oauth' | 'anthropic_api_key' | 'local' | 'open_router';
+
+/**
+ * One configured LLM provider (ADR-073 v2). Mirror of Rust `LlmProviderEntry`;
+ * key VALUES never reach the frontend, only `has_api_key`.
+ */
+export interface LlmProviderEntry {
+  /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
+  id: string;
+  kind: LlmProviderKind;
+  base_url?: string | null;
+  /** Last model used with this provider — restored on re-activation. */
+  model?: string | null;
+  has_api_key?: boolean;
+  context_tokens?: number | null;
+  has_custom_headers?: boolean;
+}
+
+/** Active provider+model selection (ADR-073). Mirror of Rust `LlmActive`. */
+export interface LlmActive {
+  provider_id: string;
+  model?: string | null;
+}
+
+/**
+ * One aggregate bucket of the usage dashboard. Mirror of the Rust
+ * `speedwave_runtime::usage::UsageBucket` returned by `get_llm_usage`.
+ */
+export interface UsageBucket {
+  requests: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** Summed cost over priced requests; `null` when none priced (never 0). */
+  cost_usd: number | null;
+  /** Throughput numerator: completion tokens from successful timed records. */
+  throughput_completion_tokens: number;
+  /** Throughput denominator: decode-phase ms (latency − ttft) of timed records. */
+  decode_latency_ms_sum: number;
+}
+
+/** Usage dashboard payload from `get_llm_usage` (ADR-073). */
+export interface UsageSummary {
+  /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
+  days: Record<string, Record<string, UsageBucket>>;
+  /** `YYYY-MM-DD` → requests per local hour (24 entries) — heatmap input. */
+  hours: Record<string, number[]>;
+  totals: UsageBucket;
+  /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
+  skipped_lines: number;
+}
+
+/**
+ * Cost provenance wire strings — mirror of Rust `usage_cost::CostSource`
+ * (snake_case serde). Kept in sync by `cost_source_ts_union_matches_rust`.
+ */
+export type CostSourceKind =
+  | 'catalog'
+  | 'subscription'
+  | 'free'
+  | 'actual'
+  | 'unknown'
+  | 'deferred'
+  | 'failed';
+
+/**
+ * Cost source that won't change on re-enrichment (mirror of Rust
+ * `CostSource::is_terminal`); `'deferred'` and `''` are non-terminal.
+ * @param src - Cost provenance string from the sidecar.
+ */
+export function isTerminalCostSource(src: CostSourceKind | ''): boolean {
+  return src !== 'deferred' && src !== '';
+}
+
+/**
+ * Final usage for one response from `get_usage_for_response` — the proxy SSOT
+ * used to reconcile the chat footer. Mirror of Rust `usage::ResponseUsage`.
+ */
+export interface ResponseUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** `null` when unpriced (subscription/unknown). */
+  cost_usd: number | null;
+  /** Provenance; `''` when no sidecar entry yet. */
+  cost_source: CostSourceKind | '';
 }
 
 /**

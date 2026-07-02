@@ -1,114 +1,58 @@
 # ADR-011: User Configuration Passed to Claude Code
 
+> **Status:** Accepted
+> **Context:** Different projects need different Claude Code settings (model, custom env vars, alternative LLM provider) without editing internal files.
+
 ## Decision
 
-Users can configure per-project environment variables and LLM provider via `~/.speedwave/config.json`. These are injected into the Claude Code process at startup.
+Users configure per-project environment variables and an LLM provider via `~/.speedwave/config.json` (personal) and an optional `<project>/.speedwave.json` (team, committed to git). These are resolved through a three-level merge and injected into the Claude Code process at startup. Both CLI and Desktop read the same resolution path.
 
-## Rationale
+## Why
 
-Different projects require different Claude Code settings (model selection, custom environment variables, alternative LLM providers). Exposing this as simple JSON in the project config allows both CLI and Desktop users to configure Claude Code without editing internal files.
+- Plain JSON config keeps Claude Code tunable for both CLI and Desktop users without touching internal files.
+- Splitting repo config (shared via git) from user config (personal, highest priority) lets a team ship a default model while individuals override locally.
+- SSRF prevention: `provider` and `base_url` are accepted only from user config, never from repo `.speedwave.json` (see ADR-040).
 
-## Config Structure
+## Config shape
 
-### User config (`~/.speedwave/config.json`)
+The two files carry a `claude` block with these fields (the `ClaudeOverrides` / `LlmConfig` structs in `config.rs`):
 
-```json
-{
-  "projects": [
-    {
-      "name": "acme-corp",
-      "dir": "/Users/user/projects/acme-corp",
-      "claude": {
-        "env": {
-          "ANTHROPIC_MODEL": "claude-opus-4-6",
-          "CUSTOM_VAR": "value"
-        },
-        "llm": {
-          "provider": "anthropic"
-        }
-      }
-    }
-  ],
-  "active_project": "acme-corp",
-  "selected_ide": {
-    "ide_name": "VS Code",
-    "port": 52698
-  }
-}
-```
+- `claude.env` — `Option<HashMap<String,String>>`, env vars injected into the Claude Code process.
+- `claude.llm.provider` — `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`. Repo config cannot set it.
+- `claude.llm.model` — model id. For every provider it is injected as `ANTHROPIC_MODEL` at compose-render time by `compose::apply_llm_config_in` (no `--model` CLI flag is added); when set it overwrites any `claude.env.ANTHROPIC_MODEL` placed earlier. Repo config may suggest only `model`.
+- `claude.llm.base_url` — overrides the provider default; user config only (SSRF, ADR-040).
+- `claude.llm.context_tokens` — persisted context window in tokens, used by the chat footer's `used / max` ratio; zero is rejected at save time (sourcing in ADR-041).
 
-### Repo config (`<project>/.speedwave.json`, optional)
+Global (top-level) fields: `active_project` (Desktop project switcher) and `selected_ide` (persisted IDE Bridge upstream — ADR-007).
 
-```json
-{
-  "claude": {
-    "env": {
-      "ANTHROPIC_MODEL": "claude-sonnet-4-6"
-    },
-    "llm": {
-      "provider": "ollama",
-      "model": "llama3.3",
-      "base_url": "http://host.docker.internal:11434"
-    }
-  }
-}
-```
+`ANTHROPIC_MODEL` is not set by defaults; users populate it via `claude.env.ANTHROPIC_MODEL` (any provider) or via `claude.llm.model` for the `anthropic` provider (the runtime injects it during compose render, where the LLM-derived value is written after `claude.env` and wins by key).
 
-### Fields
+## Default flags
 
-#### Per-project Claude overrides (`claude.*`)
+`resolve_project_config()` always attaches `defaults::DEFAULT_FLAGS` to the Claude Code process. The constant holds four flags across six slice entries (two flags — `--mcp-config` and `--thinking-display` — each carry a value argument):
 
-| Field                       | Rust type                         | Description                                                                                                                                                                                                                                                 |
-| --------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude.env`                | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                                                                                                                                             |
-| `claude.llm`                | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                                                                                                                                              |
-| `claude.llm.provider`       | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`                                                                                                                                                                                                     |
-| `claude.llm.model`          | `Option<String>`                  | Model id. For local providers passed via `--model`. For `anthropic` also injected as `ANTHROPIC_MODEL` (compose layer; `claude.env.ANTHROPIC_MODEL` still wins on conflict). Sanitised before embedding in the local-LLM identity prompt — see ADR-040.     |
-| `claude.llm.base_url`       | `Option<String>`                  | Optional; overrides the provider default port. **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040).                                                                                                                        |
-| `claude.llm.context_tokens` | `Option<u32>`                     | Persisted context window in tokens — populated by Settings (Anthropic SSOT lookup or local discovery probe). Consumed by the chat footer's `used / max` ratio before any stream-level value lands. Zero is rejected at save time. See ADR-041 for sourcing. |
+- `--dangerously-skip-permissions` — safe here because Claude runs in an isolated container with `cap_drop: ALL`, read-only filesystem, unprivileged UID 1000, zero tokens, and an isolated per-project network (see ADR-009). `IS_SANDBOX=1` in `base_env()` pre-empts the root-user gate.
+- `--mcp-config <path>` — points Claude Code at the generated MCP hub config (`MCP_CONFIG_PATH` = `/home/speedwave/.claude/mcp-config.json`, created by `containers/entrypoint.sh`).
+- `--strict-mcp-config` — ignores any `.mcp.json` in the workspace; only the generated config is used.
+- `--thinking-display summarized` — forces thinking content to be returned in populated text form instead of empty signature-only blocks, so the chat UI sees the model's reasoning.
 
-#### Global config fields
+## Config resolution
 
-| Field            | Rust type             | Description                                                     |
-| ---------------- | --------------------- | --------------------------------------------------------------- |
-| `active_project` | `Option<String>`      | Name of the currently active project (Desktop project switcher) |
-| `selected_ide`   | `Option<SelectedIde>` | Persisted IDE Bridge upstream — see ADR-007                     |
+Three-level merge, last-writer-wins per key:
 
-### `claude.settings` — not yet implemented
+1. Defaults — telemetry disabled, autoupdater disabled, sandbox flag enabled (`defaults::base_env()`).
+2. Repo `.speedwave.json` — shared via git; `provider`/`base_url` ignored.
+3. User `~/.speedwave/config.json` — personal, highest priority.
 
-The `ClaudeOverrides` struct accepts a `settings: Option<serde_json::Value>` field[^2], but `resolve_claude_config()` does not propagate it to `ResolvedClaudeConfig`. The field is parsed and silently dropped. This is a known gap — if needed, the resolver must be extended to pass `settings` through to the Claude process.
+The merge runs in `resolve_project_config()` (public entry point `resolve_claude_config()` returns its `.0`). Env vars merge via `merge_env` (`HashMap::insert`, last writer wins). LLM fields merge per-field, replacing only non-`None` overlay values: `merge_llm` for user config, `merge_llm_repo` for repo config (the latter accepts only `model`).
 
-## Default Flags
+## Known gap
 
-`resolve_claude_config()` always includes these CLI flags for the Claude Code process (`defaults::DEFAULT_FLAGS`)[^1]:
+`ClaudeOverrides` accepts a `settings: Option<serde_json::Value>` field, but the resolver does not propagate it into `ResolvedClaudeConfig` (which carries only `env`, `flags`, `llm`). The field is parsed and silently dropped; if needed, the resolver must be extended to pass it through.
 
-| Flag                             | Purpose                                                                                                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--dangerously-skip-permissions` | Safe in this context: Claude runs in an isolated container with `cap_drop: ALL`, read-only filesystem, unprivileged user, zero tokens, and isolated network — see ADR-009 |
-| `--mcp-config <path>`            | Points Claude Code to the generated MCP hub config (`/home/speedwave/.claude/mcp-config.json`, created by `entrypoint.sh`)                                                |
-| `--strict-mcp-config`            | Ignores any `.mcp.json` in the workspace — only the generated config is used                                                                                              |
+## Where it lives in code
 
-## Config Resolution
-
-Three-level merge with last-writer-wins per key:
-
-1. **Defaults** (`speedwave-runtime/src/defaults.rs`) — telemetry disabled, autoupdater disabled, sandbox flag enabled[^3]
-2. **Repo config** (`.speedwave.json` in project root) — shared across team members via git
-3. **User config** (`~/.speedwave/config.json`) — personal overrides, highest priority
-
-```
-defaults → repo .speedwave.json → user ~/.speedwave/config.json
-                                        (wins)
-```
-
-Resolution logic: `resolve_claude_config()` in `crates/speedwave-runtime/src/config.rs`[^4]. Environment variables are merged with `HashMap::insert` (last-writer-wins). LLM config fields are merged individually — only non-`None` values from the overlay replace base values.
-
----
-
-[^1]: [Claude Code CLI reference — environment variables and flags](https://docs.anthropic.com/en/docs/claude-code/cli-usage)
-
-[^2]: `serde_json::Value` allows arbitrary JSON — see [serde_json::Value docs](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
-
-[^3]: As of fix #301, `ANTHROPIC_MODEL` is no longer set by `defaults::base_env()`. Users who want a specific Claude model can populate it from one of two paths: (a) `claude.env.ANTHROPIC_MODEL` in `.speedwave.json` or `~/.speedwave/config.json` (the v1 path; works for any provider), or (b) `claude.llm.model` for the `anthropic` provider, which the runtime injects into `ANTHROPIC_MODEL` at compose-render time. When both are set, `claude.llm.model` wins: `compose::render_compose` calls `inject_claude_env(...)` for `claude.env` first, then `apply_llm_config(...)` runs `inject_claude_env` again with the LLM-derived value, and the second write replaces the first by key. Whitespace/empty values fall through to Claude Code's built-in default.
-
-[^4]: Config merge implementation — `crates/speedwave-runtime/src/config.rs:55-86`
+- Config structs — `crates/speedwave-runtime/src/config.rs` (`LlmConfig`, `ClaudeOverrides`, `ResolvedClaudeConfig`).
+- Resolution / merge — `resolve_project_config`, `resolve_claude_config`, `merge_env`, `merge_llm`, `merge_llm_repo` in `crates/speedwave-runtime/src/config.rs`.
+- Defaults, default flags, MCP config path — `crates/speedwave-runtime/src/defaults.rs` (`base_env`, `DEFAULT_FLAGS`, `MCP_CONFIG_PATH`).
+- MCP config generation — `containers/entrypoint.sh`.

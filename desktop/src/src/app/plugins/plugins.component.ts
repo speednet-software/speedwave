@@ -326,7 +326,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
   /** Syncs the active project from ProjectStateService. */
   loadActiveProject(): void {
-    this.activeProject = this.projectState.activeProject;
+    this.activeProject = this.projectState.activeProject();
     this.cdr.markForCheck();
   }
 
@@ -358,16 +358,12 @@ export class PluginsComponent implements OnInit, OnDestroy {
    */
   toolsLabelFor(plugin: PluginStatusEntry): string {
     if (!plugin.service_id) return '—';
-    // We don't currently expose tool counts via get_plugins, so render a stable
-    // "—" placeholder and let plugin-detail report the real number per worker.
+    // Placeholder; actual tool count reported per-worker.
     return '—';
   }
 
   /**
-   * True iff the plugin's signature and manifest both passed the runtime
-   * audit. Drives whether the enable toggle is interactive and which
-   * pill (green/red) renders. The remove action is intentionally
-   * available regardless — that's the recovery path.
+   * Signature and manifest audit result; gates toggle interactivity.
    * @param plugin - the plugin status entry to inspect
    */
   isVerified(plugin: PluginStatusEntry): boolean {
@@ -375,9 +371,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Short label for the pill / aria text when a plugin is unverified.
-   * Backend always supplies `verification_status` so we don't need a
-   * "missing field" fallback here.
+   * Verification result label for pill display.
    * @param plugin - the plugin status entry whose status string to render
    */
   verificationStatusLabel(plugin: PluginStatusEntry): string {
@@ -414,9 +408,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Opens a native file dialog to select a plugin ZIP, then installs it.
-   * The flow is: peek manifest → render the right step list → register the
-   * progress listener → invoke install. Progress phases drive the overlay.
+   * Opens file dialog, then invokes backend install with progress tracking.
    */
   async installPlugin(): Promise<void> {
     let selected: string | null;
@@ -440,11 +432,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * button inside the overlay's error banner.
    */
   async retryInstall(): Promise<void> {
-    // Guard against concurrent runs: a `failed` phase event arrives while
-    // the original `invoke('install_plugin')` Promise is still pending,
-    // and the overlay's retry button is reachable in that window. Without
-    // this check, clicking retry would spawn a second runInstall whose
-    // `finally` collides with the first.
+    // Guard against concurrent runs during a failed event.
     if (this.installing || !this.currentZipPath) return;
     await this.runInstall(this.currentZipPath);
   }
@@ -455,8 +443,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
     this.success = '';
     this.installError.set(null);
     this.installing = true;
-    // Render an empty list while the peek is in flight; we'll populate it
-    // before the first progress event arrives.
+    // Render empty steps; populated before first progress event.
     this.installSteps.set([]);
     this.cdr.markForCheck();
 
@@ -522,14 +509,11 @@ export class PluginsComponent implements OnInit, OnDestroy {
         this.setStepStatus(STEP_EXTRACTING, 'active', p.message);
         break;
       case 'building':
-        // STEP_VERIFYING is already 'done' from the prior 'extracting' event;
-        // we only need to advance the immediately preceding step here.
         this.setStepStatus(STEP_EXTRACTING, 'done');
         this.setStepStatus(STEP_BUILDING, 'active', p.message);
         break;
       case 'done':
-        // Mark every step in the current list as done. The overlay closes
-        // after `install_plugin` resolves (in the finally block).
+        // Mark steps done; overlay closes after invoke resolves.
         this.installSteps.update((list) => list.map((s) => ({ ...s, status: 'done' as const })));
         break;
       case 'failed': {
@@ -541,9 +525,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
         break;
       }
       case 'done_with_pending_build':
-        // Terminal informational state. After `failed` no steps remain
-        // pending, so there is nothing to mutate here — the overlay closes
-        // through the caller's `finally` block which clears `installing`.
         break;
     }
   }

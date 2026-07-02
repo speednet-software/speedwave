@@ -1,16 +1,10 @@
-//! SSOT for host→engine path handling. Every path that becomes an argv token
-//! to `wsl.exe`/`nerdctl`/`limactl`/`compose -f`/`-v`, or a mount source written
-//! into compose YAML, must be produced here — never by a hand-rolled translation
-//! or a raw `PathBuf::join` on an already-translated path. The drift detector
-//! `tests/no_raw_engine_path.rs` enforces this.
+//! SSOT for host→engine path handling, enforced by the drift detector
+//! `tests/no_raw_engine_path.rs`.
 
 use std::path::Path;
 
 /// Converts a host path to the path seen by the container engine.
-///
-/// On Windows, nerdctl runs inside WSL2 so host paths must be translated from
-/// `C:\Users\...` to `/mnt/c/Users/...`. On macOS, Lima mounts the host home
-/// at the same path inside the VM, so paths are returned unchanged.
+/// Windows: `C:\Users\...` → `/mnt/c/Users/...`; macOS: unchanged (1:1 mount).
 pub fn to_engine_path(path: &Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
@@ -28,13 +22,24 @@ pub fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
     to_engine_path(Path::new(path))
 }
 
-/// Joins a child onto an already-engine-side (Linux/WSL) directory with `/`.
-///
-/// `vm_root` is a path bound for inside the VM/container (`/mnt/c/...` on
-/// Windows). `PathBuf::join` must NOT be used: on Windows it inserts a backslash
-/// and mishandles the `/`-rooted string, mangling `<root>/<child>` into garbage
-/// (the `presaleContainerfile` plugin-build bug). Trailing slashes on `vm_root`
-/// collapse so the result has exactly one separator.
+/// Strips the `\\?\` extended-length prefix from `<drive>:\` paths (SSOT).
+/// `canonicalize` adds it; non-engine consumers (config.json, UI) choke on it.
+pub fn strip_extended_length_prefix(path: &str) -> &str {
+    let b = path.as_bytes();
+    if b.len() >= 7
+        && path.starts_with(r"\\?\")
+        && b[4].is_ascii_alphabetic()
+        && b[5] == b':'
+        && (b[6] == b'\\' || b[6] == b'/')
+    {
+        &path[4..]
+    } else {
+        path
+    }
+}
+
+/// Joins a relative `child` onto an already-engine-side `vm_root` with `/`
+/// (never `PathBuf::join`, which mangles a `/`-rooted WSL path on Windows).
 pub fn vm_path_join(vm_root: &str, child: &str) -> String {
     debug_assert!(
         !child.starts_with('/'),
@@ -44,23 +49,25 @@ pub fn vm_path_join(vm_root: &str, child: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn vm_path_join_inserts_single_separator() {
-        // The case the plugin build hit: a WSL root + "Containerfile" must yield
-        // exactly one "/", never the dropped-separator "presaleContainerfile".
+        // WSL root + "Containerfile" yields exactly one "/" separator.
         assert_eq!(
-            vm_path_join("/mnt/c/Users/u/.speedwave/plugins/presale", "Containerfile"),
-            "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile"
+            vm_path_join(
+                "/mnt/c/Users/u/.speedwave/plugins/example-plugin",
+                "Containerfile"
+            ),
+            "/mnt/c/Users/u/.speedwave/plugins/example-plugin/Containerfile"
         );
     }
 
     #[test]
     fn vm_path_join_collapses_trailing_slashes_and_keeps_forward_slash() {
-        // Trailing slashes collapse; separator is always "/" on every host OS
-        // (no backslash even on Windows).
+        // Trailing slashes collapse; separator is always "/" on every host OS.
         assert_eq!(
             vm_path_join("/mnt/c/x/", "Containerfile"),
             "/mnt/c/x/Containerfile"
@@ -121,5 +128,29 @@ mod tests {
             str_to_engine_path("/usr/local/share/speedwave").unwrap(),
             "/usr/local/share/speedwave"
         );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_drive_paths() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\C:\Users\User\proj"),
+            r"C:\Users\User\proj"
+        );
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\d:/mixed/slash"),
+            r"d:/mixed/slash"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_passthrough() {
+        // UNC verbatim, plain drive, POSIX, and short strings stay unchanged.
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\UNC\server\share"),
+            r"\\?\UNC\server\share"
+        );
+        assert_eq!(strip_extended_length_prefix(r"C:\plain"), r"C:\plain");
+        assert_eq!(strip_extended_length_prefix("/unix/path"), "/unix/path");
+        assert_eq!(strip_extended_length_prefix(r"\\?\C"), r"\\?\C");
     }
 }

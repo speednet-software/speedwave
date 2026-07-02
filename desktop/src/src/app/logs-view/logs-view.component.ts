@@ -62,9 +62,6 @@ const DRAIN_PREFIX_RE = /^(?:STDOUT|STDERR): (.*)$/;
 
 /**
  * Parse a single compose-log line into `LogLine`. Tolerant — never throws.
- * Backend (`container_logs_cmd::prefix_lines`) already strips the
- * `speedwave_<project>_` container prefix, so we render whatever source token
- * arrives — no client-side heuristic.
  * @param raw - A single log line as emitted by `get_all_logs`.
  */
 export function parseLogLine(raw: string): LogLine {
@@ -115,10 +112,6 @@ function normalizeLevel(raw: string): LogLevel {
 
 /**
  * Interleave per-source blocks into one chronological stream.
- * Lines without a parseable time inherit the *previous* line's instant; if
- * a line has no parseable time AND no prior line set one (file starts with
- * untimestamped content), it inherits the *next* line's instant so it sits
- * with its block rather than sinking to epoch zero.
  * @param lines - Parsed log lines in backend (block) order.
  */
 export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
@@ -138,10 +131,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
     }
   }
   const keyed = lines.map((line, i) => ({ line, key: keys[i] }));
-  // `Array.prototype.sort` is stable (ES2019+) — equal keys keep input order.
-  // Lines that remain NaN (no parseable timestamp anywhere in their block) sort
-  // BEFORE all timestamped lines — matches the historical epoch-zero placement
-  // so banner/header lines stay at the top of the view, not hidden at the bottom.
+  // Stable sort (ES2019+); NaN keys sort before timestamped lines.
   return keyed
     .sort((a, b) => {
       if (Number.isNaN(a.key) && Number.isNaN(b.key)) return 0;
@@ -188,112 +178,119 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
       role="status"
       aria-label="System health summary"
     >
-      <button
-        type="button"
-        class="flex items-center gap-2 text-[13px]"
-        data-testid="health-overall"
-        [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-        [attr.aria-expanded]="detailsOpen()"
-        aria-controls="logs-status-details"
-        (click)="toggleDetails()"
-        [title]="detailsOpen() ? 'Hide details' : 'Show details'"
-      >
-        <span
-          class="dot"
-          [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-        ></span>
-        <span class="font-medium">{{ overallHealthy() ? 'healthy' : 'degraded' }}</span>
-        <span
-          class="mono text-[10px] text-[var(--ink-mute)]"
-          [style.transform]="detailsOpen() ? 'rotate(180deg)' : null"
-          aria-hidden="true"
-          >▾</span
+      @if (!healthLoaded()) {
+        <div class="flex items-center gap-2 text-[13px]" data-testid="health-checking">
+          <span class="dot" [style.background]="'var(--ink-mute)'"></span>
+          <span class="text-[var(--ink-mute)]">checking system health…</span>
+        </div>
+      } @else {
+        <button
+          type="button"
+          class="flex items-center gap-2 text-[13px]"
+          data-testid="health-overall"
+          [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+          [attr.aria-expanded]="detailsOpen()"
+          aria-controls="logs-status-details"
+          (click)="toggleDetails()"
+          [title]="detailsOpen() ? 'Hide details' : 'Show details'"
         >
-      </button>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-vm">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</span>
-        <span
-          class="dot"
-          [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
-        ></span>
-        <span [style.color]="vmRunning() ? 'var(--ink)' : 'var(--accent)'">{{ vmLabel() }}</span>
-        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ vmDetail() }}</span>
-      </div>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-containers">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >containers</span
-        >
-        <span
-          class="dot"
-          [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
-        ></span>
-        <span [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink)'">{{
-          containersLabel()
-        }}</span>
-        <span
-          class="mono text-[10px]"
-          [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
-          >· {{ containersDetail() }}</span
-        >
-      </div>
-
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-bridge">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >ide_bridge</span
-        >
-        <span
-          class="dot"
-          [style.background]="bridgeConnected() ? 'var(--green)' : 'var(--ink-mute)'"
-        ></span>
-        <span [style.color]="bridgeConnected() ? 'var(--ink)' : 'var(--ink-mute)'">{{
-          bridgeConnected() ? 'connected' : 'disconnected'
-        }}</span>
-        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ bridgeDetail() }}</span>
-        @if (bridgeShowConnectLink()) {
-          <a
-            routerLink="/integrations"
-            fragment="ide-bridge"
-            class="mono text-[10px] text-[var(--accent)] hover:underline"
-            data-testid="bridge-connect-link"
-            >connect →</a
+          <span
+            class="dot"
+            [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+          ></span>
+          <span class="font-medium">{{ overallHealthy() ? 'healthy' : 'degraded' }}</span>
+          <span
+            class="mono text-[10px] text-[var(--ink-mute)]"
+            [style.transform]="detailsOpen() ? 'rotate(180deg)' : null"
+            aria-hidden="true"
+            >▾</span
           >
-        }
-      </div>
+        </button>
 
-      <span
-        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
-        aria-hidden="true"
-      ></span>
-
-      <div class="flex items-center gap-2 text-[12px]" data-testid="health-mcpos">
-        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          >mcp_os</span
-        >
         <span
-          class="dot"
-          [style.background]="mcpOsRunning() ? 'var(--green)' : 'var(--ink-mute)'"
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
         ></span>
-        <span [style.color]="mcpOsRunning() ? 'var(--ink)' : 'var(--ink-mute)'">{{
-          mcpOsRunning() ? 'running' : 'stopped'
-        }}</span>
-      </div>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-vm">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</span>
+          <span
+            class="dot"
+            [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
+          ></span>
+          <span [style.color]="vmRunning() ? 'var(--ink)' : 'var(--accent)'">{{ vmLabel() }}</span>
+          <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ vmDetail() }}</span>
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-containers">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >containers</span
+          >
+          <span
+            class="dot"
+            [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
+          ></span>
+          <span [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink)'">{{
+            containersLabel()
+          }}</span>
+          <span
+            class="mono text-[10px]"
+            [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
+            >· {{ containersDetail() }}</span
+          >
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-bridge">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >ide_bridge</span
+          >
+          <span
+            class="dot"
+            [style.background]="bridgeConnected() ? 'var(--green)' : 'var(--ink-mute)'"
+          ></span>
+          <span [style.color]="bridgeConnected() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+            bridgeConnected() ? 'connected' : 'disconnected'
+          }}</span>
+          <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ bridgeDetail() }}</span>
+          @if (bridgeShowConnectLink()) {
+            <a
+              routerLink="/integrations"
+              fragment="ide-bridge"
+              class="mono text-[10px] text-[var(--accent)] hover:underline"
+              data-testid="bridge-connect-link"
+              >connect →</a
+            >
+          }
+        </div>
+
+        <span
+          class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+          aria-hidden="true"
+        ></span>
+
+        <div class="flex items-center gap-2 text-[12px]" data-testid="health-mcpos">
+          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >mcp_os</span
+          >
+          <span
+            class="dot"
+            [style.background]="mcpOsRunning() ? 'var(--green)' : 'var(--ink-mute)'"
+          ></span>
+          <span [style.color]="mcpOsRunning() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+            mcpOsRunning() ? 'running' : 'stopped'
+          }}</span>
+        </div>
+      }
 
       <div class="ml-auto flex items-center gap-2">
         <button
@@ -311,7 +308,7 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
           type="button"
           class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="logs-export"
-          [disabled]="diagnosticsExporting() || !projectState.activeProject"
+          [disabled]="diagnosticsExporting() || !projectState.activeProject()"
           (click)="exportDiagnostics()"
           appTooltip="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
           placement="bottom"
@@ -597,6 +594,9 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   readonly levelChips = LEVEL_CHIPS;
 
   /** Whether the overall system is healthy. */
+  /** False until the first health snapshot lands — render neutral, not "degraded". */
+  readonly healthLoaded = computed<boolean>(() => this.health() !== null);
+
   readonly overallHealthy = computed<boolean>(() => this.health()?.overall_healthy ?? false);
 
   /** Whether the VM is reported as running. */
@@ -716,18 +716,11 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   private lastRaw = '';
 
   /**
-   * Kicks off the initial log fetch + health refresh + polling. Re-runs the
-   * fetch whenever the project lifecycle settles so the view recovers from
-   * the boot race where the shell loads `activeProject` after this component
-   * has already mounted (without this, the user sees a "No active project"
-   * banner even though the project pill in the header reads correctly).
+   * Kicks off the initial log fetch + health refresh + polling, re-running when the project settles.
    */
   async ngOnInit(): Promise<void> {
     await this.refresh();
-    // SystemHealthService owns the polling loop and the project-settled
-    // health refresh; we just kick it off and read its `health` signal.
-    // Await so the initial snapshot is committed before view tests assert
-    // on it.
+    // SystemHealthService owns polling and the project-settled refresh; we read its `health` signal.
     await this.systemHealth.ensurePolling();
     // Live-tail: silent refresh on the health cadence; sticky-scroll if at bottom.
     this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
@@ -775,10 +768,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   protected async refresh(silent = false): Promise<void> {
     // Skip silent ticks while a fetch is in flight — slow nerdctl shouldn't fan out.
     if (silent && this.refreshInFlight) return;
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) {
       // Project transiently null during shell boot — quiet loading, no banner.
-      if (this.projectState.status === 'loading') {
+      if (this.projectState.status() === 'loading') {
         if (!silent) this.loading.set(true);
         this.error.set('');
       } else if (!silent) {
@@ -833,7 +826,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * to the error banner so the toolbar stays calm.
    */
   protected async exportDiagnostics(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     this.diagnosticsExporting.set(true);
     this.diagnosticsPath.set('');
@@ -854,11 +847,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Copies the diagnostics path to the clipboard and flips the primary button
-   * label to `copied ✓` for a short moment. Falls back to the error banner if
-   * the clipboard API rejects (e.g. permission denied).
-   */
+  /** Copies the diagnostics path to the clipboard; on rejection surfaces the error banner. */
   protected async copyDiagnosticsPath(): Promise<void> {
     const path = this.diagnosticsPath();
     if (!path) return;
@@ -959,9 +948,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * If the active source filter no longer appears in the latest log set
-   * (container stopped, name changed), fall back to `all` so the empty
-   * "no logs match" state can't be triggered by stale selection alone.
+   * Fall back to `all` if the active source filter no longer appears in the latest log set.
    * @param lines - Most recent parsed log batch.
    */
   private reconcileSourceFilter(lines: readonly LogLine[]): void {

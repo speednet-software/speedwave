@@ -2,29 +2,9 @@ import XCTest
 @testable import SharedCLI
 
 /// Tests for `AppleEventsGate`'s two-stage authorization flow.
-///
-/// Real `NSWorkspacePidResolver` is not exercised here because it depends on
-/// the host's running-application list (non-deterministic in unit tests).
-/// Instead a `FakePidResolver` injects scripted PID values, which lets us
-/// verify that:
-///   - When the resolver returns `nil`, the gate short-circuits with
-///     `.targetNotRunning(bundleId:)` *without* invoking the real AE call.
-///     This is the new behaviour that the procNotFound bug-fix relies on.
-///   - When the resolver returns a PID, the gate proceeds to `AECreateDesc` +
-///     `AEDeterminePermissionToAutomateTarget`. The OSStatus that comes back
-///     is platform-dependent (depends on whether the calling test process is
-///     authorized to send events to the target), so we assert on the
-///     *category* of result (one of the documented `RawAuthorizationStatus`
-///     cases) rather than on a specific value.
-///
-/// The OSStatus → RawAuthorizationStatus mapping itself is tested separately
-/// in `UtilitiesTests.swift::testMapAEStatus*`.
 final class AppleEventsGateTests: XCTestCase {
 
-    /// Records how many times `pid(for:)` was called and with which bundle ids,
-    /// returning a scripted result. Used to assert that the gate consults the
-    /// resolver before the AE call, and that the gate caches/reuses the value
-    /// correctly across `authorizationStatus()` and `requestAccess`.
+    /// Records each `pid(for:)` call and returns a scripted PID.
     final class FakePidResolver: PidResolver {
         var pidByBundleId: [String: pid_t]
         private(set) var calls: [String] = []
@@ -42,10 +22,7 @@ final class AppleEventsGateTests: XCTestCase {
     // MARK: - Stage 1: NSWorkspace short-circuit
 
     func testTargetNotRunningWhenResolverReturnsNil() {
-        // The resolver maps no bundle ids → first stage returns nil → the gate
-        // must short-circuit *without* calling AE. This is what gives users the
-        // correct "open the app" hint instead of a misleading TCC reset
-        // suggestion when the target really isn't running.
+        // Nil resolver → gate short-circuits without calling AE.
         let resolver = FakePidResolver(pidByBundleId: [:])
         let gate = AppleEventsGate(
             targetBundleId: "com.apple.mail",
@@ -67,10 +44,7 @@ final class AppleEventsGateTests: XCTestCase {
     }
 
     func testResolverIsConsultedBeforeAECall() {
-        // Even when the resolver does have an entry, the gate must consult it
-        // first so that we never make an AE call against a stale ASN. We
-        // assert the resolver was invoked; the AE call's outcome is platform-
-        // dependent and not asserted on (covered by mapAEStatusToRaw tests).
+        // Gate must consult the resolver before the AE call.
         let resolver = FakePidResolver(pidByBundleId: ["com.apple.mail": 12345])
         let gate = AppleEventsGate(
             targetBundleId: "com.apple.mail",
@@ -87,9 +61,7 @@ final class AppleEventsGateTests: XCTestCase {
     }
 
     func testTargetNotRunningCarriesQueriedBundleId() {
-        // The .targetNotRunning case must propagate the *queried* bundle id
-        // (not, say, a hard-coded com.apple.mail). Composer messages and the
-        // unified logs ZIP rely on this for accurate user-facing copy.
+        // .targetNotRunning must propagate the queried bundle id.
         let resolver = FakePidResolver(pidByBundleId: [:])
         let gate = AppleEventsGate(
             targetBundleId: "com.apple.Notes",
@@ -111,12 +83,7 @@ final class AppleEventsGateTests: XCTestCase {
     // MARK: - Stage 2: PID-based AEAddressDesc
 
     func testProducesValidStatusWhenResolverReturnsPidForCallingProcess() throws {
-        // Use the test process's own PID — guaranteed to be running, so
-        // AECreateDesc + AEDeterminePermissionToAutomateTarget will see a live
-        // ASN. We can't predict whether xctest is authorized to send events
-        // to itself (depends on TCC.db state of the test runner), so we
-        // assert only that the result is one of the documented enum cases —
-        // never `.targetNotRunning` (which is the bug we're guarding against).
+        // Own PID is guaranteed running; result must never be .targetNotRunning.
         let ownPid: pid_t = ProcessInfo.processInfo.processIdentifier
         let ownBundle = Bundle.main.bundleIdentifier ?? "test.process"
         let resolver = FakePidResolver(pidByBundleId: [ownBundle: ownPid])
@@ -130,9 +97,7 @@ final class AppleEventsGateTests: XCTestCase {
 
         let raw = gate.authorizationStatus()
 
-        // The exact value is non-deterministic across CI environments, but it
-        // must NOT be .targetNotRunning — the resolver returned a live PID, so
-        // the gate must have proceeded to AE and got *some* outcome.
+        // Value is non-deterministic but must not be .targetNotRunning.
         if case .targetNotRunning = raw {
             XCTFail(
                 "Gate must NOT return .targetNotRunning when resolver gave a PID — that would indicate the bug is back. Got \(raw)"
@@ -143,9 +108,7 @@ final class AppleEventsGateTests: XCTestCase {
     // MARK: - requestAccess delegates to determineStatus(askUserIfNeeded: true)
 
     func testRequestAccessShortCircuitsWhenResolverReturnsNil() {
-        // requestAccess shares the determineStatus pipeline. With a nil
-        // resolver, the request completion fires with granted=false (because
-        // .targetNotRunning is not granted) but no AE call happens.
+        // Nil resolver → completion fires granted=false with no AE call.
         let resolver = FakePidResolver(pidByBundleId: [:])
         let gate = AppleEventsGate(
             targetBundleId: "com.apple.mail",
@@ -170,10 +133,7 @@ final class AppleEventsGateTests: XCTestCase {
     // MARK: - NSWorkspacePidResolver real-impl smoke
 
     func testNSWorkspacePidResolverReturnsNilForUnknownBundleId() {
-        // The production resolver returns nil for a bundle id that LaunchServices
-        // does not know about. Use a synthetic value that cannot collide with any
-        // running app. This validates the resolver's nil path against the real
-        // NSWorkspace API without depending on what's installed on CI.
+        // Production resolver returns nil for an unknown (synthetic) bundle id.
         let resolver = NSWorkspacePidResolver()
 
         let pid = resolver.pid(for: "pl.speedwave.testing.does-not-exist-\(UUID().uuidString)")
@@ -182,10 +142,7 @@ final class AppleEventsGateTests: XCTestCase {
     }
 
     func testNSWorkspacePidResolverReturnsPositivePidForRunningApp() throws {
-        // The production resolver should match at least one running app — the
-        // test runner itself. We use Bundle.main as a stable, always-running
-        // reference. Skip if Bundle.main lacks a bundle id (Linux CI guard,
-        // even though this whole test target is macOS-only).
+        // Production resolver should match the test runner via Bundle.main.
         guard let ownBundle = Bundle.main.bundleIdentifier else {
             throw XCTSkip("Bundle.main has no identifier in this test runner")
         }
@@ -193,10 +150,7 @@ final class AppleEventsGateTests: XCTestCase {
 
         let pid = resolver.pid(for: ownBundle)
 
-        // pid may be nil if the test runner happens to run as a non-NSApplication
-        // process (e.g. swift test from the CLI). In that case we cannot validate
-        // a positive match without spawning a helper app — accept skip rather
-        // than a flaky failure.
+        // pid may be nil for a non-NSApplication test runner; skip rather than fail.
         if pid == nil {
             throw XCTSkip(
                 "Test runner has no NSRunningApplication entry for \(ownBundle); positive resolver path is covered by manual smoke"

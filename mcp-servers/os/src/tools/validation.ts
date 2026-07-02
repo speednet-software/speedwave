@@ -4,60 +4,20 @@
  * Shared validation utilities following the Speedwave MCP pattern.
  */
 
-import { ToolsCallResult } from '@speedwave/mcp-shared';
+import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
 
-/** Standardized result returned by OS tool handlers. */
-export interface ToolResult {
-  /** Whether the tool execution succeeded. */
-  success: boolean;
-  /** Result payload on success. */
-  data?: unknown;
-  /** Error details on failure. */
-  error?: { code: string; message: string };
-}
-
-function validateParams(params: unknown): params is Record<string, unknown> {
-  return params !== null && typeof params === 'object' && !Array.isArray(params);
-}
-
-function formatResult(result: ToolResult): ToolsCallResult {
-  if (result.success) {
-    return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
-  } else {
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result.error, null, 2) }],
-      isError: true,
-    };
-  }
-}
+/** Standardized result returned by OS tool handlers (re-export of the shared type). */
+export type { ToolResult };
 
 /**
- * Wraps a tool handler with parameter validation and error handling.
+ * Wraps a tool handler with parameter validation and error handling
+ * (pretty-printed JSON output via the shared Family-A wrapper).
  * @param handler - Function that executes the tool logic.
  */
 export function withValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return async (params: Record<string, unknown>) => {
-    if (!validateParams(params)) {
-      return formatResult({
-        success: false,
-        error: { code: 'INVALID_INPUT', message: 'Tool parameters must be a non-null object' },
-      });
-    }
-    try {
-      const result = await handler(params as T);
-      return formatResult(result);
-    } catch (error) {
-      return formatResult({
-        success: false,
-        error: {
-          code: 'HANDLER_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
-    }
-  };
+  return withResultValidation(handler);
 }
 
 /**
@@ -126,7 +86,6 @@ const CONTROL_CHARS_STRICT = /[\x00-\x1f\x7f]/;
 
 /**
  * Validate string fields for max length and control characters.
- * Skips fields that are `undefined` (optional not provided).
  * @param params - Tool input parameters to validate.
  * @param specs - Array of string field specs [name, maxLength, allowNewlines].
  */
@@ -177,7 +136,6 @@ export function validateStringFields(
 
 /**
  * Validate number fields for type, finiteness, and range.
- * Skips fields that are `undefined` (optional not provided).
  * @param params - Tool input parameters to validate.
  * @param specs - Array of number field specs [name, min, max].
  */
@@ -218,7 +176,6 @@ export function validateNumberFields(
 
 /**
  * Validate boolean fields for strict `typeof === 'boolean'`.
- * Skips fields that are `undefined` (optional not provided).
  * @param params - Tool input parameters to validate.
  * @param fields - List of boolean field names to check.
  */
@@ -244,9 +201,6 @@ export function validateBooleanFields(
 
 /**
  * Validate string-array fields for type, item count, item length, and control characters.
- * Uses strict mode (no newlines) — array items are short labels, not multi-line content.
- * Skips fields that are `undefined` (optional not provided).
- * Note: `null` is NOT skipped — it returns INVALID_TYPE, matching validateStringFields behavior.
  * @param params - Tool input parameters to validate.
  * @param specs - Array of string-array field specs [name, maxItems, maxItemLength].
  */
@@ -339,9 +293,6 @@ export interface ValidationSpec {
 
 /**
  * Combine all validation steps in one call.
- * Order: required → booleans → strings → numbers → dates → stringArrays.
- * Returns `{ valid: true }` only when every enabled step passes.
- * Note: `required` validates presence of non-empty string fields only (delegates to `requireFields`).
  * @param params - Tool input parameters to validate.
  * @param spec - Which validations to run and with what configuration.
  */
@@ -378,7 +329,6 @@ export function validateAll(
 
 /**
  * Cast unknown params to `Record<string, unknown>`.
- * Replaces the verbose `params as unknown as Record<string, unknown>` pattern.
  * @param params - Tool input parameters.
  */
 export function asRecord(params: unknown): Record<string, unknown> {
@@ -387,7 +337,6 @@ export function asRecord(params: unknown): Record<string, unknown> {
 
 /**
  * Validate that optional date fields, when present, are in strict ISO8601 format.
- * Skips fields that are `undefined` or `null`.
  * @param params - Tool input parameters to validate.
  * @param fields - List of field names to check.
  */
@@ -412,18 +361,12 @@ export function validateDateFields(
   return { valid: true };
 }
 
-/**
- * Strict ISO8601 regex: YYYY-MM-DD with optional THH:MM:SS(.sss)(Z|±HH:MM).
- * Rejects non-ISO formats that `new Date()` would silently accept
- * (e.g., "Feb 20, 2026", unix timestamps, slash-delimited dates).
- */
+/** Strict ISO8601 regex: YYYY-MM-DD with optional THH:MM:SS(.sss)(Z|±HH:MM). */
 const ISO8601_RE =
   /^\d{4}-\d{2}-\d{2}(T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)?)?$/;
 
 /**
  * Validate ISO8601 date string format.
- * Uses regex pre-check before `new Date()` to reject ambiguous formats.
- * Additionally validates month/day ranges to prevent silent date rollover.
  * @param value - Value to check for valid ISO8601 date format.
  */
 export function isValidISO8601(value: unknown): value is string {

@@ -47,7 +47,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -73,7 +73,7 @@ jobs:
         run: |
           (cd shared && npx tsc)
           # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github host_exec oauth office; do
+          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done
@@ -107,7 +107,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -172,7 +172,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: desktop/src/package-lock.json
 
@@ -242,7 +242,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
-          node-version: 24
+          node-version-file: .node-version
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -266,11 +266,13 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update
+      # only), no fixed self_update release. Keep in sync with Makefile AUDIT_IGNORE.
       - name: cargo audit (root workspace)
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
 
       - name: cargo audit (desktop)
-        run: cargo audit --file desktop/src-tauri/Cargo.lock
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --file desktop/src-tauri/Cargo.lock
 
   swift:
     if: github.event_name == 'pull_request'
@@ -370,6 +372,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
+      # The runner image carries the Visual Studio version used to build the
+      # vendored whisper.cpp (whisper-rs-sys) via CMake. Fold the image version
+      # into the cache key so a runner-image bump (e.g. VS 2022 -> VS 2026)
+      # never restores a target/ whose CMakeCache.txt names a now-absent
+      # generator — which makes cmake-rs abort the build script.
+      - name: Capture runner image version
+        run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
       - name: Cache Cargo
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
@@ -378,8 +388,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             desktop/src-tauri/target/
-          key: ${{ runner.os }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-desktop-check-
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 
       - name: Create resource stubs for Tauri build script
         run: scripts/create-desktop-stubs.sh
@@ -392,4 +402,4 @@ jobs:
 
       # installer_hooks tests run on macOS (cargo check above already
       # validates Windows compile); linking the test bin here clashes
-      # with sherpa-onnx/whisper-rs CRT (ADR-061).
+      # with whisper-rs CRT (ADR-061).

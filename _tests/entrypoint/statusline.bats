@@ -53,6 +53,93 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *'$1.23'* ]]
 }
 
+@test "proxy SSOT cost from cost-cache.jsonl overrides the CC value" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":0.0200,"cost_source":"catalog"}' \
+        '{"response_id":"m2","cost_usd":0.0300,"cost_source":"actual"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # 0.02 + 0.03 = 0.05 from the sidecar, not the CC 1.23.
+    [[ "$output" == *'$0.0500'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
+@test "missing /usage keeps the CC cost value" {
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$BATS_TEST_TMPDIR/nope' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$1.23'* ]]
+}
+
+@test "SSOT cost parses serde_json scientific-notation floats" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # serde_json emits small f64 in exponent form; must not truncate at 'e'.
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":2.5e-6,"cost_source":"catalog"}' \
+        '{"response_id":"m2","cost_usd":0.0100,"cost_source":"catalog"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # 0.0000025 + 0.01 = 0.0100 (4dp), NOT 2.5 + 0.01 = 2.51 from a truncated 'e'.
+    [[ "$output" == *'$0.0100'* ]]
+    [[ "$output" != *'2.51'* ]]
+}
+
+@test "SSOT all-zero sidecar shows \$0, not the CC fallback" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # A free-local session: every priced line is 0.0 — must show the SSOT $0.
+    printf '%s\n' \
+        '{"response_id":"m1","cost_usd":0.0,"cost_source":"free"}' \
+        '{"response_id":"m2","cost_usd":0.0,"cost_source":"free"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Local"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # Priced lines exist and sum to 0 → SSOT wins, CC 1.23 is suppressed.
+    [[ "$output" != *'1.23'* ]]
+}
+
+@test "SSOT dedups duplicate response_id, last write wins" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # Re-enrichment appended a second line for msg_1: only the last (0.05) counts.
+    printf '%s\n' \
+        '{"response_id":"msg_1","cost_usd":0.0200,"cost_source":"catalog"}' \
+        '{"response_id":"msg_1","cost_usd":0.0500,"cost_source":"actual"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    # Last write wins: $0.05, NOT 0.02+0.05=0.07.
+    [[ "$output" == *'$0.0500'* ]]
+    [[ "$output" != *'0.0700'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
+@test "SSOT excludes failed/null lines from the cost sum" {
+    local usage_dir="$BATS_TEST_TMPDIR/usage"
+    mkdir -p "$usage_dir"
+    # A failed and a subscription line carry cost_usd:null → not summed; only
+    # the priced 0.04 catalog line counts.
+    printf '%s\n' \
+        '{"response_id":"m_ok","cost_usd":0.0400,"cost_source":"catalog"}' \
+        '{"response_id":"m_fail","cost_usd":null,"cost_source":"failed"}' \
+        '{"response_id":"m_sub","cost_usd":null,"cost_source":"subscription"}' \
+        > "$usage_dir/cost-cache.jsonl"
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$0.0400'* ]]
+    [[ "$output" != *'1.23'* ]]
+}
+
 @test "extracts display_name from JSON" {
     local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"

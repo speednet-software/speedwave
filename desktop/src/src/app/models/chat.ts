@@ -32,7 +32,7 @@ export type StreamChunk =
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
-  | { chunk_type: 'SystemInit'; data: { model: string } }
+  | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
@@ -245,8 +245,8 @@ export interface RateLimitInfo {
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
-  /** Total session cost in USD — estimated from token counts at API pricing. */
-  total_cost: number;
+  /** Project cost in USD from the proxy SSOT; `null` when unpriced (subscription) → "—". */
+  total_cost: number | null;
   /**
    * Latest turn's full-prompt usage from flat result.usage (not summed across
    * turns). Drives CTX % (input + cache_read + cache_write); `in:` uses input only.
@@ -293,6 +293,10 @@ export interface ConversationMessage {
    * become a retry target.
    */
   uuid?: string;
+  /** Per-message model id (assistant turns only); restores the resumed footer. */
+  model?: string;
+  /** Per-message token usage (assistant turns only). */
+  usage?: TurnUsage;
 }
 
 // Wire types — mirror `chat.rs::WireContentBlock` (ADR-065).
@@ -319,14 +323,6 @@ export interface ChatAttachment {
 export interface ChatInput {
   text: string;
   attachments: ChatAttachment[];
-}
-
-/**
- * Whether the input has no image attachments.
- * @param input - Composer input bundle.
- */
-export function chatInputIsTextOnly(input: ChatInput): boolean {
-  return input.attachments.length === 0;
 }
 
 /**

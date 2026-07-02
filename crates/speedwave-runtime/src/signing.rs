@@ -1,19 +1,15 @@
+//! Ed25519 plugin signature verification (install gate + runtime invariant). See ADR-051.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Speednet Ed25519 public key for verifying plugin signatures.
-/// This key is embedded at compile time — only Speednet can sign plugins.
-///
-/// Public key extracted from the Ed25519 private key stored in the
-/// Speednet signing infrastructure. Private key never committed to source.
+/// Speednet Ed25519 public key for verifying plugin signatures, embedded at compile time.
 const SPEEDNET_SIGNING_PUBLIC_KEY: &[u8; 32] = b"\x13\x27\xf5\x88\xa1\xeb\xb6\x22\
 \xf2\x78\x08\xee\x7d\x86\x4a\xb2\xdf\xcd\xe4\xe6\x5b\x02\xdf\xee\x73\xf7\xe3\x77\
 \x92\x49\xe7\xc6";
 
-/// Reads `SIGNATURE` and parses it. Returns the raw 64-byte detached
-/// signature on success. Used by both the cached and uncached verify
-/// paths so the file-IO/parse story lives in exactly one place.
+/// Reads and parses `SIGNATURE`, returning the raw 64-byte detached signature.
 fn read_signature_file(plugin_dir: &Path) -> anyhow::Result<[u8; 64]> {
     use base64::Engine;
     let sig_path = plugin_dir.join("SIGNATURE");
@@ -38,9 +34,7 @@ fn read_signature_file(plugin_dir: &Path) -> anyhow::Result<[u8; 64]> {
     Ok(out)
 }
 
-/// Returns true if the (debug-only) `SPEEDWAVE_ALLOW_UNSIGNED` bypass is
-/// active. The compile-time `cfg(debug_assertions)` gate means this can
-/// only ever be `true` in debug builds — release builds erase the body.
+/// Returns true if the debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass is active.
 #[cfg(debug_assertions)]
 fn unsigned_bypass_active() -> bool {
     std::env::var("SPEEDWAVE_ALLOW_UNSIGNED").is_ok()
@@ -51,11 +45,7 @@ fn unsigned_bypass_active() -> bool {
     false
 }
 
-/// Verifies a pre-computed Ed25519 digest against the SIGNATURE file in
-/// `plugin_dir`. The primary low-level entry point — every other verifier
-/// in this module composes on top of it. Splitting digest computation
-/// from verification lets callers (notably `verify_plugin_signature_cached`)
-/// hash the tree exactly once per call.
+/// Verifies a pre-computed Ed25519 digest against the SIGNATURE file in `plugin_dir`.
 fn verify_plugin_signature_with_digest(plugin_dir: &Path, digest: &[u8]) -> anyhow::Result<()> {
     let sig_bytes = read_signature_file(plugin_dir)?;
     let public_key = ed25519_dalek::VerifyingKey::from_bytes(SPEEDNET_SIGNING_PUBLIC_KEY)
@@ -70,12 +60,8 @@ fn verify_plugin_signature_with_digest(plugin_dir: &Path, digest: &[u8]) -> anyh
     Ok(())
 }
 
-/// Cache entry: the content digest the verdict was computed for, plus the
-/// verdict itself (success or a rendered error string — `anyhow::Error` is
-/// not `Clone`, but the message is what callers report). The digest is
-/// computed deterministically from the plugin tree, so any change to a
-/// file in the tree produces a fresh digest, which forces a re-verify and
-/// supersedes the cached entry.
+/// Cache entry: content digest the verdict was computed for, plus the verdict
+/// (error stored as `String` since `anyhow::Error` is not `Clone`).
 struct CacheEntry {
     content_digest: [u8; 32],
     verified: Result<(), String>,
@@ -86,15 +72,8 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, CacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Resolves the cache key for `plugin_dir`. Canonicalising defends
-/// against the case where two callers reach the same plugin via
-/// different path strings (e.g. with and without symlinks earlier in
-/// the path) — both would resolve to the same key, so a verdict
-/// learned via one path is reused via the other instead of forking the
-/// cache. A canonicalize failure on a path that does not exist is
-/// normal (plugin not installed yet, or just removed); a failure on a
-/// path that *does* exist is unusual (permission error on a parent, a
-/// symlink loop) and is logged — the caller then runs uncached.
+/// Resolves the cache key by canonicalising `plugin_dir`. Returns None if the
+/// path does not exist; logs and returns None if canonicalize otherwise fails.
 fn cache_key(plugin_dir: &Path) -> Option<PathBuf> {
     match plugin_dir.canonicalize() {
         Ok(p) => Some(p),
@@ -109,12 +88,8 @@ fn cache_key(plugin_dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Locks the verdict cache, recovering from a poisoned mutex by taking
-/// the inner value. A poison means a thread panicked while holding the
-/// lock — for this cache, the held data is just `(digest, verdict)`
-/// pairs, so recovering is safe and far better than every subsequent
-/// call silently skipping the cache (which would also silently defeat
-/// `invalidate_cache`). The poison is logged once per recovery.
+/// Locks the verdict cache, recovering from a poisoned mutex by taking the
+/// inner value and logging the poison.
 fn lock_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, CacheEntry>> {
     cache().lock().unwrap_or_else(|poisoned| {
         log::error!("signing verdict cache mutex was poisoned; recovering inner value");
@@ -122,10 +97,8 @@ fn lock_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, CacheEntry>> 
     })
 }
 
-/// Drops any cached verdict for `plugin_dir`. Call this *before*
-/// removing the plugin directory (canonicalize fails once the path is
-/// gone) and after install, so the next verify path observes the new
-/// on-disk state instead of a stale verdict.
+/// Drops any cached verdict for `plugin_dir`. Call before removing the directory
+/// (canonicalize fails once the path is gone) and after install.
 pub fn invalidate_cache(plugin_dir: &Path) {
     if let Some(key) = cache_key(plugin_dir) {
         lock_cache().remove(&key);
@@ -137,15 +110,9 @@ fn invalidate_cache_all() {
     lock_cache().clear();
 }
 
-/// Verifies a plugin's Ed25519 signature, caching the verdict. The cache
-/// is keyed by canonicalised plugin path AND the SHA-256 digest of the
-/// tree, so any byte change to any file invalidates the cached verdict
-/// and forces a fresh Ed25519 check. The cache eliminates the Ed25519
-/// signature verification (~150µs); the SHA-256 hash itself runs every
-/// call because it *is* the integrity check.
-///
-/// In debug builds, `SPEEDWAVE_ALLOW_UNSIGNED=1` skips verification.
-/// The bypass is compiled out of release builds.
+/// Verifies a plugin's Ed25519 signature, caching the verdict keyed by
+/// canonicalised path AND SHA-256 digest. Debug-only `SPEEDWAVE_ALLOW_UNSIGNED=1`
+/// skips verification.
 pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
     if unsigned_bypass_active() {
         log::warn!("SPEEDWAVE_ALLOW_UNSIGNED set — skipping signature verification");
@@ -184,18 +151,12 @@ pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Verifies the Ed25519 signature of a plugin directory.
-///
-/// This is the public entry point callers use; it delegates to
-/// [`verify_plugin_signature_cached`], which is where the caching and
-/// the debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass live.
+/// Public entry point; delegates to [`verify_plugin_signature_cached`].
 pub fn verify_plugin_signature(plugin_dir: &Path) -> anyhow::Result<()> {
     verify_plugin_signature_cached(plugin_dir)
 }
 
-/// Test-only verifier accepting a custom Ed25519 public key. Used by
-/// integration tests and fixture builders that cannot use the embedded
-/// production key. Gated behind `cfg(test)` so production callers cannot
-/// reach it.
+/// Test-only verifier accepting a custom Ed25519 public key.
 #[cfg(test)]
 pub fn verify_plugin_signature_with_key(
     plugin_dir: &Path,
@@ -213,6 +174,14 @@ pub fn verify_plugin_signature_with_key(
     Ok(())
 }
 
+/// Hex digest of the plugin tree — the same bytes the Ed25519 signature
+/// covers. Content-addressed plugin image tags derive from it (ADR-072).
+pub(crate) fn plugin_tree_digest_hex(plugin_dir: &Path) -> anyhow::Result<String> {
+    Ok(crate::bundle::bytes_to_hex(&compute_plugin_digest(
+        plugin_dir,
+    )?))
+}
+
 /// Computes a deterministic SHA-256 digest of all files in the plugin directory,
 /// excluding the SIGNATURE file. Files are sorted by relative path for determinism.
 fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
@@ -221,27 +190,15 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_files_recursive(plugin_dir, &mut files)?;
 
-    // Build (posix_rel_path, file) pairs. The sign script hashes `as_posix()`
-    // paths (forward slashes), so the relative path MUST be normalized to '/'
-    // on every host — on Windows the native separator is '\', which would
-    // both reorder the sort and change the hashed bytes, breaking verification
-    // for any plugin with subdirectories (macOS already uses '/').
+    // Relative path normalized to posix '/' on every host (matches sign script).
     let mut entries: Vec<(String, &std::path::PathBuf)> = files
         .iter()
         .map(|file| {
-            // `collect_files_recursive` only ever yields paths built by joining
-            // `plugin_dir` with `read_dir` entries, so strip_prefix can't fail.
-            // Bail explicitly rather than fall back to the absolute path: that
-            // would fold a `Prefix(C:)`/`RootDir` into the posix string and
-            // silently diverge the digest from the sign script.
+            // Bail rather than fold an absolute path into the digest.
             let rel = file.strip_prefix(plugin_dir).map_err(|_| {
                 anyhow::anyhow!("plugin file is not under plugin_dir: {}", file.display())
             })?;
             // A non-UTF-8 component must abort, never be silently dropped.
-            // The sign script's as_posix() includes the file via
-            // surrogateescape, which Rust has no equivalent for — aborting is
-            // safer than silently producing a diverging hash that also lets a
-            // non-UTF-8-named file vanish (collision / hidden-file vector).
             let posix = rel
                 .components()
                 .map(|c| {
@@ -261,7 +218,6 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     let mut hasher = Sha256::new();
     for (rel, file) in &entries {
         // Hash: relative path (length-prefixed) + file contents (length-prefixed).
-        // Length prefixes prevent ambiguity between ("ab","cd") and ("a","bcd").
         let rel_bytes = rel.as_bytes();
         hasher.update((rel_bytes.len() as u64).to_le_bytes());
         hasher.update(rel_bytes);
@@ -277,13 +233,7 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        // Use symlink_metadata so symlinks are observed *as symlinks*, not
-        // silently followed. The plugin signing model has no notion of
-        // legitimate symlinks — every plugin file is a real file inside the
-        // plugin tree. A symlink anywhere under the plugin dir is either an
-        // attacker pointing the digest at content outside the tree (e.g.
-        // `claude-resources/skills/foo.md → /etc/passwd`) or a packaging
-        // accident; both are fatal.
+        // symlink_metadata rejects symlinks rather than following them.
         let file_type = std::fs::symlink_metadata(&path)?.file_type();
         if file_type.is_symlink() {
             anyhow::bail!(
@@ -300,9 +250,8 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
     Ok(())
 }
 
-/// Generates an Ed25519 keypair for development/testing.
-/// Returns (private_key_bytes, public_key_bytes).
-#[cfg(debug_assertions)]
+/// Generates an Ed25519 keypair for testing (test-only).
+#[cfg(test)]
 pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
@@ -315,9 +264,9 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// Signs a plugin directory with the given private key (for development/testing).
+/// Signs a plugin directory with the given private key (test-only).
 /// Writes the SIGNATURE file.
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Result<()> {
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -437,10 +386,7 @@ mod tests {
     #[test]
     fn test_missing_signature_file_errors() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        // SPEEDWAVE_ALLOW_UNSIGNED can be set in the developer's shell (e.g.
-        // `make dev`); a previous test in the same process can also leak it.
-        // Either case turns this assertion into a flake. Clear the var while
-        // serialised by ENV_MUTEX.
+        // Clear in case the shell or a prior test leaked it.
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -501,14 +447,7 @@ mod tests {
         assert_ne!(d1, d2, "Digest must change when file content changes");
     }
 
-    // The `#[cfg(debug_assertions)]` gate on the SPEEDWAVE_ALLOW_UNSIGNED check is
-    // structurally enforced by the compiler — there is no bypass path in release builds.
-    // The compile-time `const _` assertion on SPEEDNET_SIGNING_PUBLIC_KEY provides the
-    // second guard. Combined with `test_allow_unsigned_not_set_by_default` below, these
-    // two tests cover the full bypass surface without brittle source-level parsing.
-
-    /// Verifies that in debug builds, SPEEDWAVE_ALLOW_UNSIGNED is NOT set
-    /// by default — the bypass is opt-in, not opt-out.
+    /// Verifies that in debug builds, SPEEDWAVE_ALLOW_UNSIGNED is NOT set by default.
     #[test]
     fn test_allow_unsigned_not_set_by_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
@@ -531,10 +470,7 @@ mod tests {
 
     #[test]
     fn test_compute_digest_path_content_boundary() {
-        // Without length-prefixing both path and content, these two layouts
-        // would produce the same raw hash input bytes:
-        //   dir1: file "ab" with content "cd"  → path(2,"ab") + content(2,"cd")
-        //   dir2: file "a"  with content "bcd" → path(1,"a")  + content(3,"bcd")
+        // Without length-prefixing, "ab"+"cd" would collide with "a"+"bcd".
         let tmp1 = tempfile::tempdir().unwrap();
         std::fs::write(tmp1.path().join("ab"), b"cd").unwrap();
 
@@ -563,20 +499,14 @@ mod tests {
         assert_eq!(d1, d2, "SIGNATURE file must be excluded from digest");
     }
 
-    /// A symlink anywhere inside the plugin tree must abort digest
-    /// computation. Without this guard, an attacker could place a symlink
-    /// pointing at an arbitrary host file (e.g. `/etc/passwd`) — the
-    /// digest would fold its contents in and the plugin would still
-    /// validate against a "signed" tree that no longer reflects what's on
-    /// disk.
+    /// A symlink anywhere inside the plugin tree must abort digest computation.
     #[cfg(unix)]
     #[test]
     fn test_compute_digest_rejects_file_symlink() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
-        // Symlink → arbitrary outside-the-tree path. Target need not exist
-        // for symlink_metadata() / is_symlink() to fire.
+        // Symlink to an outside-the-tree path; target need not exist.
         std::os::unix::fs::symlink("/etc/passwd", dir.join("evil.md")).unwrap();
 
         let err = compute_plugin_digest(dir).expect_err("symlink must abort digest");
@@ -586,9 +516,7 @@ mod tests {
         );
     }
 
-    /// Same invariant for directory-symlinks — equally dangerous because
-    /// `symlink_metadata` on the link would otherwise be followed by a
-    /// recursive descent that escapes the plugin tree.
+    /// Same invariant for directory symlinks.
     #[cfg(unix)]
     #[test]
     fn test_compute_digest_rejects_dir_symlink() {
@@ -619,8 +547,7 @@ mod tests {
 
         let actual = compute_plugin_digest(dir).unwrap();
 
-        // Expected digest: "schemas.ts" hashed BEFORE "schemas/index.ts"
-        // (Python POSIX byte order: '.' = 0x2E < '/' = 0x2F)
+        // Expected digest: "schemas.ts" hashed before "schemas/index.ts" ('.' 0x2E < '/' 0x2F).
         let mut hasher = Sha256::new();
         for (rel, content) in [
             (b"schemas.ts" as &[u8], b"file" as &[u8]),
@@ -639,13 +566,8 @@ mod tests {
         );
     }
 
-    /// The hashed relative path must always use forward slashes, regardless
-    /// of host OS separator. The sign script hashes `as_posix()` paths, so a
-    /// nested file like `claude-resources/skills/foo.md` must contribute the
-    /// posix string to the digest — never the Windows `\`-separated form.
-    /// This is the regression test for the Windows-only "signature
-    /// verification failed" caused by `to_string_lossy()` emitting native
-    /// separators (macOS already produced '/').
+    /// The hashed relative path must always use forward slashes, regardless of
+    /// host OS separator (matches the sign script's `as_posix()`).
     #[test]
     fn test_compute_digest_uses_posix_separators_for_nested_paths() {
         use sha2::{Digest, Sha256};
@@ -661,8 +583,7 @@ mod tests {
 
         let actual = compute_plugin_digest(dir).unwrap();
 
-        // Expected digest: the relative path hashed with '/' separators,
-        // exactly as the Python sign script's as_posix() would emit it.
+        // Expected digest: relative path hashed with '/' separators.
         let mut hasher = Sha256::new();
         let rel = b"claude-resources/skills/foo.md" as &[u8];
         let content = b"body" as &[u8];
@@ -678,11 +599,7 @@ mod tests {
         );
     }
 
-    /// A plugin file whose name is not valid UTF-8 must abort digest
-    /// computation, not be silently skipped. Silent skipping would diverge
-    /// the digest from the sign script's `as_posix()` (which preserves the
-    /// bytes via surrogateescape) and let a non-UTF-8-named file disappear
-    /// from the hash entirely — a collision / hidden-file vector.
+    /// A plugin file whose name is not valid UTF-8 must abort digest computation.
     #[cfg(unix)]
     #[test]
     fn test_compute_digest_rejects_non_utf8_filename() {
@@ -692,10 +609,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
-        // 0xFF is never valid UTF-8 — a legal name on ext4 (the container FS),
-        // but APFS/HFS+ reject it at write time ("Illegal byte sequence").
-        // Where the FS won't even store such a name the bug is unreachable,
-        // so skip the assertion there; it still runs on Linux CI.
+        // 0xFF is never valid UTF-8; APFS/HFS+ reject it at write time, so skip there.
         let bad = OsStr::from_bytes(b"bad\xff.md");
         if std::fs::write(dir.join(bad), b"body").is_err() {
             return;
@@ -709,17 +623,9 @@ mod tests {
     }
 
     // --- cache + test-only verifier tests ---
-    //
-    // The verdict cache is a process-global Mutex<HashMap>. Tests that
-    // exercise it MUST take ENV_MUTEX so they don't interleave with other
-    // cache-touching tests, and call `invalidate_cache_all` at entry so
-    // stale entries from an earlier test cannot mask correctness bugs.
+    // Cache is process-global; these tests take ENV_MUTEX and call invalidate_cache_all().
 
-    /// Helper: signs `dir` with a freshly-generated keypair, returns the
-    /// matching public key. Uses the test-only `sign_plugin` function
-    /// (debug-only) and produces a signature that the production verifier
-    /// will reject — the test paths use `verify_plugin_signature_with_key`
-    /// instead.
+    /// Helper: signs `dir` with a freshly-generated keypair, returns the public key.
     fn sign_with_fresh_key(dir: &Path) -> [u8; 32] {
         let (priv_key, pub_key) = generate_keypair();
         sign_plugin(dir, &priv_key).unwrap();
@@ -730,9 +636,6 @@ mod tests {
 
     #[test]
     fn test_verify_with_key_accepts_fixture_keypair() {
-        // Independent of the embedded production key. Lets us exercise
-        // the full happy path (parse SIGNATURE, compute digest, Ed25519
-        // verify) without access to Speednet's signing infrastructure.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
@@ -759,18 +662,14 @@ mod tests {
     #[test]
     fn test_cache_invalidates_on_content_change() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        // A previous test in this process may have set the bypass — clear
-        // it so we exercise the real verifier path.
+        // Clear the bypass so the real verifier path runs.
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         invalidate_cache_all();
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
-        // Sign with a non-Speednet key — verify_plugin_signature_cached
-        // rejects (and caches the rejection) because the embedded prod
-        // key doesn't match. We're checking that the *cached digest*
-        // tracks the on-disk content, not the verdict value.
+        // Non-Speednet key: verify rejects and caches; we check the cached digest tracks content.
         let _pk = sign_with_fresh_key(dir);
         assert!(verify_plugin_signature_cached(dir).is_err());
         let key = cache_key(dir).expect("dir must canonicalize");
@@ -781,10 +680,7 @@ mod tests {
             .expect("cache populated after first verify")
             .content_digest;
 
-        // Tamper. The cache is keyed by `(canonical_path, content_digest)`;
-        // changing a file changes the digest, so the next verify must
-        // recompute and overwrite the cache entry — not short-circuit on
-        // the stale one.
+        // Cache keyed by digest; a file change forces recompute and overwrites the stale entry.
         std::fs::write(dir.join("plugin.json"), r#"{"name":"changed"}"#).unwrap();
         assert!(verify_plugin_signature_cached(dir).is_err());
         let digest_after = cache()

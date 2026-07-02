@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_CREDENTIAL_BYTES: usize = 4096;
 
-/// Converts a `Result<T, String>` into `anyhow::Result<T>` — eliminates the
-/// repeated `.map_err(|e| anyhow::anyhow!("{e}"))` boilerplate at compose
-/// transaction callsites where the inner function returns `String` errors.
+/// Converts a `Result<T, String>` into `anyhow::Result<T>`.
 pub(crate) trait IntoAnyhow<T> {
     fn into_anyhow(self) -> anyhow::Result<T>;
 }
@@ -43,31 +41,47 @@ pub(crate) struct BundleReconcileStatus {
     pub(crate) applied_bundle_id: Option<String>,
 }
 
-/// Frontend-facing snapshot of `claude.llm` for the active project plus the
-/// computed `default_base_url`. We flatten the underlying `LlmConfig` so
-/// every new field added to the SSOT struct (`speedwave_runtime::config::LlmConfig`)
-/// surfaces here automatically — without this, `provider`/`model`/`base_url`/
-/// `context_tokens` had to be hand-copied at three layers (LlmConfig → this
-/// response → frontend interface) and a missed step would silently drop the
-/// field.
-///
-/// Write-only direction (backend → frontend). The struct does not derive
-/// `Deserialize` so the type-system makes that explicit.
-///
-/// Footgun warning: when adding a new field to `LlmConfig`, mark optional
-/// fields with `#[serde(default, skip_serializing_if = "Option::is_none")]`
-/// — `#[serde(flatten)]` here propagates the field but does not omit
-/// `null`s, so a bare `Option` would surface as `field: null` in the JSON
-/// payload and the frontend's exact-shape assertions would diverge.
+/// Write-only (backend → frontend) flattened snapshot of `claude.llm` plus
+/// the computed `default_base_url`. Optional fields added to `LlmConfig` must
+/// use `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 #[derive(Serialize)]
 pub(crate) struct LlmConfigResponse {
     #[serde(flatten)]
     pub(crate) llm: speedwave_runtime::config::LlmConfig,
-    /// Backend-authoritative default for the selected provider — exposed so
-    /// the UI can render it as a placeholder without duplicating provider URL
-    /// strings on the frontend.
+    /// Backend-authoritative default base URL for the selected provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) default_base_url: Option<String>,
+}
+
+/// Auth-status discriminant derived from the `AuthStatusResponse` flags.
+/// Wire strings are snake_case: `no_provider` | `ready` | `auth_required`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthReadiness {
+    /// Fail-safe default: an absent/unknown status routes to provider setup.
+    #[default]
+    NoProvider,
+    Ready,
+    AuthRequired,
+}
+
+impl AuthReadiness {
+    /// SSOT derivation (mirrors `authStatusToProjectStatus` in
+    /// `project-state.service.ts`): no provider wins, then the R7 gate + flags.
+    pub(crate) fn derive(
+        provider_configured: bool,
+        needs_anthropic_auth: bool,
+        api_key_configured: bool,
+        oauth_authenticated: bool,
+    ) -> Self {
+        if !provider_configured {
+            return AuthReadiness::NoProvider;
+        }
+        if !needs_anthropic_auth || api_key_configured || oauth_authenticated {
+            return AuthReadiness::Ready;
+        }
+        AuthReadiness::AuthRequired
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,15 +89,45 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
     /// True when `claude auth status` inside the running container succeeds.
     pub(crate) oauth_authenticated: bool,
+    /// Whether the active provider needs Anthropic auth at all (R7); `false`
+    /// for non-anthropic kinds, so the UI gate never blocks on the two flags.
+    pub(crate) needs_anthropic_auth: bool,
+    /// False when the project has no active LLM provider (logout) — the UI shows
+    /// "choose a provider" instead of a fake-ready chat.
+    #[serde(default)]
+    pub(crate) provider_configured: bool,
+    /// Backend-derived discriminant (`AuthReadiness::derive`) — the frontend
+    /// consumes this instead of re-deriving from the raw flags above.
+    #[serde(default)]
+    pub(crate) status: AuthReadiness,
 }
 
-/// Update DTO for the LLM settings save path.
-///
-/// Mirrors `speedwave_runtime::config::LlmConfig` fields but adds two
-/// tri-state credential fields that the runtime struct doesn't carry (it
-/// only stores presence flags). The `api_key` / `custom_headers` *values*
-/// land in token files on disk; only `has_api_key` / `has_custom_headers`
-/// reach `LlmConfig` in `config.json`.
+impl AuthStatusResponse {
+    /// Builds the response with `status` derived from the flags — the only
+    /// constructor, so no site can ship an inconsistent discriminant.
+    pub(crate) fn from_flags(
+        api_key_configured: bool,
+        oauth_authenticated: bool,
+        needs_anthropic_auth: bool,
+        provider_configured: bool,
+    ) -> Self {
+        Self {
+            api_key_configured,
+            oauth_authenticated,
+            needs_anthropic_auth,
+            provider_configured,
+            status: AuthReadiness::derive(
+                provider_configured,
+                needs_anthropic_auth,
+                api_key_configured,
+                oauth_authenticated,
+            ),
+        }
+    }
+}
+
+/// Update DTO for the LLM settings save path. Mirrors `LlmConfig` plus two
+/// tri-state credential fields (`api_key`/`custom_headers`) stored off-config.
 ///
 /// Tri-state semantics via `serde_with::rust::double_option`:
 /// - **field omitted** (`None`) — leave on-disk file unchanged
@@ -100,6 +144,17 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub(crate) custom_headers: Option<Option<String>>,
+    /// v2 provider list (ADR-073). When present, replaces the stored list
+    /// wholesale (the UI always sends the full set). Key VALUES never ride
+    /// this DTO — they go through `set_llm_provider_key`.
+    #[serde(default)]
+    pub(crate) providers: Option<Vec<speedwave_runtime::config::LlmProviderEntry>>,
+    /// v2 active provider+model selection (ADR-073).
+    #[serde(default)]
+    pub(crate) active: Option<speedwave_runtime::config::LlmActive>,
+    /// ADR-073 kill-switch passthrough; omitted = leave unchanged.
+    #[serde(default)]
+    pub(crate) proxy_enabled: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -125,13 +180,14 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub(crate) badge: Option<String>,
-    /// Reason the integration needs the user's attention even though it is
-    /// configured. Currently only SharePoint sets this — when the stored
-    /// `grantedScopes` is a strict subset of the currently-required
-    /// `SHAREPOINT_OAUTH_SCOPES` (typically after migration, ADR-060), the UI
-    /// surfaces a "Re-authorize" banner so the next refresh doesn't quietly
-    /// fail with `scope_mismatch`. `None` = no action required.
+    /// OAuth re-authorization required (stale scopes, expired token, etc.).
+    /// `None` = no action required.
     pub(crate) oauth_action_required: Option<String>,
+    /// "Connected to <workspace>" hint for OAuth services persisting identity
+    /// in providerData (Slack: teamName · authedUserId). `None` = nothing to show.
+    pub(crate) oauth_identity: Option<String>,
+    /// IdP brand name for OAuth button copy, from the descriptor SSOT.
+    pub(crate) oauth_provider_label: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -259,11 +315,7 @@ mod tests {
 
     #[test]
     fn allowed_fields_match_auth_fields() {
-        // Every UI auth field must live in exactly one storage tier:
-        // credential_files (worker-mounted) OR oauth_state_fields (off-mount,
-        // plan §PR3:290-299). Earlier versions of this test only checked
-        // credential_files — that became wrong when PR3 moved SharePoint's
-        // refresh_token / client_id / tenant_id off-mount.
+        // Verify auth fields belong to credential_files or oauth_state_fields storage tier.
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let auth_fields = get_auth_fields(svc.config_key);
             for field in &auth_fields {
@@ -328,7 +380,7 @@ mod tests {
 
     #[test]
     fn secret_fields_list_covers_sensitive_keys() {
-        assert!(is_secret_field("bot_token"));
+        // Descriptor-derived keys with is_secret=true.
         assert!(is_secret_field("api_key"));
         assert!(is_secret_field("token"));
         assert!(is_secret_field("access_token"));
@@ -375,12 +427,8 @@ mod tests {
 
     #[test]
     fn get_auth_fields_classic_form_services_no_oauth_flow() {
-        // Services that authenticate with a single user-entered token (PAT,
-        // API key, bot token) — none of their fields should be flagged as
-        // OAuth-flow-driven. SharePoint and GitHub are intentionally NOT in
-        // this list because they use OAuth device flow (the UI renders a
-        // "Sign in with X" button instead of a text input for the OAuth field).
-        for svc_key in &["slack", "gitlab", "atlassian", "redmine"] {
+        // Services using PAT/API key auth (not OAuth flows like SharePoint, GitHub, Slack).
+        for svc_key in &["gitlab", "atlassian", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
                 assert!(
@@ -394,10 +442,7 @@ mod tests {
 
     #[test]
     fn get_auth_fields_github_token_uses_oauth_flow() {
-        // GitHub `token` field is populated by the OAuth App device flow
-        // (`start_github_oauth` Tauri command) — the UI must not render a
-        // text input for it. SharePoint has the analogous invariant tested
-        // in `get_auth_fields_includes_oauth_flow` above.
+        // GitHub `token` is populated by the OAuth App device flow, so oauth_flow=true.
         let fields = get_auth_fields("github");
         let token = fields
             .iter()
@@ -426,10 +471,7 @@ mod tests {
     fn toggleable_services_have_auth_fields() {
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let fields = get_auth_fields(svc.config_key);
-            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`
-            // in their descriptor; `get_auth_fields` faithfully returns an empty vec.
-            // Only fail if the descriptor says the service has auth fields but the
-            // getter returns nothing — a real bug.
+            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`.
             if svc.auth_fields.is_empty() {
                 assert!(
                     fields.is_empty(),
@@ -447,12 +489,7 @@ mod tests {
         }
     }
 
-    /// Wire-format guard: flattening `LlmConfig` into `LlmConfigResponse`
-    /// must keep `provider`/`model`/`base_url`/`context_tokens` at the top
-    /// level of the JSON payload — the frontend reads them from there
-    /// (mirror declared in `desktop/src/src/app/settings/llm-provider/`).
-    /// If a future serde change buries them under an `llm:` key the
-    /// frontend silently breaks.
+    /// Verify `#[serde(flatten)]` surfaces `LlmConfig` fields at top level (not nested under `llm:`).
     #[test]
     fn llm_config_response_flattens_inner_llm_at_top_level() {
         let resp = LlmConfigResponse {
@@ -463,6 +500,7 @@ mod tests {
                 context_tokens: Some(32_768),
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
             default_base_url: Some("http://host.docker.internal:11434".to_string()),
         };
@@ -484,9 +522,7 @@ mod tests {
 
     #[test]
     fn llm_config_response_omits_context_tokens_when_unset() {
-        // Backend returns `LlmConfig::default()` when no project is active —
-        // the response must skip the `context_tokens` key entirely so the
-        // frontend's `?? null` fallback kicks in cleanly.
+        // Default config (no active project) must skip the `context_tokens` key entirely.
         let resp = LlmConfigResponse {
             llm: speedwave_runtime::config::LlmConfig::default(),
             default_base_url: None,
@@ -498,13 +534,106 @@ mod tests {
         );
     }
 
+    // ── AuthReadiness derivation (SSOT for the frontend discriminant) ──
+
+    #[test]
+    fn auth_readiness_no_provider_wins_over_everything() {
+        // provider_configured=false → NoProvider regardless of the other flags.
+        for needs in [false, true] {
+            for key in [false, true] {
+                for oauth in [false, true] {
+                    assert_eq!(
+                        AuthReadiness::derive(false, needs, key, oauth),
+                        AuthReadiness::NoProvider,
+                        "needs={needs} key={key} oauth={oauth}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auth_readiness_ready_when_no_anthropic_auth_needed() {
+        // R7: non-anthropic providers are ready without any credential flag.
+        assert_eq!(
+            AuthReadiness::derive(true, false, false, false),
+            AuthReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn auth_readiness_ready_with_api_key_or_oauth() {
+        assert_eq!(
+            AuthReadiness::derive(true, true, true, false),
+            AuthReadiness::Ready
+        );
+        assert_eq!(
+            AuthReadiness::derive(true, true, false, true),
+            AuthReadiness::Ready
+        );
+        assert_eq!(
+            AuthReadiness::derive(true, true, true, true),
+            AuthReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn auth_readiness_auth_required_only_without_credentials() {
+        assert_eq!(
+            AuthReadiness::derive(true, true, false, false),
+            AuthReadiness::AuthRequired
+        );
+    }
+
+    #[test]
+    fn auth_readiness_wire_strings_are_snake_case() {
+        let cases = [
+            (AuthReadiness::NoProvider, "\"no_provider\""),
+            (AuthReadiness::Ready, "\"ready\""),
+            (AuthReadiness::AuthRequired, "\"auth_required\""),
+        ];
+        for (v, wire) in cases {
+            assert_eq!(serde_json::to_string(&v).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<AuthReadiness>(wire).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn auth_status_missing_provider_configured_deserializes_to_no_provider() {
+        // Fail-safe: a legacy payload without `provider_configured`/`status`
+        // reads as false → derives NoProvider (provider setup, not fake-ready).
+        let json = r#"{
+            "api_key_configured": true,
+            "oauth_authenticated": true,
+            "needs_anthropic_auth": true
+        }"#;
+        let resp: AuthStatusResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.provider_configured);
+        assert_eq!(resp.status, AuthReadiness::NoProvider);
+        assert_eq!(
+            AuthReadiness::derive(
+                resp.provider_configured,
+                resp.needs_anthropic_auth,
+                resp.api_key_configured,
+                resp.oauth_authenticated,
+            ),
+            AuthReadiness::NoProvider
+        );
+    }
+
+    #[test]
+    fn auth_status_from_flags_populates_consistent_status() {
+        let resp = AuthStatusResponse::from_flags(false, true, true, true);
+        assert_eq!(resp.status, AuthReadiness::Ready);
+        let resp = AuthStatusResponse::from_flags(false, false, true, true);
+        assert_eq!(resp.status, AuthReadiness::AuthRequired);
+        let resp = AuthStatusResponse::from_flags(true, true, true, false);
+        assert_eq!(resp.status, AuthReadiness::NoProvider);
+    }
+
     #[test]
     fn max_credential_bytes_matches_ts_constant() {
-        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union
-        // in plugin.rs): TS `MAX_PLUGIN_CREDENTIAL_BYTES` must equal Rust
-        // `MAX_CREDENTIAL_BYTES` so the form's <input maxlength=…> exactly
-        // mirrors the server-side reject threshold. Bumping one without the
-        // other = silent drift.
+        // Cross-language SSOT guard: TS `MAX_PLUGIN_CREDENTIAL_BYTES` must equal Rust `MAX_CREDENTIAL_BYTES`.
         let src = include_str!("../../src/src/app/models/plugin.ts");
         let needle = "export const MAX_PLUGIN_CREDENTIAL_BYTES";
         let idx = src

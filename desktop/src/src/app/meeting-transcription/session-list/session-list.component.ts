@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   inject,
   output,
@@ -29,9 +30,9 @@ function statusLabel(s: TranscriptStatus): string {
 }
 
 /**
- * The recordings list (left pane of the Meeting transcription tab): open /
- * delete, status badge, and "discard audio" per session (frees disk; makes
- * re-transcription impossible). No auto-cleanup in v1 — the user manages it.
+ * The recordings list (left pane of the Meeting transcription tab): open,
+ * status badge, and delete (removes audio + transcript). No auto-cleanup —
+ * the user manages it.
  */
 @Component({
   selector: 'app-session-list',
@@ -67,28 +68,15 @@ function statusLabel(s: TranscriptStatus): string {
                 {{ s.language }} · {{ label(s) }} · {{ s.live_segments.length }} segments
               </div>
             </button>
-            <div class="mt-1 flex items-center gap-2 text-[10px]">
-              <span class="text-[var(--ink-mute)]">{{ audioLabel(s) }}</span>
-              <span class="ml-auto flex gap-1">
-                @if (s.audio_path) {
-                  <button
-                    type="button"
-                    class="mono rounded border border-[var(--line-strong)] px-2 py-0.5 hover:bg-[var(--bg-2)]"
-                    [attr.data-testid]="'discard-' + s.id"
-                    (click)="discardAudio(s.id)"
-                  >
-                    discard audio
-                  </button>
-                }
-                <button
-                  type="button"
-                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
-                  [attr.data-testid]="'delete-' + s.id"
-                  (click)="remove(s.id)"
-                >
-                  delete
-                </button>
-              </span>
+            <div class="mt-1 flex items-center text-[10px]">
+              <button
+                type="button"
+                class="mono ml-auto rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
+                [attr.data-testid]="'delete-' + s.id"
+                (click)="remove(s.id)"
+              >
+                delete
+              </button>
             </div>
           </li>
         }
@@ -96,7 +84,7 @@ function statusLabel(s: TranscriptStatus): string {
     </div>
   `,
 })
-export class SessionListComponent implements OnInit {
+export class SessionListComponent implements OnInit, OnDestroy {
   /** Emits the session the user opened (the parent shows it in the right pane). */
   readonly opened = output<TranscriptSession>();
   /** Forwards errors to the parent banner. */
@@ -111,10 +99,17 @@ export class SessionListComponent implements OnInit {
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
+  /** Poll timer, active only while a session is still recording/finalizing. */
+  private poll: ReturnType<typeof setInterval> | undefined;
 
   /** Loads the session list on first paint. */
   async ngOnInit(): Promise<void> {
     await this.refresh();
+  }
+
+  /** Stops the poll timer on teardown. */
+  ngOnDestroy(): void {
+    this.stopPolling();
   }
 
   /** Re-reads the session list from disk. */
@@ -131,6 +126,23 @@ export class SessionListComponent implements OnInit {
       this.errorOccurred.emit(msg);
     }
     this.cdr.markForCheck();
+    // A session left mid-finalize only streams events to the active view, so
+    // poll the list until everything settles, then stop.
+    const pending = this.sessions().some(
+      (s) => s.status.state === 'recording' || s.status.state === 'finalizing'
+    );
+    if (pending && this.poll === undefined) {
+      this.poll = setInterval(() => void this.refresh(), 1500);
+    } else if (!pending) {
+      this.stopPolling();
+    }
+  }
+
+  private stopPolling(): void {
+    if (this.poll !== undefined) {
+      clearInterval(this.poll);
+      this.poll = undefined;
+    }
   }
 
   /**
@@ -168,33 +180,10 @@ export class SessionListComponent implements OnInit {
   }
 
   /**
-   * Drops a session's recorded audio (the transcript stays) and refreshes.
-   * @param id - the session id.
-   */
-  async discardAudio(id: string): Promise<void> {
-    try {
-      await this.transcription.discardAudio(id);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.error.set(msg);
-      this.errorOccurred.emit(msg);
-    }
-    await this.refresh();
-  }
-
-  /**
    * Status label for the list row.
    * @param s - the session.
    */
   label(s: TranscriptSession): string {
     return statusLabel(s.status);
-  }
-
-  /**
-   * Whether the session still has its recorded WAV.
-   * @param s - the session.
-   */
-  audioLabel(s: TranscriptSession): string {
-    return s.audio_path ? 'audio kept' : 'audio discarded';
   }
 }

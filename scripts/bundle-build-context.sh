@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# bundle-build-context.sh — Copies container build context, mcp-os, host_exec,
-# and the oauth worker into desktop/src-tauri/ for Tauri resource bundling.
+# bundle-build-context.sh — Copies container build context, mcp-os, and the
+# oauth worker into desktop/src-tauri/ for Tauri resource bundling.
 #
 # Defines which MCP services are bundled into the Tauri app resource directory.
 # NOTE: Container image definitions live in crates/speedwave-runtime/src/build.rs (IMAGES constant).
 #       The IMAGES list and MCP_SERVICES list must stay aligned for overlapping services.
-#       host_exec, os, and oauth are NOT in IMAGES (they are host processes, not containers) —
-#       they are bundled as mcp-os/, host_exec/, and oauth/ here, and listed in
+#       os and oauth are NOT in IMAGES (they are host processes, not containers) —
+#       they are bundled as mcp-os/ and oauth/ here, and listed in
 #       crates/speedwave-runtime/src/bundle.rs::COMMON_BUNDLED_ASSETS.
 # Called from: Makefile (dev target), CI workflows (desktop-build, desktop-release).
 #
 # Usage:
-#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / host_exec / oauth dist
-#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + host_exec + oauth from source first
+#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / oauth dist
+#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + oauth from source first
 
 set -euo pipefail
 
@@ -49,12 +49,17 @@ trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 echo "$$" >"$LOCK_DIR/pid"
 
 # Clean destination to prevent stale files from previous runs
-rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/host_exec" "$DEST/oauth"
+rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/oauth"
 
 # -- Build context (containers + MCP server sources) --------------------------
 
 mkdir -p "$DEST/build-context"
 cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
+
+# Host build outputs (e.g. a dirty containers/proxy/target) are never image
+# content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
+find "$DEST/build-context/containers" -type d \
+    \( -name target -o -name dist -o -name node_modules \) -prune -exec rm -rf {} +
 
 # Linux kernel rejects #!/bin/bash\r with exit 127 (issue #603).
 # `sed -i.bak` preserves perms in place; `.bak` suffix is the portable form across BSD and GNU.
@@ -78,8 +83,7 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
-  # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
-  # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
+  # office: exclude test_*.py — not in runtime image; must match bundle-build-context.ps1.
   if [ -d "$svc_src/scripts" ]; then
     mkdir -p "$svc_dest/scripts"
     find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;
@@ -90,14 +94,13 @@ for svc in $MCP_SERVICES; do
   done
 done
 
-# -- mcp-os + host_exec + oauth (host-side TypeScript workers) ---------------
+# -- mcp-os + oauth (host-side TypeScript workers) ---------------------------
 
 if [[ "${1:-}" == "--ci" ]]; then
   # CI mode: build from clean checkout (no pre-built dist/) and install production-only deps
   (cd "$REPO_ROOT/mcp-servers" && npm ci \
     && npm run build --workspace=shared \
     && npm run build --workspace=os \
-    && npm run build --workspace=host_exec \
     && npm run build --workspace=oauth)
 fi
 
@@ -123,5 +126,4 @@ stage_host_worker() {
 }
 
 stage_host_worker os mcp-os
-stage_host_worker host_exec host_exec
 stage_host_worker oauth oauth

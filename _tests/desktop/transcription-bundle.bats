@@ -1,9 +1,5 @@
 #!/usr/bin/env bats
-# Drift guards for the meeting-transcription bundle wiring (ADR-056). These are
-# the SSOT-alignment pairs from CLAUDE.md that must move together:
-#   tauri.macos.conf.json bundle.resources ↔ scripts/sign-bundled-binaries.sh
-#   SIGN_TARGETS ↔ desktop/src-tauri/entitlements/audio-capture.plist, plus the
-#   static third-party licenses kept in desktop/src-tauri/licenses-static/.
+# Drift guards for the meeting-transcription bundle wiring (ADR-056).
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 MACOS_CONF="$REPO_ROOT/desktop/src-tauri/tauri.macos.conf.json"
@@ -46,15 +42,14 @@ PY
 }
 
 @test "static transcription licenses are present in licenses-static/" {
-    for f in whisper-cpp-LICENSE sherpa-onnx-LICENSE onnxruntime-LICENSE cpal-LICENSE transcription-models-LICENSE; do
+    for f in whisper-cpp-LICENSE cpal-LICENSE wasapi-LICENSE transcription-models-LICENSE; do
         [ -f "$LICENSES_STATIC/$f" ] || { echo "Missing $LICENSES_STATIC/$f" >&2; return 1; }
     done
 }
 
 @test "Makefile has a bundle-static-licenses target wired into build-tauri" {
     grep -qE '^bundle-static-licenses:' "$MAKEFILE"
-    # build-tauri must invoke it (so the bundled THIRD-PARTY-LICENSES dir gets
-    # the transcription licenses alongside the lima/nodejs ones).
+    # build-tauri must invoke bundle-static-licenses.
     grep -qF 'bundle-static-licenses' "$MAKEFILE"
 }
 

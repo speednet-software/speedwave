@@ -22,8 +22,6 @@ use tokio_tungstenite::WebSocketStream;
 use speedwave_runtime::consts;
 use speedwave_runtime::fs_perms as runtime_fs_perms;
 
-use crate::fs_perms;
-
 // ---------------------------------------------------------------------------
 // Public types — auth / origin / subprotocol
 // ---------------------------------------------------------------------------
@@ -34,13 +32,7 @@ pub enum AuthScheme {
     /// Token in a request header. Used by Node.js / Rust workers that can
     /// set arbitrary headers on the WebSocket upgrade.
     Header(&'static str),
-    /// Token in the URL query string (`?<name>=<token>`). Required for
-    /// browser-based clients. **Accepted risk:** URL query strings can
-    /// leak via process arg lists, browser history, and `Referer` headers.
-    /// Mitigated by (a) binding only on a host-local address —
-    /// `127.0.0.1` on macOS, WSL vEthernet adapter IP on Windows (invisible
-    /// from LAN), via `compose::host_bind_address`; (b) UUID v4 token
-    /// regenerated each Desktop startup; (c) `0o600` lock file.
+    /// Token in the URL query string (`?<name>=<token>`). For browser clients; risk in ADR-063.
     QueryParam(&'static str),
 }
 
@@ -273,17 +265,11 @@ pub type ConnectionHandler = Arc<
         + 'static,
 >;
 
-/// Handler-side request context. Most fields are exercised only by tests
-/// (`endpoint_context_exposes_path_query_matched_auth`); the IDE Bridge
-/// handler reads `bridge_name` and `peer_addr` directly. `cfg_attr` keeps
-/// the contract intact while silencing dead-code for the prod `--bin` build.
+/// Handler-side request context. The IDE Bridge handler reads `bridge_name` and `peer_addr`.
 pub struct ConnectionContext {
     pub bridge_name: String,
     pub peer_addr: SocketAddr,
-    /// `_`-prefixed fields are part of the public API for connection
-    /// handlers but currently have no in-tree handler that reads them.
-    /// The prefix signals "available, not currently consumed" without
-    /// silencing dead-code lints with `#[allow(...)]`.
+    /// `_`-prefixed: public API for handlers, no in-tree consumer reads them yet.
     pub _path: String,
     pub _query: Option<String>,
     pub _selected_subprotocol: Option<String>,
@@ -297,10 +283,7 @@ pub struct ConnectionContext {
 
 pub type PairingEventCallback = Arc<dyn Fn(PairingEvent) + Send + Sync + 'static>;
 
-/// Event surface for Pairing-mode bridges. `_`-prefixed fields are
-/// emitted for future telemetry / test inspection but no in-tree
-/// consumer reads them — the prefix signals "available, not currently
-/// consumed" without silencing dead-code lints with `#[allow(...)]`.
+/// Event surface for Pairing-mode bridges. `_`-prefixed fields have no in-tree consumer yet.
 #[derive(Clone, Debug)]
 pub enum PairingEvent {
     SlotOccupied {
@@ -778,9 +761,7 @@ async fn run_endpoint_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // Result<Response, http::Response<Option<String>>> — the
-                // error variant size is dictated by tokio_tungstenite.
-                // Threshold raised in clippy.toml, no per-site allow.
+                // Err variant size dictated by tokio_tungstenite; threshold raised in clippy.toml.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {
@@ -1277,11 +1258,7 @@ fn select_subprotocol(req: &Request<()>, policy: &SubprotocolPolicy) -> Option<&
 }
 
 fn http_response(code: u16, body: &str) -> ErrorResponse {
-    // `http::Response::builder()` only fails when the status or header
-    // values are invalid; for a fixed numeric status and a plain string
-    // body neither path is reachable. If the builder ever did fail, we
-    // synthesize a minimal Internal Server Error response so the
-    // accept_hdr_async callback signature stays infallible.
+    // Synthesize a 500 if the builder fails; the callback signature must stay infallible.
     Response::builder()
         .status(code)
         .body(Some(body.to_string()))
@@ -1311,7 +1288,7 @@ pub(crate) fn write_lock_file_atomic(
     let mut tmp = tempfile::NamedTempFile::with_prefix_in(".lock-", dir)
         .context("creating temp lock file")?;
 
-    fs_perms::set_owner_only(tmp.path())
+    runtime_fs_perms::set_owner_only(tmp.path())
         .map_err(|e| anyhow::anyhow!("set_owner_only on temp lock file: {e}"))?;
 
     tmp.as_file_mut()
@@ -1326,7 +1303,7 @@ pub(crate) fn write_lock_file_atomic(
 
 pub(crate) fn ensure_lock_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
-    fs_perms::set_owner_only_dir(dir)
+    runtime_fs_perms::set_owner_only_dir(dir)
         .map_err(|e| anyhow::anyhow!("set_owner_only_dir on {dir:?}: {e}"))?;
     Ok(())
 }
@@ -1336,9 +1313,7 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
         Ok(e) => e,
         Err(_) => return,
     };
-    // Probe on the same address bridges bind on (macOS: 127.0.0.1; Windows:
-    // WSL adapter IP). If detection fails, skip — better to leave orphan
-    // locks than to delete files for live bridges that probe rejects.
+    // Probe on the bind address; skip on failure to avoid deleting locks for live bridges.
     let bind: std::net::IpAddr = match speedwave_runtime::compose::host_bind_address() {
         Ok(addr) => match addr.parse() {
             Ok(ip) => ip,
@@ -1456,7 +1431,7 @@ mod tests {
     #[test]
     fn validate_bridge_name_ok() {
         assert!(validate_bridge_name("ide"));
-        assert!(validate_bridge_name("figma"));
+        assert!(validate_bridge_name("example-plugin"));
         assert!(validate_bridge_name("a"));
         assert!(validate_bridge_name("a-b-c"));
         assert!(validate_bridge_name("a1b2"));
@@ -1510,8 +1485,8 @@ mod tests {
 
     #[test]
     fn config_builder_pairing_valid() {
-        let cfg = pairing_config("figma");
-        assert_eq!(cfg.name, "figma");
+        let cfg = pairing_config("example-plugin");
+        assert_eq!(cfg.name, "example-plugin");
         assert!(matches!(cfg.mode, ConnectionMode::Pairing(_)));
         assert!(cfg.auth.is_none());
     }
@@ -1528,7 +1503,7 @@ mod tests {
 
     #[test]
     fn config_builder_pairing_empty_roles_rejected() {
-        let err = HostBridgeConfig::builder("figma")
+        let err = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles: HashMap::new(),
                 on_role_collision: RoleCollisionPolicy::EvictOlder,
@@ -1722,7 +1697,7 @@ mod tests {
     #[test]
     fn origin_reject_if_present_blocks_browser() {
         let req = req_with_origin(
-            Some("https://figma.com"),
+            Some("https://example.com"),
             None,
             Some(("x-test-auth", "tok")),
         );
@@ -1738,7 +1713,7 @@ mod tests {
 
     #[test]
     fn origin_accept_if_query_param_allows_browser_with_token() {
-        let req = req_with_origin(Some("https://figma.com"), Some("token=tok"), None);
+        let req = req_with_origin(Some("https://example.com"), Some("token=tok"), None);
         let auth = AuthState::new("tok".to_string());
         let matched = validate_request_auth_single(&req, &auth, &AuthScheme::QueryParam("token"))
             .expect("auth must match via query param");
@@ -1753,7 +1728,7 @@ mod tests {
     fn origin_accept_if_query_param_blocks_browser_with_header_auth() {
         // Header auth + Origin = forged combo (workers never set Origin).
         let req = req_with_origin(
-            Some("https://figma.com"),
+            Some("https://example.com"),
             None,
             Some(("x-test-worker-auth", "tok")),
         );
@@ -1843,7 +1818,7 @@ mod tests {
 
     #[test]
     fn start_endpoint_in_pairing_config_bails() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let mut bridge = HostBridge::new(cfg).unwrap();
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
         let err = bridge.start_endpoint(handler);
@@ -2004,9 +1979,7 @@ mod tests {
         let handler: ConnectionHandler = Arc::new(move |mut ws, mut ctx| {
             let observed = observed_clone.clone();
             Box::pin(async move {
-                // Touch every public ConnectionContext field so the
-                // contract is exercised end-to-end. `shutdown` is a
-                // broadcast receiver — resubscribe instead of cloning.
+                // `shutdown` is a broadcast receiver — resubscribe instead of cloning.
                 let _shutdown_alive = ctx._shutdown.try_recv().is_err();
                 *observed.lock().unwrap() = Some((
                     ctx.bridge_name.clone(),
@@ -2123,7 +2096,7 @@ mod tests {
 
     #[test]
     fn pairing_two_different_roles_get_paired_and_relay() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |evt| {
@@ -2145,7 +2118,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2187,7 +2160,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_forwards_binary_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2201,7 +2174,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2220,7 +2193,7 @@ mod tests {
 
     #[test]
     fn pairing_pair_busy_returns_http_409() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |evt| {
@@ -2240,7 +2213,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (_plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
             // Wait for pairing to set `active`.
@@ -2277,7 +2250,7 @@ mod tests {
 
     #[test]
     fn pairing_disconnect_one_side_closes_other() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2291,7 +2264,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
@@ -2376,11 +2349,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_rolls_back_on_lock_file_write_failure() {
-        // Drive write_lock_file_atomic into the error branch by pointing
-        // it at a parent path that is a regular file (not a directory) —
-        // tempfile::NamedTempFile::with_prefix_in fails immediately.
-        // start_endpoint then takes the rollback path: shuts down the
-        // accept loop and surfaces the error.
+        // Parent is a regular file, so the tempfile create fails and start_endpoint rolls back.
         let tmp = tempfile::tempdir().unwrap();
         let file_path = tmp.path().join("not-a-dir");
         std::fs::write(&file_path, b"sentinel").unwrap();
@@ -2397,9 +2366,7 @@ mod tests {
 
     #[test]
     fn start_writes_lock_file_atomic_via_named_temp_file() {
-        // Implicit: write_lock_file_atomic uses tempfile::NamedTempFile.
-        // We assert the lock file appears (full content + mode is checked
-        // in write_lock_file_atomic_writes_json + start_lock_file_mode_0o600).
+        // Asserts the lock file appears; content + mode are checked in dedicated tests.
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2514,7 +2481,7 @@ mod tests {
 
     #[test]
     fn pairing_role_match_header_worker() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2549,7 +2516,7 @@ mod tests {
 
     #[test]
     fn pairing_role_match_query_plugin() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2565,7 +2532,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             );
             let (_ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2582,7 +2549,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_text_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2600,7 +2567,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2616,7 +2583,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_close_frames() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2634,7 +2601,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2656,7 +2623,7 @@ mod tests {
 
     #[test]
     fn pairing_event_callback_order_slot_slot_paired_closed() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2680,7 +2647,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2716,7 +2683,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::Reject,
@@ -2785,7 +2752,7 @@ mod tests {
 
     #[test]
     fn pairing_evict_older_replaces_pending() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: PairingEventCallback = Arc::new(move |e| {
@@ -2835,7 +2802,7 @@ mod tests {
 
     #[test]
     fn pairing_third_connection_returns_http_409_not_close_1008() {
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2853,7 +2820,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2867,9 +2834,7 @@ mod tests {
             .await;
             assert!(res.is_err());
             let err = format!("{:?}", res.err().unwrap());
-            // Pre-handshake response means the error contains HTTP 409, NOT
-            // a tungstenite Close frame string. Close frame would surface as
-            // "Connection closed" or "ConnectionClosed", not as a status code.
+            // Pre-handshake error carries HTTP 409, not a tungstenite Close frame.
             assert!(err.contains("409"), "must be HTTP 409, got: {err}");
             assert!(
                 !err.contains("1008"),
@@ -2882,7 +2847,7 @@ mod tests {
     fn pairing_pair_id_generation_prevents_stale_active_clear() {
         // A relay task that finishes after a *new* pair was activated must
         // NOT clear `active`. We exercise this by walking the state manually.
-        let cfg = pairing_config("figma");
+        let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
@@ -2901,7 +2866,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2924,7 +2889,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -2957,7 +2922,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::EvictOlder,
@@ -2985,7 +2950,7 @@ mod tests {
                 port,
                 Some(&format!("token={token}")),
                 None,
-                Some("https://figma.com"),
+                Some("https://example.com"),
             ))
             .await
             .unwrap();
@@ -3018,7 +2983,7 @@ mod tests {
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
         ]);
-        let cfg = HostBridgeConfig::builder("figma")
+        let cfg = HostBridgeConfig::builder("example-plugin")
             .pairing(PairingConfig {
                 roles,
                 on_role_collision: RoleCollisionPolicy::EvictOlder,
@@ -3047,9 +3012,7 @@ mod tests {
             ))
             .await
             .unwrap();
-            // check_interval = max(timeout/4, 1s). With 1s timeout that
-            // gives 1s ticks; the slot needs >= 1s of age before the next
-            // tick clears it. Wait through 2 ticks to be safe.
+            // check_interval = max(timeout/4, 1s) = 1s; wait through 2 ticks to age the slot out.
             tokio::time::sleep(Duration::from_millis(2500)).await;
         });
         let evts = events.lock().unwrap().clone();
@@ -3062,14 +3025,7 @@ mod tests {
         );
     }
 
-    /// Watchdog recovery test — verifies the **logic** that recreates a
-    /// missing lock file by exercising `write_lock_file_atomic` directly.
-    ///
-    /// We avoid relying on real-time scheduling of the watchdog tokio
-    /// runtime: under heavy parallel test load it can be starved beyond
-    /// any reasonable budget, making a timing-based test flaky. The
-    /// integration timing path is exercised in the smoke test
-    /// (`make dev` — see ADR-063 Verification section).
+    /// Verifies lock-file recreation logic; the timing path is covered by the smoke test.
     #[test]
     fn watchdog_recreates_lock_file_when_missing() {
         let dir = tempfile::tempdir().unwrap();

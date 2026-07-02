@@ -1,15 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ProjectStateService } from './project-state.service';
+import {
+  ProjectStateService,
+  unhealthySummary,
+  authStatusToProjectStatus,
+  type AuthStatusResponse,
+} from './project-state.service';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { HealthStoreService } from './health-store.service';
+import type { HealthReport } from '../models/health';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
+function makeHealth(overrides: Partial<HealthReport>): HealthReport {
+  return {
+    containers: [{ name: 'claude', status: 'running', healthy: true }],
+    vm: { running: true, vm_type: 'lima' },
+    mcp_os: { running: true },
+    ide_bridge: { running: true, port: null, ws_url: null, detected_ides: [], selected_ide: null },
+    overall_healthy: true,
+    ...overrides,
+  };
+}
 
 describe('ProjectStateService', () => {
   let service: ProjectStateService;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'list_projects':
@@ -23,14 +48,23 @@ describe('ProjectStateService', () => {
         case 'start_containers':
           return undefined;
         case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: true };
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
         default:
           return undefined;
       }
     };
 
     TestBed.configureTestingModule({
-      providers: [ProjectStateService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        ProjectStateService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
     service = TestBed.inject(ProjectStateService);
   });
@@ -39,8 +73,8 @@ describe('ProjectStateService', () => {
     it('loads active project and sets status to ready', async () => {
       await service.init();
 
-      expect(service.activeProject).toBe('test');
-      expect(service.status).toBe('ready');
+      expect(service.activeProject()).toBe('test');
+      expect(service.status()).toBe('ready');
     });
 
     it('is idempotent — second call is no-op', async () => {
@@ -58,7 +92,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('loading');
+      expect(service.status()).toBe('loading');
     });
 
     it('registers listeners even when invoke fails', async () => {
@@ -70,7 +104,34 @@ describe('ProjectStateService', () => {
 
       // Listeners should still work
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
+    });
+
+    it('sets status=error and logs when invoke fails INSIDE Tauri', async () => {
+      mockTauri.runningInTauri = true;
+      mockTauri.invokeHandler = async () => {
+        throw new Error('list_projects boom');
+      };
+
+      await service.init();
+
+      expect(service.status()).toBe('error');
+      expect(service.error).toContain('list_projects boom');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('init failed: list_projects boom')
+      );
+    });
+
+    it('stays silent (no error status, no log) when invoke fails OUTSIDE Tauri', async () => {
+      mockTauri.runningInTauri = false;
+      mockTauri.invokeHandler = async () => {
+        throw new Error('not in Tauri');
+      };
+
+      await service.init();
+
+      expect(service.status()).toBe('loading');
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -78,12 +139,106 @@ describe('ProjectStateService', () => {
     it('sets checking then ready when containers already running', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
       expect(statuses).toContain('checking');
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
+    });
+
+    it('reaches ready for a non-anthropic provider with no anthropic auth (needs_anthropic_auth=false)', async () => {
+      // Non-anthropic provider, no Anthropic creds, backend says auth not needed:
+      // gate must not strand the user on "auth required" (the free-model bug).
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: false,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning sets no_provider when provider_configured=false (logout)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              // Stale Anthropic creds present, but the project was emptied:
+              // no-provider wins so the user is routed to pick a provider.
+              api_key_configured: true,
+              oauth_authenticated: true,
+              needs_anthropic_auth: false,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('still requires anthropic auth when needs_anthropic_auth=true and neither credential present', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      await service.ensureContainersRunning();
+
+      expect(service.status()).toBe('auth_required');
     });
 
     it('sets checking then starting then ready when containers not running', async () => {
@@ -100,22 +255,27 @@ describe('ProjectStateService', () => {
           case 'start_containers':
             return undefined;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
       await service.init();
-      service.status = 'ready' as const;
+      service.status.set('ready');
 
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
       expect(statuses).toContain('checking');
       expect(statuses).toContain('starting');
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('sets error on failure', async () => {
@@ -128,23 +288,168 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('connection refused');
     });
 
     it('sets error when no active project', async () => {
-      service.activeProject = null;
+      service.activeProject.set(null);
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('No active project');
+    });
+
+    it('holds the overlay until get_health reports overall_healthy', async () => {
+      let healthCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          case 'get_health':
+            healthCalls += 1;
+            return healthCalls < 3 ? makeHealth({ overall_healthy: false }) : makeHealth({});
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+      expect(healthCalls).toBe(3);
+    });
+
+    it('sets error with an unhealthy summary when the health gate times out', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          case 'get_health':
+            return makeHealth({
+              overall_healthy: false,
+              vm: { running: false, vm_type: 'lima' },
+            });
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      service.healthGateTimeoutMs = 5;
+      await service.init();
+
+      expect(service.status()).toBe('error');
+      expect(service.error).toContain('System did not become healthy');
+      expect(service.error).toContain('VM not running');
+    });
+
+    it('passes the health gate when get_health returns no report', async () => {
+      // Default handler returns undefined for get_health — gate must not block.
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+    });
+
+    it('seeds the shared health store with the gate snapshot', async () => {
+      const healthy = makeHealth({});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          case 'get_health':
+            return healthy;
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+      expect(TestBed.inject(HealthStoreService).health()).toEqual(healthy);
+    });
+
+    it('keeps polling through transient get_health failures', async () => {
+      let healthCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          case 'get_health':
+            healthCalls += 1;
+            if (healthCalls === 1) throw new Error('probe boom');
+            return makeHealth({});
+          default:
+            return undefined;
+        }
+      };
+      service.healthGatePollMs = 1;
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+      expect(healthCalls).toBe(2);
     });
 
     it('sets system_check status during prereq phase', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
@@ -160,26 +465,26 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('check_failed');
+      expect(service.status()).toBe('check_failed');
       expect(service.error).toContain('WSL2 is not available');
     });
 
     it('guard prevents reentry when status is system_check', async () => {
       await service.init();
-      service.status = 'system_check';
+      service.status.set('system_check');
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
 
       await service.ensureContainersRunning();
 
       expect(spy.mock.calls.length).toBe(callsBefore);
-      expect(service.status).toBe('system_check');
+      expect(service.status()).toBe('system_check');
     });
 
     it('proceeds to checking after successful system check', async () => {
       await service.init();
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
 
       await service.ensureContainersRunning();
 
@@ -199,7 +504,7 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('check_failed');
+      expect(service.status()).toBe('check_failed');
       expect(service.error).toContain('System check failed:');
     });
 
@@ -213,15 +518,139 @@ describe('ProjectStateService', () => {
 
       await service.ensureContainersRunning();
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('network timeout');
+    });
+  });
+
+  describe('requestRestart', () => {
+    it('flags a restart when the project is already running', () => {
+      service.status.set('ready');
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      expect(service.needsRestart).toBe(true);
+      expect(ensureSpy).not.toHaveBeenCalled();
+    });
+
+    it('starts containers instead of flagging when the project has no provider', () => {
+      service.status.set('no_provider');
+      service.needsRestart = false;
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      // no_provider hides the restart overlay — start rather than set a dead flag.
+      expect(ensureSpy).toHaveBeenCalled();
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('defers a restart requested mid-switch, keeping needsRestart false for now', () => {
+      service.status.set('switching');
+      service.needsRestart = false;
+      const ensureSpy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      service.requestRestart();
+
+      // Overlay can't render while switching — flag stays down until we settle.
+      expect(service.needsRestart).toBe(false);
+      expect(ensureSpy).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a restart requested during switching once the switch settles to ready', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: true, // → ready
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_started', { project: 'e2e-test' });
+      expect(service.status()).toBe('switching');
+
+      // Save fires requestRestart while switching — deferred, not visible yet.
+      service.requestRestart();
+      expect(service.needsRestart).toBe(false);
+
+      // Switch settles → the deferred intent becomes a live needsRestart.
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'e2e-test' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('clears a deferred restart intent when the switch settles on no_provider', async () => {
+      await service.init();
+      mockTauri.dispatchEvent('project_switch_started', { project: 'bare' });
+      service.requestRestart(); // deferred while switching
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: false, // → no_provider
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'bare' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      // No-provider settle voids the intent — nothing is running to restart.
+      expect(service.status()).toBe('no_provider');
+      expect(service.needsRestart).toBe(false);
+
+      // The voided intent must not resurrect on a later ready settle.
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('drops a deferred restart intent when a new switch starts', async () => {
+      await service.init();
+      service.status.set('switching');
+      service.requestRestart(); // deferred
+
+      // A brand-new switch supersedes the stale deferred intent.
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
     });
   });
 
   describe('reconcile status', () => {
     it('sets rebuilding when reconcile in_progress', async () => {
       await service.init();
-      service.status = 'ready';
+      service.status.set('ready');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -231,12 +660,12 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('rebuilding');
+      expect(service.status()).toBe('rebuilding');
     });
 
     it('sets error when reconcile has last_error', async () => {
       await service.init();
-      service.status = 'ready';
+      service.status.set('ready');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -246,13 +675,13 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toBe('Image rebuild failed');
     });
 
     it('triggers ensureContainersRunning when reconcile completes from rebuilding', async () => {
       await service.init();
-      service.status = 'rebuilding';
+      service.status.set('rebuilding');
 
       const spy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
 
@@ -271,7 +700,7 @@ describe('ProjectStateService', () => {
     it('ignores reconcile events during switching', async () => {
       await service.init();
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
 
       mockTauri.dispatchEvent('bundle_reconcile_status', {
         phase: 'images_built',
@@ -281,7 +710,7 @@ describe('ProjectStateService', () => {
         applied_bundle_id: null,
       });
 
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
     });
 
     it('starts in rebuilding when init sees in_progress reconcile', async () => {
@@ -304,7 +733,7 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      expect(service.status).toBe('rebuilding');
+      expect(service.status()).toBe('rebuilding');
     });
   });
 
@@ -316,19 +745,99 @@ describe('ProjectStateService', () => {
     it('project_switch_started sets switching state', () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'new-project' });
 
-      expect(service.status).toBe('switching');
+      expect(service.status()).toBe('switching');
       expect(service.targetProject).toBe('new-project');
       expect(service.error).toBe('');
     });
 
-    it('project_switch_succeeded sets ready state', () => {
+    it('project_switch_succeeded sets ready state', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
       mockTauri.dispatchEvent('project_switch_started', { project: 'new-project' });
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'new-project' });
+      await new Promise((r) => setTimeout(r, 0));
 
-      expect(service.status).toBe('ready');
-      expect(service.activeProject).toBe('new-project');
+      expect(service.status()).toBe('ready');
+      expect(service.activeProject()).toBe('new-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('');
+    });
+
+    it('project_switch_succeeded resolves no_provider when the project has no LLM provider', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: false,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'fresh-project' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('project_switch_succeeded sets error state when get_auth_status throws', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') throw new Error('container not ready');
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('error');
+      expect(service.error).toBe('Error: container not ready');
+    });
+
+    it('project_switch_succeeded auth failure fires onProjectFailed + onProjectSettled (parity with other error paths)', async () => {
+      const failed = vi.fn();
+      const settled = vi.fn();
+      service.onProjectFailed(failed);
+      service.onProjectSettled(settled);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') throw new Error('container not ready');
+        return undefined;
+      };
+
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('error');
+      expect(failed).toHaveBeenCalledWith(expect.stringContaining('container not ready'));
+      expect(settled).toHaveBeenCalledTimes(1);
+    });
+
+    it('project_switch_succeeded honors the backend status discriminant over contradictory flags', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status') {
+          return {
+            // Ready-looking flags, but the backend SSOT says no provider.
+            status: 'no_provider',
+            api_key_configured: true,
+            oauth_authenticated: true,
+            needs_anthropic_auth: false,
+            provider_configured: true,
+          };
+        }
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.status()).toBe('no_provider');
     });
 
     it('project_switch_failed sets error state with rollback', () => {
@@ -338,8 +847,8 @@ describe('ProjectStateService', () => {
         error: 'container crash',
       });
 
-      expect(service.status).toBe('error');
-      expect(service.activeProject).toBe('old-project');
+      expect(service.status()).toBe('error');
+      expect(service.activeProject()).toBe('old-project');
       expect(service.targetProject).toBeNull();
       expect(service.error).toBe('container crash');
     });
@@ -350,8 +859,8 @@ describe('ProjectStateService', () => {
         error: 'no previous project',
       });
 
-      expect(service.status).toBe('error');
-      expect(service.activeProject).toBeNull();
+      expect(service.status()).toBe('error');
+      expect(service.activeProject()).toBeNull();
     });
   });
 
@@ -365,7 +874,9 @@ describe('ProjectStateService', () => {
       expect(cb).toHaveBeenCalledTimes(1);
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
-      expect(cb).toHaveBeenCalledTimes(2);
+      await new Promise((r) => setTimeout(r, 0));
+      // 1 (started) + 1 (resolveSwitchSucceededStatus) + 1 (refreshProjectList).
+      expect(cb).toHaveBeenCalledTimes(3);
     });
 
     it('returns working unsubscribe function', async () => {
@@ -389,6 +900,7 @@ describe('ProjectStateService', () => {
       expect(cb).not.toHaveBeenCalled();
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).toHaveBeenCalledTimes(1);
     });
 
@@ -399,6 +911,7 @@ describe('ProjectStateService', () => {
       unsub();
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).not.toHaveBeenCalled();
     });
   });
@@ -424,6 +937,7 @@ describe('ProjectStateService', () => {
       service.onProjectSettled(cb);
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
+      await new Promise((r) => setTimeout(r, 0));
       expect(cb).toHaveBeenCalledTimes(1);
 
       mockTauri.dispatchEvent('project_switch_failed', {
@@ -436,10 +950,10 @@ describe('ProjectStateService', () => {
 
   describe('dismissError', () => {
     it('sets ready when containers are running', async () => {
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'some error';
       await service.dismissError();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(service.error).toBe('');
     });
 
@@ -448,9 +962,9 @@ describe('ProjectStateService', () => {
         if (cmd === 'check_containers_running') return false;
         return undefined;
       };
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'old error';
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       await service.dismissError();
       expect(service.error).toContain('Containers are not running');
     });
@@ -460,10 +974,10 @@ describe('ProjectStateService', () => {
         if (cmd === 'check_containers_running') throw new Error('timeout');
         return undefined;
       };
-      service.status = 'error';
+      service.status.set('error');
       service.error = 'some error';
       await service.dismissError();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
       expect(service.error).toBe('');
     });
   });
@@ -471,7 +985,7 @@ describe('ProjectStateService', () => {
   describe('ensureContainersRunning error handling', () => {
     it('catches errors from ensureContainersRunning after reconcile done', async () => {
       await service.init();
-      service.status = 'rebuilding';
+      service.status.set('rebuilding');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'run_system_check') return undefined;
@@ -489,15 +1003,15 @@ describe('ProjectStateService', () => {
 
       // Wait for the async error handling
       await new Promise((r) => setTimeout(r, 20));
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
       expect(service.error).toContain('check failed');
     });
 
     it('clears error when retrying', async () => {
-      service.activeProject = 'test';
+      service.activeProject.set('test');
       service.error = 'previous error';
       const statuses: string[] = [];
-      service.onChange(() => statuses.push(service.status));
+      service.onChange(() => statuses.push(service.status()));
       await service.ensureContainersRunning();
       expect(service.error).toBe('');
       expect(statuses[0]).toBe('system_check');
@@ -533,13 +1047,18 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
     });
 
     it('transitions to ready when OAuth is authenticated', async () => {
@@ -554,13 +1073,18 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: true };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
       await service.init();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('transitions to ready when API key is configured', async () => {
@@ -575,13 +1099,18 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: true, oauth_authenticated: false };
+            return {
+              api_key_configured: true,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
       await service.init();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
     it('sets error when get_auth_status throws', async () => {
@@ -602,7 +1131,7 @@ describe('ProjectStateService', () => {
         }
       };
       await service.init();
-      expect(service.status).toBe('error');
+      expect(service.status()).toBe('error');
     });
 
     it('retryAuth transitions to ready when auth succeeds', async () => {
@@ -618,22 +1147,31 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: authed };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: authed,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
 
       authed = true;
       await service.retryAuth();
-      expect(service.status).toBe('ready');
+      expect(service.status()).toBe('ready');
     });
 
-    it('retryAuth stays in auth_required when auth check fails', async () => {
-      service.activeProject = 'test';
-      service.status = 'auth_required';
+    it('retryAuth sets error (NOT auth_required) and logs when the auth check throws', async () => {
+      service.activeProject.set('test');
+      service.status.set('auth_required');
+      const failed = vi.fn();
+      const settled = vi.fn();
+      service.onProjectFailed(failed);
+      service.onProjectSettled(settled);
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_auth_status') throw new Error('connection refused');
@@ -641,44 +1179,260 @@ describe('ProjectStateService', () => {
       };
 
       await service.retryAuth();
-      expect(service.status).toBe('auth_required');
+
+      // A failed check must not masquerade as "not authenticated".
+      expect(service.status()).toBe('error');
+      expect(service.error).toContain('connection refused');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('retryAuth check failed: connection refused')
+      );
+      expect(failed).toHaveBeenCalledWith(expect.stringContaining('connection refused'));
+      expect(settled).toHaveBeenCalled();
     });
 
     it('retryAuth sets auth_required when no auth configured', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
       };
-      service.activeProject = 'test';
-      service.status = 'ready';
+      service.activeProject.set('test');
+      service.status.set('ready');
 
       await service.retryAuth();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
+    });
+
+    it('retryAuth sets no_provider when provider_configured=false', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      service.activeProject.set('test');
+      service.status.set('ready');
+
+      await service.retryAuth();
+      expect(service.status()).toBe('no_provider');
     });
 
     it('applyAuthStatus sets ready when auth is valid', () => {
-      service.status = 'auth_required';
-      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
-      expect(service.status).toBe('ready');
+      service.status.set('auth_required');
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
     });
 
-    it('applyAuthStatus sets auth_required when no auth', () => {
-      service.status = 'ready';
-      service.applyAuthStatus({ api_key_configured: false, oauth_authenticated: false });
-      expect(service.status).toBe('auth_required');
+    it('applyAuthStatus sets auth_required when no auth (from a pre-ready state)', () => {
+      service.status.set('starting');
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('auth_required');
+    });
+
+    it('applyAuthStatus never downgrades a live ready session', () => {
+      // Opening Settings probes auth; a false negative (no_provider / auth_required)
+      // must not blank a running chat. Both pre-ready outcomes are ignored when ready.
+      for (const auth of [
+        // → no_provider
+        {
+          api_key_configured: true,
+          oauth_authenticated: true,
+          needs_anthropic_auth: false,
+          provider_configured: false,
+        },
+        // → auth_required
+        {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        },
+      ]) {
+        service.status.set('ready');
+        const cb = vi.fn();
+        service.onChange(cb);
+        service.applyAuthStatus(auth);
+        expect(service.status()).toBe('ready');
+        expect(cb).not.toHaveBeenCalled();
+      }
     });
 
     it('applyAuthStatus does not downgrade ready to ready', () => {
-      service.status = 'ready';
+      service.status.set('ready');
       const cb = vi.fn();
       service.onChange(cb);
-      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
-      expect(service.status).toBe('ready');
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
       expect(cb).not.toHaveBeenCalled();
+    });
+
+    it('applyAuthStatus sets no_provider when provider_configured=false', () => {
+      service.status.set('starting');
+      service.applyAuthStatus({
+        // Auth flags are irrelevant: no-provider is checked first.
+        api_key_configured: true,
+        oauth_authenticated: true,
+        needs_anthropic_auth: false,
+        provider_configured: false,
+      });
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('applyAuthStatus recovers no_provider to ready once a provider is configured', () => {
+      service.status.set('no_provider');
+      service.applyAuthStatus({
+        api_key_configured: true,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+    });
+
+    it('applyAuthStatus never-downgrade guard also holds for discriminant payloads', () => {
+      for (const status of ['no_provider', 'auth_required'] as const) {
+        service.status.set('ready');
+        const cb = vi.fn();
+        service.onChange(cb);
+        service.applyAuthStatus({
+          status,
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: status !== 'no_provider',
+        });
+        expect(service.status()).toBe('ready');
+        expect(cb).not.toHaveBeenCalled();
+      }
+    });
+
+    it('applyAuthStatus promotes no_provider to ready from a discriminant payload', () => {
+      service.status.set('no_provider');
+      service.applyAuthStatus({
+        // Discriminant says ready even though the flags alone would not.
+        status: 'ready',
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning honors status=ready despite provider_configured=false', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              status: 'ready',
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: false,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status()).toBe('ready');
+    });
+
+    it('ensureContainersRunning honors status=no_provider despite provider_configured=true', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+          case 'start_containers':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              status: 'no_provider',
+              api_key_configured: true,
+              oauth_authenticated: true,
+              needs_anthropic_auth: false,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+
+      expect(service.status()).toBe('no_provider');
+    });
+
+    it('forceUnconfigured downgrades a live ready session (deliberate logout)', () => {
+      // Unlike applyAuthStatus, a user-initiated logout is not a false
+      // negative — the chat view must blank to the no_provider screen.
+      service.status.set('ready');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.forceUnconfigured();
+      expect(service.status()).toBe('no_provider');
+      expect(cb).toHaveBeenCalled();
+    });
+
+    it('forceUnconfigured sets no_provider from any pre-ready status', () => {
+      for (const status of ['auth_required', 'starting', 'checking'] as const) {
+        service.status.set(status);
+        service.forceUnconfigured();
+        expect(service.status()).toBe('no_provider');
+      }
+    });
+
+    it('forceUnconfigured is idempotent (no_provider to no_provider still notifies)', () => {
+      service.status.set('no_provider');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.forceUnconfigured();
+      expect(service.status()).toBe('no_provider');
+      expect(cb).toHaveBeenCalled();
     });
 
     it('does not fire onProjectReady for auth_required', async () => {
@@ -693,7 +1447,12 @@ describe('ProjectStateService', () => {
           case 'check_containers_running':
             return true;
           case 'get_auth_status':
-            return { api_key_configured: false, oauth_authenticated: false };
+            return {
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
           default:
             return undefined;
         }
@@ -701,7 +1460,7 @@ describe('ProjectStateService', () => {
       const cb = vi.fn();
       service.onProjectReady(cb);
       await service.init();
-      expect(service.status).toBe('auth_required');
+      expect(service.status()).toBe('auth_required');
       expect(cb).not.toHaveBeenCalled();
     });
   });
@@ -735,8 +1494,7 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // justEnabled is null when no integration was just toggled — backend
-      // accepts an Option<String> and rolls back only the named service.
+      // justEnabled is null when no integration was just toggled.
       expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
         project: 'test',
         justEnabled: null,
@@ -744,6 +1502,68 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
+    });
+
+    it('restartContainers fires onRestartBegin before the Tauri invoke, and ready before restart-complete', async () => {
+      // Ordering invariant the chat resume relies on: the id snapshot happens at
+      // begin (before the invoke), and ready (which nulls the live id) precedes
+      // restart-complete (which reads the snapshot). A reorder breaks resume.
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        order.push('begin');
+      });
+      service.onProjectReady(() => {
+        order.push('ready');
+      });
+      service.onRestartComplete(() => {
+        order.push('complete');
+      });
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('invoke');
+        return undefined as unknown as never;
+      });
+
+      await service.restartContainers();
+
+      expect(order.indexOf('begin')).toBeLessThan(order.indexOf('invoke'));
+      expect(order.indexOf('ready')).toBeLessThan(order.indexOf('complete'));
+    });
+
+    it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {
+      // Repro: logged out (auth_required) → switch to local + restart. Backend
+      // now reports no auth needed, so the stale auth_required must clear.
+      service.status.set('auth_required');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_auth_status')
+          return {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: false,
+            provider_configured: true,
+          };
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      expect(service.status()).toBe('ready');
+    });
+
+    it('restartContainers logs (not console) when invalidate_slash_cache fails but still succeeds', async () => {
+      service.requestRestart();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'invalidate_slash_cache') throw new Error('cache gone');
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      // The slash-cache miss is non-fatal: restart still completes.
+      expect(service.needsRestart).toBe(false);
+      expect(service.restartError).toBe('');
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('invalidate_slash_cache failed: cache gone')
+      );
     });
 
     it('restartContainers fires notifyChange at each state transition', async () => {
@@ -764,9 +1584,7 @@ describe('ProjectStateService', () => {
       };
 
       const promise = service.restartContainers();
-      // restartContainers preloads worker-image estimates and registers an
-      // event listener before invoking the restart command; allow those
-      // microtasks to settle so resolveInvoke is bound.
+      // Allow microtasks to settle so resolveInvoke is bound.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
@@ -826,7 +1644,7 @@ describe('ProjectStateService', () => {
     });
 
     it('restartContainers is no-op when no active project', async () => {
-      service.activeProject = null;
+      service.activeProject.set(null);
       service.requestRestart();
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
@@ -846,15 +1664,10 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // Slash cache must be invalidated so the next slash-menu open
-      // re-runs discovery — otherwise the chat composer keeps the
-      // pre-restart skill list (10-min cache).
+      // Slash cache must be invalidated before the next slash-menu open.
       expect(spy).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'test' });
-      // onProjectReady must fire so the composer + chat re-fetch their
-      // per-project state with the new container set.
+      // onProjectReady/onProjectSettled fire so consumers re-fetch per-project state.
       expect(readyCallback).toHaveBeenCalled();
-      // onProjectSettled must fire too — integrations.component and
-      // project-switcher refresh through this listener path, not ready.
       expect(settledCallback).toHaveBeenCalled();
     });
 
@@ -875,20 +1688,14 @@ describe('ProjectStateService', () => {
       await service.restartContainers();
 
       expect(service.restartError).toBe('boom');
-      // The post-success steps (cache invalidate + ready/settled fanout)
-      // MUST NOT run when the restart itself failed: state has not
-      // advanced, and firing ready could mask the error or trigger
-      // consumers to refetch stale data.
+      // Post-success steps must not run when restart fails — state has not advanced.
       expect(spy).not.toHaveBeenCalledWith('invalidate_slash_cache', expect.anything());
       expect(readyCallback).not.toHaveBeenCalled();
       expect(settledCallback).not.toHaveBeenCalled();
     });
 
     it('restartContainers still fires onProjectReady when invalidate_slash_cache itself fails', async () => {
-      // Regression guard: a future refactor that moves `restartedOk = true`
-      // inside the inner try would silently break the "ready fires even
-      // when invalidation fails" guarantee. The cache eventually expires,
-      // so the invalidate call is best-effort.
+      // Regression guard: ensures ready fires even when invalidation fails.
       service.requestRestart();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'invalidate_slash_cache') {
@@ -975,6 +1782,123 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(false);
       expect(service.restarting).toBe(false);
       expect(service.restartError).toBe('');
+    });
+
+    it('awaits onRestartBegin callbacks before restarting containers', async () => {
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        await Promise.resolve();
+        order.push('begin');
+      });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('restart');
+        return undefined;
+      };
+      // activeProject must be set for restartContainers to proceed.
+      service.activeProject.set('p');
+      await service.restartContainers();
+      expect(order).toEqual(['begin', 'restart']);
+    });
+
+    it('a rejecting onRestartBegin callback does not block the restart', async () => {
+      const order: string[] = [];
+      service.onRestartBegin(async () => {
+        throw new Error('hook failed');
+      });
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') order.push('restart');
+        return undefined;
+      };
+      service.activeProject.set('p');
+      await service.restartContainers();
+      expect(order).toEqual(['restart']); // restart still ran despite the rejecting hook
+    });
+  });
+
+  describe('unhealthySummary', () => {
+    it('reports unavailable status for a null report', () => {
+      expect(unhealthySummary(null)).toContain('health status unavailable');
+    });
+
+    it('lists every failing subsystem', () => {
+      const msg = unhealthySummary(
+        makeHealth({
+          overall_healthy: false,
+          vm: { running: false, vm_type: 'lima' },
+          mcp_os: { running: false },
+          containers: [
+            { name: 'claude', status: 'exited', healthy: false },
+            { name: 'mcp-hub', status: 'running', healthy: true },
+          ],
+        })
+      );
+
+      expect(msg).toContain('VM not running');
+      expect(msg).toContain('mcp-os worker stopped');
+      expect(msg).toContain('unhealthy containers: claude');
+      expect(msg).not.toContain('mcp-hub');
+    });
+
+    it('falls back to unknown reason when subsystems look fine', () => {
+      expect(unhealthySummary(makeHealth({ overall_healthy: false }))).toContain('unknown reason');
+    });
+  });
+
+  describe('authStatusToProjectStatus', () => {
+    const auth = (o: Partial<AuthStatusResponse>): AuthStatusResponse => ({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      ...o,
+    });
+
+    it('passes the backend discriminant through as the SSOT, overriding contradictory flags', () => {
+      // no_provider despite every credential flag and provider_configured=true.
+      expect(
+        authStatusToProjectStatus(
+          auth({
+            status: 'no_provider',
+            provider_configured: true,
+            api_key_configured: true,
+            oauth_authenticated: true,
+            needs_anthropic_auth: false,
+          })
+        )
+      ).toBe('no_provider');
+      // ready despite provider_configured=false (backend already decided).
+      expect(authStatusToProjectStatus(auth({ status: 'ready', provider_configured: false }))).toBe(
+        'ready'
+      );
+      // auth_required despite credentials being present.
+      expect(
+        authStatusToProjectStatus(
+          auth({ status: 'auth_required', api_key_configured: true, oauth_authenticated: true })
+        )
+      ).toBe('auth_required');
+    });
+
+    // The remaining cases exercise the legacy fallback (payload without `status`).
+
+    it('no_provider wins first, regardless of credential flags', () => {
+      expect(
+        authStatusToProjectStatus(
+          auth({ provider_configured: false, oauth_authenticated: true, api_key_configured: true })
+        )
+      ).toBe('no_provider');
+    });
+
+    it('ready when not needing anthropic auth', () => {
+      expect(authStatusToProjectStatus(auth({ needs_anthropic_auth: false }))).toBe('ready');
+    });
+
+    it('ready when oauth or api key present', () => {
+      expect(authStatusToProjectStatus(auth({ oauth_authenticated: true }))).toBe('ready');
+      expect(authStatusToProjectStatus(auth({ api_key_configured: true }))).toBe('ready');
+    });
+
+    it('auth_required when anthropic auth needed and no credentials', () => {
+      expect(authStatusToProjectStatus(auth({}))).toBe('auth_required');
     });
   });
 });

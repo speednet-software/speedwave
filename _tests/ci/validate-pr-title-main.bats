@@ -1,8 +1,5 @@
 #!/usr/bin/env bats
-# Tests for scripts/validate-pr-title-main.sh
-#
-# Regression: issue #371 — `chore` as PR title to main makes release-please
-# ignore the merge, collapsing feat/fix commits into an invisible release.
+# Tests for scripts/validate-pr-title-main.sh — regression guard for issue #371
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/validate-pr-title-main.sh"
 
@@ -11,7 +8,7 @@ run_script() {
 }
 
 # ---------------------------------------------------------------------------
-# Happy path — allowed conventional commit types
+# Happy path — allowed release-triggering conventional commit types
 # ---------------------------------------------------------------------------
 
 @test "feat with scope passes" {
@@ -36,46 +33,6 @@ run_script() {
 
 @test "feat with scope and breaking-change marker passes" {
     run_script "feat(api)!: redesign surface"
-    [ "$status" -eq 0 ]
-}
-
-@test "perf passes" {
-    run_script "perf(runtime): faster container boot"
-    [ "$status" -eq 0 ]
-}
-
-@test "refactor passes" {
-    run_script "refactor(desktop): extract hub logic"
-    [ "$status" -eq 0 ]
-}
-
-@test "docs passes" {
-    run_script "docs: update ADR index"
-    [ "$status" -eq 0 ]
-}
-
-@test "ci passes" {
-    run_script "ci: bump action version"
-    [ "$status" -eq 0 ]
-}
-
-@test "test passes" {
-    run_script "test(cli): cover edge case"
-    [ "$status" -eq 0 ]
-}
-
-@test "build passes" {
-    run_script "build: update toolchain"
-    [ "$status" -eq 0 ]
-}
-
-@test "style passes" {
-    run_script "style: format Rust sources"
-    [ "$status" -eq 0 ]
-}
-
-@test "revert passes" {
-    run_script "revert: undo feat(runtime): bad change"
     [ "$status" -eq 0 ]
 }
 
@@ -134,6 +91,56 @@ run_script() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"feat(...)"* ]]
     [[ "$output" == *"fix(...)"* ]]
+}
+
+@test "perf is REJECTED because it may not bump updater version" {
+    run_script "perf(runtime): faster container boot"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+    [[ "$output" == *"latest.json.version"* ]]
+}
+
+@test "refactor is REJECTED because it may not bump updater version" {
+    run_script "refactor(desktop): extract shell logic"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+    [[ "$output" == *"latest.json.version"* ]]
+}
+
+@test "docs is REJECTED because it may not bump updater version" {
+    run_script "docs: update release notes"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+}
+
+@test "ci is REJECTED because it may not bump updater version" {
+    run_script "ci: update release workflow"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+}
+
+@test "test is REJECTED because it may not bump updater version" {
+    run_script "test(cli): cover release gate"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+}
+
+@test "build is REJECTED because it may not bump updater version" {
+    run_script "build(desktop): update tauri packaging"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+}
+
+@test "style is REJECTED because it may not bump updater version" {
+    run_script "style(desktop): adjust app css"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
+}
+
+@test "revert is REJECTED because it may not bump updater version" {
+    run_script "revert: undo broken desktop update"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"release-please version bump"* ]]
 }
 
 # ---------------------------------------------------------------------------

@@ -122,26 +122,20 @@ pub(crate) fn collect_security_paths(
         data_dir.join("secrets"),
         data_dir.join("snapshots"),
         data_dir.join("tokens"),
-        // ADR-060: per-project OAuth state dir; refreshToken / clientId live here,
-        // never inside the SharePoint container's mount. Must be 0o700.
+        // ADR-060: per-project OAuth state dir, must be 0o700.
         data_dir.join(consts::OAUTH_SUBDIR),
-        // ADR-054: per-project host_exec state dir; bearer token, command
-        // config snapshot, and audit log all live here. Must be 0o700.
-        data_dir.join(consts::HOST_EXEC_SUBDIR),
         // Per-project directories
         data_dir.join("secrets").join(project),
         data_dir.join("snapshots").join(project),
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
         data_dir.join(consts::OAUTH_SUBDIR).join(project),
-        data_dir.join(consts::HOST_EXEC_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
 
     // --- tokens/<project>/<service>/ subdirectories ---
-    // Single read_dir pass collects both directory paths (for 0o700)
-    // and credential file paths (for 0o600).
+    // Collects both directory paths (0o700) and credential file paths (0o600).
     let tokens_project_dir = data_dir.join("tokens").join(project);
     if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
         for entry in services.flatten() {
@@ -164,9 +158,7 @@ pub(crate) fn collect_security_paths(
 
     // --- Root-level files ---
     files.push(data_dir.join("bundle-state.json"));
-    // ADR-054: mcp-os is a singleton — its unified lock lives at the data
-    // dir root (not under a per-project subdir). Holds the worker's auth
-    // token, so must be 0o600.
+    // ADR-054: mcp-os unified lock at data dir root, must be 0o600.
     files.push(data_dir.join(consts::MCP_OS_LOCK_FILE));
 
     // --- secrets/<project>/* (worker auth tokens) ---
@@ -207,27 +199,9 @@ pub(crate) fn collect_security_paths(
     }
 
     // --- oauth/<project>/* (ADR-060 OAuth worker state) ---
-    // Every file under here must be 0o600: oauth.json (refreshToken,
-    // clientId, tenantId, grantedScopes), `.bearer-map.json` (consumer
-    // → service map), per-consumer `bearer-<service>` tokens, the unified
-    // `lock.json` (pid/port/authToken), rotating `audit.log` / `.1`.
+    // Every file here must be 0o600.
     let oauth_project_dir = data_dir.join(consts::OAUTH_SUBDIR).join(project);
     if let Ok(entries) = std::fs::read_dir(&oauth_project_dir) {
-        for entry in entries.flatten() {
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_file() {
-                    files.push(entry.path());
-                }
-            }
-        }
-    }
-
-    // --- host-exec/<project>/* (ADR-054 host_exec worker state) ---
-    // Files include the unified `lock.json` (pid/port/authToken), the
-    // command snapshot `config.json` (may hold env-value secrets), and
-    // the audit `log`. All must be 0o600.
-    let host_exec_project_dir = data_dir.join(consts::HOST_EXEC_SUBDIR).join(project);
-    if let Ok(entries) = std::fs::read_dir(&host_exec_project_dir) {
         for entry in entries.flatten() {
             if let Ok(ft) = entry.file_type() {
                 if ft.is_file() {
@@ -278,8 +252,6 @@ mod tests {
             data_dir.join("ide-bridge"),
             data_dir.join("oauth"),
             data_dir.join("oauth/proj"),
-            data_dir.join("host-exec"),
-            data_dir.join("host-exec/proj"),
         ];
         for dir in &dirs_to_create {
             std::fs::create_dir_all(dir).unwrap();
@@ -304,10 +276,6 @@ mod tests {
             data_dir.join("oauth/proj/lock.json"),
             data_dir.join("oauth/proj/audit.log"),
             data_dir.join("oauth/proj/audit.log.1"),
-            // ADR-054 host_exec worker state — post-PR3 unified lock layout:
-            data_dir.join("host-exec/proj/lock.json"),
-            data_dir.join("host-exec/proj/config.json"),
-            data_dir.join("host-exec/proj/log"),
         ];
         for file in &files_to_create {
             std::fs::write(file, "test").unwrap();
@@ -328,11 +296,8 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected dirs (16): secrets, secrets/proj, snapshots, snapshots/proj,
-        // tokens, tokens/proj, tokens/proj/slack, tokens/proj/gitlab,
-        // tokens/proj/github, tokens/proj/atlassian, tokens/proj/empty-service,
-        // ide-bridge, oauth, oauth/proj, host-exec, host-exec/proj
-        assert_eq!(dirs.len(), 16, "expected 16 dirs, got: {dirs:?}");
+        // Expected 14 dirs.
+        assert_eq!(dirs.len(), 14, "expected 14 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -347,21 +312,9 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
         assert!(dirs.contains(&data_dir.join("oauth")));
         assert!(dirs.contains(&data_dir.join("oauth/proj")));
-        assert!(dirs.contains(&data_dir.join("host-exec")));
-        assert!(dirs.contains(&data_dir.join("host-exec/proj")));
 
-        // Expected files (18): 8 legacy + 6 oauth + 3 host-exec +
-        // 1 mcp-os singleton (post-PR3 unified lock layout). Pre-PR3
-        // host-exec/oauth each had `auth-token`/`port`/`pid` as three
-        // separate 0o600 files; PR3 collapsed them into a single
-        // `lock.json` per worker.
-        //   secrets/proj/worker-auth-token, tokens/proj/{slack,gitlab,github}/...
-        //   tokens/proj/atlassian/api_token, snapshots/proj/snapshot.json,
-        //   ide-bridge/1234.lock, bundle-state.json, mcp-os.lock.json,
-        //   oauth/proj/{sharepoint.json,.bearer-map.json,bearer-sharepoint,
-        //     lock.json,audit.log,audit.log.1},
-        //   host-exec/proj/{lock.json,config.json,log}
-        assert_eq!(files.len(), 18, "expected 18 files, got: {files:?}");
+        // Expected 15 files: 8 legacy + 6 oauth + 1 mcp-os singleton.
+        assert_eq!(files.len(), 15, "expected 15 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
@@ -377,9 +330,6 @@ mod tests {
         assert!(files.contains(&data_dir.join("oauth/proj/lock.json")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
-        assert!(files.contains(&data_dir.join("host-exec/proj/lock.json")));
-        assert!(files.contains(&data_dir.join("host-exec/proj/config.json")));
-        assert!(files.contains(&data_dir.join("host-exec/proj/log")));
 
         // non-.lock file must NOT be included
         assert!(
@@ -574,12 +524,12 @@ mod tests {
 
         // Make some even worse
         std::fs::set_permissions(
-            &data_dir.join("tokens"),
+            data_dir.join("tokens"),
             std::fs::Permissions::from_mode(0o777),
         )
         .unwrap();
         std::fs::set_permissions(
-            &data_dir.join("bundle-state.json"),
+            data_dir.join("bundle-state.json"),
             std::fs::Permissions::from_mode(0o666),
         )
         .unwrap();

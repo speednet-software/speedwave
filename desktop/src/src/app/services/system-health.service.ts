@@ -1,42 +1,30 @@
-import { Injectable, OnDestroy, inject, signal } from '@angular/core';
+import { Injectable, OnDestroy, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
+import { LoggerService } from './logger.service';
+import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
 
 /** How often the polling loop refreshes the health snapshot. */
 export const HEALTH_REFRESH_INTERVAL_MS = 5000;
 
-/**
- * Polls `get_health` and exposes the latest `HealthReport` as a signal so
- * any component can subscribe without managing the polling timer or
- * project-settled subscription itself.
- *
- * Lifetime is `'root'` — there is exactly one polling loop per app instance.
- * The loop starts on first `ensurePolling()` call and stops on `OnDestroy`.
- *
- * Extracted from `LogsViewComponent` so the SRP load on that component is
- * reduced and the same data is reusable from other views (system tray,
- * setup wizard) without duplicating polling logic.
- */
+/** Polls `get_health` and exposes the latest `HealthReport` as a signal. */
 @Injectable({ providedIn: 'root' })
 export class SystemHealthService implements OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly log = inject(LoggerService);
+  private readonly store = inject(HealthStoreService);
 
-  /** Latest health report; `null` until the first fetch lands. */
-  readonly health = signal<HealthReport | null>(null);
+  /** Latest health report (SSOT in HealthStoreService); `null` until the first fetch lands. */
+  readonly health = this.store.health;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubProjectSettled: (() => void) | null = null;
   private lastSerialised = '';
   private started = false;
 
-  /**
-   * Starts the polling loop on first call and returns the initial fetch
-   * promise so callers can `await` the first snapshot. Subsequent calls
-   * still return a promise that resolves immediately; they don't multiply
-   * the fetch rate or restart the timer.
-   */
+  /** Starts the polling loop on first call; returns the initial fetch promise. */
   ensurePolling(): Promise<void> {
     if (this.started) return Promise.resolve();
     this.started = true;
@@ -50,21 +38,23 @@ export class SystemHealthService implements OnDestroy {
 
   /** Force a fetch outside the regular cadence (e.g. after a manual action). */
   async refresh(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
     if (!project) return;
     try {
       const report = await this.tauri.invoke<HealthReport>('get_health', { project });
       if (!report || typeof report !== 'object' || !('vm' in report) || !('ide_bridge' in report)) {
         return;
       }
-      // Skip the signal write when the snapshot is byte-identical to the
-      // previous one — OnPush descendants stay quiet between real changes.
+      // Skip the signal write when the snapshot is byte-identical to the previous one.
       const serialised = JSON.stringify(report);
       if (serialised === this.lastSerialised) return;
       this.lastSerialised = serialised;
       this.health.set(report);
-    } catch {
-      // Health is non-critical; keep the previous snapshot.
+    } catch (err) {
+      // Health is non-critical; keep the previous snapshot and log at debug level.
+      if (this.tauri.isRunningInTauri()) {
+        this.log.debug(`[SystemHealth] get_health failed: ${String(err)}`);
+      }
     }
   }
 

@@ -126,6 +126,38 @@ function makeSharepointSvc(): IntegrationStatusEntry {
   };
 }
 
+function makeSlackSvc(over: Partial<IntegrationStatusEntry> = {}): IntegrationStatusEntry {
+  return {
+    service: 'slack',
+    enabled: false,
+    configured: false,
+    display_name: 'Slack',
+    description: 'Team messaging and notifications',
+    auth_fields: [
+      {
+        key: 'access_token',
+        label: 'Slack Access Token',
+        field_type: 'password',
+        placeholder: 'xoxe.xoxp-...',
+        oauth_flow: true,
+        optional: false,
+      },
+      {
+        key: 'refresh_token',
+        label: 'Refresh Token',
+        field_type: 'password',
+        placeholder: 'xoxe-1-...',
+        oauth_flow: true,
+        optional: false,
+      },
+    ],
+    current_values: {},
+    mappings: undefined,
+    oauth_provider_label: 'Slack',
+    ...over,
+  };
+}
+
 describe('ServiceCardComponent', () => {
   let component: ServiceCardComponent;
   let fixture: ComponentFixture<ServiceCardComponent>;
@@ -427,6 +459,57 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).not.toBeNull();
+    });
+
+    it('slack: all-OAuth card renders Sign in with Slack and no Save button', () => {
+      fixture.componentRef.setInput('svc', makeSlackSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.detectChanges();
+      const el = fixture.nativeElement;
+      // No typed inputs at all — bundled client_id, no prerequisites.
+      expect(el.querySelectorAll('[data-testid="auth-field-input"]').length).toBe(0);
+      expect(el.querySelector('[data-testid="oauth-section"]')).not.toBeNull();
+      expect(el.textContent).toContain('Sign in with Slack');
+      expect(el.querySelector('[data-testid="integrations-save-slack"]')).toBeNull();
+      expect(component.oauthPrerequisitesMet()).toBe(true);
+    });
+
+    it('provider label comes from the descriptor SSOT with a neutral fallback', () => {
+      fixture.componentRef.setInput('svc', makeSlackSvc());
+      fixture.detectChanges();
+      expect(component.oauthProviderLabel()).toBe('Slack');
+
+      fixture.componentRef.setInput('svc', makeSlackSvc({ oauth_provider_label: undefined }));
+      fixture.detectChanges();
+      expect(component.oauthProviderLabel()).toBe('provider');
+    });
+
+    it('passes redirectUri through to the oauth-connect hint', () => {
+      fixture.componentRef.setInput('svc', makeSlackSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('oauthStatus', 'awaiting_redirect');
+      fixture.componentRef.setInput('redirectUri', 'http://localhost:41739/callback');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('http://localhost:41739/callback');
+    });
+
+    it('shows the workspace identity hint when oauth_identity is present', () => {
+      fixture.componentRef.setInput(
+        'svc',
+        makeSlackSvc({ configured: true, oauth_identity: 'Speednet · U123' })
+      );
+      fixture.componentRef.setInput('expanded', true);
+      fixture.detectChanges();
+      const identity = fixture.nativeElement.querySelector('[data-testid="oauth-identity"]');
+      expect(identity).not.toBeNull();
+      expect(identity.textContent).toContain('Connected to Speednet · U123');
+    });
+
+    it('omits the identity hint when oauth_identity is absent', () => {
+      fixture.componentRef.setInput('svc', makeSlackSvc({ configured: true }));
+      fixture.componentRef.setInput('expanded', true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="oauth-identity"]')).toBeNull();
     });
 
     it('does not show oauth section for non-oauth services', () => {

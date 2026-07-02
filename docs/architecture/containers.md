@@ -9,6 +9,9 @@ Each project runs an isolated set of containers on a dedicated network:
 ```
 speedwave_<project>_network
 ├── speedwave_<project>_claude      # Claude Code — no tokens, no container socket
+├── speedwave_<project>_proxy  # Rust forwarder (port 4000, ADR-073) — routes every session
+│   ├── anthropic passthrough       # Subscription OAuth / API key → api.anthropic.com (verbatim headers)
+│   └── /v1/messages (prefix route) # Local / OpenRouter backends — native Anthropic, SSE relayed, no translation
 ├── speedwave_<project>_mcp_hub     # MCP Hub (port 4000) — ONLY MCP server Claude sees
 │   ├── search_tools                # Discovers OS tools alongside Slack, GitLab, etc.
 │   ├── execute_code                # os.listReminders(), os.createEvent(), etc.
@@ -16,9 +19,12 @@ speedwave_<project>_network
 └── speedwave_<project>_mcp_<service>  # Per-service workers (own tokens only)
 ```
 
-- The Claude container has **no tokens** and **no container socket** — it communicates only with the MCP Hub
+- The Claude container has **no tokens** and **no container socket** — it talks to the proxy forwarder (LLM traffic) and the MCP Hub (tools)
+- It ships two language runtimes — `node` + `npm` and `python3` + `pip` + `venv` (`Containerfile.claude`) — so Claude can run `.js`/`.py` scripts and install libraries into `/workspace`/`$HOME`. It still has no reach to the host toolchain (ADR-054)
 - Each MCP worker mounts only its own service credentials at `/tokens` (read-only)
 - The Hub has **zero tokens** and acts as a router
+- The proxy is a worker-class token holder: per-provider LLM keys mount `:ro` at `/tokens` (`tokens/<project>/llm/`), the rendered routing config mounts `:ro` at `/config`, and the usage JSONL sink is its only writable mount (`/usage`). No host port, no database, no admin UI; it holds no Anthropic credential and relays native Anthropic streams without translation (ADR-073)
+- The Claude container `depends_on` the proxy with `condition: service_started`, so the proxy is created first on `compose up`. It is start-ordering only — the proxy ships no healthcheck, and Claude Code only sends `/v1/messages` on the first user prompt, by which point the scratch-binary proxy is listening (ADR-073)
 
 ## Compose Template
 
@@ -30,51 +36,57 @@ speedwave_<project>_network
 
 ## Resource Limits
 
-Container memory limits are defined in `containers/compose.template.yml`. The Claude container memory is **adaptive** based on host RAM; other services use fixed limits:
+Container limits are the resource SSOT in Rust (not the compose template, which
+carries only placeholders the renderer fills — see ADR-068):
 
-- **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
-- **MCP Hub:** 512 MiB (fixed)
-- **MCP workers:** 128 MiB each (fixed), except:
-  - `mcp-github` — 256 MiB (Octokit composed with the throttling + retry plugins, plus `octokit.paginate` buffering full result sets, OOM-kills a 128 MiB cap on a busy repo)
-  - `mcp-office` — 1 GiB (`cpus: 1.0`); LibreOffice headless on a non-trivial document needs the headroom. Attached only to an `internal: true` compose network (no egress) — see ADR-055
-  - `mcp-playwright` — 2048 MiB (`cpus: 2.0`) due to Chromium requirements
+- **Claude container:** fixed **6 GiB** cap on every platform/host size. Claude Code needs 4 GB+ officially and its process is light (heavy compute is server-side), so a fixed cap is generous and immune to drift when workers are added. (`resources.rs::CLAUDE_MEMORY_GIB`)
+- **MCP Hub:** 512 MiB, `cpus: 1.0` (on the path of every request, does real CPU work)
+- **Speedwave proxy:** 128 MiB, `cpus: 0.5` (`resources.rs::PROXY_RESOURCES`) — a tiny Rust forwarder that relays the SSE byte stream (no translation); measured ~3-4 MiB idle / ~37 MiB peak, so 128 MiB is ≈3.5× headroom (ADR-073)
+- **MCP workers:** 128 MiB / `cpus: 0.5` each (`resources::STANDARD_WORKER_RESOURCES`), except:
+  - `mcp-github` — 256 MiB (Octokit + throttling/retry plugins + `octokit.paginate` buffering full result sets OOM-kills a 128 MiB cap on a busy repo)
+  - `mcp-office` — 1 GiB / `cpus: 1.0`; LibreOffice headless needs the headroom. Internal-only network (no egress) — see ADR-055
+  - `mcp-playwright` — 2048 MiB / `cpus: 2.0` + 2 GiB shm (Chromium IPC)
 
-**Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
+Container limits are **ceilings, not reservations** — the limit sum may exceed
+the VM (overcommit is fine) as long as live usage does not. Only the always-on
+set (Claude + hub) is asserted to fit the smallest supported VM.
 
-All resource formulas live in `crates/speedwave-runtime/src/resources.rs` (SSOT).
+**Minimum requirement:** 16 GiB RAM (`resources::MIN_SUPPORTED_HOST_GIB`). At 16 GiB the VM is sized to 8 GiB, which fits the always-on set (Claude's 6 GiB cap + hub) without overcommit; a smaller host would size the VM below Claude's cap and risk an OOM. Speedwave warns at startup if the host has less than 16 GiB.
 
-### Adaptive scaling (macOS — Lima VM)
+The SSOT spans two files (ADR-068 §3): always-on limits + VM sizing in
+`crates/speedwave-runtime/src/resources.rs`; per-worker limits on
+`consts::McpServiceDescriptor.resources`; the plugin default/cap envelope in
+`consts.rs`. A drift test (`compose::tests::resources_render_from_ssot`) enforces
+template ↔ SSOT parity.
 
-The Lima VM and Claude container memory scale based on host RAM. The VM never takes more than 50% of host RAM (capped at 32 GiB):
+### Adaptive VM sizing (macOS — Lima VM)
 
-| Host RAM | Lima VM      | Claude container |
-| -------- | ------------ | ---------------- |
-| 8 GiB    | 4 GiB        | 4 g (floor)      |
-| 16 GiB   | 8 GiB        | 4 g              |
-| 24 GiB   | 12 GiB       | 8 g              |
-| 32 GiB   | 16 GiB       | 12 g             |
-| 64 GiB   | 32 GiB (cap) | 28 g (cap)       |
+Only the **VM** is host-adaptive; the Claude container cap is fixed (above). The
+VM never takes more than 50% of host RAM/cores:
 
-Formulas: VM = `(host_ram / 2).clamp(4, 32)`, Claude = `(vm_mem - 4).clamp(4, 28)`.
+| Host RAM / cores | Lima VM RAM   | Lima VM vCPUs |
+| ---------------- | ------------- | ------------- |
+| 16 GiB / 8       | 8 GiB (floor) | 4 (floor)     |
+| 32 GiB / 16      | 16 GiB        | 8 (cap)       |
+| 64 GiB / 24      | 32 GiB (cap)  | 8 (cap)       |
+
+Formulas: VM RAM = `(host_ram / 2).clamp(8, 32)`, VM vCPUs = `(host_cores / 2).clamp(4, 8)`. The 8 GiB RAM floor matches the 16 GiB minimum host (a sub-minimum host still floors at an 8 GiB VM so the always-on set fits).
 
 ### Windows (WSL2)
 
-Claude container memory scales directly from host RAM with 6 GiB reserved for
-the OS and user applications. WSL2 shares host RAM dynamically rather than
-reserving a hard partition like Lima, so the formula bypasses the VM-memory
-step. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()`
-returns 16 on failure → 16 − 6 = 10).
-
-| Host RAM | Claude container |
-| -------- | ---------------- |
-| 8 GiB    | 4 g (floor)      |
-| 16 GiB   | 10 g             |
-| 32 GiB   | 26 g             |
-| 64 GiB   | 28 g (cap)       |
+WSL2 sizing is **deliberately unmanaged** (ADR-068 §4): WSL2 schedules CPU
+dynamically and defaults the VM to half host RAM, and `.wslconfig` is a global,
+user-owned file shared with Docker Desktop. Speedwave does not set
+`memory`/`processors` there. The Claude container's fixed 6 GiB cap applies on
+Windows too.
 
 ### Migration
 
-On upgrade from older versions, `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed. The migration applies both upgrades and downgrades so that a reduced VM formula takes effect immediately (triggers when `current != desired`).
+On upgrade, `ensure_lima_vm_config()` regenerates `lima.yaml` from the SSOT
+template (macOS only) when the VM memory, vCPU count, or VPN netplan drop-in
+drifts from the current formulas. `lima.yaml` is treated as a generated file —
+user hand-edits are not preserved (ADR-068). The migration stops the VM, rewrites
+both source and instance config, and restarts — no VM recreation.
 
 Existing projects receive the new Claude container memory limit on next container start (when `render_compose()` generates a fresh compose.yml), not immediately on upgrade.
 
@@ -96,25 +108,32 @@ Builds are scoped to what the user actually runs:
 - **Project switch runs the same lazy build for the destination project** before `compose_up`, so switching to a project whose integrations weren't yet built never fails with `no such image`. The build is part of the "Switching project…" wait.
 - `images_exist(rt, integrations)` checks only images that should exist for the given set, so disabled integrations don't force a phantom rebuild at reconcile time.
 - After each reconcile and every successful `restart_integration_containers`, `prune_orphan_current_bundle_images` force-removes worker tags that the **active project** no longer enables (`enabled_images(active)`). Per-project scope: switching to another project that needs the pruned image triggers a lazy build during the switch.
-- Pruning is unchanged: `prune_old_bundle_images` still `rmi`s every catalogue tag for the old bundle id; `rmi` of an absent tag is a no-op.
+
+### Per-image build-input hash tags (ADR-072)
+
+Each image is tagged `name:<hash16>` where the hash covers that image's declared `ImageDef.hash_inputs` (its Containerfile + every COPY/ADD source; workers also `mcp-servers/shared` + `tsconfig.base.json`) plus its build args (`CLAUDE_VERSION` affects only `speedwave-claude`). The aggregate `bundle_id` (app_version + per-image hashes + claude-resources hash) is the **reconcile trigger** — it decides resources sync + project restore, never which images rebuild. Consequences:
+
+- A release with no container changes runs sync + restore but builds **zero** images; a one-worker change rebuilds one image (`build_missing_images` — a present tag is already the exact build the manifest needs).
+- A `mcp-servers/shared` change rebuilds every worker (it is baked into each via multi-stage COPY); a `claude-resources/` change rebuilds nothing but still reconciles (the claude container is recreated at restore, re-running the entrypoint symlinks).
+- The `hash_inputs` declarations are test-enforced (`hash_inputs_cover_copy_sources` parses every COPY/ADD); an undeclared source fails the build.
+- Builds and tag prunes are serialised across processes by `<data_dir>/build.lock` (`build::with_build_lock`) — Desktop reconcile, CLI update and project-switch lazy builds no longer race. Builds stay outside compose locks (ADR-066).
 
 ### Image pruning on update
 
-When the bundle ID changes (app version bump or build-context change), disk space is reclaimed in two steps **before** building the new image set:
+Disk space is reclaimed **after** the full restore succeeds (atomicity: the previous images stay on disk until the new set is running, so a partial failure leaves a known-good fallback). `build::prune_superseded_images` performs, warn-only:
 
-1. The previous bundle's tagged images (one per `build.rs::IMAGES` entry) are removed via `nerdctl rmi`, reclaiming several GiB.
-2. BuildKit build cache is pruned via `nerdctl builder prune --all --force`, reclaiming an additional ~5–15 GiB of transient layers from `--mount=type=cache` steps.
+1. **Per-image diff prune** (`prune_replaced_images`): for every image whose applied hash differs from the manifest's, removes `name:old_hash`. Unchanged images keep their tag — nothing to reclaim.
+2. **One-time legacy prune** on migration from the pre-ADR-072 single-id format (state without a per-image map): removes every catalogue tag for the old `bundle_id`.
 
-This two-step cleanup ensures the Lima VM diffdisk (50 GiB cap) has sufficient space for the new build.
+BuildKit cache is **no longer pruned on update** — apt/npm `--mount=type=cache` layers survive and are reused by the next rebuild. Cache is pruned only by the recovery ladder in `with_build_recovery` (shared by bundle and plugin builds), on disk-full or containerd snapshotter corruption — `nerdctl system prune` does not clear cache mounts, so those branches call `builder prune` explicitly.
 
-Both update paths perform this pruning:
+Both update paths share this pruning: **Desktop** (`reconcile_bundle_update_inner`) after `ProjectsRestored`, **CLI** (`update_containers` → `maybe_prune_previous_bundle`) after containers are confirmed running. The CLI never writes `bundle-state.json` (single-writer rule, test-pinned); Desktop reconcile and the setup wizard are the only writers of `applied_image_hashes`/`applied_bundle_id`.
 
-- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_enabled_images` for the active project's enabled set
-- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_images_for_bundle` for the current project's enabled set
+### Known upstream: containerd overlayfs snapshotter rename race
 
-The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
+A build can intermittently fail with a containerd snapshotter error whose chain contains `apply layer error` / `failed to prepare extraction snapshot` / `failed to rename … file exists`. This is a race in containerd's overlayfs snapshotter atomic-commit path[^containerd-11719][^nerdctl-3420], **not a Speedwave bug** — concurrent layer extraction can collide on the `snapshots/new-<N>` → `snapshots/<N>` rename.
 
-Failure to prune is warn-only and never blocks the update — the build proceeds regardless.
+Speedwave detects it via `is_snapshotter_error` (string match over the full error chain) and recovers in the `with_build_recovery` ladder: **`nerdctl system prune --force` → retry once → engine restart** if it still fails. The accompanying `[WARN][speedwave_runtime::build]` line is **expected on a recovered build and requires no operator action** — the retry resolves it. A `warn!` level is intentional: the retry-after-prune is a fallback path, which `warn!` denotes; `info!` would understate it.
 
 ## Dynamic Port Reconciliation (mcp-os)
 
@@ -122,7 +141,7 @@ The mcp-os process runs on the host (not in a container) and binds to a dynamic 
 
 `reconcile_compose_port` runs in a background thread to fix this:
 
-1. Reads the current mcp-os port from `~/.speedwave/mcp-os.port`
+1. Reads the current mcp-os port from the unified lock file `~/.speedwave/mcp-os.lock.json` (`consts::MCP_OS_LOCK_FILE`) via `host_mcp_process::lock::read`
 2. Reads the active compose file and checks `WORKER_OS_URL` for a matching port
 3. If the port is stale, regenerates the compose YAML via `render_compose()`, runs the security check, and saves the new compose file
 4. Calls `compose_up_recreate` to recreate containers with the updated `WORKER_OS_URL`
@@ -138,7 +157,7 @@ When the watchdog respawns the oauth worker it:
 
 1. Stops and re-runs `OauthProcess::spawn_in`, getting a new port.
 2. Adds the project to a `respawned` list (built under the worker map's mutex, then drained outside it).
-3. Calls `host_exec_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
+3. Calls `containers_cmd::recreate_project_containers_if_running` for each respawned project — wrapped in `std::panic::catch_unwind` so a single bad project does not silently kill the watchdog thread.
 4. `recreate_project_containers_if_running` regenerates the compose YAML via `render_compose()`, runs the security check, and recreates the project's containers — they pick up the new `WORKER_OAUTH_URL` in env.
 
 The `is_oauth_alive` TCP probe retries 3 × with a 200 ms backoff before declaring a worker dead, because every false-positive respawn cascades into a full container recreate of every OAuth consumer.
@@ -173,9 +192,9 @@ Per-project granularity: different projects never block each other; the same pro
 
 After every `save_compose`, transactions call `compose_validate_with_retry(rt, project)` which runs `nerdctl compose -f <file> -p <project> config --quiet` inside the VM/distro. This catches virtiofs/9p propagation lag — the host atomic-write succeeded but the engine still sees stale or torn YAML.
 
-Retries on errors matching `is_propagation_error` (substrings `"undefined network"` and `"invalid compose project"`, both lowercased). Backoff: 100 ms before retry 1, 200 ms before retry 2. Max 3 attempts. Non-propagation errors propagate immediately.
+Retries on errors matching `is_propagation_error` (all lowercased): `"undefined network"`, `"invalid compose project"`, plus the schema/parse symptoms of a torn read — a truncated scalar makes compose-go report the field as the wrong type (`networks.<n>.driver`, `deploy.resources.limits.cpus`, `deploy.resources.limits.memory`) and a mid-line cut makes libyaml's scanner emit `"could not find expected"` / `"did not find expected"`. Capped exponential backoff: 100/200/400/800/1600 ms between attempts, doubling each retry up to `COMPOSE_VALIDATE_MAX_DELAY_MS` = 1600 ms. Max `COMPOSE_VALIDATE_MAX_ATTEMPTS` = 6 attempts. Non-propagation errors propagate immediately.
 
-The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT` and `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, shared between the host-side `validate_compose_network_refs` (which emits the fragment) and `runtime::is_propagation_error` (which recognises it).
+The error-fragment strings are SSOT'd as `compose::UNDEFINED_NETWORK_ERROR_FRAGMENT`, `compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT`, and `compose::COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS` (the torn-field / scanner symptoms above), shared between the host-side `validate_compose_network_refs` (which emits the network fragment) and `runtime::is_propagation_error` (which recognises them). The `deploy.resources.limits.cpus` case was surfaced in production by `mcp-office`.
 
 ## Network Cleanup (compose_down)
 
@@ -208,11 +227,11 @@ After a containerd reinstall, VM recreation, or other event that wipes container
 4. If recovery fails, the user sees an actionable message ("Please restart Speedwave")
 5. `start_containers()` additionally verifies exec health before marking `containers_started = true` in setup state
 
-The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from four sites: CLI (`main.rs`), Desktop chat (`chat.rs`), auth check (`setup_wizard.rs`), and container start (`setup_wizard.rs`).
+The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from three sites: CLI (`main.rs`), auth check (`check_claude_auth` in `setup_wizard.rs`), and container start (`start_containers` in `setup_wizard.rs`). The Desktop chat path (`chat.rs`) does **not** call it directly — `ChatSession::start` requires the caller to have already verified health (e.g. via `check_claude_auth`) and skips the check to avoid double health-checks.
 
 ### Missing images (reconcile-time detection)
 
-At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the bundle ID has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile forces a rebuild of the active project's enabled set before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-057) and don't trigger a rebuild.
+At startup, `reconcile_bundle_update` verifies that the expected container images exist for the active project even when the reconcile id has not changed. If any of those images are missing (e.g. containerd was reinstalled), the reconcile rebuilds the missing tags of the active project's enabled set (`build_missing_images`, per-image — ADR-072) before setting `IMAGES_READY = Ready`. Disabled-integration images are intentionally absent under lazy builds (ADR-057) and don't trigger a rebuild. When the id matches and images are present but `pending_running_projects` is non-empty (projects stopped by an update that turned out to be a no-op), those projects are restored before the state is cleaned.
 
 ## VM Lifecycle on Exit
 
@@ -220,7 +239,7 @@ When the Desktop app exits, Speedwave stops the underlying VM (where applicable)
 
 ### macOS (Lima VM)
 
-The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
+The Lima VM reserves 8–32 GiB of RAM for the lifetime of the process (`desired_vm_memory_gib` = `(host_ram / 2).clamp(8, 32)`, per the adaptive table above) — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
 
 - **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
 - **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.
@@ -244,3 +263,7 @@ SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)
 - [ADR-008: No Background Daemon](../adr/ADR-008-no-background-daemon.md)
 - [ADR-017: Claude Code in Container via entrypoint.sh](../adr/ADR-017-claude-code-in-container-via-entrypoint.md)
+
+[^containerd-11719]: containerd issue #11719 — overlayfs snapshotter rename race on concurrent extraction. <https://github.com/containerd/containerd/issues/11719>
+
+[^nerdctl-3420]: nerdctl issue #3420 — `failed to rename … file exists` during parallel image pulls/builds. <https://github.com/containerd/nerdctl/issues/3420>

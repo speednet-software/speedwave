@@ -1,19 +1,18 @@
 /**
  * Generic OAuth provider contract used by the host-side `oauth` worker.
- *
- * Each IdP (Microsoft, Atlassian, …) implements one `OAuthProvider`. The
- * worker reads `state.provider` from `oauth/<project>/<service>.json`, looks
- * the implementation up in the registry, and calls `refresh()` with the
- * stored `providerData` (IdP-specific fields like Microsoft `clientId` /
- * `tenantId`).
  */
 
 /** SSOT — widen this union when adding an IdP. */
-export type ProviderId = 'microsoft';
+export type ProviderId = 'microsoft' | 'generic' | 'slack';
+
+/** OAuth grant the stored state was minted with; drives generic refresh. */
+export type GrantType = 'refresh_token' | 'client_credentials';
 
 /** Inputs for an OAuth refresh round-trip. */
 export interface RefreshRequest {
-  /** Long-lived refresh token issued by the IdP. */
+  /** Grant the state uses. Defaults to `refresh_token` for legacy state. */
+  grantType?: GrantType;
+  /** Long-lived refresh token. Empty for `client_credentials` (re-mint). */
   refreshToken: string;
   /** Scopes requested at refresh time (caller-supplied, IdP-validated). */
   scopes: string[];
@@ -48,5 +47,7 @@ export interface OAuthProvider {
   readonly id: ProviderId;
   /** Required keys of `providerData`; dispatcher validates pre-call. */
   readonly requiredFields: readonly string[];
+  /** Per-request validation; returns an error to reject, or `null` to proceed. */
+  validateRequest?(req: RefreshRequest): RefreshError | null;
   refresh(req: RefreshRequest): Promise<RefreshResult>;
 }

@@ -15,8 +15,7 @@ describe('ShellComponent', () => {
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
-  // Stub the root BetaService so specs control beta state directly; default
-  // "on" so the meeting-transcription nav entry behaves as before.
+  // Beta on by default so the meeting-transcription nav entry is present.
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -100,7 +99,7 @@ describe('ShellComponent', () => {
   it('shows rebuilding overlay when reconcile in progress', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'rebuilding';
+    projectState.status.set('rebuilding');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -111,7 +110,7 @@ describe('ShellComponent', () => {
 
   it('shows checking overlay when containers checking', async () => {
     await component.ngOnInit();
-    projectState.status = 'checking';
+    projectState.status.set('checking');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -122,7 +121,7 @@ describe('ShellComponent', () => {
 
   it('shows starting overlay when containers starting', async () => {
     await component.ngOnInit();
-    projectState.status = 'starting';
+    projectState.status.set('starting');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -146,12 +145,27 @@ describe('ShellComponent', () => {
   it('hides overlay when ready', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'ready';
+    projectState.status.set('ready');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="blocking-error"]')).toBeNull();
+  });
+
+  it('does not overlay no_provider (chat renders its own choose-provider surface)', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status.set('no_provider');
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
+  });
+
+  it('statusMessage returns the no-provider copy', () => {
+    projectState.status.set('no_provider');
+    expect(component.statusMessage).toBe('No LLM provider selected.');
   });
 
   it('cleans up subscription on destroy', async () => {
@@ -184,7 +198,7 @@ describe('ShellComponent', () => {
   it('shows fullscreen blocking overlay on check_failed', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'check_failed';
+    projectState.status.set('check_failed');
     projectState.error = 'WSL2 is not available';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -198,7 +212,7 @@ describe('ShellComponent', () => {
   it('check_failed overlay shows only Retry button, no Dismiss', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'check_failed';
+    projectState.status.set('check_failed');
     projectState.error = 'prereq failure';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -219,7 +233,7 @@ describe('ShellComponent', () => {
   it('shows spinner with system check message during system_check', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'system_check';
+    projectState.status.set('system_check');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -230,7 +244,7 @@ describe('ShellComponent', () => {
 
   it('does not show blocking overlay when auth_required', async () => {
     await component.ngOnInit();
-    projectState.status = 'auth_required';
+    projectState.status.set('auth_required');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -241,11 +255,9 @@ describe('ShellComponent', () => {
   });
 
   it('keeps the Chat nav link visible when status is auth_required', async () => {
-    // Mockup-aligned behaviour: the chat icon is always present in the rail.
-    // When auth is missing the chat view itself surfaces an inline
-    // "auth required" block with a link to Settings instead of disappearing.
+    // Chat icon persists in nav even when auth is required; auth surfaces inline.
     await component.ngOnInit();
-    projectState.status = 'auth_required';
+    projectState.status.set('auth_required');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -257,6 +269,7 @@ describe('ShellComponent', () => {
       'nav-integrations',
       'nav-plugins',
       'nav-meeting-transcription',
+      'nav-usage',
       'nav-settings',
       'nav-logs',
     ]);
@@ -265,7 +278,7 @@ describe('ShellComponent', () => {
   it('shows Chat nav link when status is ready', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'ready';
+    projectState.status.set('ready');
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
@@ -277,6 +290,7 @@ describe('ShellComponent', () => {
       'nav-integrations',
       'nav-plugins',
       'nav-meeting-transcription',
+      'nav-usage',
       'nav-settings',
       'nav-logs',
     ]);
@@ -285,7 +299,7 @@ describe('ShellComponent', () => {
   it('shows Chat nav link when status is error', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    projectState.status = 'error';
+    projectState.status.set('error');
     projectState.error = 'something failed';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -306,15 +320,14 @@ describe('ShellComponent', () => {
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-usage',
       'nav-settings',
       'nav-logs',
     ]);
   });
 
   describe('restart overlay', () => {
-    // Modal contents render through CDK Dialog (a portal attached to
-    // document.body), not inside the host fixture, so we query the global
-    // document for any element underneath the overlay.
+    // CDK Dialog renders into document.body, outside the host fixture.
     function q(sel: string): HTMLElement | null {
       return document.querySelector(sel) as HTMLElement | null;
     }
@@ -322,7 +335,7 @@ describe('ShellComponent', () => {
     beforeEach(async () => {
       await component.ngOnInit();
       await fixture.whenStable();
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       component['cdr'].markForCheck();
       fixture.detectChanges();
     });
@@ -340,9 +353,8 @@ describe('ShellComponent', () => {
     });
 
     it('shows overlay when needsRestart is true and status is auth_required', () => {
-      // Toggling an integration is valid before Anthropic login; the restart
-      // prompt must still surface in auth_required, not only in ready.
-      projectState.status = 'auth_required';
+      // Restart prompt must surface in auth_required, not only in ready.
+      projectState.status.set('auth_required');
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
       fixture.detectChanges();
@@ -371,7 +383,7 @@ describe('ShellComponent', () => {
         'checking',
         'starting',
       ] as const) {
-        projectState.status = status;
+        projectState.status.set(status);
         component['cdr'].markForCheck();
         fixture.detectChanges();
 
@@ -384,7 +396,7 @@ describe('ShellComponent', () => {
 
     it('hides overlay when status is error', () => {
       projectState.needsRestart = true;
-      projectState.status = 'error';
+      projectState.status.set('error');
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
@@ -423,8 +435,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      // The spinner branch lives inside the host template (not the modal),
-      // so it stays in the fixture DOM.
+      // Spinner branch lives in the host template, so it stays in the fixture DOM.
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');

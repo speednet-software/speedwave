@@ -1,9 +1,4 @@
-/**
- * Tests for GitHub Pull Request Tools
- *
- * Coverage: listPullRequests, getPullRequest, createPullRequest, mergePullRequest,
- *           updatePullRequest, getPrDiff, getPrFiles (7 tools)
- */
+/** Tests for GitHub Pull Request Tools. */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';

@@ -55,7 +55,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
 2. When ready to release, merge `dev` → `main` via PR
 3. On push to `main`, release-please analyzes new commits since the last release
 4. If there are releasable changes, release-please opens (or updates) a **release PR** on `main`
-5. The release PR updates `CHANGELOG.md`, bumps version in all 16 files, and shows a summary of changes
+5. The release PR updates `CHANGELOG.md`, bumps version in all configured version files, and shows a summary of changes
 6. **Merge the release PR** — this triggers release-please to create a draft GitHub Release + tag
 7. The draft release triggers `desktop-release.yml` to build all platforms
 8. After all builds succeed, `publish-release` flips the release from draft → published
@@ -111,7 +111,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   │        │                                                                      │
   │        ▼                                                                      │
   │  [job: publish-release]                                                       │
-  │    verify-release-assets.sh: 20 assets, 6 .sig companions, latest.json       │
+  │    verify-release-assets.sh: 18 assets, 6 .sig companions, latest.json       │
   │    draft ─► live ─► verify-release-assets.sh (post-publish safety net)       │
   │                                                                               │
   └──────────────────────────┬────────────────────────────────────────────────────┘
@@ -138,9 +138,9 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
         │      ├─ desktop (desktop clippy, angular eslint, angular tests)
         │      └─ audit (cargo-audit, npm audit)
         │
-        └──► desktop-build.yml  (push/PR to main only, when desktop/** crates/** Cargo.toml Cargo.lock change)
-               ├─ PR to main:   macOS only
-               └─ push to main: macOS + Windows (unsigned)
+        └──► desktop-build.yml  (push/PR to main or dev, when desktop/** crates/** Cargo.toml Cargo.lock change)
+               ├─ PR:   macOS only
+               └─ push: macOS + Windows (unsigned)
 ```
 
 ## How to Create a Release
@@ -165,13 +165,13 @@ That's it — no manual version bumping, no workflow dispatch, no release type s
 - Release-please also backfills file lists per commit — empty commits (`--allow-empty`) return 0 files and are excluded from path-based detection
 - Squash merge produces a single commit with the PR title as the message — if the PR title follows conventional commits (e.g. `feat(runtime): add logging`), release-please picks it up correctly
 
-#### `chore(...)` is NOT allowed as a PR title to `main`
+#### Non-release types are NOT allowed as PR titles to `main`
 
-Release-please only tracks commit types listed in its `changelog-sections` (`release-please-config.json`). `chore` is intentionally absent — a `chore` squash merge from `dev` to `main` would collapse every bundled `feat`/`fix` commit into a single `chore` commit that release-please ignores entirely. Result: no version bump, no release PR, the whole batch vanishes from the release record.
+The desktop updater installs only when `latest.json.version` is greater than the installed version. A `dev` → `main` squash merge must therefore use a release-triggering title: `feat(...)` or `fix(...)`.
 
-`merge-strategy-check.yml` enforces this by rejecting `chore(...)` PR titles on PRs to `main`. Allowed types for `dev → main`: `feat, fix, perf, refactor, docs, ci, test, build, style, revert`.
+Release-please may not create a version bump for non-release types such as `build`, `chore`, `ci`, `docs`, `perf`, `refactor`, `revert`, `style`, or `test`. If one of those titles is used for the squash merge, code can land on `main` without a newer updater version. Result: no release PR, no desktop build, and users who check for updates remain on the previous app code.
 
-If a `dev → main` PR contains only housekeeping, wait for the next `feat`/`fix` before merging — do not promote a `chore`-only batch on its own. `chore` remains valid for PRs targeting `dev`.
+`merge-strategy-check.yml` enforces this by rejecting non-release titles on PRs to `main`. If a `dev` → `main` PR contains only housekeeping, wait for the next `feat`/`fix` batch before merging, or retitle the PR to the dominant user-visible release reason. Non-release types remain valid for PRs targeting `dev`.
 
 #### What happens if you accidentally use a regular merge
 
@@ -391,22 +391,23 @@ gh workflow run desktop-release.yml --ref main -f version=0.3.0
 
 **Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
 
-Or use `desktop-build.yml` which runs automatically on PRs to `main` (macOS only) and on push to `main` (macOS + Windows). These builds are unsigned.
+Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (macOS only) and on push to `main` or `dev` (macOS + Windows). These builds are unsigned.
 
 ## Files Involved
 
-| File                                            | Role                                                           |
-| ----------------------------------------------- | -------------------------------------------------------------- |
-| `release-please-config.json`                    | release-please configuration — extra-files, changelog sections |
-| `.release-please-manifest.json`                 | Current version tracker for release-please                     |
-| `.github/workflows/release-please.yml`          | Runs release-please on push to main, triggers builds           |
-| `.github/workflows/release-please-lockfile.yml` | Regenerates Cargo.lock on release-please PRs                   |
-| `.github/workflows/desktop-release.yml`         | Matrix build, code signing, CLI cross-compile, publish         |
-| `.github/workflows/desktop-build.yml`           | PR/push CI build (unsigned)                                    |
-| `.github/workflows/backmerge.yml`               | Automated main → dev backmerge after release publish           |
-| `.github/workflows/merge-strategy-check.yml`    | Enforces conventional commit PR titles on PRs to main          |
-| `desktop/src-tauri/src/updater.rs`              | Stable endpoint, version comparator, auto-check loop           |
-| `desktop/src-tauri/tauri.conf.json`             | Tauri config — updater pubkey, default stable endpoint         |
+| File                                                | Role                                                           |
+| --------------------------------------------------- | -------------------------------------------------------------- |
+| `release-please-config.json`                        | release-please configuration — extra-files, changelog sections |
+| `.release-please-manifest.json`                     | Current version tracker for release-please                     |
+| `.github/workflows/release-please.yml`              | Runs release-please on push to main, triggers builds           |
+| `.github/workflows/release-please-lockfile.yml`     | Regenerates Cargo.lock on release-please PRs                   |
+| `.github/workflows/release-please-npm-lockfile.yml` | Regenerates npm package-lock.json files on release-please PRs  |
+| `.github/workflows/desktop-release.yml`             | Matrix build, code signing, CLI cross-compile, publish         |
+| `.github/workflows/desktop-build.yml`               | PR/push CI build (unsigned)                                    |
+| `.github/workflows/backmerge.yml`                   | Automated main → dev backmerge after release publish           |
+| `.github/workflows/merge-strategy-check.yml`        | Enforces conventional commit PR titles on PRs to main          |
+| `desktop/src-tauri/src/updater.rs`                  | Stable endpoint, version comparator, auto-check loop           |
+| `desktop/src-tauri/tauri.conf.json`                 | Tauri config — updater pubkey, default stable endpoint         |
 
 ## Verifying a Release
 

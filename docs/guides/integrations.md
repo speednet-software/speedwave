@@ -16,11 +16,8 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 | Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                                 |
 | Context7    | Library docs       | `speedwave_<project>_mcp_context7`   | `~/.speedwave/tokens/<project>/context7/` (optional) |
 | OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                                   |
-| Host Exec   | Project toolchain  | host-exec (per-project host process) | N/A (whitelist in `~/.speedwave/config.json`)        |
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, WinRT/MAPI on Windows).
-
-**Host Exec** (`host_exec`) is opt-in per project and runs a **user-defined whitelist** of project-toolchain commands (build / test / lint, `docker compose`, …) on the host machine, in the project folder — so Claude (running in a container) can finally drive your toolchain. It is a deliberate, scoped weakening of Speedwave's container isolation; see [Host Exec](#host-exec) below and [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening).
 
 #### macOS Permission Check
 
@@ -88,7 +85,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 
 | Integration | Required Fields                                    | Optional Fields                                                        |
 | ----------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                          | —                                                                      |
+| Slack       | `access_token` (via **Sign in with Slack**)        | —                                                                      |
 | SharePoint  | `client_id`, `tenant_id`, `site_id` + OAuth tokens | —                                                                      |
 | GitLab      | `token`, `host_url`                                | —                                                                      |
 | GitHub      | `token`                                            | —                                                                      |
@@ -96,12 +93,44 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | Redmine     | `api_key`, `host_url`                              | `project_id` (scope operations to a default project)                   |
 | Office      | _(none — no credentials required)_                 | —                                                                      |
 | Playwright  | _(none — no credentials required)_                 | —                                                                      |
+| Context7    | _(none — anonymous mode works)_                    | `api_key` (higher rate limits; anonymous is per-IP rate-limited)       |
 
 ### Enabling an integration — first build on demand
 
 When you toggle an integration on for the first time in a project, Speedwave builds its worker container image on demand (ADR-057). The build is part of the "Restarting containers…" wait. First builds of heavy images (e.g. `playwright`, which pulls Chromium; `office`, which pulls LibreOffice + a Python venv) noticeably extend that wait; subsequent toggles are near-instant because the build is cached.
 
 If the build fails (network, disk), the integration row reverts to disabled — your running containers keep their prior configuration. Disabling an integration drops its worker image; re-enabling rebuilds.
+
+### Slack — Messaging
+
+The Slack integration is a built-in MCP worker that acts **as you** — messages sent by Claude carry your name and avatar, not a bot identity. Authentication is a single **Sign in with Slack** button ([ADR-071](../adr/ADR-071-slack-oauth-pkce-user-tokens.md)); there is nothing to type and no Slack app to create.
+
+**Signing in:**
+
+1. Open **Integrations → Slack** in Speedwave Desktop and click **Sign in with Slack**.
+2. Your browser opens Slack's consent screen — pick the workspace and click **Allow**. Workspaces with app approval enabled need a one-time admin approval of the Speedwave app.
+3. The browser redirects to `http://localhost:41739/callback` on your machine; Speedwave exchanges the code locally (PKCE — no client secret exists anywhere) and the card shows **Connected to <workspace>**.
+4. Click **Restart** when prompted so the worker picks up the credentials.
+
+**What is stored where:**
+
+- `~/.speedwave/tokens/<project>/slack/access_token` — the short-lived access token (about 12 hours), the only file the worker container can see (`:ro`).
+- `~/.speedwave/oauth/<project>/slack.json` — host-only state: the rotating refresh token plus workspace identity. Never mounted into any container.
+
+The host-side `oauth` worker ([ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)) refreshes the access token on demand; each refresh also rotates the refresh token. Two caveats follow from the token model:
+
+- **Refresh tokens expire after 30 days.** If a project sits idle past that, the card shows a re-authorise banner — sign in again to restore access.
+- **Refresh runs in Speedwave Desktop.** With Desktop closed and only the CLI running, the current access token keeps working until it expires (up to 12 hours), then tool calls ask you to reconnect from Desktop.
+
+**Requested user scopes** (the integration can do exactly this, nothing more): `chat:write` (send messages as you — channels and DMs), `channels:read` + `groups:read` (list public/private channels you are in), `channels:history` + `groups:history` (read history of those channels), `im:read` + `mpim:read` (list your direct-message conversations), `im:history` + `mpim:history` (read those conversations), `im:write` + `mpim:write` (open a DM conversation — sending itself uses `chat:write`), `files:read` (read and download files shared with you), `users:read` + `users:read.email` (show real names instead of user IDs; find people by name or e-mail). You can only read conversations **you are a member of** — the integration never sees anything your account cannot.
+
+**Files shared in channels.** Text files (markdown, code, logs, JSON) are read inline. Binary files (PDF, Word/Excel, images) are downloaded into the project workspace at `/workspace/.speedwave/slack/` — when the **Office** integration is also enabled, Claude can then read PDFs and documents from there.
+
+**Direct messages.** Claude can read and send 1:1 DMs and group DMs, find people by name, and shows author names instead of raw user IDs. Sending is deliberately friction-full: the bundled skill requires Claude to show you the exact recipient and the verbatim message text and wait for your explicit go-ahead before sending **anything** — channel post or DM, no exceptions.
+
+**Connected before a permission was added?** The scope list grows as features ship (files in channels, direct messages). When your existing sign-in lacks a now-required permission, the integration card shows a re-authorise banner — sign in again once to grant the full set.
+
+Disconnecting (**Remove Credentials**) deletes the local tokens and state. To revoke the grant on Slack's side as well, remove the Speedwave app under your Slack profile's **Settings → Apps**.
 
 ### GitHub — Code Hosting
 
@@ -211,10 +240,10 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 
 **Scopes.** SharePoint requests `Sites.Manage.All Files.ReadWrite.All User.Read offline_access`. `Sites.Manage.All` is the broadest of the three site scopes Microsoft offers (covers `Sites.ReadWrite.All` and `Sites.Read.All`); it is required for `createList` (PR5) and is requested up-front so a single consent dialog covers all SharePoint operations. `Sites.Manage.All` typically requires tenant admin consent in Azure AD; users in tenants without admin consent will be prompted to request it during the device-code flow.
 
-**Tool surface.** 26 tools total:
+**Tool surface.** 28 tools total:
 
 - Files (5): `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `getCurrentUser`.
-- Pages (8, PR4): `listPages`, `getPage`, `createPage`, `updatePage`, `addWebPart`, `updateWebPart`, `removeWebPart`, `publishPage`.
+- Pages (10, PR4): `listPages`, `getPage`, `createPage`, `updatePage`, `addWebPart`, `updateWebPart`, `removeWebPart`, `publishPage`, `generateTableOfContents`, `addImageWebPart`.
 - Lists / items / columns / deletion (13, PR5): `listLists`, `getList`, `createList`, `updateList`, `deleteList`, `addListColumn`, `removeListColumn`, `listItems`, `getItem`, `createItem`, `updateItem`, `deleteItem`, `deletePage`.
 
 **Site policy by omission.** None of the page / list / item / column tools accept a `site_id` parameter. The worker uses the `site_id` it reads from `/tokens/site_id` at startup, so the model has no way to target another site — security by design, not by validation. A regression test (`PAGE_TOOL_SCHEMAS` / `LIST_TOOL_SCHEMAS`) asserts no schema introduces a `site_id` field.
@@ -241,15 +270,17 @@ SharePoint integration combines two Microsoft Graph surfaces: a SharePoint docum
 **OAuth refresh flow.** The SharePoint worker takes two paths to refreshing its access token; both end at `oauth.refresh()` on the host-side `oauth` worker (see [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md)).
 
 - _Proactive_ — before every Graph API call the worker reads the JWT `exp` claim from the cached access token. If it expires within 120 s, it calls `oauth.refresh()` first to avoid a 401 round-trip and the race window where the oauth watchdog has just respawned the worker (rotating `WORKER_OAUTH_URL`). If the proactive refresh fails (`worker_unreachable` / `timeout`), the worker logs a warning and falls through to the Graph call with the still-valid existing token — `OAuthScopeMismatchError` is the exception and is re-thrown immediately because no retry can fix it.
-- _Reactive_ — a 401 from Graph triggers the same `oauth.refresh()` under a mutex, then retries the original request.
+- _Reactive_ — a 401 from Graph triggers the same `oauth.refresh()`, serialized by the helper's single-flight lock so concurrent 401s refresh once, then retries the original request. Both paths run through the shared `authedRequest` helper in `mcp-shared`, so the refresh-retry logic is identical across every OAuth integration.
 
 In both paths the oauth worker reads `refreshToken` from `oauth.json`, calls Microsoft's `/oauth2/v2.0/token` endpoint, writes the new `access_token` to `/tokens/access_token`, and the SharePoint worker re-reads it. The SharePoint container never sees the refresh token. If Microsoft returns `scope_mismatch` (e.g. after a scope bump or admin policy change), the failure surfaces as an `OAUTH_SCOPE_MISMATCH` error that the Desktop UI uses to trigger re-consent. If the host oauth worker is unreachable (e.g. mid-respawn), the caller gets `OAuthRefreshError(worker_unreachable)` with a "Restart the project from Speedwave Desktop" recovery hint.
 
+**Authentication errors.** Speedwave refreshes expired access tokens reactively — when a tool call fails with an auth error, the worker refreshes the token and retries once, so transient expiry is invisible. If a tool still fails with an authentication error after that, the refresh token itself is exhausted or revoked; reconnect the integration from its card in **Settings** to sign in again.
+
 ### Office — Documents
 
-The Office integration is a built-in MCP worker for **Word, Excel, PowerPoint, and PDF** files. It is a pure file processor: it has **no credentials** (no `/tokens` mount), **no network egress** (attached only to an `internal: true` compose network — see [ADR-055](../adr/ADR-055-built-in-office-document-worker.md)), and its only window onto the host is the project workspace mounted read-write. Generated files are written under `/workspace/.speedwave-office/`.
+The Office integration is a built-in MCP worker for **Word, Excel, PowerPoint, and PDF** files. It is a pure file processor: it has **no credentials** (no `/tokens` mount), **no network egress** (attached only to an `internal: true` compose network — see [ADR-055](../adr/ADR-055-built-in-office-document-worker.md)), and its only window onto the host is the project workspace mounted read-write. Generated files are written under `/workspace/.speedwave/office/`.
 
-It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn` — the `presale` plugin's hybrid pattern — gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
+It is a thin TypeScript worker on `@speedwave/mcp-shared` plus Python support-scripts invoked via `spawn`, gluing mature tools: `markitdown` and SheetJS for extraction, `pandoc` for Markdown↔document conversion, `weasyprint` for HTML/Markdown→PDF, LibreOffice headless for Office→PDF and Office↔Office conversion, `python-docx`/`openpyxl`/`python-pptx` for creating and editing Office files (including native Excel/PowerPoint charts), `pypdf` for PDF manipulation, and `matplotlib` for standalone chart images. Per [ADR-053](../adr/ADR-053-worker-implementation-own-vs-wrap-official-mcp.md) this is an own thin worker rather than wrapping an upstream MCP server: `microsoft/markitdown-mcp` covers read only (not create/edit/PDF/charts), and the other community servers are single-maintainer or Windows-only COM-based.
 
 #### When to use Office vs reading files directly
 
@@ -305,7 +336,7 @@ Playwright is unique among the built-in integrations in three ways:
 
 - **No credentials.** It accesses public URLs and may navigate to services running on the host loopback (e.g. local dev servers like `http://host.docker.internal:4200` for an Angular project — see [ADR-062](../adr/ADR-062-playwright-host-gateway-access.md)). There is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
 - **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
-- **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
+- **Higher resource limits.** Chromium needs a large shared-memory segment (IPC) and tmpfs (heavy caching) plus more CPU/memory than an HTTP-only worker — noticeably larger than the 128 MiB budget given to those. The exact numbers are SSOT'd on the `playwright` descriptor in `crates/speedwave-runtime/src/consts.rs` (`McpServiceDescriptor.resources`), not here; see ADR-068. These values are read by the renderer, so this paragraph intentionally avoids restating them to prevent drift.
 
 Container hardening is otherwise identical to every other MCP worker: `cap_drop: ALL`, `no-new-privileges:true`, `read_only: true` root filesystem, `noexec,nosuid` on `/tmp`. Chromium runs with `--no-sandbox` because the Lima/WSL2 VM + container capability-drop layer replaces its in-process sandbox (see [ADR-004](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)). Each container restart wipes `/tmp` (tmpfs-backed), giving the same ephemeral-profile guarantee as `--isolated` — no cookies, no storage state persist between invocations.
 
@@ -373,7 +404,7 @@ MCP service containers (both built-in SharePoint and plugins) mount the project 
 
 This allows MCP workers and Claude to share files through identical paths — `/workspace/...` is valid for both. No path translation needed and no separate context directory is required.
 
-The path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in `path-validator.ts`, ensuring that MCP workers cannot read or write protected files even though the full project directory is mounted.
+The SharePoint worker's path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in the SharePoint worker's `mcp-servers/sharepoint/src/path-validator.ts`, ensuring that worker cannot read or write protected files even though the full project directory is mounted. This denylist is SharePoint-worker-specific — it is not a shared validator automatically applied to other built-in workers or plugins.
 
 ## Adding New Integrations
 
@@ -492,9 +523,43 @@ Behaviour to know:
 After saving or resetting, Speedwave requests a container restart so the
 worker picks up the change.
 
+### Plugin OAuth (Authorize)
+
+A plugin can declare an `oauth` block in `plugin.json` to authenticate against a
+third-party service through an OAuth2 flow instead of a pasted token. The flow
+runs on the host; only a short-lived access token reaches the plugin container,
+while the refresh token and client secret stay off-mount under
+`~/.speedwave/oauth/<project>/<slug>.json` (see
+[ADR-069](../adr/ADR-069-generic-plugin-oauth2.md)).
+
+How it works in the UI:
+
+1. Enter the plugin's OAuth **client id** (and **client secret** if the manifest
+   declares one) in the Credentials section and click **Save**. These are not
+   written to `/tokens` — they go to the off-mount seed file. The **Authorize**
+   button stays disabled until they are saved.
+2. Click **Sign in with `<plugin>`**. For the `authorization_code` grant a
+   browser tab opens; complete sign-in there. If the identity provider requires
+   a registered redirect URI, the UI shows the loopback URI to register.
+3. On success the plugin is **auto-enabled** (a freshly-authorized OAuth plugin
+   is ready to run) and Speedwave shows the restart banner; click it so the
+   worker container starts and picks up the access token.
+
+**Self-hosted services.** When the OAuth endpoints depend on the instance (e.g. a
+self-hosted GLPI), the manifest declares `base_url_field` (naming the base-URL
+credential field) plus `authorize_suffix`/`token_suffix` instead of static
+`authorize_url`/`token_url`. The host resolves and SSRF-validates the endpoints
+from the base URL you enter at sign-in time.
+
+**Identity (who the service logs).** `authorization_code` and `device_code` are
+user-delegated: you sign in with your own account and the service attributes
+actions to **you**. `client_credentials` is a machine identity — actions land on
+the OAuth client's technical account, not a specific person. Choose the grant
+that matches your audit requirements.
+
 ### Bridge plugins — dev UX
 
-Plugins that pair a containerized worker with an external host application (e.g. a Figma Desktop plugin, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
+Plugins that pair a containerized worker with an external host application (e.g. a design-tool desktop app, an editor extension) declare a `host_bridge` block in `plugin.json` — see [ADR-063](../adr/ADR-063-host-bridge-generic.md). Speedwave Desktop spawns a loopback WebSocket relay per such plugin and injects the bridge URL + auth token into the worker's container.
 
 Two optional manifest fields make the user-facing flow smoother:
 
@@ -515,6 +580,8 @@ Example manifest fragment:
 ```
 
 **User flow** (any bridge plugin): the plugin detail page in Speedwave Desktop shows a _Bridge connection_ card with the connect URL, the auth token (masked, with Reveal/Copy), and a live status dot. Users copy these into their external app once; with `persistent_token: true`, restarts of Speedwave do not invalidate the credentials.
+
+**CLI sessions** reach the same bridge, with one prerequisite: the relay listener lives in the Speedwave Desktop process (no background daemon, [ADR-008](../adr/ADR-008-no-background-daemon.md)), so Desktop must be running. When it is, a `speedwave` terminal launch — and likewise `speedwave update` and project-add — reconstructs the worker's bridge env from disk: the port from `preferred_port` in the manifest, the token from `plugin-state/<slug>/bridge-token`. Both interfaces then render identical bridge env, so a CLI render never recreates the shared worker without it. A plugin missing either opt-in (`preferred_port` + `persistent_token`) is not reconstructable off-process; its CLI workers degrade to `BRIDGE_NOT_CONFIGURED`. See [ADR-074](../adr/ADR-074-cli-host-bridge-reconstruction.md).
 
 **Recovery from a port collision**: free the port (`lsof -nP -iTCP:<port> -sTCP:LISTEN`), or change `preferred_port` in the manifest, or remove the field to let the kernel pick a random one. Reload the plugin (toggle off/on) to retry.
 
@@ -601,58 +668,41 @@ The entrypoint records every link it creates in `~/.claude/.speedwave-managed-li
 2. No Rust or Compose changes are needed — `ENABLED_SERVICES` is already wired up.
 3. Add a BATS test in `_tests/entrypoint/entrypoint.bats` exercising the on/off transition for the new directory.
 
-## Host Exec
-
-Claude Code runs inside the `claude` container (Node + git only). It **cannot build, test, lint, or run your project**, and it cannot drive the host's Docker / `docker compose`. **Host Exec** (`host_exec`) closes that gap: it runs a **user-defined whitelist** of your project's commands on the host machine, in the project folder, behind the per-project MCP hub — Claude calls them as `host_exec.<recipeName>()`.
-
-> **Host Exec is a deliberate, scoped weakening of Speedwave's container isolation.** A recipe runs on _your machine_ with your user's privileges, and the commands it runs execute code from _your repository_ (`./gradlew test` runs `build.gradle`, `npm run test` runs `node_modules`, `docker compose up` runs the images in `docker-compose.yml`). Because Claude can also _edit_ your repository, a prompt-injected Claude could write a malicious build script and then run it. **Enabling Host Exec is the consent — there is no per-command prompt; once on, Claude runs any whitelisted recipe anytime** (the audit log records every run). Only enable Host Exec for repositories you trust, and only whitelist commands you're OK with Claude running unattended. See [Security Model → Host Exec](../architecture/security.md#host-exec--deliberate-scoped-weakening) for the full mitigations and residual risks. Works under both the Desktop app and the `speedwave` CLI.
-
-### Enabling it
-
-1. **Service integrations → Host Exec → toggle on.** Enabling pops a blocking danger modal that explains the consequences; nothing happens until you confirm it. **That click is the consent** — there is no per-command prompt afterwards. (Disabling needs no modal.)
-2. The whitelist starts **empty** — Claude can run nothing until you add a command.
-3. **+ add command** opens the recipe editor (see below). Add e.g. `{ name: gradle_test, exec: ./gradlew, args: [test] }`. Click **save changes**.
-4. Ask Claude to run it: `host_exec.gradleTest()` — Claude calls it directly, with no prompt, and gets the structured result (exit code + captured output). The CLI works the same: `speedwave` in the project dir, then ask Claude to run the recipe.
-
-The whitelist lives **only in your user config** (`~/.speedwave/config.json`, under `integrations.hostExec`). The repo `.speedwave.json` **cannot** enable Host Exec or contribute recipes — an executable command whitelist is a security-class field, like the LLM `provider` / `base_url` (see [ADR-054](../adr/ADR-054-host-exec-worker.md)). The recipe set is per project, and each project gets its own worker process on its own loopback port; two projects' workers don't share anything.
-
-### Defining a recipe
-
-A recipe is a fixed command — never a free-form string Claude types:
-
-| Field    | Meaning                                                                                                                                                                                                                                                                                                                                                                                        |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`   | `snake_case`, unique. Claude calls it as `host_exec.<camelCase(name)>()` — `gradle_test` → `host_exec.gradleTest()`.                                                                                                                                                                                                                                                                           |
-| `exec`   | The executable. A relative path (`./gradlew`, `npm`, `docker`) resolves against the project directory or your PATH; an absolute path is allowed (the editor flags it so you can double-check). **Shell / eval launchers are rejected** — `bash`, `sh`, `zsh`, `eval`, `env`, `xargs`, `find`, `ssh`, … — because `{"exec":"bash","args":["-c","{cmd}"]}` would be "run anything Claude types". |
-| `args`   | Fixed argument list — literals plus `{name}` parameter tokens. Each token substitution becomes **one** argv element, never re-split. There is no "pass the rest through". A literal sub-command is fine (`npm run build`, `make test`); a **bare `{param}`** as the whole element after a meta-tool (`npm`, `make`, `node`, `python`, …) is rejected (same "run anything" reason).             |
-| `cwdSub` | Optional subdirectory to run in (monorepos) — relative, no `..`, no symlink escape; the worker canonicalises `projectDir/cwdSub` and refuses anything outside the project root.                                                                                                                                                                                                                |
-| `params` | Optional named parameters Claude may supply: `{ name, pattern, maxLen? }`. The `pattern` is a regex the supplied value must **fully** match (the worker anchors it as `^(?:…)$`). Keep it tight.                                                                                                                                                                                               |
-| `env`    | Optional literal environment variables for the recipe (e.g. `CI=true`, `SPRING_PROFILES_ACTIVE=test`). Reserved names (`PATH`, `LD_*`, `NODE_OPTIONS`, …) are rejected. **Don't put secrets here** — use a `.env` in the repo. The on-disk snapshot is `0600` and the host log redacts these values, but a repo `.env` is still the right place for credentials.                               |
-
-There is **no per-recipe `confirm` field** — enabling Host Exec is the consent (above). The recipe editor shows an amber warning when you add a recipe that mounts arbitrary host paths into a privileged container (`docker`/`docker-compose`/`podman` with `up`/`down`/`exec`/`rm`/`prune` — effectively host root from a `docker-compose.yml` Claude can edit), and a milder warning for database clients / migrations; neither is blocking. If you don't want a recipe to run unattended, don't whitelist it.
-
-### Reading a command's result
-
-When Claude runs a recipe it gets a structured result: a `status` (`exited` / `killed_timeout` / `spawn_error`), an `exitCode` (when it exited on its own), `stdout`, `stderr` (separate streams), `truncated`, `durationMs`, the recipe `name`, and the directory it ran in. Two things to know:
-
-- **A non-zero exit code is _not_ an error to Claude — it's a successful result carrying the code.** "Tests failed (exit 1)" is information, not a tool failure; Claude sees the `stderr` and can act on it. Tool _errors_ are reserved for: an unknown/removed recipe, a parameter that fails its regex, a `cwdSub` that escapes the project, and the executable not being found.
-- **Output may be truncated**, and **output ≠ full state.** Each stream is capped (the tail is kept, ANSI stripped); Claude should not assume `stdout` is the whole picture, and for anything that changes state it should separately check the side effects (run the test report, query the DB) rather than trust the captured text.
-
-A per-command timeout (≈7 minutes) kills the **whole process tree** if a recipe (or a daemon it spawned — Gradle daemon, `docker compose` children) runs away; the result then has `status: killed_timeout`.
-
-### "Honest `shell:false`" — what the bans actually buy you
-
-`host_exec` always runs `exec` with `shell: false` and no `-c`/eval option, and it rejects shell-launcher execs and bare-parameter meta-invocations. **This is defense-in-depth, not a guarantee.** `npm run`, `make`, `gradle`, `docker compose` all execute repo-controlled code — often via `/bin/sh` themselves — and the launcher ban is by _basename_, so `./node_modules/.bin/node …` is not caught (a documented residual). The real safety boundary for Host Exec is: **it's off by default, it's user-local, and the whitelist is the one you deliberately chose at enable time** (there is no per-call prompt — the audit log is the after-the-fact record). Treat a whitelisted recipe as "this repo's code, on my machine, runnable by Claude without a prompt" — which is exactly what it is.
-
-### Don't hand-roll an agent on `0.0.0.0` (anti-pattern)
-
-Before Host Exec existed, some users wired their own bridge — an LLM-generated `agent.js` on `0.0.0.0:8765` with a token committed to the repo — so Claude could run `./gradlew test`. **Don't.** Binding to `0.0.0.0` exposes a command-execution endpoint to your whole LAN; a token in the repo is a token in everyone's git history; and a hand-rolled bridge runs _anything_ Claude asks (no whitelist, no audit). Host Exec is the safe path: loopback-only, a per-(project, app-session) bearer the hub never sees in the repo, a user-local whitelist of fixed commands you chose, and a `0600` audit log.
-
 ## Local LLM Setup
 
-You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
+You can run Claude Code inside Speedwave against a local or third-party LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to configure providers.
 
-### Ollama (requires 0.14.0+)
+Since [ADR-073](../adr/ADR-073-embedded-per-project-speedwave-proxy.md) every session routes through an **embedded, per-project Rust forwarder** (container `proxy`, reachable only on the project's compose network — no host port, no admin UI). You do not run or install anything yourself; Speedwave builds and starts it. It routes by model prefix to your configured backend and relays the Anthropic stream unchanged — every supported backend already speaks the native Anthropic Messages API, so there is no translation step.
+
+Settings holds a **provider list** rather than a single choice: configure several and pick the active one. A fresh project starts with no provider selected, so pick one and save it before the first chat. Each entry is one of these kinds:
+
+| Kind                    | What it is                                                                                                                | Key needed                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| **Anthropic (OAuth)**   | Your Claude subscription                                                                                                  | No (managed by Claude Code login) |
+| **Anthropic (API key)** | Anthropic via a raw API key                                                                                               | Yes                               |
+| **Local**               | A local **or remote** custom-URL server serving the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, gateways) | Only if the server requires one   |
+| **OpenRouter**          | OpenRouter's model catalog                                                                                                | Yes                               |
+
+Per-provider API keys are stored at `~/.speedwave/tokens/<project>/llm/<provider_id>_api_key` (chmod 0600) — the on-disk config holds only a presence flag, never the secret. Switching the active provider or its model restarts the session; adding a provider or changing a key hot-reloads only the proxy.
+
+**Cost per provider.** The LLM usage dashboard (and the chat footer / CLI statusline) show cost from the proxy usage SSOT, computed per provider: **API key** → real cost from the model price catalog; **OpenRouter** → real cost from its `/generation` endpoint; **local** → `$0`; **subscription (OAuth)** → "—" (flat-rate, per-request cost is not meaningful). An unpriced request shows "—", never `$0`.
+
+#### Supported local / self-hosted servers
+
+The forwarder speaks **native Anthropic Messages** (`POST /v1/messages`, streaming) and does **not** translate — the server must expose that endpoint. Supported servers:
+
+| Server         | Notes                                                                          |
+| -------------- | ------------------------------------------------------------------------------ |
+| **llama.cpp**  | `llama-server` native Anthropic Messages support (incl. `count_tokens`, tools) |
+| **Ollama**     | Bind `OLLAMA_HOST=0.0.0.0` so the container can reach it (not loopback)        |
+| **LM Studio**  | Enable the Local Server; Anthropic-compatible `/v1/messages`                   |
+| **Unsloth**    | Serves via `llama-server`; same Anthropic Messages endpoint as llama.cpp       |
+| **vLLM**       | A build exposing `/v1/messages`; use the **Local** row (local or remote URL)   |
+| **OpenRouter** | Remote; exposes the Anthropic Messages API natively                            |
+
+A stock OpenAI-only server (TGI, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
+
+### Ollama
 
 1. Install Ollama and pull a model:
 
@@ -663,31 +713,32 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 
    > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
 
-2. In Speedwave Settings → LLM Provider → select **Ollama**
-3. The Settings UI fetches the model list from Ollama's `/api/tags` endpoint and pre-selects one automatically. You only need to type the model name manually if the Ollama server is offline when you open Settings.
-4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
-5. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
+4. Click **Discover models** (the probe lists models via `GET /v1/models`) and pick one from the dropdown
+5. Set the row active and **Save**
 
-### LM Studio (requires 0.4.1+)
+### LM Studio
 
 1. In LM Studio, load a model and enable the **Local Server**
-2. In Speedwave Settings → LLM Provider → select **LM Studio**
-3. Leave Base URL empty for the default port (`http://host.docker.internal:1234`)
-4. Restart containers
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:1234` (LM Studio's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
-### llama.cpp (requires January 2026 build or later)
+### llama.cpp
 
 1. Start `llama-server` with the Anthropic API server enabled
-2. Select **llama.cpp** in Settings → LLM Provider
-3. Default port: `http://host.docker.internal:8080`
+2. In Speedwave Settings → LLM Provider, open the **Local** row
+3. Set **Base URL** to `http://host.docker.internal:8080` (llama-server's default port)
+4. Click **Discover models**, pick one from the dropdown, then set the row active and **Save**
 
 ### Non-standard addresses
 
-If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select any local provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/anthropic` (LiteLLM) or `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
+If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), select the **Local** provider and override the **Base URL** field. The URL must use `http://` or `https://` and may include a single-segment path prefix such as `/v1` (AWS-style gateways). Multi-segment paths and query strings are rejected.
 
 ### Servers requiring authentication
 
-When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY`, corporate gateways):
+When the local server requires a Bearer token (vLLM `--api-key`, LM Studio with "Require Authentication" enabled, llama.cpp `--api-key`, LiteLLM `LITELLM_MASTER_KEY` for a user-operated LiteLLM gateway — not Speedwave's own stack, corporate gateways):
 
 1. In Settings → LLM Provider, enter the token in the **api_key** field. The value is stored in `~/.speedwave/tokens/<project>/local-llm/api_key` (chmod 0600) — the on-disk config never contains the secret.
 2. Click **Discover models** to verify connectivity (the probe sends an `Authorization: Bearer <token>` header and a 1-token `/v1/messages` sanity request).
@@ -698,16 +749,22 @@ A leading `Bearer ` typed by mistake is stripped automatically (Claude Code alre
 
 For gateways that require a non-`Authorization` header (e.g. `Ocp-Apim-Subscription-Key`, tenant routing), use the **custom_headers** textarea. Format: one `Name: Value` per line. The parser rejects `Authorization` (use the api_key field instead), `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, and any CRLF in values (HTTP request-smuggling defense).
 
-### LiteLLM proxy (route via `/anthropic`)
+### OpenRouter
 
-LiteLLM exposes an Anthropic-compatible path at `/anthropic`. Configure it as:
+1. In Settings → LLM Provider, open the **OpenRouter** row and enter your OpenRouter API key.
+2. Click **Discover models** to pull OpenRouter's catalog (the dropdown lists tool-capable models); pick one.
+3. Set the row active. No base URL is needed — OpenRouter is a fixed endpoint.
 
-- **Base URL:** `http://host.docker.internal:4000/anthropic`
-- **api_key:** the value of `LITELLM_MASTER_KEY` set on the LiteLLM server
+### Remote / custom-URL servers (vLLM, gateways)
 
-### Servers without `/v1/messages`
+The forwarder speaks **native Anthropic Messages** to the backend — it does **not** translate to OpenAI Chat Completions. The server must therefore expose `POST /v1/messages` (streaming). llama.cpp, LM Studio, Ollama, and a vLLM build with `/v1/messages` all do; a stock OpenAI-only server (TGI, an old vLLM, a plain Chat-Completions gateway) is **not** supported — point Speedwave at a backend with the Anthropic endpoint, or run your own Anthropic-Messages shim in front of it.
 
-Speedwave requires the server to implement Anthropic Messages on `POST /v1/messages`. Pure OpenAI Chat Completions servers (vLLM stock, TGI, Triton) **will not work for chat** — Settings shows a yellow banner after Discover when the sanity probe detects a missing `/v1/messages` endpoint. Resolve by running a translation proxy (LiteLLM with `/anthropic` route is the common choice) between Speedwave and the OpenAI-only server.
+1. In Settings → LLM Provider, open the **Local** row (it serves both local and remote custom-URL backends that speak the Anthropic Messages API).
+2. Enter the server's **Base URL** (e.g. `http://host.docker.internal:8000` or a LAN address). A trailing `/v1` is fine — it's normalized away, and the forwarder appends `/v1/messages` itself.
+3. Enter an **api_key** if the server requires one, then **Discover models** and pick one.
+4. Set the row active.
+
+> A **local** provider that needs custom headers (see below) is the one case that bypasses the forwarder and talks to the server directly — there too the server must speak Anthropic Messages on `POST /v1/messages`.
 
 ## See Also
 
@@ -717,4 +774,3 @@ Speedwave requires the server to implement Anthropic Messages on `POST /v1/messa
 - [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
 - [ADR-040: Remove LiteLLM — Direct Local Provider Injection](../adr/ADR-040-remove-litellm-direct-provider-injection.md)
 - [ADR-041: Local LLM Model Discovery and SSRF Policy](../adr/ADR-041-local-llm-model-discovery.md)
-- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)

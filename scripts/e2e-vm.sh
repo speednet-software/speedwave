@@ -72,11 +72,6 @@ ensure_provisioned_windows() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        # bzip2 required by scripts/lib/fetch-sherpa-onnx-md.sh (ADR-061).
-        # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'command -v bzip2'" >/dev/null 2>&1 || ok=0
-    fi
-    if [ "$ok" -eq 1 ]; then
         echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
@@ -110,6 +105,12 @@ ensure_provisioned_macos() {
 # The Windows install dir is C:\Speedwave.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 
+# Escape a value for embedding in a PowerShell single-quoted literal.
+# PowerShell escapes ' inside '...' by doubling it ('' = literal ').
+ps_squote() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
 # Run a PowerShell script on the Windows host.
 # Writes the script to a .ps1 temp file via sftp, then executes via -File.
 # This is necessary because `powershell.exe -Command -` (reading from stdin)
@@ -120,9 +121,15 @@ windows_ps() {
     tmpname="e2e-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # Inject $WINDOWS_WSL_DISTRO so PS heredocs can reference it without
-    # switching to unquoted heredocs (which would require escaping all PS $vars).
-    local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'"
+    # Inject vars so PS heredocs can reference them without unquoting
+    # (SSH does not forward local env vars to the remote shell).
+    local ps_prefix
+    ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
+\$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
+\$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
+\$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
+\$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
+\$env:LOCAL_LLM_MODEL = '$(ps_squote "${LOCAL_LLM_MODEL:-}")'"
     # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
     # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
     # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
@@ -450,7 +457,7 @@ Copy-Item $nodePath desktop\src-tauri\nodejs\node.exe
 
 Write-Host "── Downloading WSL resources..."
 New-Item -ItemType Directory -Path desktop\src-tauri\wsl -Force | Out-Null
-curl.exe -fsSL -o desktop\src-tauri\wsl\nerdctl-full.tar.gz "https://github.com/containerd/nerdctl/releases/download/v2.1.2/nerdctl-full-2.1.2-linux-amd64.tar.gz"
+curl.exe -fsSL -o desktop\src-tauri\wsl\nerdctl-full.tar.gz "https://github.com/containerd/nerdctl/releases/download/v2.2.2/nerdctl-full-2.2.2-linux-amd64.tar.gz"
 Assert-ExitCode
 curl.exe -fsSL -o desktop\src-tauri\wsl\ubuntu-rootfs.tar.gz "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz"
 Assert-ExitCode
@@ -492,15 +499,6 @@ $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cargo-build'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
-
-# Windows CRT alignment: sherpa-onnx prebuilt MD-Release via SHERPA_ONNX_LIB_DIR
-# so the rest of the toolchain stays on /MD (default). Stage on C:\ so wslpath
-# returns a plain Windows path (not \\wsl.localhost\...) and the idempotency
-# guard survives between E2E runs. See ADR-061.
-$libDir = (wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'SHERPA_ONNX_FETCH_DIR=/mnt/c/sherpa-onnx-md /mnt/c/speedwave-e2e/scripts/lib/fetch-sherpa-onnx-md.sh').Trim()
-Assert-ExitCode
-$env:SHERPA_ONNX_LIB_DIR = (wsl.exe -d $WINDOWS_WSL_DISTRO -- wslpath -w "$libDir").Trim()
-Write-Host "SHERPA_ONNX_LIB_DIR = $env:SHERPA_ONNX_LIB_DIR"
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
@@ -613,6 +611,44 @@ SCRIPT
     windows_clean_state
 
     return "$exit_code"
+}
+
+# Audio-transcription pipeline E2E on Windows-native (ADR-056/ADR-075). Syncs
+# the runtime source, ensures the `small` Whisper model is downloaded, then runs
+# the gated `transcription_pipeline_e2e` integration test (capture → live →
+# finalize → markdown) plus the audio_windows wasapi unit tests. Native cargo
+# (MSVC) — the wasapi/whisper deps don't build under WSL.
+run_windows_audio() {
+    windows_wait_ssh
+    ensure_provisioned_windows
+    echo "[windows-audio] Syncing repo to WSL staging..."
+    windows_rsync_to "$HOST_REPO_DIR/" "$WINDOWS_WSL_STAGING/"
+    echo "[windows-audio] Copying to native dir, ensuring model, running tests..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = "Stop"
+function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "exit $LASTEXITCODE"; exit $LASTEXITCODE } }
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+$dst = "C:\spw-audio-e2e"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst
+New-Item -ItemType Directory -Path $dst -Force | Out-Null
+Write-Host "── Copying repo WSL2 → $dst ..."
+wsl.exe -d $WINDOWS_WSL_DISTRO -- tar -C /home/windows/speedwave-e2e -cf - . 2>$null | tar -C $dst -xf -
+Set-Location $dst
+
+Write-Host "── wasapi/audio_windows unit tests + audio-transcription clippy ..."
+cargo clippy -p speedwave-runtime --features audio-transcription -- -D warnings
+Assert-ExitCode
+cargo test -p speedwave-runtime --features audio-transcription --lib transcription
+Assert-ExitCode
+
+Write-Host "── Full pipeline E2E (downloads the small model if absent) ..."
+$env:RUN_STT_E2E = "1"
+$env:STT_E2E_MODEL = "small"
+cargo test -p speedwave-runtime --features audio-transcription --test transcription_pipeline_e2e -- --nocapture
+Assert-ExitCode
+Write-Host "── Windows audio E2E OK"
+SCRIPT
 }
 
 # Runs the Speedwave desktop app and executes wdio tests on Windows via SSH.
@@ -825,7 +861,15 @@ SCRIPT
 # Expects the .app to be installed at /Applications/Speedwave.app and E2E
 # suite to be in /tmp/speedwave-e2e.
 run_macos_e2e() {
-    macos_ssh bash <<'SCRIPT'
+    # SSH does not forward local env vars — export the LLM test config via
+    # locally expanded prefix lines ahead of the quoted heredoc body.
+    {
+        printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
+        printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
+        printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
+        printf 'export LOCAL_LLM_MODEL=%q\n' "${LOCAL_LLM_MODEL:-}"
+        cat <<'SCRIPT'
 set -euo pipefail
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -883,6 +927,7 @@ trap - EXIT
 
 exit $E2E_EXIT
 SCRIPT
+    } | macos_ssh bash
 }
 
 # -- Preview mode: install & launch app for manual testing ---------------------
@@ -947,6 +992,7 @@ TARGET="${1:-all}"
 
 case "$TARGET" in
     windows|win)    run_windows ;;
+    windows-audio|win-audio) run_windows_audio ;;
     macos|mac)      run_macos ;;
     all)
         PIDS=()

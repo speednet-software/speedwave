@@ -1,6 +1,5 @@
 /**
- * Tests for `runPythonScript` driving a real interpreter (node standing in for python via a
- * mocked `PYTHON_BIN`/`SCRIPTS_DIR`), so the JSON-contract parsing branches are exercised end to end.
+ * Tests for `runPythonScript` JSON-contract parsing.
  * @module mcp-office/subprocess-pyscript.test
  */
 

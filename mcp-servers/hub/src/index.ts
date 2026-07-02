@@ -1,36 +1,19 @@
 #!/usr/bin/env node
 /**
- * Speedwave MCP Server - Code Executor
- * Filesystem as API pattern for 98.7% token reduction
+ * Speedwave MCP Hub — code executor exposing 2 meta-tools instead of 44+ (~25K→~600 tokens, ~97.6% reduction).
+ * Based on Anthropic "Code Execution with MCP": https://www.anthropic.com/engineering/code-execution-with-mcp
+ * Security: AsyncFunction sandbox, PII tokenization, container network isolation, 100 req/min per session.
  * @module index
- *
- * Based on: Anthropic "Code Execution with MCP" article
- * https://www.anthropic.com/engineering/code-execution-with-mcp
- *
- * This server provides 2 meta-tools instead of 44+ individual tools:
- * 1. search_tools - Progressive discovery (lazy loading)
- * 2. execute_code - JavaScript execution in sandbox
- *
- * Token Reduction:
- * - Before: ~25K tokens (44 tool definitions upfront)
- * - After: ~600 tokens (2 meta-tools)
- * - Reduction: 97.6%
- *
- * Security Model:
- * ✅ AsyncFunction sandbox (restricted globals, no eval/require)
- * ✅ Execution timeout (2 min standard, 5 min for long operations like file transfers)
- * ✅ PII tokenization (sensitive data never reaches model)
- * ✅ Container network isolation (no exposed ports)
- * ✅ Rate limiting (100 req/min per session)
  */
 
-import express, { Express, Request, Response } from 'express';
+import express, { Express, NextFunction, Request, Response } from 'express';
 
 // Import MCP infrastructure from shared library
 import {
   JSONRPCHandler,
   handleMCPPost,
   handleMCPDelete,
+  readSessionId,
   Tool,
   TIMEOUTS,
   ts,
@@ -64,6 +47,11 @@ const SERVER_INFO = {
   name: SERVER_NAME,
   version: '1.0.0',
 };
+
+/** Sliding-window rate limit: max requests per session per window. */
+const HUB_RATE_LIMIT_MAX = 100;
+/** Rate-limit window in milliseconds (1 minute). */
+const HUB_RATE_LIMIT_WINDOW_MS = 60_000;
 
 //═══════════════════════════════════════════════════════════════════════════════
 // MCP Tool Definitions (2 Meta-Tools)
@@ -259,7 +247,7 @@ async function main() {
     console.log(`${ts()} ✅ Speedwave Code Executor MCP Server running on port ${PORT}`);
     console.log(`${ts()} 📡 MCP Protocol: Streamable HTTP (JSON-RPC 2.0 + optional SSE)`);
     console.log(
-      `${ts()} 🔒 Security: AsyncFunction sandbox, PII tokenization, container network isolation`
+      `${ts()} 🔒 Security: AsyncFunction sandbox, PII tokenization, container network isolation, ${HUB_RATE_LIMIT_MAX} req/min per session`
     );
     console.log(`${ts()} 📋 Endpoints:`);
     console.log(`${ts()}    POST /              - MCP protocol endpoint`);
@@ -270,8 +258,7 @@ async function main() {
     console.log(`${ts()}    2. execute_code     - JavaScript execution in sandbox`);
   });
 
-  // Graceful shutdown handler — only reachable via OS signals at runtime, not in unit tests.
-  // The lambdas registered with process.on() are also only invoked by OS signals, never in tests.
+  // Graceful shutdown handler.
   /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
@@ -296,9 +283,36 @@ async function main() {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Sliding-window rate limiter keyed by MCP session id (IP fallback before a
+ * session exists). Returns 429 with Retry-After once the window cap is reached.
+ * @returns Express middleware enforcing {@link HUB_RATE_LIMIT_MAX} per window
+ */
+export function createSessionRateLimiter() {
+  const hits = new Map<string, number[]>();
+  return function rateLimit(req: Request, res: Response, next: NextFunction): void {
+    const key = readSessionId(req) ?? req.ip ?? 'unknown';
+    const now = Date.now();
+    const valid = (hits.get(key) ?? []).filter((t) => now - t < HUB_RATE_LIMIT_WINDOW_MS);
+
+    if (valid.length >= HUB_RATE_LIMIT_MAX) {
+      console.warn(`${ts()} RATE_LIMIT ${req.method} from session ${key}`);
+      res.setHeader('Retry-After', Math.ceil(HUB_RATE_LIMIT_WINDOW_MS / 1000).toString());
+      res.status(429).json({ error: 'Too Many Requests' });
+      return;
+    }
+
+    valid.push(now);
+    hits.set(key, valid);
+    // Evict idle keys so the map does not grow unboundedly across ephemeral sessions.
+    for (const [k, stamps] of hits) {
+      if (k !== key && stamps.every((t) => now - t >= HUB_RATE_LIMIT_WINDOW_MS)) hits.delete(k);
+    }
+    next();
+  };
+}
+
+/**
  * Create the Hub Express app with MCP transport endpoints.
- * Extracted for testability — callers can exercise routes without starting
- * the full server (health check, bridges, registry).
  * @param rpcHandler - JSON-RPC handler to process incoming requests
  * @returns Configured Express app
  */
@@ -317,6 +331,12 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });
   });
+
+  //─────────────────────────────────────────────────────────────────────────────
+  // Rate Limiting (sliding window, per MCP session — falls back to IP pre-session)
+  //─────────────────────────────────────────────────────────────────────────────
+
+  app.use(createSessionRateLimiter());
 
   //─────────────────────────────────────────────────────────────────────────────
   // MCP Protocol Endpoints (Streamable HTTP)

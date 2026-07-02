@@ -1,8 +1,7 @@
 /**
  * Allowed `auth_fields[].field_type` values. Mirrors `ALLOWED_AUTH_FIELD_TYPES`
- * in `crates/speedwave-runtime/src/plugin.rs` — kept in sync by the Rust test
- * `allowed_auth_field_types_match_ts_union`. As a literal union, the compiler
- * flags any unhandled case in the credentials form's render switch.
+ * in `crates/speedwave-runtime/src/plugin.rs`; kept in sync by the Rust test
+ * `allowed_auth_field_types_match_ts_union`.
  */
 export type PluginAuthFieldType = 'text' | 'password' | 'textarea';
 
@@ -21,11 +20,14 @@ export interface PluginAuthField {
   description?: string;
   /**
    * Optional regex format constraint. Mirrors the Rust `AuthFieldValidation`
-   * (`plugin.rs`). `pattern` is treated as anchored (full-match) to agree
-   * with the HTML `<input pattern>` attribute and the host-side check in
-   * `save_plugin_credentials`; `message` is shown on mismatch.
+   * (`plugin.rs`). `pattern` is anchored (full-match); `message` shown on mismatch.
    */
   validation?: PluginAuthFieldValidation;
+  /**
+   * Marks an OAuth credential filled by the host-driven Authorize flow.
+   * Mirrors Rust `AuthFieldDef.oauth_flow`.
+   */
+  oauth_flow?: boolean;
 }
 
 /** Regex constraint for a {@link PluginAuthField} value. */
@@ -36,38 +38,22 @@ export interface PluginAuthFieldValidation {
 
 /**
  * Maximum byte length of a single plugin credential value.
- *
- * Mirrors `MAX_CREDENTIAL_BYTES` in
- * `desktop/src-tauri/src/types.rs` — the Rust `save_plugin_credentials`
- * command rejects anything longer. Surfaced here so the credentials form
- * can cap input via `maxlength` and fail in the UI before a round-trip.
+ * Mirrors `MAX_CREDENTIAL_BYTES` in `desktop/src-tauri/src/types.rs`.
  */
 export const MAX_PLUGIN_CREDENTIAL_BYTES = 4096;
 
 /**
- * Payload emitted by `PluginCredentialsFormComponent` when the user
- * submits filled credential fields. Only non-empty (post-trim) fields
- * appear in `credentials`.
- *
- * Named `Plugin…` to avoid collision with the `SaveCredentialsEvent`
- * in `integrations/service-card/service-card.component.ts`, which has a
- * different shape (service + credentials + mappings).
+ * Payload emitted by `PluginCredentialsFormComponent` on submit.
+ * Only non-empty (post-trim) fields appear in `credentials`.
  */
 export interface PluginSaveCredentialsEvent {
   credentials: Record<string, string>;
 }
 
 /**
- * Outcome of `runtime::plugin::list_for_ui` for a single plugin.
- * `'verified'` is the only state that allows the user to enable the
- * plugin or save credentials; every other state surfaces in
- * `verification_error` so users can see what went wrong and how to
- * recover (the remove button stays available regardless).
- *
- * Mirrors the `VerificationStatus` enum in
- * `crates/speedwave-runtime/src/plugin.rs`, which derives
- * `#[serde(rename_all = "snake_case")]` — the literals here must
- * stay in sync with that derive.
+ * Verification outcome for a plugin; `'verified'` is the only usable state.
+ * Mirrors `VerificationStatus` in `crates/speedwave-runtime/src/plugin.rs`
+ * (`#[serde(rename_all = "snake_case")]`).
  */
 export type PluginVerificationStatus =
   | 'verified'
@@ -83,10 +69,7 @@ export interface PluginStatusEntry {
   service_id: string | null;
   version: string;
   description: string;
-  /**
-   * Optional long-form Markdown setup/usage guide from the manifest,
-   * rendered on the Dashboard tab. Absent when the manifest omits it.
-   */
+  /** Optional long-form Markdown setup/usage guide from the manifest. */
   instructions?: string;
   enabled: boolean;
   configured: boolean;
@@ -94,8 +77,7 @@ export interface PluginStatusEntry {
   current_values: Record<string, string>;
   /**
    * Keys of `auth_fields` that have a non-empty value stored on disk.
-   * Metadata-only — secret contents are never exposed. Drives the
-   * per-field "configured" indicator in the credentials form.
+   * Metadata-only — secret contents are never exposed.
    */
   configured_fields: string[];
   token_mount: PluginTokenMount;
@@ -107,6 +89,8 @@ export interface PluginStatusEntry {
   verification_error?: string;
   /** True when the manifest declares `host_bridge`. */
   has_host_bridge: boolean;
+  /** Access-token expiry (ISO-8601) when OAuth-authorized; absent otherwise. */
+  oauth_expires_at?: string;
 }
 
 /** Snapshot returned by the `plugin_bridge_get_status` Tauri command. */
@@ -149,11 +133,8 @@ export interface PluginsResponse {
 
 /**
  * Phase strings emitted by the `plugin_install_status` event.
- *
  * Mirror of `ALL_PLUGIN_INSTALL_PHASES` in
- * `crates/speedwave-runtime/src/plugin.rs`. Adding/removing/renaming a phase
- * here requires the same change there (no codegen — small, rarely-changing
- * list).
+ * `crates/speedwave-runtime/src/plugin.rs`.
  */
 export const PLUGIN_INSTALL_PHASES = [
   'verifying',

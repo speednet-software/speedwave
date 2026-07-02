@@ -11,6 +11,7 @@ import {
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 // `track` uses `msg.timestamp` until state-tree (ADR-044) gives `ChatMessage` a stable index.
 const SCROLL_BOTTOM_THRESHOLD_PX = 16;
@@ -18,7 +19,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
   selector: 'app-chat-message-list',
-  imports: [ChatMessageComponent],
+  imports: [ChatMessageComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
@@ -28,9 +29,17 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
       role="log"
       aria-live="polite"
       aria-label="Chat messages"
-      class="h-full overflow-y-auto p-4 md:p-6"
+      class="relative h-full overflow-y-auto p-4 md:p-6"
       (scroll)="onScroll()"
     >
+      @if (showTranscriptLoader()) {
+        <div
+          data-testid="chat-transcript-loading"
+          class="absolute inset-0 flex items-center justify-center"
+        >
+          <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+        </div>
+      }
       <div class="mx-auto max-w-3xl space-y-8">
         @for (msg of messages(); track msg.timestamp; let i = $index) {
           <app-chat-message
@@ -53,12 +62,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             (questionAnswered)="questionAnswered.emit($event)"
           />
         } @else if (showAwaitingCaret()) {
-          <!-- Streaming has started but no block has arrived yet. Show a
-               blinking caret so the user has visual confirmation that
-               the assistant is working — same caret used inline during
-               text streaming, just rendered as a standalone placeholder.
-               No horizontal padding so the caret aligns flush-left with
-               the rule columns of the surrounding tool/thinking blocks. -->
+          <!-- Standalone caret placeholder: streaming started, no block yet. -->
           <div data-testid="chat-message-list-awaiting">
             <span class="caret" aria-label="Assistant is responding"></span>
           </div>
@@ -71,6 +75,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly messages = input.required<readonly ChatMessage[]>();
   readonly currentBlocks = input<readonly MessageBlock[]>([]);
   readonly isStreaming = input(false);
+  /** Shows a centered spinner while a resumed transcript is being fetched. */
+  readonly loadingTranscript = input(false);
   /**
    * Index of the most recent assistant entry in `messages`; `-1` when none.
    * Used to gate the per-message Retry button (only the latest assistant
@@ -87,24 +93,14 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Tracks message-count to detect new turns (vs. mere streaming deltas). */
   private lastMessageCount = 0;
 
-  /**
-   * Wires the streaming-aware scroll sync — re-runs on every signal input
-   *  change so streaming deltas (which mutate `currentBlocks` in place) and
-   *  new turns alike trigger a scroll-to-bottom.
-   */
+  /** Wires the streaming-aware scroll sync, re-run on every signal-input change. */
   constructor() {
-    // Re-run on every signal-input change. `messages`, `currentBlocks` and
-    // `isStreaming` all need to drive a scroll sync — relying on
-    // `ngOnChanges` alone misses streaming deltas where the array reference
-    // stays stable but its contents grow.
     effect(() => {
       const count = this.messages().length;
       // Reading these signals subscribes the effect to streaming chunks too.
       this.currentBlocks();
       this.isStreaming();
-      // A genuinely new turn (length grew) re-arms auto-scroll even if the
-      // user had previously scrolled up — they almost always want to see
-      // the freshly-sent message + the assistant's reply.
+      // A new turn (length grew) re-arms auto-scroll.
       if (count > this.lastMessageCount) {
         this.shouldAutoScroll = true;
       }
@@ -113,16 +109,17 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
     });
   }
 
+  /** Whether to show the transcript loader: fetching with nothing rendered yet. */
+  showTranscriptLoader(): boolean {
+    return this.loadingTranscript() && this.messages().length === 0;
+  }
+
   /** Whether to render the streaming placeholder as the last entry. */
   showStreaming(): boolean {
     return this.isStreaming() && this.currentBlocks().length > 0;
   }
 
-  /**
-   * Whether to render the standalone blinking caret. True only in the gap
-   * between sending a message and the first streamed block — once any block
-   * arrives the regular streaming bubble takes over.
-   */
+  /** Whether to render the standalone caret: streaming with no block yet. */
   showAwaitingCaret(): boolean {
     return this.isStreaming() && this.currentBlocks().length === 0;
   }

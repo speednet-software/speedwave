@@ -82,9 +82,7 @@ jobs:
             TAG="v${VERSION}"
           fi
 
-          # Validate version format (stable only — no pre-release suffixes).
-          # Defense-in-depth: same regex also enforced by verify-release-assets.sh
-          # (line 21). Both must stay in sync if the format contract ever changes.
+          # Stable-only regex; kept in sync with verify-release-assets.sh.
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "ERROR: Version '$VERSION' has invalid format. Expected: X.Y.Z"
             exit 1
@@ -146,34 +144,18 @@ jobs:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: desktop/src/package-lock.json
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Ensure cross-compile target is installed
-        if: matrix.platform == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-        with:
-          workspaces: "./desktop/src-tauri -> target"
+          rust-targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          rust-cache-workspaces: "./desktop/src-tauri -> target"
 
       - name: Install frontend dependencies
         run: npm ci
         working-directory: desktop/src
 
-      # Export code-signing secrets to GITHUB_ENV only when they are configured.
-      # tauri-action attempts certificate import when APPLE_CERTIFICATE env var
-      # exists (even if empty), so we must not set it unless the secret is real.
+      # Set APPLE_* in GITHUB_ENV only when the secret is real (tauri-action
+      # imports on any non-null APPLE_CERTIFICATE).
       - name: Configure macOS code signing
         if: matrix.platform == 'macos-latest'
         env:
@@ -203,14 +185,8 @@ jobs:
             echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"
           fi
 
-      # tauri-action does not import the certificate into the macOS keychain —
-      # it only passes APPLE_CERTIFICATE to tauri-bundler for signing the outer
-      # .app. Our beforeBundleCommand (scripts/sign-bundled-binaries.sh) runs
-      # `codesign --sign "$APPLE_SIGNING_IDENTITY"` on bundled Mach-O resources
-      # and requires the identity to already be resolvable in a keychain.
-      # This step performs the prescribed Tauri/Apple pattern of creating a
-      # throwaway build keychain and importing the .p12 before tauri-action
-      # starts. See: https://v2.tauri.app/distribute/sign/macos/
+      # Import the .p12 into a throwaway build keychain so codesign can resolve
+      # APPLE_SIGNING_IDENTITY. See: https://v2.tauri.app/distribute/sign/macos/
       - name: Import Apple signing certificate to keychain
         if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         shell: bash
@@ -231,9 +207,7 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Prepend the build keychain to the search list so codesign can find
-          # the identity without overriding the login keychain globally.
-          # macOS ships bash 3.2 which lacks mapfile — use a while-read loop.
+          # Prepend the build keychain to the search list (bash 3.2: no mapfile).
           _existing_keychains=()
           while IFS= read -r _kc; do
             [ -n "$_kc" ] && _existing_keychains+=("$_kc")
@@ -251,16 +225,12 @@ jobs:
 
           rm -f "$CERT_FILE"
 
-          # Guard against an empty APPLE_SIGNING_IDENTITY — `grep -q ""` would
-          # match every line and the verification below would silently pass
-          # even without a usable identity in the keychain.
+          # Empty identity would make the grep below match any line.
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
             echo "::error::APPLE_SIGNING_IDENTITY is empty — check the repository secret"
             exit 1
           fi
-          # Verify the identity is now resolvable — fail fast if not.
-          # -qF: fixed-string match, since the identity contains `()` which
-          # grep would otherwise treat as regex metacharacters in ERE.
+          # Verify the identity is resolvable (-qF: identity contains `()`).
           if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
                | grep -qF "$APPLE_SIGNING_IDENTITY"; then
             echo "::error::APPLE_SIGNING_IDENTITY not found in imported keychain"
@@ -286,76 +256,14 @@ jobs:
             echo "::notice::Windows code signing skipped (no WINDOWS_CERTIFICATE secret)"
           fi
 
-      - name: Download Lima for bundling
-        if: contains(matrix.platform, 'macos')
-        uses: ./.github/actions/download-lima
+      - name: Prepare desktop bundle
+        uses: ./.github/actions/prepare-desktop-bundle
         with:
-          arch: ${{ contains(matrix.args, 'aarch64') && 'aarch64' || 'x86_64' }}
+          platform: ${{ matrix.platform }}
+          args: ${{ matrix.args }}
 
-      - name: Download WSL resources for offline bundling
-        if: matrix.platform == 'windows-latest'
-        uses: ./.github/actions/download-wsl-resources
-
-      - name: Pre-fetch sherpa-onnx MD-Release prebuilt (Windows CRT alignment)
-        if: matrix.platform == 'windows-latest'
-        uses: ./.github/actions/download-sherpa-onnx
-
-      - name: Download Node.js for bundling
-        uses: ./.github/actions/download-nodejs
-        with:
-          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || 'win' }}
-          arch: ${{ (contains(matrix.platform, 'macos') && contains(matrix.args, 'aarch64')) && 'arm64' || 'x64' }}
-
-      - name: Bundle build context and mcp-os
-        shell: bash
-        run: scripts/bundle-build-context.sh --ci
-
-      - name: Build macOS native CLI binaries
-        if: contains(matrix.platform, 'macos')
-        shell: bash
-        run: scripts/build-native-macos.sh
-
-      - name: Bundle macOS native CLI binaries
-        if: contains(matrix.platform, 'macos')
-        shell: bash
-        run: scripts/bundle-native-assets.sh
-
-      - name: Build CLI for bundling
-        shell: bash
-        env:
-          MATRIX_ARGS: ${{ matrix.args }}
-          MATRIX_PLATFORM: ${{ matrix.platform }}
-        run: |
-          # Extract --target value from matrix.args using sed (BSD-compatible)
-          TARGET=$(echo "$MATRIX_ARGS" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
-          if [ -n "$TARGET" ]; then
-            cargo build --release --target "$TARGET" -p speedwave-cli
-            CLI_BIN="target/$TARGET/release/speedwave"
-          else
-            cargo build --release -p speedwave-cli
-            CLI_BIN="target/release/speedwave"
-          fi
-          # Windows: append .exe
-          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
-            CLI_BIN="${CLI_BIN}.exe"
-          fi
-          mkdir -p desktop/src-tauri/cli
-          cp "$CLI_BIN" desktop/src-tauri/cli/
-
-      - name: Verify bundled runtime assets
-        shell: bash
-        env:
-          MATRIX_PLATFORM: ${{ matrix.platform }}
-        run: |
-          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
-            scripts/verify-bundled-assets.sh windows
-          else
-            scripts/verify-bundled-assets.sh macos
-          fi
-
-      # When releaseId is set, tauri-action uploads artifacts to the existing
-      # release and ignores tagName/releaseName/releaseDraft. When releaseId is
-      # empty (manual dispatch), tauri-action creates/finds the release by tag.
+      # releaseId set: upload to existing release (tag* ignored); empty: create
+      # by tag.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5  # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -490,9 +398,7 @@ jobs:
           if [ -z "$RID" ]; then
             RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
           fi
-          # All asset / latest.json shape checks happened in the pre-publish gate
-          # (scripts/verify-release-assets.sh). The post-publish step re-runs that
-          # gate as a safety net.
+          # Asset/latest.json checks ran in the pre-publish gate; post-publish re-runs it.
           gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false
           echo "Release published successfully"
 

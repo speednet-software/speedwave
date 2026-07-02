@@ -1,7 +1,6 @@
-//! Generic [`HostMcpProcess<S>`] — the SSOT spawn/stop/respawn/cleanup
-//! lifecycle three host MCP worker managers (mcp-os, host_exec, oauth)
-//! share. Each manager keeps only its worker-specific data and protocol
-//! in a [`WorkerSpec`] impl; the generic struct handles everything else.
+//! Generic [`HostMcpProcess<S>`] — SSOT spawn/stop/respawn/cleanup
+//! lifecycle shared by host MCP worker managers (mcp-os, oauth) via a
+//! [`WorkerSpec`] impl per manager.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,10 +24,8 @@ pub trait WorkerSpec: Send + 'static {
     fn log_tag(&self) -> &'static str;
 
     /// File name of the unified lock file relative to `state_dir`.
-    /// Per-project workers use `consts::PER_PROJECT_LOCK_FILE` (the
-    /// default); mcp-os singleton lives in `data_dir` directly with
-    /// `consts::MCP_OS_LOCK_FILE` to avoid colliding with other
-    /// top-level state files.
+    /// Default `consts::PER_PROJECT_LOCK_FILE`; mcp-os singleton uses
+    /// `consts::MCP_OS_LOCK_FILE` in `data_dir`.
     fn lock_file_name(&self) -> &'static str {
         crate::consts::PER_PROJECT_LOCK_FILE
     }
@@ -38,32 +35,21 @@ pub trait WorkerSpec: Send + 'static {
     /// the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
-    /// Worker-specific PATH substitution. `None` → inherit parent PATH
-    /// (mcp-os, oauth); `Some(path)` → recovered login-shell PATH
-    /// (host_exec).
-    fn path_override(&self) -> Option<&str> {
-        None
-    }
-
-    /// Hook invoked after `state_dir` is created and stale-PID cleanup
-    /// has run but BEFORE the Node child is spawned. Worker writes
-    /// anything it needs in the worker's environment view of the disk
-    /// here (host_exec config snapshot, oauth bearer map + per-service
-    /// bearer files).
+    /// Hook invoked after `state_dir` creation and stale-PID cleanup,
+    /// before the Node spawn. Worker writes its disk state here (oauth
+    /// bearer map + per-service bearer files).
     fn pre_spawn(&self, _ctx: &SpawnContext) -> anyhow::Result<()> {
         Ok(())
     }
 
     /// Liveness probe variant. mcp_os does pid+TCP via
-    /// `is_mcp_os_alive_in`; host_exec is single-attempt TCP; oauth is
-    /// 3-attempt TCP with backoff (a flake on the probe cascades into
-    /// a container recreate so the retry matters — ADR-060).
+    /// `is_mcp_os_alive_in`; oauth is 3-attempt TCP with backoff
+    /// (retries matter — ADR-060).
     fn probe(&self) -> LivenessProbe;
 
     /// Extra files removed alongside `lock.json` on
     /// [`HostMcpProcess::cleanup_files`]. Per-service bearer files and
-    /// `oauth.json` are NOT in this list (they are mounted into
-    /// consumer containers; they must survive a supervisor respawn).
+    /// `oauth.json` are NOT in this list (they survive supervisor respawn).
     fn extra_cleanup_files(&self, _ctx: &SpawnContext) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -72,11 +58,16 @@ pub trait WorkerSpec: Send + 'static {
 /// Liveness probe variants.
 #[derive(Clone, Copy, Debug)]
 pub enum LivenessProbe {
-    /// Single TCP connect to `127.0.0.1:port`. host_exec default.
+    /// Single TCP connect to `127.0.0.1:port`.
     TcpSingle,
     /// `attempts` TCP connects with `backoff` between them. oauth
     /// uses {3, 100 ms} to absorb transient stalls.
-    TcpRetry { attempts: u32, backoff: Duration },
+    TcpRetry {
+        /// Number of connect attempts.
+        attempts: u32,
+        /// Delay between attempts.
+        backoff: Duration,
+    },
     /// Custom liveness check given the state dir. mcp_os delegates to
     /// `is_mcp_os_alive_in` (reads lock.json itself).
     Custom(fn(&Path) -> bool),
@@ -102,15 +93,20 @@ impl LivenessProbe {
 /// minted auth-token, the state dir paths and the log file location —
 /// everything a hook needs without poking at globals.
 pub struct SpawnContext<'a> {
+    /// Per-worker state directory.
     pub state_dir: &'a Path,
+    /// Path to the worker's lock file.
     pub lock_path: &'a Path,
+    /// Path to the worker's log file.
     pub log_path: &'a Path,
+    /// Freshly minted auth token for this run.
     pub auth_token: &'a str,
+    /// Speedwave data directory.
     pub data_dir: &'a Path,
 }
 
-/// Generic host MCP worker process manager. Three real managers
-/// (mcp_os, host_exec, oauth) are type aliases over this struct with a
+/// Generic host MCP worker process manager. The real managers
+/// (mcp_os, oauth) are type aliases over this struct with a
 /// concrete `WorkerSpec`.
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
@@ -129,31 +125,12 @@ pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) script_path: String,
     /// Cleared by `respawn()` before `*self = new` so the dropped old
     /// instance does not delete the replacement's on-disk artifacts.
-    /// Kept private — only `spawn_with_spec`, `respawn`, and `Drop`
-    /// inside this module may mutate it.
     cleanup_on_drop: bool,
 }
 
 impl<S: WorkerSpec> HostMcpProcess<S> {
-    /// Spawn the worker. `state_dir` is whatever the per-manager wrapper
-    /// computes (e.g. `<data_dir>` for mcp-os singleton,
-    /// `<data_dir>/host-exec/<project>` for host_exec). Blocks up to
-    /// 10 s waiting for the `{"port":N}` handshake on stdout.
-    ///
-    /// Sequence:
-    /// 1. `create_dir_all(state_dir)`
-    /// 2. Idempotent upgrade-time migration of any pre-PR3 legacy
-    ///    3-file layout into `lock.json` (caller is expected to wire
-    ///    `lock::migrate_legacy` separately for service-specific
-    ///    legacy file names — happens before this call).
-    /// 3. Stale-PID cleanup from existing `lock.json` (kills only
-    ///    confirmed node processes).
-    /// 4. `WorkerSpec::pre_spawn` — config snapshot, bearer map, …
-    /// 5. Mint UUID v4 auth-token; spawn `node <script_path>` with the
-    ///    SSOT env policy + `WorkerSpec::apply_env`.
-    /// 6. Drain stdout/stderr; read port from first JSON line (10 s).
-    /// 7. Write `lock.json` with `{service, pid, port, authToken,
-    ///    transport}`.
+    /// Spawn the worker into `state_dir` (per-manager wrapper computes it).
+    /// Blocks up to 10 s waiting for the `{"port":N}` handshake on stdout.
     pub fn spawn_with_spec(
         spec: S,
         data_dir: &Path,
@@ -185,9 +162,8 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
-        apply_child_env(&mut cmd, spec.path_override(), &CurrentProcessEnv);
-        // SSOT: macOS 127.0.0.1, Windows WSL adapter IP — must match host_gateway_ip
-        // so container reaches the worker via extra_hosts: host.docker.internal:<gateway>.
+        apply_child_env(&mut cmd, &CurrentProcessEnv);
+        // SSOT bind host — must match host_gateway_ip for container extra_hosts.
         cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
         spec.apply_env(&mut cmd, &ctx);
         cmd.stdin(Stdio::null())
@@ -232,14 +208,17 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         })
     }
 
+    /// Port the worker is listening on.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// Path to the worker's lock file.
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
     }
 
+    /// The worker spec backing this manager.
     pub fn spec(&self) -> &S {
         &self.spec
     }
@@ -282,10 +261,9 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 }
 
 impl<S: WorkerSpec + Clone> HostMcpProcess<S> {
-    /// Stop the old worker and spawn a fresh one at the same script
-    /// path with the same spec. Disarms the old instance's `Drop` so it
-    /// cannot delete the replacement's `lock.json` or spec-extras
-    /// (token mount files, bearer files) when it goes out of scope.
+    /// Stop the old worker and spawn a fresh one at the same script/spec.
+    /// Disarms the old instance's `Drop` so it cannot delete the
+    /// replacement's `lock.json` or spec-extras on scope exit.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -322,6 +300,11 @@ impl<S: WorkerSpec> Drop for HostMcpProcess<S> {
     }
 }
 
+/// The greppable phrase the live-worker-kill WARN line carries. SSOT shared
+/// with `resources::OOM_MESSAGE`, whose exit-137 guidance tells users to grep
+/// for it — the two must never drift (a test in `resources.rs` pins it).
+pub(crate) const KILL_STALE_LOG_MARKER: &str = "killing a LIVE worker";
+
 /// Kill a stale node process recorded by a previous spawn. SSOT —
 /// replaces three identical `kill_stale_node` shims that used to live
 /// in each worker module.
@@ -330,9 +313,10 @@ pub fn kill_stale_node(pid: u32, service_tag: &str) {
         log::debug!("{service_tag}: stale PID {pid} is not a node process — skipping kill");
         return;
     }
-    // `is_node_process` already confirmed PID is alive (ps -p succeeded),
-    // so no second liveness probe is needed.
-    log::info!("{service_tag}: killing stale worker (PID {pid})");
+    // Live node at spawn means a second supervisor is racing us (exit-137 bug, ADR-060).
+    log::warn!(
+        "{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid}) at spawn — possible second supervisor racing this one"
+    );
     kill_process(pid);
 }
 
@@ -388,7 +372,7 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::test_support::FakeSpec;
     use super::*;
@@ -415,12 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_spec_default_path_override_is_none() {
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
-        assert!(spec.path_override().is_none());
-    }
-
-    #[test]
     fn worker_spec_default_extra_cleanup_files_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
@@ -432,7 +410,7 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         assert!(spec.extra_cleanup_files(&ctx).is_empty());
     }
 
@@ -448,17 +426,14 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         assert!(spec.pre_spawn(&ctx).is_ok());
     }
 
     #[test]
     fn fake_spec_records_hook_order() {
         // Spawn-sequence contract: pre_spawn → apply_env → spawn → write_atomic.
-        // Without a real node binary we can't test the full sequence
-        // end-to-end, but we can prove the order pre_spawn → apply_env
-        // by invoking them directly the way `spawn_in` would.
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
@@ -482,6 +457,16 @@ mod tests {
         kill_stale_node(1, "test");
     }
 
+    #[test]
+    fn kill_stale_node_warn_uses_shared_marker() {
+        // Source-string guard: WARN line must carry KILL_STALE_LOG_MARKER (grep hint in resources::OOM_MESSAGE).
+        let source = include_str!("process.rs");
+        assert!(
+            source.contains("{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid})"),
+            "kill_stale_node WARN line must interpolate KILL_STALE_LOG_MARKER"
+        );
+    }
+
     /// FakeEnv proves that apply_child_env composes with WorkerSpec::apply_env
     /// — base policy runs first (env_clear + PATH/HOME), then the spec
     /// adds worker-specific vars on top.
@@ -489,7 +474,7 @@ mod tests {
     fn spec_apply_env_runs_on_top_of_base_policy() {
         let env = FakeEnv::empty().with("PATH", "/usr/bin").with("HOME", "/h");
         let mut cmd = Command::new("true");
-        apply_child_env(&mut cmd, None, &env);
+        apply_child_env(&mut cmd, &env);
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
@@ -500,7 +485,7 @@ mod tests {
             auth_token: "abc",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::HostExec, "fake");
+        let spec = FakeSpec::new(LockService::Oauth, "fake");
         spec.apply_env(&mut cmd, &ctx);
 
         let envs: std::collections::HashMap<_, _> = cmd

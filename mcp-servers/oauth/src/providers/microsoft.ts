@@ -8,6 +8,7 @@
  */
 
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { readJsonCapped } from './http-body.js';
 import type { OAuthProvider, RefreshRequest, RefreshResult } from './types.js';
 
 /** Inputs for the Microsoft v2 refresh-token POST. */
@@ -63,8 +64,7 @@ export async function refreshMicrosoftToken(
     scope: req.scopes.join(' '),
   });
 
-  // Upper bound on the Microsoft token endpoint round-trip — a hang here
-  // would block every SharePoint tool call (refresh fires on 401).
+  // Upper bound on the Microsoft token endpoint round-trip.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
   let response: Response;
@@ -73,6 +73,7 @@ export async function refreshMicrosoftToken(
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      redirect: 'manual',
       signal: controller.signal,
     });
   } catch (err) {
@@ -87,18 +88,22 @@ export async function refreshMicrosoftToken(
     clearTimeout(timeoutId);
   }
 
-  let json: Record<string, unknown>;
-  try {
-    json = (await response.json()) as Record<string, unknown>;
-  } catch (err) {
+  // A 3xx is not a valid token response; refuse rather than follow it.
+  if (response.status >= 300 && response.status < 400) {
     return {
       ok: false,
-      error: {
-        code: 'malformed',
-        message: `Microsoft response is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-      },
+      error: { code: 'http', message: `unexpected redirect ${response.status}` },
     };
   }
+
+  const parsedBody = await readJsonCapped(response);
+  if (!parsedBody.ok) {
+    return {
+      ok: false,
+      error: { code: 'malformed', message: `Microsoft response: ${parsedBody.message}` },
+    };
+  }
+  const json = parsedBody.json;
 
   if (!response.ok) {
     const errCode = typeof json.error === 'string' ? json.error : 'http';
@@ -134,15 +139,8 @@ export async function refreshMicrosoftToken(
   const grantedScopes =
     typeof grantedScope === 'string' && grantedScope.trim() ? grantedScope.trim().split(/\s+/) : [];
 
-  // Scope mismatch (granted ⊊ requested) — Microsoft returns 200 in this case.
-  // Exception: `offline_access` is an OIDC scope, not an API permission. Even
-  // when granted (and a `refresh_token` is returned), Microsoft does NOT echo
-  // it back in the `scope` field of the token response. Treat its presence in
-  // `req.scopes` as satisfied iff the response carries a refresh_token on the
-  // initial exchange, or — for refresh calls — implicitly (we got here at all).
-  // The Desktop banner check applies the same skip in
-  // `desktop/src-tauri/src/integrations_cmd.rs` (`OFFLINE_ACCESS_SCOPE`) — keep
-  // both in sync.
+  // `offline_access` is never echoed in the token response; treat as satisfied.
+  // Keep in sync with integrations_cmd.rs::OFFLINE_ACCESS_SCOPE.
   const missing = req.scopes.filter((s) => {
     if (s.toLowerCase() === 'offline_access') return false;
     return !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase());

@@ -1,7 +1,6 @@
 //! Per-project compose transaction lock — in-process Mutex + cross-process
 //! file lock (`<data_dir>/compose/<project>/compose.lock`). Innermost layer of
-//! `LockedRuntime::transaction()`; serialises every compose-touching op per
-//! project across threads and processes.
+//! `LockedRuntime::transaction()`.
 
 use anyhow::Context;
 use std::collections::HashMap;
@@ -43,28 +42,37 @@ pub(crate) fn with_project_compose_lock_in<F, T>(
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    use fs2::FileExt;
-
-    // Defence-in-depth: lock path is built from `project`, so reject traversal
-    // at the boundary even if the caller forgot to validate.
+    // Lock path is built from `project`; reject traversal at the boundary.
     crate::validation::validate_project_name(project)?;
 
     let inner_arc = in_process_lock_for(project);
-    let _inner_guard = inner_arc.lock().unwrap_or_else(|e| e.into_inner());
-
     let lock_path = data_dir.join("compose").join(project).join("compose.lock");
+    with_file_lock_in(&inner_arc, &lock_path, f)
+}
+
+/// Holds `in_process` + an exclusive file lock at `lock_path`, runs `f`,
+/// releases in reverse. Shared by the per-project compose lock and the
+/// global image-build lock (`build::with_build_lock`, ADR-072).
+pub(crate) fn with_file_lock_in<F, T>(
+    in_process: &Mutex<()>,
+    lock_path: &std::path::Path,
+    f: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    use fs2::FileExt;
+
+    let _inner_guard = in_process.lock().unwrap_or_else(|e| e.into_inner());
+
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let lock_file = std::fs::File::create(&lock_path)?;
-    lock_file.lock_exclusive().with_context(|| {
-        format!(
-            "Failed to acquire compose lock for project '{}' at '{}'",
-            project,
-            lock_path.display()
-        )
-    })?;
+    let lock_file = std::fs::File::create(lock_path)?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire lock at '{}'", lock_path.display()))?;
     let _file_guard = FileLockGuard(lock_file);
 
     f()
@@ -197,9 +205,7 @@ mod tests {
             with_project_compose_lock_in(&root, "epsilon", || Ok(())).unwrap();
         }
         let map_len = IN_PROCESS_LOCKS.lock().unwrap().len();
-        // Map grows monotonically with distinct project keys. Other tests
-        // run in parallel may add their own entries, so we only assert that
-        // our key is present, not that the map is size 1.
+        // Parallel tests may add entries, so assert only our key is present.
         let map_contains = IN_PROCESS_LOCKS.lock().unwrap().contains_key("epsilon");
         assert!(map_contains, "epsilon entry should persist for reuse");
         assert!(map_len >= 1);
@@ -229,8 +235,7 @@ mod tests {
     fn panic_releases_file_lock_via_raii() {
         let dir = tempdir();
         let root = dir.path().to_path_buf();
-        // Panic inside the critical section — FileLockGuard::drop must release
-        // the cross-process file lock so the next acquire does not deadlock.
+        // Panic in the critical section; FileLockGuard::drop must release the file lock.
         let root_clone = root.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_project_compose_lock_in(&root_clone, "panic_proj", || -> anyhow::Result<()> {

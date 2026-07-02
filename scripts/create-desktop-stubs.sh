@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# create-desktop-stubs.sh — Creates minimal stub files for desktop/src-tauri/
-# so that build.rs validation passes with SPEEDWAVE_ALLOW_BUNDLE_STUBS=1.
-#
-# Used by: Makefile (check-desktop-clippy), CI (test.yml).
-# Does NOT overwrite existing real files (e.g. from bundle-build-context.sh or downloads).
+# create-desktop-stubs.sh — stub files for desktop/src-tauri/ so build.rs
+# validation passes with SPEEDWAVE_ALLOW_BUNDLE_STUBS=1; never overwrites real files.
 
 set -euo pipefail
 
@@ -24,10 +21,6 @@ stub_dir "$DEST/mcp-os/os/dist"
 stub_dir "$DEST/mcp-os/shared/dist"
 stub_dir "$DEST/mcp-os/shared/node_modules"
 stub_dir "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared"
-stub_dir "$DEST/host_exec/host_exec/dist"
-stub_dir "$DEST/host_exec/shared/dist"
-stub_dir "$DEST/host_exec/shared/node_modules"
-stub_dir "$DEST/host_exec/host_exec/node_modules/@speedwave/mcp-shared"
 stub_dir "$DEST/oauth/oauth/dist"
 stub_dir "$DEST/oauth/shared/dist"
 stub_dir "$DEST/oauth/shared/node_modules"
@@ -43,9 +36,6 @@ stub_file "$DEST/build-context/mcp-servers/tsconfig.base.json"
 stub_file "$DEST/mcp-os/os/dist/index.js"
 stub_file "$DEST/mcp-os/shared/package.json"
 stub_file "$DEST/mcp-os/shared/package-lock.json"
-stub_file "$DEST/host_exec/host_exec/dist/index.js"
-stub_file "$DEST/host_exec/shared/package.json"
-stub_file "$DEST/host_exec/shared/package-lock.json"
 stub_file "$DEST/oauth/oauth/dist/index.js"
 stub_file "$DEST/oauth/shared/package.json"
 stub_file "$DEST/oauth/shared/package-lock.json"

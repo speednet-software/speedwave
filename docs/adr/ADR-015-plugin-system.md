@@ -1,579 +1,63 @@
 # ADR-015: Plugin System
 
+> **Status:** Accepted
+> **Context:** Speedwave needs an extension mechanism that adds MCP integrations and Claude resources without weakening the per-project token isolation and container hardening of the built-in workers.
+
 ## Decision
 
-Speedwave uses an open-core model: MIT-licensed core with proprietary plugins distributed as Ed25519-signed ZIP packages via portal.speednet.pl. Only Speednet creates and signs plugins. Plugins are installed globally, enabled per-project, and discovered dynamically by the MCP Hub at runtime.
-
-## Rationale
-
-| Layer                                                                                   | License     | Distribution                    |
-| --------------------------------------------------------------------------------------- | ----------- | ------------------------------- |
-| Speedwave core (hub, slack, gitlab, redmine, sharepoint, mcp-os, runtime, CLI, Desktop) | MIT         | Public GitHub                   |
-| Plugins (Presale CRM, etc.)                                                             | Proprietary | portal.speednet.pl (signed ZIP) |
-
-This model is identical to GitLab CE/EE[^1] and Metabase[^2] — MIT core for maximum adoption, proprietary extensions for monetization.
-
-The previous addon system (unsigned ZIPs, compose fragment merge, no per-project control) is fully replaced. The `addon.rs` module, `addon.json` manifest format, and `compose.addon.yml` fragment approach no longer exist.
-
----
-
-## Plugin Types
-
-| Type                     | Has `service_id`? | Has `Containerfile`? | What it provides                                     |
-| ------------------------ | ----------------- | -------------------- | ---------------------------------------------------- |
-| **MCP service plugin**   | Yes               | Yes (required)       | Containerized MCP worker + optional claude-resources |
-| **Resource-only plugin** | No                | No                   | Skills, commands, agents, hooks only                 |
-
----
-
-## Plugin ZIP Structure
-
-A plugin ZIP is **source code, not a pre-built image**. It contains a `Containerfile` (OCI build specification[^10]) and application sources. At install time, Speedwave builds a local OCI image from these sources using `nerdctl build` — the same mechanism used for built-in MCP workers. The resulting container runs under `nerdctl compose` as part of the project's compose stack. No pre-built tarballs, no image registry pulls — the image is built locally from verified, signed source.
-
-```
-presale-1.2.0/
-├── plugin.json              # PluginManifest (REQUIRED)
-├── Containerfile            # OCI build specification (REQUIRED for MCP plugins)
-├── src/                     # Application source code
-├── package.json
-├── package-lock.json        # REQUIRED alongside package.json
-├── claude-resources/        # Optional
-│   ├── skills/              # .md workflow definitions
-│   ├── commands/            # Claude commands (e.g. /presale)
-│   ├── agents/              # Specialized agents
-│   └── hooks/               # Hook scripts
-├── SIGNATURE                # Ed25519 detached signature (REQUIRED)
-└── LICENSE
-```
-
----
-
-## Plugin Manifest (`plugin.json`)
-
-### Example — MCP service plugin
-
-```json
-{
-  "name": "Presale CRM",
-  "slug": "presale",
-  "service_id": "presale",
-  "version": "1.2.0",
-  "description": "CRM integration for pre-sales workflow automation",
-  "instructions": "## Setup\n\n1. Generate an API key in CRM Settings → Developer.\n2. Paste it in the **Settings → Credentials** tab.",
-  "port": 4010,
-  "image_tag": null,
-  "resources": ["skills", "commands", "agents"],
-  "token_mount": { "mode": "read_only" },
-  "auth_fields": [
-    {
-      "key": "api_key",
-      "label": "API Key",
-      "field_type": "password",
-      "placeholder": "Enter your CRM API key",
-      "is_secret": true,
-      "description": "Generate under CRM Settings → Developer → API Keys.",
-      "validation": {
-        "pattern": "^[A-Za-z0-9_-]{20,}$",
-        "message": "API keys are 20+ characters of letters, digits, '-' and '_'."
-      }
-    },
-    {
-      "key": "workspace_url",
-      "label": "Workspace URL",
-      "field_type": "text",
-      "placeholder": "https://your-company.crm.example.com",
-      "is_secret": false
-    }
-  ],
-  "settings_schema": null,
-  "speedwave_compat": ">=0.8, <1",
-  "extra_env": null,
-  "mem_limit": "128m"
-}
-```
-
-### Example — Resource-only plugin
-
-```json
-{
-  "name": "Custom Commands",
-  "slug": "my-commands",
-  "version": "0.1.0",
-  "description": "Additional Claude commands for internal workflows",
-  "resources": ["commands", "skills"]
-}
-```
-
-### Field Reference
-
-| Field                   | Type     | Required | Description                                                                                                                                                           |
-| ----------------------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`                  | string   | Yes      | Human-readable display name                                                                                                                                           |
-| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                                                                                           |
-| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                                                                                        |
-| `version`               | string   | Yes      | Semantic version                                                                                                                                                      |
-| `description`           | string   | Yes      | Short description (also used as the plugin-list tagline)                                                                                                              |
-| `instructions`          | string?  | No       | Long-form Markdown setup/usage guide; shown as a collapsible "Setup & usage" disclosure (collapsed by default) on the Dashboard tab. ≤ 16 KiB; rendered via `marked`. |
-| `port`                  | u16?     | MCP only | Container listening port                                                                                                                                              |
-| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                                                                                                 |
-| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                                                                                                 |
-| `token_mount`           | object   | No       | `{"mode": "read_only"}` only — `read_write` is rejected (reserved for built-ins, ADR-009)                                                                             |
-| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                                                                                                       |
-| `settings_schema`       | JSON?    | No       | JSON Schema (object, ≤ 64 KiB) for per-project plugin settings; payloads are validated against it                                                                     |
-| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install.                                                                         |
-| `extra_env`             | map?     | No       | Additional environment variables; reserved/dangerous keys (see `consts::RESERVED_ENV_KEYS`) rejected                                                                  |
-| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`); must be > 0 and ≤ 16 GiB                                                                                                    |
-| `cpu_limit`             | f32?     | No       | Container CPU limit in cores; must be ≤ 4                                                                                                                             |
-| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                                                                                                       |
-
-### Compatibility enforcement
-
-The `speedwave_compat` field is optional. Omitting it disables the check and preserves backward compatibility for legacy plugins.
-
-If present, the value MUST NOT be empty or whitespace, and MUST parse as a `semver::VersionReq`[^11]. If the running Speedwave version does not satisfy the declared range, `install_plugin()` rejects the ZIP with a clear error before any file is copied into `~/.speedwave/plugins/`.
-
-**Recommended pattern for plugin authors:** declare `">=<current_minor>, <<next_major>"`. A plugin built and tested against Speedwave 0.8.x should declare `"speedwave_compat": ">=0.8, <1"`. Bump this range on every Speedwave major release, after re-testing the plugin against the new major. See Cargo version-requirement syntax[^12] for the full range language.
-
-### auth_fields entry
-
-| Field         | Type    | Description                                                                                                |
-| ------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
-| `key`         | string  | File name under `tokens/<project>/<slug>/`                                                                 |
-| `label`       | string  | Label shown in Desktop UI                                                                                  |
-| `field_type`  | string  | `"text"`, `"password"`, or `"textarea"`                                                                    |
-| `placeholder` | string  | Placeholder text in the input field                                                                        |
-| `is_secret`   | bool    | If `true`, stored as a token file with `0o600` permissions                                                 |
-| `required`    | bool    | Defaults to `true`. If `false`, missing value does not block auto-enable or the `configured` status check. |
-| `description` | string? | Optional help text rendered under the field label (e.g. where to generate the token, required scopes).     |
-| `validation`  | object? | Optional `{ "pattern", "message"? }` format constraint. See **auth_fields validation** below.              |
-
-#### auth_fields validation
-
-A field may declare a regex constraint enforced both in the Desktop form and host-side at save time:
-
-```json
-"validation": { "pattern": "^[A-Za-z0-9_-]{20,}$", "message": "Expected a long token of letters, digits, '-' and '_'." }
-```
-
-| Field     | Type    | Description                                                                                          |
-| --------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `pattern` | string  | Regex the value must **fully** match (treated as `^(?:…)$`, mirroring the HTML `pattern` attribute). |
-| `message` | string? | Shown on mismatch. Falls back to a generic "does not match the required format" message when absent. |
-
-Enforcement and limits:
-
-- **Anchored full-match** everywhere — the host wraps the pattern in `^(?:…)$` so a partial match never passes; UI (`<input pattern>`) and backend agree.
-- **Two-sided.** The form blocks submit and shows `message`; `save_plugin_credentials` re-checks host-side, so a crafted IPC call cannot bypass it. An empty value (leave-stored-untouched) is never rejected — emptiness is governed by `required`.
-- **Capped + RE2-only.** `pattern` is length-capped (`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`, 512) and must compile under the Rust `regex` crate, which is a linear-time RE2-style engine with no backreferences or look-around[^13]. Both are checked at install (`validate_manifest`), so JS-only patterns are rejected before a plugin ships rather than diverging between browser and host.
-
-#### Regex flavour vs `settings_schema`
-
-A plugin manifest can carry **two** regex surfaces:
-
-| Surface                                           | Engine                                                                                   | Flavour                                                                                          | Where checked                                                                |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `auth_fields[].validation.pattern`                | Rust `regex` crate (compiled in `plugin.rs`) + native HTML `pattern` (browser JS engine) | **RE2 subset** — no backreferences, no look-around, no atomic groups; linear-time guarantee[^13] | install (`validate_manifest`) + save (`save_plugin_credentials`) + UI submit |
-| `settings_schema` (JSON Schema `pattern` keyword) | JSON Schema validator on save                                                            | **ECMA-262** (JavaScript regex) — backreferences and look-around allowed[^14]                    | install (size/shape) + save (`plugin_save_settings`)                         |
-
-The two are deliberately separate: `auth_fields` are _credentials_ (secret tokens, host URLs — single value per field, strict format), while `settings` are _user-settable preferences_ (structured payload, often shaped by JSON Schema's full vocabulary). A plugin author writing `(?=.*\d)` works in `settings_schema` and fails at `auth_fields[].validation` install time — the cleaner alternative (extend `settings_schema` to auth_fields) was rejected because the two surfaces have different lifecycle and storage (per-field token files vs. one JSON blob in `plugin_settings`).
-
-**Practical guidance:** if a credential pattern needs look-around or backreferences, it is too restrictive for a regex anyway — declare the field `is_secret` and validate inside the worker after `/tokens/<key>` read.
-
----
-
-## Identification: `slug` and `service_id`
-
-Every plugin has a **slug** — a unique kebab-case identifier validated against `^[a-z][a-z0-9-]{0,63}$`.
-
-MCP plugins additionally have a **service_id**. For MCP plugins, `slug == service_id` is enforced at install time.
-
-The slug determines all paths and keys:
-
-| Context           | Pattern                                 | Example                                 |
-| ----------------- | --------------------------------------- | --------------------------------------- |
-| Install directory | `~/.speedwave/plugins/<slug>/`          | `~/.speedwave/plugins/presale/`         |
-| Config key        | `integrations.plugins.<slug>.enabled`   | `integrations.plugins.presale.enabled`  |
-| Compose service   | `mcp-<slug>`                            | `mcp-presale`                           |
-| Hub env           | `WORKER_{SLUG_UPPER}_URL`               | `WORKER_PRESALE_URL`                    |
-| ENABLED_SERVICES  | `...,<slug>`                            | `...,presale`                           |
-| Tokens            | `~/.speedwave/tokens/<project>/<slug>/` | `~/.speedwave/tokens/acme/presale/`     |
-| Claude env        | `SPEEDWAVE_PLUGINS=<slug>,<slug>`       | `SPEEDWAVE_PLUGINS=presale,my-commands` |
-
----
-
-## Disk Layout
-
-```
-~/.speedwave/
-├── plugins/                             # signed plugin trees — re-verified on every load
-│   ├── presale/                         # MCP plugin (keyed by slug)
-│   │   ├── plugin.json
-│   │   ├── Containerfile
-│   │   ├── src/
-│   │   ├── claude-resources/
-│   │   └── SIGNATURE
-│   └── my-commands/                     # Resource-only plugin
-│       ├── plugin.json
-│       ├── claude-resources/
-│       └── SIGNATURE
-├── plugin-state/                        # mutable per-plugin state, OUTSIDE the signed tree
-│   └── presale/
-│       └── image_pending                # deferred build marker (temporary)
-├── tokens/
-│   └── acme/
-│       └── presale/                     # per-project credentials
-│           ├── api_key                  # 0o600 permissions
-│           └── workspace_url
-└── config.json
-    ├── projects[].integrations.plugins.presale.enabled = true
-    └── projects[].plugin_settings.presale = { ... }
-```
-
-> Mutable state (like the `image_pending` marker) lives in `plugin-state/`, a sibling of `plugins/`, so writing it never changes a plugin's content digest. Plugins installed by an older Speedwave release that still carry an in-tree `.image_pending` are migrated to `plugin-state/` on the first load. See [ADR-051](ADR-051-plugin-signature-runtime-verification.md).
-
----
-
-## Signature Verification
-
-Every plugin ZIP must contain a `SIGNATURE` file — an Ed25519 detached signature created by Speednet's private key. The public key is embedded at compile time in `signing.rs`.
-
-Verification runs at install time **and on every subsequent load** (compose render, image build, claude-resources mount, UI listing, startup audit) — the signature is a runtime invariant, not just an install gate. See [ADR-051](ADR-051-plugin-signature-runtime-verification.md) for the threat model (a local attacker with write access to `~/.speedwave/plugins/`) and the verdict cache (keyed by content digest, so any byte change forces a fresh Ed25519 check).
-
-Each verification:
-
-1. Read `SIGNATURE` (base64-encoded, 64 bytes decoded)
-2. Compute SHA-256 digest of all files except `SIGNATURE` (sorted by name for determinism); a symlink anywhere in the tree is a hard reject
-3. Verify Ed25519 signature against the embedded Speednet public key[^3]
-4. Reject if missing, tampered, or invalid
-
-In debug builds only (`#[cfg(debug_assertions)]`), the `SPEEDWAVE_ALLOW_UNSIGNED` env var skips verification for development. No CLI flag exists — prevents accidental use in production. The bundled CLI inside the `.dmg`/`.exe`/`.deb` is built in release mode, so the bypass is compiled out of shipped artifacts.[^4]
-
----
-
-## Install-Time Validation
-
-Beyond signature verification:
-
-1. **Slug format** — must match `^[a-z][a-z0-9-]{0,63}$`
-2. **No built-in collision** — slug must not collide with a `BUILT_IN_SERVICE_IDS` entry (`slack`, `sharepoint`, `redmine`, `gitlab`, `playwright`, `os`) nor with a built-in compose service name (`claude`, `mcp-hub`, `mcp-slack`, …)
-3. **Slug == service_id** — enforced when `service_id` is present
-4. **Containerfile required** — if `service_id` present, Containerfile must exist
-5. **No `read_write` token mount** — `token_mount: read_write` is unconditionally rejected; the `:rw` token mount is reserved for built-in services per [ADR-009](ADR-009-per-project-isolation-preserved.md). (Earlier drafts allowed it with a justification string; that path was removed.)
-6. **No duplicate service_id** — no other installed plugin may have the same `service_id`
-7. **No reserved/dangerous `extra_env` keys** — `PORT`, `PATH`, `HOME`, dynamic-linker hijacks (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, …) and language-runtime hijacks (`NODE_OPTIONS`, `PYTHONPATH`, …); see `consts::RESERVED_ENV_KEYS`
-8. **Resource limits bounded** — `mem_limit` ≤ 16 GiB and `cpu_limit` ≤ 4 cores; `mem_limit: 0` (Docker "no limit") rejected
-9. **`settings_schema` shape** — must be a JSON object, ≤ 64 KiB
-10. **Zip Slip protection** — all extracted paths validated to stay within the target directory[^5]
-
-The slug-collision, reserved-env-key, `read_write`, and resource-limit checks (4–9) also re-run when compose is rendered, so a manifest that would now fail a stricter ruleset is rejected at render time rather than silently rendered.
-
----
-
-## Per-Project Enable/Disable
-
-Plugins are installed globally but enabled per-project. Default state: **disabled**.
-
-Enable/disable state follows the 3-layer config merge:
-
-```
-defaults (disabled) → repo .speedwave.json → user ~/.speedwave/config.json
-```
-
-Config structure:
-
-```json
-{
-  "projects": [
-    {
-      "name": "acme",
-      "integrations": {
-        "plugins": {
-          "presale": { "enabled": true }
-        }
-      },
-      "plugin_settings": {
-        "presale": { "workspace": "acme-corp" }
-      }
-    }
-  ]
-}
-```
-
-`set_plugin_enabled()` is separate from `set_service()` — a typo like `"gitlb"` is rejected because it doesn't match any installed plugin manifest.
-
----
-
-## Compose Integration
-
-Plugin services are generated programmatically by `apply_plugins()` in `compose.rs`. This follows the `apply_llm_config()` pattern — fully-resolved YAML via `format!()` inserted into `doc["services"]`. No compose fragment merge.
-
-### Generated service (MCP plugin)
-
-```yaml
-mcp-presale:
-  image: speedwave-mcp-presale:1.2.0
-  container_name: speedwave_acme_mcp_presale
-  read_only: true
-  user: '1000:1000'
-  cap_drop:
-    - ALL
-  security_opt:
-    - no-new-privileges:true
-  tmpfs:
-    - /tmp:noexec,nosuid,size=512m
-  volumes:
-    - /home/user/.speedwave/tokens/acme/presale:/tokens:ro
-    - /path/to/project:/workspace:rw
-  environment:
-    - PORT=4010
-  networks:
-    - speedwave_acme_network
-  labels:
-    speedwave.plugin-service: 'true'
-  deploy:
-    resources:
-      limits:
-        cpus: '2.0'
-        memory: 128m
-```
-
-### Environment injection
-
-For each enabled MCP plugin, `apply_plugins()` injects:
-
-- `WORKER_{SID}_URL` into mcp-hub (e.g., `WORKER_PRESALE_URL=http://mcp-presale:4010`)
-- Service ID into hub's `ENABLED_SERVICES` via `apply_integrations_filter()`
-- `SPEEDWAVE_PLUGINS=presale,my-commands` into the claude container (all enabled plugin slugs)
-
-### Image build
-
-Plugin images are built lazily:
-
-1. `install_plugin()` writes an `image_pending` marker under `~/.speedwave/plugin-state/<slug>/` (outside the signed plugin tree — see ADR-051)
-2. If `ContainerRuntime` is available at install time, builds immediately
-3. Otherwise, `render_compose()` calls `ensure_plugin_images(runtime, enabled_ids)` before compose generation — this builds pending installs (the `image_pending` marker) AND rebuilds any images missing from the container engine (e.g., after VM reset), scoped to plugins enabled for the current project. Only plugins that pass signature verification are built.
-4. Build uses `prepare_build_context()` + `build_image()`, handling Lima/WSL path translation[^6]
-
----
-
-## Security Model
-
-### Inherited container hardening
-
-All OWASP protections[^7] apply to plugin containers (same as built-in workers):
-
-- `cap_drop: ALL`
-- `no-new-privileges`
-- `read_only` filesystem
-- `tmpfs: /tmp:noexec,nosuid`
-- Isolated network per project (ADR-009)
-- Resource limits (CPU + memory)
-- Per-service token isolation
-
-### Plugin-specific SecurityChecks
-
-Four additional checks in `SecurityCheck::run()`, targeting services labeled `speedwave.plugin-service: "true"`:
-
-| Check                           | Rejects                                      |
-| ------------------------------- | -------------------------------------------- |
-| `check_plugin_no_privileged`    | `privileged: true`                           |
-| `check_plugin_no_host_network`  | `network_mode: host`                         |
-| `check_plugin_no_extra_volumes` | Any volume beyond the single `/tokens` mount |
-| `check_plugin_token_mount_mode` | Compose mount mode other than `:ro`          |
-
-`SecurityCheck::run()` receives `&[PluginManifest]` from the caller — manifests are loaded once during compose generation and passed through. The security gate is mandatory before any `compose_up`.
-
-### Token mount mode
-
-Plugins always get a **read-only** (`:ro`) token mount. `token_mount: read_write` is rejected at install time and again at compose-render time — the `:rw` token mount is reserved for built-in services (SharePoint's OAuth refresh, ADR-009)[^8]. A plugin that needs to persist data writes to `/workspace` (mounted `:rw`), not to `/tokens`.
-
-### Service ID constants
-
-| Constant               | Values                                                                          | Purpose                        |
-| ---------------------- | ------------------------------------------------------------------------------- | ------------------------------ |
-| `BUILT_IN_SERVICES`    | `claude`, `mcp-hub`, `mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab` | SecurityCheck (compose names)  |
-| `BUILT_IN_SERVICE_IDS` | `slack`, `sharepoint`, `redmine`, `gitlab`, `os`                                | Plugin install collision check |
-
-Guard test verifies no overlap between the two.
-
----
-
-## Plugin Sandbox
-
-Plugins operate within a strict sandbox — they cannot modify application settings or credentials of core integrations. This is analogous to browser extensions, which cannot alter browser settings.
-
-**Principles:**
-
-- A plugin manages only its own tokens at `~/.speedwave/tokens/<project>/<slug>/`
-- `requires_integrations` declares dependencies on core integrations — the user must configure them in the Integrations tab
-- The Desktop UI shows required integration status on the plugin dashboard with a link to the Integrations tab
-- `provision_credentials` was removed — it violated the sandbox principle by allowing plugins to write into core integration token directories
-
----
-
-## Hub Discovery
-
-The MCP Hub discovers plugin tools dynamically via `service-list.ts` — a module with zero imports from other hub modules (reads only `process.env.ENABLED_SERVICES`).
-
-### Import graph (no cycles)
-
-```
-service-list.ts    ← reads process.env only
-    ↑                    ↑
-hub-tool-policy.ts   tool-registry.ts
-    ↑                    ↑
-tool-discovery.ts    http-bridge.ts
-                         ↑
-                     auth-tokens.ts
-```
-
-### Flow
-
-1. `service-list.ts` parses `ENABLED_SERVICES`, separates built-in from plugin service IDs
-2. `tool-registry.ts` sets `SERVICE_NAMES` dynamically during `initializeRegistry()` (includes plugins)
-3. Registry calls `tools/list` on each worker (including plugin workers)
-4. `tool-discovery.ts`: for plugin services (`isPluginService()`), accepts ALL worker tools — no policy-gating
-5. `hub-tool-policy.ts`: `getPluginToolPolicy()` returns a default policy (`deferLoading: false`) for all plugin tools
-6. `http-bridge.ts`, `auth-tokens.ts` iterate `getAllServiceNames()` dynamically
-
----
-
-## Credential Lifecycle
-
-Credentials are stored as individual files at `~/.speedwave/tokens/<project>/<slug>/<key>` with `0o600` permissions.
-
-| Function                                               | Purpose                                                                  |
-| ------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `configure_plugin_tokens(project, service_id, tokens)` | Write credential files                                                   |
-| `get_plugin_token_status(project, manifest)`           | Returns `Configured`, `NotConfigured { missing }`, or `NoTokensRequired` |
-
-Desktop UI auto-generates a credential form from `auth_fields` in the manifest. The form shows field labels, types (text/password), and placeholders. Saving credentials triggers a restart prompt.
-
----
-
-## Claude Container Integration
-
-`entrypoint.sh` symlinks plugin resources into Claude's `~/.claude/` directory:
-
-```bash
-if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
-    for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
-        # Validate slug: lowercase alphanumeric + hyphens, 1-64 chars, starts with letter
-        if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
-            echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
-            continue
-        fi
-        plugin_path="/speedwave/plugins/${plugin}"
-        if [ -d "${plugin_path}" ]; then
-            for resource_type in commands agents skills hooks; do
-                if [ -d "${plugin_path}/${resource_type}" ]; then
-                    mkdir -p "${HOME}/.claude/${resource_type}"
-                    for entry in "${plugin_path}/${resource_type}"/*; do
-                        [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
-                    done
-                fi
-            done
-        fi
-    done
-fi
-```
-
-Shell-level slug validation provides defense-in-depth. Individual file symlinks (not directory symlinks) prevent overwriting user's custom resources.
-
----
-
-## CLI Interface
-
-```bash
-speedwave plugin install <path.zip>                  # Extract, verify, install
-speedwave plugin list                                 # List with status
-speedwave plugin remove <slug>                        # Uninstall
-speedwave plugin enable <slug> --project <name>       # Enable per-project
-speedwave plugin disable <slug> --project <name>      # Disable per-project
-```
-
-## Desktop Interface
-
-| Feature            | Description                                                                  |
-| ------------------ | ---------------------------------------------------------------------------- |
-| Install            | File picker for ZIP upload                                                   |
-| List               | Cards showing name, version, configured/not-configured badge                 |
-| Enable/disable     | Toggle switch per plugin (requires configuration first)                      |
-| Credentials        | Auto-generated form from `auth_fields`                                       |
-| Settings           | Per-project plugin settings (save/load)                                      |
-| Uninstall          | Removes plugin directory                                                     |
-| Restart            | Banner prompts for container restart after changes                           |
-| Integration status | Shows required integration status on dashboard with link to Integrations tab |
-
-Tauri commands: `get_plugins`, `peek_plugin_manifest`, `install_plugin`, `remove_plugin`, `set_plugin_enabled`, `save_plugin_credentials`, `delete_plugin_credentials`, `delete_plugin_credential_field`, `plugin_save_settings`, `plugin_load_settings`.
-
----
-
-## Implementation Files
-
-| File                                                                                       | Change                                                                            |
-| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| `crates/speedwave-runtime/src/plugin.rs`                                                   | New — manifest, install, remove, list, build, generate service, tokens            |
-| `crates/speedwave-runtime/src/signing.rs`                                                  | New — Ed25519 verification, dev-only signing                                      |
-| `crates/speedwave-runtime/src/compose.rs`                                                  | `render_compose()` +runtime param, `apply_plugins()`, 4 SecurityChecks            |
-| `crates/speedwave-runtime/src/config.rs`                                                   | `plugins` field, `set_plugin_enabled()`, `is_plugin_enabled()`, `plugin_settings` |
-| `crates/speedwave-runtime/src/consts.rs`                                                   | `BUILT_IN_SERVICE_IDS` constant                                                   |
-| `crates/speedwave-runtime/src/lib.rs`                                                      | `pub mod plugin; pub mod signing;` (replaces `pub mod addon;`)                    |
-| `crates/speedwave-runtime/Cargo.toml`                                                      | +zip, ed25519-dalek, sha2, base64                                                 |
-| `crates/speedwave-cli/src/main.rs`                                                         | Plugin subcommands (install/list/remove/enable/disable)                           |
-| `containers/entrypoint.sh`                                                                 | `SPEEDWAVE_PLUGINS` block (replaces `SPEEDWAVE_ADDONS`)                           |
-| `mcp-servers/hub/src/service-list.ts`                                                      | New — dynamic service list from env                                               |
-| `mcp-servers/hub/src/hub-tool-policy.ts`                                                   | `getPluginToolPolicy()`                                                           |
-| `mcp-servers/hub/src/tool-discovery.ts`                                                    | Plugin service branch (accept all tools)                                          |
-| `mcp-servers/hub/src/tool-registry.ts`                                                     | Dynamic `SERVICE_NAMES`                                                           |
-| `mcp-servers/hub/src/http-bridge.ts`                                                       | Dynamic `AllBridges`                                                              |
-| `mcp-servers/hub/src/auth-tokens.ts`                                                       | Iterate all services dynamically                                                  |
-| `desktop/src-tauri/src/plugin_cmd.rs`                                                      | New — 10 Tauri commands (incl. per-field credential clear)                        |
-| `desktop/src/src/app/plugins/plugin-credentials-form/plugin-credentials-form.component.ts` | New — auth_fields credentials form (description, validation, per-field status)    |
-| `desktop/src/src/app/plugins/plugin-detail/plugin-detail.component.ts`                     | Settings/Dashboard tabs (credentials form, instructions disclosure)               |
-
----
-
-## Consequences
-
-**Positive:**
-
-- Supply-chain security via Ed25519 signatures — only Speednet-signed plugins accepted
-- Per-project control with independent credential sets
-- Hub discovers plugin tools automatically — no manual configuration
-- Generated services match the exact shape of built-in workers (full hardening)
-- Standard credential lifecycle with Desktop UI forms
-
-**Negative:**
-
-- No third-party plugin creation — community contributions require Speednet
-- New dependencies (zip, ed25519-dalek, sha2, base64) increase compile time
-- Breaking change from addons — existing addon installs require re-install as plugins
-
----
-
-[^1]: [GitLab CE vs EE — open-core model](https://about.gitlab.com/install/ce-or-ee/)
-
-[^2]: [Metabase open-source vs commercial](https://www.metabase.com/docs/latest/paid-features/overview)
-
-[^3]: [Ed25519 — Edwards-curve Digital Signature Algorithm (RFC 8032)](https://datatracker.ietf.org/doc/html/rfc8032)
-
-[^4]: [Rust conditional compilation — cfg(debug_assertions)](https://doc.rust-lang.org/reference/conditional-compilation.html#debug_assertions)
-
-[^5]: [Zip Slip vulnerability — Snyk research](https://security.snyk.io/research/zip-slip-vulnerability)
-
-[^6]: [Lima — Linux virtual machines on macOS](https://github.com/lima-vm/lima)
-
-[^7]: [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
-
-[^8]: [Microsoft identity platform — OAuth 2.0 token refresh](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token)
-
-[^10]: [OCI Image Format Specification — Containerfile](https://github.com/containers/common/blob/main/docs/Containerfile.5.md)
-
-[^11]: https://docs.rs/semver/1/semver/struct.VersionReq.html
-
-[^12]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#version-requirement-syntax
-
-[^13]: [`regex` crate documentation — Syntax & guarantees (no backreferences or look-around; linear-time matching)](https://docs.rs/regex/latest/regex/#syntax)
-
-[^14]: [JSON Schema Validation — `pattern` keyword (uses ECMA-262 regex)](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)
+Speedwave uses an open-core model: an MIT-licensed core plus signed plugins distributed as Ed25519-signed ZIP packages (only Speednet creates and signs them). Plugins are installed globally, enabled per project, and discovered dynamically by the MCP Hub at runtime. A plugin ZIP is source code (a `Containerfile` plus sources), not a pre-built image — Speedwave builds a local OCI image from the verified, signed source at install time, the same way built-in workers are built. The earlier unsigned-addon system (`addon.json`, `compose.addon.yml` fragment merge) is fully replaced.
+
+There are two plugin types: an **MCP service plugin** has a `service_id` and a required `Containerfile`, and ships a containerized worker plus optional claude-resources; a **resource-only plugin** has neither and ships only skills/commands/agents/hooks.
+
+## Why
+
+- Supply-chain integrity: an Ed25519 signature is verified at install **and on every load** (compose render, image build, resource mount, UI listing, startup audit) — it is a runtime invariant, not just an install gate (ADR-051).
+- Per-project control: the same global install can be enabled for one project and disabled for another, each with its own credential set.
+- Hardening parity: generated plugin services match the exact shape of built-in workers — `cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs /tmp:noexec,nosuid`, isolated per-project network, CPU/memory caps, read-only `/tokens` mount.
+- Zero hub trust: the hub holds no tokens; it discovers plugin tools purely from `ENABLED_SERVICES`.
+
+## How it works
+
+- **Manifest (`plugin.json`):** required `name`, `slug` (kebab-case, `^[a-z][a-z0-9-]{0,63}$`), `version`, `description`. MCP plugins also set `service_id` (must equal `slug`). Optional fields include `instructions` (Markdown, ≤ 16 KiB), `resources`, `token_mount` (read-only only), `auth_fields`, `settings_schema`, `speedwave_compat`, `extra_env`, `mem_limit` (≤ 16 GiB), `cpu_limit` (≤ 4), and `requires_integrations`. The `port` field is **deprecated and ignored** — see "single worker port" below.
+- **Slug drives all paths/keys:** install dir `~/.speedwave/plugins/<slug>/`, config key `integrations.plugins.<slug>.enabled`, compose service `mcp-<slug>`, hub env `WORKER_<SLUG_UPPER>_URL` (hyphens → underscores), tokens `~/.speedwave/tokens/<project>/<slug>/`, and the `SPEEDWAVE_PLUGINS` list passed to the claude container.
+- **Single worker port:** every worker (built-in and plugin) listens on `consts::PORT_WORKER` (3000). Each container has its own network namespace, so port reuse is safe and DNS disambiguates (ADR-038). The generated compose always sets `PORT=3000`; a manifest that still declares a different `port` is logged and the value discarded.
+- **Mutable state outside the signed tree:** per-plugin mutable files (e.g. the `image_pending` build marker, the persisted host-bridge `bridge-token` — ADR-074) live under `~/.speedwave/plugin-state/<slug>/`, never inside `plugins/<slug>/`, so writing them never changes the content digest (ADR-051). Legacy in-tree markers are migrated on first load.
+- **Install-time validation:** slug format; no collision with `consts::BUILT_IN_SERVICE_IDS` or a built-in compose service name; `slug == service_id`; `Containerfile` present for MCP plugins; `token_mount: read_write` rejected (the `:rw` mount is reserved for built-ins per ADR-009); no duplicate `service_id`; reserved/dangerous `extra_env` keys rejected via `consts::RESERVED_ENV_KEYS`; bounded resource limits; `settings_schema` must be a JSON object ≤ 64 KiB; Zip-Slip protection on extraction. The collision/env/mount/limit checks re-run at compose-render time.
+- **auth_fields validation:** an optional per-field regex constraint, enforced anchored full-match in both the Desktop `<input pattern>` and host-side at save. The pattern is length-capped (`consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN`, 512) and must compile under the Rust `regex` crate (RE2 subset — no backreferences/look-around). This is intentionally stricter than the ECMA-262 flavour allowed in `settings_schema` (ADR-015 rationale: credentials are single strict values, settings are structured payloads).
+- **Sandbox:** a plugin manages only its own tokens; it cannot write into core-integration token directories (`provision_credentials` was removed for violating this). `requires_integrations` declares dependencies the user must configure; the Desktop dashboard shows their status with a link to the Integrations tab.
+- **Hub discovery:** `service-list.ts` parses `ENABLED_SERVICES` (no imports from other hub modules); the registry sets `SERVICE_NAMES` dynamically and calls `tools/list` on each worker. Plugin services flow through the same unified discovery path as built-in workers, with no plugin-specific tool-policy override: a tool whose `_meta` omits `deferLoading` defaults to `deferLoading: true` (the hub-side default in `tool-discovery.ts`); a worker can opt a tool in by supplying `deferLoading: false` in its `_meta`.
+- **Container resources:** `containers/entrypoint.sh` iterates `SPEEDWAVE_PLUGINS`, revalidates each slug, and symlinks each plugin's `commands`/`agents`/`skills`/`hooks` entry individually (never whole directories) into `~/.claude/` so user resources are never overwritten.
+- **CLI / Desktop:** CLI exposes `plugin install|list|remove|enable|disable`. Desktop adds a file-picker install, status cards, per-project enable toggle, an auto-generated credentials form from `auth_fields`, per-project settings, and a restart banner.
+
+## Service ID constants (current values — verify against `consts.rs`)
+
+- `consts::BUILT_IN_SERVICES` (compose names, for SecurityCheck): `claude`, `mcp-hub`, `mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, `mcp-github`, `mcp-atlassian`, `mcp-office`, `mcp-playwright`, `mcp-context7`.
+- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063.)
+- A guard test verifies no overlap between the two lists.
+
+## Where it lives in code
+
+- Manifest, install/remove/list, image build, service generation, token I/O — `crates/speedwave-runtime/src/plugin.rs`
+- Ed25519 verification (embedded public key, debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass compiled out of release builds) — `crates/speedwave-runtime/src/signing.rs`
+- `apply_plugins()`, `generate_plugin_service()`, `WORKER_*_URL` injection, plugin SecurityChecks — `crates/speedwave-runtime/src/compose.rs`
+- Service-ID constants and reserved env keys — `crates/speedwave-runtime/src/consts.rs`
+- Per-project enable state and `plugin_settings` — `crates/speedwave-runtime/src/config.rs`
+- CLI subcommands — `crates/speedwave-cli/src/main.rs`
+- Container resource symlinking — `containers/entrypoint.sh`
+- Hub discovery — `mcp-servers/hub/src/service-list.ts`, `tool-discovery.ts`, `tool-registry.ts`, `http-bridge.ts`, `auth-tokens.ts`
+- Tauri commands (10) — `desktop/src-tauri/src/plugin_cmd.rs`
+- Frontend models and forms — `desktop/src/src/app/models/plugin.ts`, `desktop/src/src/app/plugins/`
+
+## Rejected alternatives
+
+- **Third-party plugin signing:** rejected — only Speednet-signed plugins are accepted, so community contributions go through Speednet. This is the supply-chain trade-off for the runtime-signature invariant.
+- **Compose fragment merge (the old addon system):** rejected — fragments could not be validated or hardened consistently; plugin services are now generated programmatically with the same shape as built-in workers.
+- **`read_write` token mount for plugins:** rejected — the `:rw` mount is reserved for built-in OAuth refresh (ADR-009). A plugin that must persist data writes to the `:rw` `/workspace` mount instead.
+- **One unified regex flavour for both `auth_fields` and `settings_schema`:** rejected — the two surfaces have different lifecycles and storage (per-field token files vs. one JSON settings blob), so they keep RE2-subset and ECMA-262 respectively.
+
+## References
+
+- [ADR-009](ADR-009-per-project-isolation-preserved.md) — per-project isolation and the reserved `:rw` token mount
+- [ADR-038](ADR-038-single-internal-worker-port.md) — single internal worker port (3000)
+- [ADR-051](ADR-051-plugin-signature-runtime-verification.md) — plugin signature as a runtime invariant
+- [ADR-060](ADR-060-host-side-oauth-refresh-worker.md), [ADR-063](ADR-063-host-bridge-generic.md) — host-side workers/bridges reserved in `BUILT_IN_SERVICE_IDS`

@@ -1,5 +1,14 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
+
+/**
+ * True when `text` trimmed is `/` (slash-menu trigger). Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
+ * @param text - Raw composer text to test.
+ */
+export function isBareSlash(text: string): boolean {
+  return text.trim() === '/';
+}
 
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
@@ -23,16 +32,13 @@ export interface SlashDiscovery {
 }
 
 /**
- * Bridges the slash-menu UI with the Tauri backend.
- *
- * Keeps the discovery result in signals so the menu component can re-render
- * automatically. Never throws — failures degrade to an empty list with
- * `source = null` so the UI can show a subtle error state without losing
- * any already-loaded commands.
+ * Bridges the slash-menu UI with the Tauri backend, holding discovery in signals.
+ * Never throws — failures degrade to an empty list with `source = null`.
  */
 @Injectable({ providedIn: 'root' })
 export class SlashService {
   private readonly tauri = inject(TauriService);
+  private readonly log = inject(LoggerService);
 
   /** Last discovered list of commands (empty until refresh resolves). */
   readonly commands = signal<readonly SlashCommand[]>([]);
@@ -47,9 +53,7 @@ export class SlashService {
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
 
   /**
-   * Fetches the slash-command list for the given project and updates the
-   * signals. Resolves on both success and failure; errors are surfaced
-   * via `this.error` / `this.source` without throwing.
+   * Fetches the slash-command list and updates the signals; never throws.
    * @param projectId - Project name used by Tauri to find the container.
    */
   async refresh(projectId: string): Promise<void> {
@@ -76,8 +80,7 @@ export class SlashService {
   }
 
   /**
-   * Invalidates the backend cache for a project. Call after installing or
-   * removing a plugin so the next `refresh` returns the new list.
+   * Invalidates the backend slash-command cache for a project.
    * @param projectId - Project name whose cache to invalidate.
    */
   async invalidate(projectId: string): Promise<void> {
@@ -85,9 +88,7 @@ export class SlashService {
     try {
       await this.tauri.invoke('invalidate_slash_cache', { projectId });
     } catch (err) {
-      // Invalidation errors are not user-actionable; log via the logging
-      // facade for diagnostics.
-      console.warn('[SlashService] invalidate_slash_cache failed:', err);
+      this.log.warn(`[SlashService] invalidate_slash_cache failed: ${String(err)}`);
     }
   }
 }

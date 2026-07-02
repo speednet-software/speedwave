@@ -6,7 +6,7 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
-  activeProject: string | null = null;
+  readonly activeProject = signal<string | null>(null);
   onProjectReady(_cb: () => void): () => void {
     return () => undefined;
   }
@@ -154,6 +154,66 @@ describe('ComposerComponent', () => {
       sendButton().click();
 
       expect(emitted).toEqual([longText]);
+    });
+
+    it('does not emit when submitting a lone slash (skill-menu trigger)', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.text.setValue('/');
+      fixture.detectChanges();
+
+      sendButton().click();
+
+      expect(emitted).toEqual([]);
+    });
+
+    it('does not emit when submitting a slash with surrounding whitespace', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.text.setValue('  /  ');
+      fixture.detectChanges();
+
+      sendButton().click();
+
+      expect(emitted).toEqual([]);
+    });
+
+    it('emits a real slash command (slash + name)', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.text.setValue('/code-review');
+      fixture.detectChanges();
+
+      component.submit();
+
+      expect(emitted).toEqual(['/code-review']);
+    });
+
+    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
+      // The lone-`/` guard only suppresses a *text-only* send; with a ready
+      // attachment the image is the real payload, so submit is allowed.
+      component.text.setValue('/');
+      component.attachments.set([
+        {
+          id: 'a1',
+          filename: 'img.png',
+          previewUrl: 'blob:x',
+          preprocessed: {
+            attachment: {
+              filename: 'img.png',
+              mediaType: 'image/png',
+              containerPath: '/workspace/.speedwave/pastes/img.png',
+              hostPath: '/tmp/img.png',
+            },
+            previewUrl: 'blob:x',
+            width: 1,
+            height: 1,
+            sizeBytes: 1,
+          },
+        },
+      ]);
+      fixture.detectChanges();
+      expect(component.canSubmit()).toBe(true);
     });
   });
 

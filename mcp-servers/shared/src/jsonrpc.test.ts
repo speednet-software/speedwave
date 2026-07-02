@@ -859,8 +859,7 @@ describe('jsonrpc', () => {
       });
 
       it('creates auto-reconnect session when provided sessionId is not found in tools/list', async () => {
-        // Covers the second-OR branch of: if (!sessionId || !sessionManager.getSession(sessionId))
-        // sessionId is provided but session doesn't exist — auto-reconnect fires
+        // Covers the second-OR branch: sessionId provided but session not found.
         registerNTools(handler, 1);
         const request = {
           jsonrpc: '2.0',
@@ -879,8 +878,7 @@ describe('jsonrpc', () => {
       });
 
       it('skips auto-reconnect when tools/list is called with a valid existing sessionId', async () => {
-        // Covers the false branch of: if (!sessionId || !sessionManager.getSession(sessionId))
-        // — both conditions are false: sessionId is non-null AND session exists
+        // Covers the false branch: sessionId non-null AND session exists.
         registerNTools(handler, 2);
 
         // First create a session via initialize
@@ -912,8 +910,7 @@ describe('jsonrpc', () => {
 
     describe('tools/call session auto-reconnect', () => {
       it('creates auto-reconnect session when provided sessionId is not found in tools/call', async () => {
-        // Covers the second-OR branch of: if (!sessionId || !sessionManager.getSession(sessionId))
-        // for the handleToolsCall path
+        // Covers the second-OR branch for the handleToolsCall path.
         const tool = {
           name: 'reconnect_tool',
           description: 'Test tool',
@@ -1058,9 +1055,7 @@ describe('jsonrpc', () => {
 
   describe('processRequest outer catch', () => {
     it('returns InternalError when a handler method throws unexpectedly', async () => {
-      // Covers lines 184-188: outer try-catch in processRequest.
-      // sessionManager.createSession is called inside handleInitialize; if it throws,
-      // the outer catch fires (handleInitialize has no catch of its own).
+      // Covers the outer try-catch in processRequest when createSession throws.
       vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.spyOn(console, 'error').mockImplementation(() => {});

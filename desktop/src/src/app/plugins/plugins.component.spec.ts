@@ -14,9 +14,9 @@ const openMock = vi.mocked(open);
 const MOCK_PLUGINS = {
   plugins: [
     {
-      slug: 'presale',
-      name: 'Presale CRM',
-      service_id: 'presale',
+      slug: 'example-plugin',
+      name: 'Example Plugin CRM',
+      service_id: 'example-plugin',
       version: '1.2.0',
       description: 'CRM integration',
       enabled: true,
@@ -86,15 +86,7 @@ describe('PluginsComponent', () => {
   let projectState: ProjectStateService;
 
   beforeEach(async () => {
-    // The Angular `unit-test` builder configures Vitest with
-    // `isolate: false` (see @angular/build/.../vitest/executor.js), which
-    // means module mocks live across spec files in the same run. Without
-    // an explicit reset here, `openMock` retains whatever mockResolvedValue
-    // the previous spec configured — most visibly,
-    // `create-project-modal.component.spec.ts` resolves `open` to a path
-    // string, and the next plugins-spec test that calls `open` without
-    // setting its own resolved value gets that stale path back. Reset
-    // first thing in every beforeEach to keep specs self-contained.
+    // Reset openMock to clear stale mock values from previous specs (isolate: false).
     openMock.mockReset();
 
     mockTauri = new MockTauriService();
@@ -106,7 +98,8 @@ describe('PluginsComponent', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test-project';
+    projectState.activeProject.set('test-project');
+    projectState.status.set('ready'); // toggles/saves happen on a ready project
 
     fixture = TestBed.createComponent(PluginsComponent);
     component = fixture.componentInstance;
@@ -138,7 +131,7 @@ describe('PluginsComponent', () => {
 
   it('should not load plugins without active project', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = null;
+    projectState.activeProject.set(null);
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
     await component.ngOnInit();
     expect(invokeSpy).not.toHaveBeenCalledWith('get_plugins', expect.anything());
@@ -146,18 +139,18 @@ describe('PluginsComponent', () => {
 
   describe('toggleExpand()', () => {
     it('expands a plugin', () => {
-      component.toggleExpand('presale');
-      expect(component.expandedPlugin).toBe('presale');
+      component.toggleExpand('example-plugin');
+      expect(component.expandedPlugin).toBe('example-plugin');
     });
 
     it('collapses an already expanded plugin', () => {
-      component.expandedPlugin = 'presale';
-      component.toggleExpand('presale');
+      component.expandedPlugin = 'example-plugin';
+      component.toggleExpand('example-plugin');
       expect(component.expandedPlugin).toBeNull();
     });
 
     it('switches to a different plugin', () => {
-      component.expandedPlugin = 'presale';
+      component.expandedPlugin = 'example-plugin';
       component.toggleExpand('my-commands');
       expect(component.expandedPlugin).toBe('my-commands');
     });
@@ -179,7 +172,7 @@ describe('PluginsComponent', () => {
       await component.handleTogglePlugin({ plugin: component.plugins[0], event });
       expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
         project: 'test-project',
-        serviceId: 'presale',
+        serviceId: 'example-plugin',
         enabled: true,
       });
     });
@@ -221,7 +214,7 @@ describe('PluginsComponent', () => {
       });
       expect(invokeSpy).toHaveBeenCalledWith('save_plugin_credentials', {
         project: 'test-project',
-        slug: 'presale',
+        slug: 'example-plugin',
         credentials: { api_key: 'secret-123' },
       });
       expect(projectState.needsRestart).toBe(true);
@@ -256,7 +249,7 @@ describe('PluginsComponent', () => {
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
         project: 'test-project',
-        serviceId: 'presale',
+        serviceId: 'example-plugin',
         enabled: true,
       });
     });
@@ -332,7 +325,7 @@ describe('PluginsComponent', () => {
       await component.handleDeleteCredentials(component.plugins[0]);
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credentials', {
         project: 'test-project',
-        slug: 'presale',
+        slug: 'example-plugin',
       });
       expect(projectState.needsRestart).toBe(true);
     });
@@ -353,8 +346,8 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.handleRemovePlugin(component.plugins[0]);
-      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
-      expect(component.success).toContain('Presale CRM');
+      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'example-plugin' });
+      expect(component.success).toContain('Example Plugin CRM');
       expect(projectState.needsRestart).toBe(true);
     });
 
@@ -370,11 +363,7 @@ describe('PluginsComponent', () => {
   });
 
   describe('installPlugin()', () => {
-    /**
-     * Default install handler used by these tests: peeks an MCP plugin
-     * (with `service_id`) and installs successfully. Override per-test for
-     * other scenarios.
-     */
+    /** Peeks an MCP plugin (with `service_id`) and installs successfully. */
     function defaultInstallHandler(): (cmd: string) => Promise<unknown> {
       return async (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
@@ -459,9 +448,7 @@ describe('PluginsComponent', () => {
         return undefined;
       };
       await component.installPlugin();
-      // After install completes, the steps signal still holds the last list
-      // used during the run — we can assert resource-only plugins never get
-      // a `building` step.
+      // Resource-only plugins never get a `building` step.
       const steps = component.installSteps();
       expect(steps.map((s) => s.id)).toEqual(['verifying', 'extracting']);
     });
@@ -509,8 +496,7 @@ describe('PluginsComponent', () => {
     it('marks the active step as error and sets installError on phase=failed', async () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/bad.zip');
-      // Hold install_plugin pending so the dispatched phase events are
-      // delivered while the listener is still registered.
+      // Hold install_plugin pending so phase events arrive while the listener is registered.
       let rejectFn!: (e: Error) => void;
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
@@ -659,8 +645,8 @@ describe('PluginsComponent', () => {
     it('navigates to plugin detail route', () => {
       const router = TestBed.inject(Router);
       const spy = vi.spyOn(router, 'navigate');
-      component.navigateToPlugin('presale');
-      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+      component.navigateToPlugin('example-plugin');
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'example-plugin']);
     });
   });
 
@@ -709,15 +695,17 @@ describe('PluginsComponent', () => {
       const rows = fixture.nativeElement.querySelectorAll('tbody tr');
       expect(rows.length).toBe(component.plugins.length);
 
-      const presaleRow = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
-      expect(presaleRow).not.toBeNull();
-      const type = presaleRow.querySelector('[data-testid="plugins-row-type"]');
+      const examplePluginRow = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-row-example-plugin"]'
+      );
+      expect(examplePluginRow).not.toBeNull();
+      const type = examplePluginRow.querySelector('[data-testid="plugins-row-type"]');
       expect(type).not.toBeNull();
       expect(type.textContent.trim()).toBe('mcp');
-      const ver = presaleRow.querySelector('[data-testid="plugins-row-ver"]');
+      const ver = examplePluginRow.querySelector('[data-testid="plugins-row-ver"]');
       expect(ver).not.toBeNull();
       expect(ver.textContent.trim()).toContain('v1.2.0');
-      const signed = presaleRow.querySelector('[data-testid="plugins-row-signed"]');
+      const signed = examplePluginRow.querySelector('[data-testid="plugins-row-signed"]');
       expect(signed).not.toBeNull();
       expect(signed.textContent).toContain('ed25519');
     });
@@ -738,9 +726,9 @@ describe('PluginsComponent', () => {
       fixture.detectChanges();
       const router = TestBed.inject(Router);
       const spy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
-      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-example-plugin"]');
       row.click();
-      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'example-plugin']);
     });
 
     it('row toggle flips enabled state and stops propagation (no navigation)', async () => {
@@ -752,9 +740,7 @@ describe('PluginsComponent', () => {
       const target = component.plugins[0];
       const before = target.enabled;
       await component.onRowToggle(target, new MouseEvent('click'));
-      // Hold a direct reference because ngOnInit's project-ready listener
-      // can re-fetch and replace the plugins array between the await and
-      // the assertion in some Angular zone flushes.
+      // Hold a direct reference: the project-ready listener may replace the plugins array.
       expect(target.enabled).toBe(!before);
       expect(navSpy).not.toHaveBeenCalled();
     });

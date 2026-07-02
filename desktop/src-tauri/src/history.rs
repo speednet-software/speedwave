@@ -1,8 +1,5 @@
 /// Chat history — reads Claude Code JSONL session files and project memory.
-///
-/// All public functions resolve paths from `consts::data_dir()` and delegate to
-/// internal `_impl` functions that accept a `data_dir: &Path` parameter.
-/// Tests call the `_impl` functions directly with `tempfile::TempDir`.
+/// Public fns delegate to `_impl(data_dir: &Path)` variants that tests call directly.
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -57,11 +54,16 @@ pub struct ConversationMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
-    /// Stable UUID written into the JSONL by Claude Code; needed by the
-    /// retry-last-turn flow (ADR-046) to anchor the rewind point. `None`
-    /// when the line lacks a `uuid` field.
+    /// Stable JSONL UUID; anchors the retry-last-turn rewind point (ADR-046).
+    /// `None` when the line lacks a `uuid` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
+    /// Per-message model id (assistant turns only); restores the resumed footer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-message token usage (assistant turns only). Reuses the chat SSOT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::chat::TurnUsage>,
 }
 
 /// Full transcript of a conversation.
@@ -88,17 +90,7 @@ fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
 }
 
 /// Resolves the workspace subdirectory inside `.claude/projects/`.
-/// Claude Code derives the dir name from CWD — `/workspace` → `-workspace`.
-/// Falls back to auto-discovery if `-workspace` doesn't exist (handles
-/// Claude Code internal path derivation changes across versions).
-///
-/// **Known limitation:** Auto-discovery is a best-effort heuristic.  When
-/// multiple candidates exist the newest-by-mtime is picked, which could be
-/// wrong if an unrelated process touched a stale directory.  Both session
-/// JSONL files and `memory/MEMORY.md` share the same resolved path, so they
-/// always resolve together (for better or worse).  Callers that get an empty
-/// result despite sessions existing should check the Desktop log for the
-/// "multiple project dirs" warning emitted here.
+/// `/workspace` → `-workspace`; falls back to newest-by-mtime auto-discovery.
 fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     let default = projects_dir.join("-workspace");
     if default.is_dir() {
@@ -120,10 +112,7 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
                 return candidates.remove(0);
             }
             if candidates.len() > 1 {
-                // Sort by mtime (newest first), then alphabetically as
-                // deterministic tiebreak.  mtime is a best-effort heuristic —
-                // some filesystems (ext3, HFS+) have 1-second granularity;
-                // the alphabetical sort is the ultimate deterministic fallback.
+                // Sort by mtime (newest first), alphabetical as tiebreak.
                 candidates.sort_by(|a, b| {
                     let ma = a.metadata().and_then(|m| m.modified()).ok();
                     let mb = b.metadata().and_then(|m| m.modified()).ok();
@@ -188,12 +177,7 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
-    // Skip Claude Code synthetic meta-entries (slash-command caveats, image
-    // attachment markers, …). They have `type:"user"` but are model-facing
-    // hints, never actual user input. Scoped to "user" so a future
-    // upstream `isMeta` on assistant/result rows isn't silently swallowed.
-    // `isMeta` lives at the top level today; we also probe `message.isMeta`
-    // defensively in case Anthropic nests it later.
+    // Skip synthetic `type:"user"` meta-entries via `isMeta` (top-level or nested) or content sniffing.
     if msg_type == "user" {
         let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
@@ -224,18 +208,43 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     }
 }
 
-/// Detects Claude Code synthetic `type:"user"` entries that aren't real user
-/// input: slash-command markers, slash-command stdout/stderr, and the
-/// SDK CLI's `Commands are in the form …` boilerplate. None of these are
-/// flagged with `isMeta`, so we sniff the content. Caller must ensure
-/// `parsed["type"] == "user"`.
+/// Bytes of the file tail read by [`last_message_timestamp`]. Sized to comfortably
+/// hold the last several JSONL lines (incl. trailing `last-prompt`/`ai-title`).
+const TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// Timestamp of the last JSONL line carrying one — the session's last activity.
+/// Scans only the final [`TAIL_READ_BYTES`] backwards; `None` if none present.
+fn last_message_timestamp(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_READ_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let tail = String::from_utf8_lossy(&buf);
+    // When we started mid-file the first line may be partial — drop it. `skip`
+    // (not slicing) stays panic-free even if the tail read returned no lines.
+    let lines: Vec<&str> = tail.lines().collect();
+    let scan_from = if start > 0 { 1 } else { 0 };
+    for line in lines.iter().skip(scan_from).rev() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(ts) = v["timestamp"].as_str() {
+                return Some(ts.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Detects synthetic `type:"user"` entries with no `isMeta` flag by sniffing content.
+/// Caller must ensure `parsed["type"] == "user"`.
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
     if let Some(s) = content.as_str() {
         text_is_synthetic(s)
     } else if let Some(arr) = content.as_array() {
-        // Check each text block separately so a synthetic tag is caught even
-        // when it isn't the first block of a multi-block content array.
+        // Check each text block so a synthetic tag in any block is caught.
         arr.iter()
             .filter(|b| b["type"].as_str() == Some("text"))
             .filter_map(|b| b["text"].as_str())
@@ -275,6 +284,8 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             }]),
             timestamp,
             uuid,
+            model: None,
+            usage: None,
         });
     }
 
@@ -312,6 +323,8 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             blocks: Some(rich_blocks),
             timestamp,
             uuid,
+            model: None,
+            usage: None,
         });
     }
 
@@ -372,12 +385,20 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         parts.join("\n")
     };
 
+    let model = message["model"].as_str().map(String::from);
+    // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
+    let usage = message
+        .get("usage")
+        .and_then(crate::chat::turn_usage_from_jsonl);
+
     Some(ConversationMessage {
         role: "assistant".to_string(),
         content: flat_content,
         blocks: Some(rich_blocks),
         timestamp,
         uuid,
+        model,
+        usage,
     })
 }
 
@@ -390,8 +411,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     }
 
     let timestamp = parsed["timestamp"].as_str().map(String::from);
-    // Result lines don't carry a stable per-turn uuid in the JSONL — they're
-    // synthetic summary entries. Leave `None` so the retry path skips them.
+    // Result lines carry no stable per-turn uuid; leave `None`.
     let uuid = None;
 
     if is_error {
@@ -403,6 +423,8 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
             }]),
             timestamp,
             uuid: uuid.clone(),
+            model: None,
+            usage: None,
         });
     }
 
@@ -414,6 +436,8 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
         }]),
         timestamp,
         uuid,
+        model: None,
+        usage: None,
     })
 }
 
@@ -477,9 +501,7 @@ fn list_conversations_impl(
             continue;
         }
 
-        // Read first ~50 lines to get timestamp and preview without loading
-        // entire multi-MB JSONL files. We also count messages in those lines
-        // as an approximate count for display.
+        // Scan first ~50 lines for timestamp, preview, and approximate count.
         let file = match fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -489,22 +511,24 @@ fn list_conversations_impl(
         };
 
         let reader = BufReader::new(file);
-        let mut first_timestamp: Option<String> = None;
+        let mut last_timestamp: Option<String> = None;
         let mut preview = String::new();
         let mut message_count: usize = 0;
+        let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
         const MAX_SCAN_LINES: usize = 50;
+        // Whether the head scan saw the whole file — gates the junk-slash drop
+        // below (a real 2nd user message past the cap must keep the session).
+        let mut scanned_lines: usize = 0;
 
         for line in reader.lines().take(MAX_SCAN_LINES) {
             let line = match line {
                 Ok(l) => l,
                 Err(_) => break,
             };
+            scanned_lines += 1;
             if let Some(msg) = parse_jsonl_message(&line) {
-                // Deduplicate: skip result whose content is contained in the
-                // preceding assistant message.  `parse_assistant_message`
-                // concatenates text + "[Tool: X]" placeholders, so the result
-                // text (plain text only) is a substring of the assistant content.
+                // Deduplicate: skip result whose content is a substring of the preceding assistant message.
                 if msg.role == "assistant" {
                     if let Some(ref prev) = last_assistant_content {
                         if prev.contains(&msg.content) {
@@ -516,8 +540,13 @@ fn list_conversations_impl(
                     last_assistant_content = None;
                 }
                 message_count += 1;
-                if first_timestamp.is_none() {
-                    first_timestamp = msg.timestamp.clone();
+                if msg.role == "user" {
+                    user_message_count += 1;
+                }
+                // Head-scan timestamp is only a fallback for when the tail read
+                // below finds none; the tail is the authoritative last activity.
+                if msg.timestamp.is_some() {
+                    last_timestamp = msg.timestamp.clone();
                 }
                 if preview.is_empty() && msg.role == "user" {
                     preview = truncate_preview(&msg.content, 200);
@@ -525,19 +554,40 @@ fn list_conversations_impl(
             }
         }
 
+        // The head scan saw the whole file iff it stopped before its cap; then
+        // `last_timestamp`/`user_message_count` are authoritative.
+        let head_saw_whole_file = scanned_lines < MAX_SCAN_LINES;
+
+        // Re-read the tail only when the head was truncated; tail wins when
+        // present (a fully-scanned short file already has the last activity).
+        if !head_saw_whole_file {
+            if let Some(ts) = last_message_timestamp(&path) {
+                last_timestamp = Some(ts);
+            }
+        }
+
         if message_count == 0 {
+            continue;
+        }
+
+        // Drop junk sessions whose sole user message is a lone `/`, only when the
+        // head saw the whole file. Real `/code-review` and 2nd messages survive.
+        if head_saw_whole_file
+            && user_message_count == 1
+            && speedwave_runtime::slash::is_bare_slash(&preview)
+        {
             continue;
         }
 
         summaries.push(ConversationSummary {
             session_id,
-            timestamp: first_timestamp,
+            timestamp: last_timestamp,
             preview,
             message_count,
         });
     }
 
-    // Sort newest first (by timestamp descending, None last)
+    // Sort by last activity, newest first (None last).
     summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     if dir.is_dir() && summaries.is_empty() {
@@ -573,10 +623,7 @@ fn get_conversation_impl(
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         if let Some(msg) = parse_jsonl_message(&line) {
-            // Deduplicate: skip result message whose content is contained in
-            // the preceding assistant message.  `parse_assistant_message`
-            // concatenates text + "[Tool: X]" placeholders, so the result
-            // text (plain text only) is a substring of the assistant content.
+            // Deduplicate: skip result whose content is a substring of the preceding assistant message.
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
                     if prev.contains(&msg.content) {
@@ -637,9 +684,8 @@ fn delete_conversation_impl(
 // Resume snapshot
 // ---------------------------------------------------------------------------
 
-/// Cumulative session state recovered from an existing transcript. Seeded
-/// into the `StreamParser` on resume so the first new turn reports a real
-/// delta instead of `cumulative - 0`.
+/// Cumulative session state recovered from a transcript. Seeds the
+/// `StreamParser` on resume so the first new turn reports a real delta.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResumeSnapshot {
     /// Cumulative input tokens across the session.
@@ -658,15 +704,8 @@ pub struct ResumeSnapshot {
     pub model: Option<String>,
 }
 
-/// Compute the cumulative session snapshot from an existing JSONL transcript.
-///
-/// The CLI emits `total_cost_usd` and `modelUsage` cumulatively in every
-/// `result` line, so the latest such values describe the full session
-/// state. Token counts are recovered preferring the latest `modelUsage`
-/// (already cumulative) and falling back to the running sum of per-step
-/// flat `usage` payloads — matching the parser's own snapshot accounting in
-/// `compute_turn_usage_from_result`. The model is taken from the most
-/// recent `modelUsage` key, or the last `system init` line if none.
+/// Compute the cumulative session snapshot from a JSONL transcript: prefers the
+/// latest `modelUsage`, falls back to summed flat `usage` / last `system init`.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
@@ -685,8 +724,7 @@ fn compute_resume_snapshot_impl(
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
 
-    // Running sum of flat `usage` blocks — used as a fallback when the
-    // session has no `modelUsage` (older CLI versions / partial payloads).
+    // Running sum of flat `usage` blocks; fallback when no `modelUsage`.
     let mut summed = ResumeSnapshot::default();
     // Cumulative snapshot from the most recent `result` carrying `modelUsage`.
     let mut latest_cumulative: Option<ResumeSnapshot> = None;
@@ -710,21 +748,23 @@ fn compute_resume_snapshot_impl(
                     latest_cost = Some(cost);
                 }
                 if let Some(usage) = parsed.get("usage") {
+                    // Summing keeps its legacy-name fallback; field names are
+                    // the chat SSOT consts (cf. `turn_usage_from_jsonl`).
                     let read_u64 = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64);
                     summed.input_tokens = summed
                         .input_tokens
-                        .saturating_add(read_u64("input_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_INPUT_TOKENS).unwrap_or(0));
                     summed.output_tokens = summed
                         .output_tokens
-                        .saturating_add(read_u64("output_tokens").unwrap_or(0));
+                        .saturating_add(read_u64(crate::chat::USAGE_OUTPUT_TOKENS).unwrap_or(0));
                     summed.cache_read_tokens = summed.cache_read_tokens.saturating_add(
-                        read_u64("cache_read_input_tokens")
-                            .or_else(|| read_u64("cache_read_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_READ_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_READ_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                     summed.cache_write_tokens = summed.cache_write_tokens.saturating_add(
-                        read_u64("cache_creation_input_tokens")
-                            .or_else(|| read_u64("cache_write_tokens"))
+                        read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS)
+                            .or_else(|| read_u64(crate::chat::USAGE_CACHE_WRITE_TOKENS_LEGACY))
                             .unwrap_or(0),
                     );
                 }
@@ -752,13 +792,7 @@ fn compute_resume_snapshot_impl(
                         if any_field {
                             latest_cumulative = Some(cumulative);
                         }
-                        // Pick the model that produced the most output tokens —
-                        // that's the main response model. A single turn can mix
-                        // models (Opus for the user-facing answer + Haiku for
-                        // background tasks like title generation), so picking
-                        // `keys().next()` would be non-deterministic and tended
-                        // to surface Haiku (alphabetically before Opus) even when
-                        // Opus did the real work.
+                        // Pick the model with the most output tokens (the main response model).
                         if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
                             stats
                                 .get("outputTokens")
@@ -1101,11 +1135,69 @@ mod tests {
 
     #[test]
     fn parse_result_message_uuid_is_always_none() {
-        // Result lines are synthesized turn summaries — they're not valid
-        // retry anchors, so the parser should never expose a uuid for them.
+        // Result lines must never expose a uuid.
         let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.uuid.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_extracts_model_and_usage() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":12,"output_tokens":34,"cache_read_input_tokens":56,"cache_creation_input_tokens":78}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
+        let usage = msg.usage.expect("usage must be present");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 34);
+        // cache_read_input_tokens → cache_read_tokens
+        assert_eq!(usage.cache_read_tokens, 56);
+        // cache_creation_input_tokens → cache_write_tokens
+        assert_eq!(usage.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn parse_assistant_message_usage_missing_fields_default_zero() {
+        // A `usage` object with only partial fields zero-fills the rest.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"haiku-4.5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        let usage = msg.usage.expect("usage must be present");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_assistant_message_without_usage_leaves_none() {
+        // No `usage` object — `usage` stays None (model still parsed when present).
+        let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_null_usage_is_none() {
+        // `usage: null` is not an object — None, not a zero-filled TurnUsage.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":null}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_user_message_has_no_model_or_usage() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.model.is_none());
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn parse_result_message_has_no_model_or_usage() {
+        let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.model.is_none());
+        assert!(msg.usage.is_none());
     }
 
     #[test]
@@ -1173,6 +1265,86 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].session_id, id_new);
         assert_eq!(result[1].session_id, id_old);
+    }
+
+    #[test]
+    fn list_conversations_sorts_by_last_activity_not_first_message() {
+        // A chat STARTED earlier but REPLIED-TO later must sort above a chat
+        // started later with no further activity — newest activity on top.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+
+        let id_started_early = "00000000-0000-0000-0000-00000000000a";
+        let id_started_late = "00000000-0000-0000-0000-00000000000b";
+
+        write_session(
+            &dir,
+            id_started_early,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"begun monday"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"replied friday"},"timestamp":"2025-01-05T12:00:00Z"}"#,
+            ],
+        );
+        write_session(
+            &dir,
+            id_started_late,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"begun wednesday"},"timestamp":"2025-01-03T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 2);
+        // id_started_early last activity (Jan 5) > id_started_late (Jan 3).
+        assert_eq!(result[0].session_id, id_started_early);
+        assert_eq!(result[1].session_id, id_started_late);
+    }
+
+    #[test]
+    fn list_conversations_timestamp_skips_trailing_metadata_lines() {
+        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the report
+        // is the last real message before them, not None.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+        let id = "00000000-0000-0000-0000-00000000000d";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"yo"}]},"timestamp":"2025-02-02T02:02:02Z"}"#,
+                r#"{"type":"last-prompt"}"#,
+                r#"{"type":"ai-title","title":"chat"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].timestamp.as_deref(), Some("2025-02-02T02:02:02Z"));
+    }
+
+    #[test]
+    fn list_conversations_timestamp_is_last_activity() {
+        // The reported timestamp is the latest message, not the first —
+        // the sidebar renders it as "last activity".
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "acme");
+        let id = "00000000-0000-0000-0000-00000000000c";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"start"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2025-01-09T09:09:09Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "acme").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].timestamp.as_deref(), Some("2025-01-09T09:09:09Z"));
     }
 
     #[test]
@@ -1287,17 +1459,14 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_respects_nested_is_meta_under_message() {
-        // Defensive: should Claude Code ever move `isMeta` from top-level
-        // into `message.*`, the filter must still catch it.
+        // `isMeta` nested under `message.*` must still be caught.
         let line = r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<local-command-caveat>x</local-command-caveat>"}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_does_not_drop_is_meta_on_non_user_types() {
-        // The `isMeta` filter is intentionally scoped to user entries — an
-        // assistant row with isMeta:true must still parse, so future upstream
-        // tagging of legitimate assistant turns doesn't make them vanish.
+        // The `isMeta` filter is scoped to user entries; an assistant row with isMeta:true must still parse.
         let line = r#"{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
         let msg = parse_jsonl_message(line).expect("assistant with isMeta should parse");
         assert_eq!(msg.role, "assistant");
@@ -1348,8 +1517,7 @@ mod tests {
 
     #[test]
     fn list_conversations_skips_slash_command_markers() {
-        // Slash-command invocations carry no `isMeta` flag but are still
-        // synthetic — they should not surface as previews or get counted.
+        // Slash-command invocations carry no `isMeta` flag but are still synthetic.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1373,9 +1541,7 @@ mod tests {
 
     #[test]
     fn list_conversations_drops_sdk_cli_boilerplate_session() {
-        // `claude -p "/cmd"` opens a session whose only user entry is the
-        // boilerplate `Commands are in the form …` (no `isMeta`). Such a
-        // session should never appear in the sidebar.
+        // A session whose only user entry is the `Commands are in the form …` boilerplate must not appear.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1393,10 +1559,237 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_drops_bare_slash_session() {
+        // A junk session whose only content is a lone `/` (slash-menu trigger
+        // sent as a message) must not pollute the history list.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_conversations_drops_bare_slash_session_with_reply() {
+        // The common junk shape: a lone `/` plus Claude's "you typed /" reply.
+        // The user never sent anything real, so this must be dropped too.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"You typed / with no command."}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_conversations_keeps_slash_session_with_real_message_past_head_scan() {
+        // Lone `/`, then >50 noise lines, then a real 2nd user message past the
+        // head-scan cap: the session must NOT be dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(
+            r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#
+                .to_string(),
+        );
+        // 60 noise lines (assistant text + system) — past the 50-line head cap.
+        for i in 0..60 {
+            lines.push(format!(
+                r#"{{"type":"system","message":"step {i}","timestamp":"2025-01-01T00:00:01Z"}}"#
+            ));
+        }
+        lines.push(
+            r#"{"type":"user","message":{"role":"user","content":"the real question"},"timestamp":"2025-01-01T00:01:00Z"}"#
+                .to_string(),
+        );
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_session(&dir, id, &refs);
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "a real message past the head-scan cap must keep the session"
+        );
+    }
+
+    #[test]
+    fn list_conversations_keeps_session_where_slash_is_followed_by_real_message() {
+        // A lone `/` first, then a real second user message: `user_message_count`
+        // is 2, so the junk filter must NOT drop it — preventing history loss.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"actually, summarize this repo"},"timestamp":"2025-01-01T00:00:05Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure."}]},"timestamp":"2025-01-01T00:00:06Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "a 2nd real user message must keep the session"
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_skips_trailing_metadata_lines() {
+        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the tail
+        // scan walks past them to the last real message's timestamp.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-03-03T03:03:03Z"}"#,
+                r#"{"type":"last-prompt"}"#,
+                r#"{"type":"ai-title","title":"chat"}"#,
+            ],
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2025-03-03T03:03:03Z")
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_none_when_no_line_has_a_timestamp() {
+        // No timestamp anywhere in the tail → None; the list path then keeps the
+        // head-scanned value (the documented fallback).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, "{\"type\":\"last-prompt\"}\n{\"type\":\"ai-title\"}").unwrap();
+        assert!(last_message_timestamp(&path).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_does_not_panic_on_single_huge_line() {
+        // One JSONL line larger than TAIL_READ_BYTES: the 64 KiB tail is a single
+        // partial fragment, `skip(1)` empties the scan — must return None, not panic.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let huge = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}},"timestamp":"2025-01-01T00:00:00Z"}}"#,
+            "x".repeat((TAIL_READ_BYTES as usize) + 1000)
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, huge).unwrap();
+        assert!(last_message_timestamp(&path).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_reads_final_line_without_trailing_newline() {
+        // The last line has no trailing `\n`; `lines()` still yields it, so the
+        // timestamp is found.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\"timestamp\":\"2027-07-07T07:07:07Z\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2027-07-07T07:07:07Z")
+        );
+    }
+
+    #[test]
+    fn last_message_timestamp_none_for_unreadable_or_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing file → None (no panic).
+        assert!(last_message_timestamp(&tmp.path().join("nope.jsonl")).is_none());
+        // Empty file → None.
+        let empty = tmp.path().join("empty.jsonl");
+        fs::write(&empty, "").unwrap();
+        assert!(last_message_timestamp(&empty).is_none());
+    }
+
+    #[test]
+    fn last_message_timestamp_reads_only_the_tail_of_a_large_file() {
+        // A file larger than TAIL_READ_BYTES: the timestamp in the final line is
+        // still found even though earlier lines are never read.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let filler = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}},"timestamp":"2024-01-01T00:00:00Z"}}"#,
+            "x".repeat(2000)
+        );
+        let mut lines: Vec<String> = (0..200).map(|_| filler.clone()).collect();
+        lines.push(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-12-12T12:12:12Z"}"#
+                .to_string(),
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, lines.join("\n")).unwrap();
+        assert!(path.metadata().unwrap().len() > TAIL_READ_BYTES);
+        assert_eq!(
+            last_message_timestamp(&path).as_deref(),
+            Some("2026-12-12T12:12:12Z")
+        );
+    }
+
+    #[test]
+    fn list_conversations_keeps_real_slash_command_session() {
+        // A real slash command (`/code-review`) with a reply is a genuine
+        // conversation — it must NOT be dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/code-review"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reviewing"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "/code-review");
+    }
+
+    #[test]
     fn parse_jsonl_message_drops_command_args_and_command_result_prefixes() {
-        // Defensive: Claude Code today only emits <command-name> first, but
-        // these sibling tags belong to the same family and should they ever
-        // arrive as standalone user rows we still want them filtered.
+        // Sibling command tags must also be filtered, not only <command-name>.
         for tag in ["<command-args>", "<command-result>"] {
             let line = format!(
                 r#"{{"type":"user","message":{{"role":"user","content":"{tag}foo</X>"}}}}"#
@@ -1410,17 +1803,14 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_drops_boilerplate_with_trailing_punctuation() {
-        // `starts_with` (not `==`) means small upstream wording tweaks —
-        // trailing newline, period, additional context — don't leak the
-        // boilerplate back into the sidebar.
+        // Boilerplate with trailing punctuation/context is still filtered.
         let line = r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`\n\nMore context."}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_drops_synthetic_tag_in_non_first_text_block() {
-        // Multi-block content where the synthetic marker isn't the first
-        // block — caught per-block instead of after `join("\n")`.
+        // Synthetic marker in a non-first text block is caught per-block.
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"preamble"},{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
@@ -1532,8 +1922,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
 
-        // Create a directory at the MEMORY.md path — reading a directory as a
-        // file produces an I/O error that is NOT ErrorKind::NotFound.
+        // A directory at the MEMORY.md path yields an I/O error that is NOT ErrorKind::NotFound.
         let memory_dir = dir.join("memory").join("MEMORY.md");
         fs::create_dir_all(&memory_dir).unwrap();
 
@@ -1683,8 +2072,7 @@ mod tests {
         );
 
         let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
-        // Should have 2 messages: user + assistant (result deduplicated even
-        // though assistant content includes "[Tool: Read]" suffix)
+        // 2 messages: user + assistant (result deduplicated).
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
@@ -1699,8 +2087,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Two turns: each result line carries cumulative `modelUsage` and
-        // cumulative `total_cost_usd`. The latest line is authoritative.
+        // Two cumulative result lines; the latest is authoritative.
         write_session(
             &dir,
             id,
@@ -1727,8 +2114,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // No `modelUsage` anywhere — only flat per-step `usage`. Must sum
-        // them up to recover the cumulative state.
+        // No `modelUsage` anywhere; flat per-step `usage` must be summed.
         write_session(
             &dir,
             id,
@@ -1745,8 +2131,7 @@ mod tests {
         assert_eq!(snap.cache_read_tokens, 3);
         assert_eq!(snap.cache_write_tokens, 1);
         assert_eq!(snap.total_cost, Some(0.05));
-        // No `modelUsage` ever, so the system init model is used as the
-        // fallback signal.
+        // No `modelUsage` ever, so the system init model is the fallback.
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
     }
 
@@ -1756,9 +2141,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Transcript with no result/init lines (e.g., a session that
-        // crashed before the first turn). Must not error and must report
-        // a zero baseline so the resume parser starts fresh.
+        // Transcript with no result/init lines must not error and reports a zero baseline.
         write_session(
             &dir,
             id,
@@ -1775,8 +2158,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Mix of malformed and valid lines — the malformed ones must not
-        // poison the running totals.
+        // Malformed lines must not poison the running totals.
         write_session(
             &dir,
             id,
@@ -1818,9 +2200,7 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // The init line declares one model, but the latest `modelUsage`
-        // shows another (mid-session model switch). The seed must reflect
-        // the most recent model so the next turn's pricing is correct.
+        // On a mid-session model switch, the seed reflects the latest `modelUsage` model.
         write_session(
             &dir,
             id,
@@ -1836,13 +2216,7 @@ mod tests {
 
     #[test]
     fn compute_resume_snapshot_picks_dominant_model_from_modelusage() {
-        // Regression: Claude Code emits a `modelUsage` map that may contain
-        // several entries when one turn mixes a main-response model with
-        // background calls (Haiku for title generation, summarization, etc.).
-        // Using `keys().next()` was non-deterministic and tended to surface
-        // Haiku (alphabetically before Opus) even when Opus produced the
-        // real answer, so the chat footer showed the wrong model.
-        // The fix selects the model with the highest `outputTokens`.
+        // From a multi-entry modelUsage map, picks the highest `outputTokens`.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456790";

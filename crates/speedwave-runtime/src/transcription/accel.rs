@@ -6,7 +6,8 @@ use crate::transcription::model_catalog::{
     ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS,
 };
 
-/// A whisper.cpp acceleration backend compiled into this binary.
+/// A whisper.cpp acceleration backend compiled into this binary. v1 ships CPU
+/// (all platforms) + Metal (macOS); CUDA/Vulkan are deferred (ADR-056).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
@@ -14,10 +15,6 @@ pub enum Backend {
     Cpu,
     /// Apple Metal GPU (macOS builds).
     Metal,
-    /// NVIDIA CUDA — not built in v1.
-    Cuda,
-    /// Vulkan GPU — not built in v1.
-    Vulkan,
 }
 
 impl Backend {
@@ -31,8 +28,6 @@ impl Backend {
         match self {
             Backend::Cpu => "CPU",
             Backend::Metal => "Metal",
-            Backend::Cuda => "CUDA",
-            Backend::Vulkan => "Vulkan",
         }
     }
 }
@@ -40,11 +35,14 @@ impl Backend {
 /// The acceleration backends compiled into this binary (not what the host
 /// hardware supports — backends are a build-time choice).
 pub fn compiled_backends() -> Vec<Backend> {
-    #[allow(unused_mut)]
-    let mut v = vec![Backend::Cpu];
     #[cfg(all(feature = "audio-transcription", target_os = "macos"))]
-    v.push(Backend::Metal);
-    v
+    {
+        vec![Backend::Cpu, Backend::Metal]
+    }
+    #[cfg(not(all(feature = "audio-transcription", target_os = "macos")))]
+    {
+        vec![Backend::Cpu]
+    }
 }
 
 /// `true` if any GPU backend was compiled in.
@@ -52,29 +50,24 @@ pub fn has_gpu_backend() -> bool {
     compiled_backends().iter().any(|b| b.is_gpu())
 }
 
-/// The live-path Whisper model for `backends`: `large-v3-turbo` if a GPU
-/// backend is present, else `small`.
-pub fn recommended_live_model(backends: &[Backend]) -> &'static WhisperModelInfo {
+/// The single best model to download for `backends`: `large-v3` on GPU, else
+/// `large-v3-turbo`. One model serves both the live and offline passes; on a
+/// weak CPU turbo may lag live, accepted (ADR-056).
+pub fn best_model_for_backends(backends: &[Backend]) -> &'static WhisperModelInfo {
     let want = if backends.iter().any(|b| b.is_gpu()) {
-        ModelRole::GpuLive
+        ModelRole::Finalize
     } else {
-        ModelRole::CpuLive
+        ModelRole::GpuLive
     };
     WHISPER_MODELS
         .iter()
-        .find(|m| m.role == want && m.live_capable && matches!(m.quantization, Quantization::Full))
-        .or_else(|| {
-            WHISPER_MODELS
-                .iter()
-                .find(|m| m.role == want && m.live_capable)
-        })
-        .or_else(|| WHISPER_MODELS.iter().find(|m| m.live_capable))
+        .find(|m| m.role == want && matches!(m.quantization, Quantization::Full))
         .unwrap_or(&WHISPER_MODELS[0])
 }
 
-/// The live model for this build's compiled backends.
-pub fn recommended_live_model_for_this_build() -> &'static WhisperModelInfo {
-    recommended_live_model(&compiled_backends())
+/// The best model to download for this build's compiled backends.
+pub fn best_model_for_this_build() -> &'static WhisperModelInfo {
+    best_model_for_backends(&compiled_backends())
 }
 
 #[cfg(test)]
@@ -88,11 +81,9 @@ mod tests {
     }
 
     #[test]
-    fn metal_is_present_on_macos_only_and_no_cuda_vulkan_in_v1() {
+    fn metal_is_present_on_macos_only() {
         let has_metal = compiled_backends().contains(&Backend::Metal);
         assert_eq!(has_metal, cfg!(target_os = "macos"));
-        assert!(!compiled_backends().contains(&Backend::Cuda));
-        assert!(!compiled_backends().contains(&Backend::Vulkan));
     }
 
     #[test]
@@ -104,32 +95,27 @@ mod tests {
     }
 
     #[test]
-    fn recommended_live_model_gpu_vs_cpu() {
+    fn best_model_gpu_is_large_v3_cpu_is_turbo() {
         assert_eq!(
-            recommended_live_model(&[Backend::Cpu, Backend::Metal]).key,
+            best_model_for_backends(&[Backend::Cpu, Backend::Metal]).key,
+            "large-v3"
+        );
+        assert_eq!(
+            best_model_for_backends(&[Backend::Cpu]).key,
             "large-v3-turbo"
-        );
-        assert_eq!(recommended_live_model(&[Backend::Cpu]).key, "small");
-        assert_eq!(
-            recommended_live_model(&[Backend::Cpu, Backend::Cuda]).role,
-            ModelRole::GpuLive
-        );
-        assert_eq!(
-            recommended_live_model(&[Backend::Vulkan]).role,
-            ModelRole::GpuLive
         );
     }
 
     #[test]
-    fn recommended_live_model_for_this_build_is_consistent() {
-        let m = recommended_live_model_for_this_build();
-        assert!(m.live_capable);
+    fn best_model_is_full_precision_and_consistent_with_this_build() {
+        let m = best_model_for_this_build();
+        assert!(matches!(m.quantization, Quantization::Full));
         assert_eq!(
-            m.role,
+            m.key,
             if has_gpu_backend() {
-                ModelRole::GpuLive
+                "large-v3"
             } else {
-                ModelRole::CpuLive
+                "large-v3-turbo"
             }
         );
     }
@@ -137,14 +123,14 @@ mod tests {
     #[test]
     fn backend_helpers() {
         assert!(!Backend::Cpu.is_gpu());
-        assert!(Backend::Metal.is_gpu() && Backend::Cuda.is_gpu() && Backend::Vulkan.is_gpu());
+        assert!(Backend::Metal.is_gpu());
         assert_eq!(Backend::Cpu.label(), "CPU");
         assert_eq!(Backend::Metal.label(), "Metal");
     }
 
     #[test]
     fn backend_round_trips_through_serde() {
-        for b in [Backend::Cpu, Backend::Metal, Backend::Cuda, Backend::Vulkan] {
+        for b in [Backend::Cpu, Backend::Metal] {
             assert_eq!(
                 serde_json::from_str::<Backend>(&serde_json::to_string(&b).unwrap()).unwrap(),
                 b

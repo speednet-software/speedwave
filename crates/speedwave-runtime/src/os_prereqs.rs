@@ -1,3 +1,5 @@
+//! Host OS prerequisite checks (virtualization, WSL2/Lima availability).
+
 use std::fmt;
 
 /// Compile-time enumeration of OS prerequisite rules.
@@ -18,8 +20,11 @@ impl fmt::Display for PrereqRule {
 /// A single OS prerequisite violation with actionable remediation.
 #[derive(Debug)]
 pub struct PrereqViolation {
+    /// Which prerequisite rule was violated.
     pub rule: PrereqRule,
+    /// Human-readable description of the violation.
     pub message: String,
+    /// Actionable remediation steps.
     pub remediation: &'static str,
 }
 
@@ -80,8 +85,6 @@ fn check_wsl() -> Vec<PrereqViolation> {
 
 /// Returns non-blocking OS warnings (e.g. low memory, nested virtualization).
 /// Separate from `check_os_prereqs()` which returns blocking errors.
-///
-/// Warnings are logged by callers — they do not block container operations.
 pub fn check_os_warnings() -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -97,9 +100,7 @@ pub fn check_os_warnings() -> Vec<String> {
 }
 
 /// Warns when the Windows build is older than 22H2 (build 22621), where
-/// `.wslconfig` `networkingMode=mirrored` is silently ignored — corporate
-/// VPN routes never propagate into WSL2 distros. Not a blocker; Speedwave
-/// works otherwise.
+/// `.wslconfig` `networkingMode=mirrored` is silently ignored.
 #[cfg(target_os = "windows")]
 fn check_wsl_mirrored_mode_supported() -> Vec<String> {
     let build = match windows_build_number() {
@@ -120,7 +121,7 @@ fn check_wsl_mirrored_mode_supported() -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_build_number() -> Option<u32> {
-    let output = crate::binary::system_command("powershell")
+    let output = crate::binary::powershell_command()
         .args([
             "-NoProfile",
             "-Command",
@@ -139,11 +140,12 @@ fn check_low_memory() -> Vec<String> {
 }
 
 fn check_low_memory_with(host_ram_gib: u32) -> Vec<String> {
-    if host_ram_gib < 8 {
+    if host_ram_gib < crate::resources::MIN_SUPPORTED_HOST_GIB {
         vec![format!(
-            "Low memory detected: {} GiB RAM. Speedwave requires at least 8 GiB. \
+            "Low memory detected: {} GiB RAM. Speedwave requires at least {} GiB. \
              Performance may be severely degraded.",
-            host_ram_gib
+            host_ram_gib,
+            crate::resources::MIN_SUPPORTED_HOST_GIB
         )]
     } else {
         Vec::new()
@@ -166,13 +168,7 @@ fn parse_vm_info(json: &str) -> Option<(String, String)> {
 }
 
 /// Returns `true` if the WMI Model/Manufacturer strings indicate a virtual machine.
-///
-/// Case-insensitive matching. Checks both fields to catch all major hypervisors:
-/// - VMware: model contains "vmware"
-/// - VirtualBox: model contains "virtualbox" OR manufacturer contains "innotek"
-/// - Hyper-V: model contains "virtual machine" AND manufacturer contains "microsoft"
-///   (requires both to avoid false positives on Microsoft Surface hardware)
-/// - QEMU/KVM: manufacturer contains "qemu" (model is generic, e.g. "Standard PC")
+/// Case-insensitive matching against VMware/VirtualBox/Hyper-V/QEMU markers.
 #[cfg(any(target_os = "windows", test))]
 fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
     let model_lower = model.to_ascii_lowercase();
@@ -189,7 +185,7 @@ fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
 fn check_nested_virt() -> Vec<String> {
     use crate::binary;
 
-    let mut cmd = binary::system_command("powershell.exe");
+    let mut cmd = binary::powershell_command();
     cmd.args([
         "-NoProfile",
         "-Command",
@@ -199,8 +195,6 @@ fn check_nested_virt() -> Vec<String> {
         .stderr(std::process::Stdio::null());
 
     // No explicit timeout — cmd.output() blocks until PowerShell exits.
-    // PowerShell startup is ~2-3s; the Get-CimInstance query is fast.
-    // If WMI hangs, the warning is skipped (fail-open) on the next startup.
     let output = match cmd.output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(_) | Err(_) => return Vec::new(), // Fail open
@@ -392,16 +386,16 @@ mod tests {
 
     #[test]
     fn test_check_os_warnings_returns_empty_on_macos_with_sufficient_ram() {
-        // On macOS dev machines with ≥8 GiB RAM, check_os_warnings() returns
-        // empty (no nested-virt check, no low-memory warning).
+        // On macOS dev machines at/above the minimum host, check_os_warnings()
+        // returns empty (no nested-virt check, no low-memory warning).
         #[cfg(not(target_os = "windows"))]
         {
             let host_ram = crate::resources::host_total_memory_gib();
-            if host_ram >= 8 {
+            if host_ram >= crate::resources::MIN_SUPPORTED_HOST_GIB {
                 let warnings = check_os_warnings();
                 assert!(
                     warnings.is_empty(),
-                    "check_os_warnings() should return empty on non-Windows with ≥8 GiB RAM, \
+                    "check_os_warnings() should return empty on non-Windows at/above the minimum host, \
                      got: {:?}",
                     warnings
                 );
@@ -414,45 +408,47 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn low_memory_warning_below_8() {
-        let w = check_low_memory_with(4);
+    fn low_memory_warning_below_minimum() {
+        let w = check_low_memory_with(8);
         assert_eq!(w.len(), 1);
         assert!(
-            w[0].contains("4 GiB"),
+            w[0].contains("8 GiB"),
             "warning must mention host RAM: {}",
             w[0]
         );
         assert!(
-            w[0].contains("8 GiB"),
-            "warning must mention threshold: {}",
+            w[0].contains("16 GiB"),
+            "warning must mention the 16 GiB threshold: {}",
             w[0]
         );
     }
 
     #[test]
-    fn low_memory_no_warning_at_8() {
-        assert!(check_low_memory_with(8).is_empty());
+    fn low_memory_no_warning_at_minimum() {
+        // MIN_SUPPORTED_HOST_GIB (16) is the boundary — at/above it, no warning.
+        assert!(check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB).is_empty());
     }
 
     #[test]
-    fn low_memory_no_warning_above_8() {
-        assert!(check_low_memory_with(16).is_empty());
+    fn low_memory_no_warning_above_minimum() {
+        assert!(check_low_memory_with(32).is_empty());
+    }
+
+    #[test]
+    fn low_memory_warning_just_below_minimum() {
+        // 15 GiB — one below the boundary — must still warn.
+        let w = check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB - 1);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("15 GiB"),
+            "warning must mention host RAM: {}",
+            w[0]
+        );
     }
 
     #[test]
     fn low_memory_warning_at_zero() {
         let w = check_low_memory_with(0);
         assert_eq!(w.len(), 1);
-    }
-
-    #[test]
-    fn low_memory_warning_at_7() {
-        let w = check_low_memory_with(7);
-        assert_eq!(w.len(), 1);
-        assert!(
-            w[0].contains("7 GiB"),
-            "warning must mention host RAM: {}",
-            w[0]
-        );
     }
 }

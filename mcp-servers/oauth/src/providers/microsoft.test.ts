@@ -17,16 +17,37 @@ describe('refreshMicrosoftToken', () => {
     vi.restoreAllMocks();
   });
 
-  function mockFetchResponse(init: { status?: number; ok?: boolean; body: unknown }): void {
+  /** Builds a fetch-Response stub compatible with readJsonCapped (headers +
+   *  capped body read; `body: null` exercises the arrayBuffer fallback). */
+  function responseStub(init: {
+    status?: number;
+    ok?: boolean;
+    bodyText: string;
+    contentType?: string;
+  }): Record<string, unknown> {
     const status = init.status ?? 200;
-    const ok = init.ok ?? (status >= 200 && status < 300);
+    return {
+      status,
+      ok: init.ok ?? (status >= 200 && status < 300),
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === 'content-type' ? (init.contentType ?? 'application/json') : null,
+      },
+      body: null,
+      arrayBuffer: async () => new TextEncoder().encode(init.bodyText).buffer,
+    };
+  }
+
+  function mockFetchResponse(init: { status?: number; ok?: boolean; body: unknown }): void {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        status,
-        ok,
-        json: async () => init.body,
-      })
+      vi.fn().mockResolvedValue(
+        responseStub({
+          status: init.status,
+          ok: init.ok,
+          bodyText: JSON.stringify(init.body),
+        })
+      )
     );
   }
 
@@ -98,23 +119,64 @@ describe('refreshMicrosoftToken', () => {
     }
   });
 
-  it('uses String(err) fallback when json() throws a non-Error value', async () => {
+  it('returns malformed on a truncated JSON body', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        status: 200,
-        ok: true,
-        json: async () => {
-          throw 'truncated body';
-        },
-      })
+      vi.fn().mockResolvedValue(responseStub({ bodyText: '{"access_token":"a' }))
     );
     const result = await refreshMicrosoftToken(baseReq);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('malformed');
-      expect(result.error.message).toContain('truncated body');
+      expect(result.error.message).toContain('not valid JSON');
     }
+  });
+
+  it('rejects a non-JSON content-type', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(responseStub({ bodyText: '<html/>', contentType: 'text/html' }))
+    );
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('malformed');
+      expect(result.error.message).toContain('content-type');
+    }
+  });
+
+  it('refuses a 3xx redirect instead of following it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(responseStub({ status: 302, ok: false, bodyText: '' }))
+    );
+    const result = await refreshMicrosoftToken(baseReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('http');
+      expect(result.error.message).toContain('unexpected redirect 302');
+    }
+  });
+
+  it('sends redirect: manual on the token request', async () => {
+    const captured: RequestInit[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        captured.push(init);
+        return Promise.resolve(
+          responseStub({
+            bodyText: JSON.stringify({
+              access_token: 'a',
+              expires_in: 3600,
+              scope: baseReq.scopes.join(' '),
+            }),
+          })
+        );
+      })
+    );
+    await refreshMicrosoftToken(baseReq);
+    expect(captured[0].redirect).toBe('manual');
   });
 
   it('returns network error when fetch is aborted (30s timeout)', async () => {
@@ -165,16 +227,7 @@ describe('refreshMicrosoftToken', () => {
   });
 
   it('returns malformed when the response is not JSON', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        status: 200,
-        ok: true,
-        json: async () => {
-          throw new Error('Unexpected end of JSON input');
-        },
-      })
-    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(responseStub({ bodyText: 'plain garbage' })));
     const result = await refreshMicrosoftToken(baseReq);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('malformed');
@@ -313,15 +366,15 @@ describe('refreshMicrosoftToken', () => {
         'fetch',
         vi.fn().mockImplementation((url: string, init: RequestInit) => {
           captured.push({ url, body: String(init.body) });
-          return Promise.resolve({
-            status: 200,
-            ok: true,
-            json: async () => ({
-              access_token: 'a',
-              expires_in: 3600,
-              scope: 'https://graph.microsoft.com/Sites.Manage.All',
-            }),
-          });
+          return Promise.resolve(
+            responseStub({
+              bodyText: JSON.stringify({
+                access_token: 'a',
+                expires_in: 3600,
+                scope: 'https://graph.microsoft.com/Sites.Manage.All',
+              }),
+            })
+          );
         })
       );
       const result = await microsoftProvider.refresh({
@@ -355,15 +408,15 @@ describe('refreshMicrosoftToken', () => {
       'fetch',
       vi.fn().mockImplementation((url: string) => {
         captured.push({ url });
-        return Promise.resolve({
-          status: 200,
-          ok: true,
-          json: async () => ({
-            access_token: 'a',
-            expires_in: 3600,
-            scope: baseReq.scopes.join(' '),
-          }),
-        });
+        return Promise.resolve(
+          responseStub({
+            bodyText: JSON.stringify({
+              access_token: 'a',
+              expires_in: 3600,
+              scope: baseReq.scopes.join(' '),
+            }),
+          })
+        );
       })
     );
     await refreshMicrosoftToken({ ...baseReq, tenantId: 'with space' });

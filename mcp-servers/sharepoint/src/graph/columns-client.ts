@@ -5,14 +5,7 @@
  *   - `POST   /sites/{site-id}/lists/{list-id}/columns`                  (addListColumn)
  *   - `DELETE /sites/{site-id}/lists/{list-id}/columns/{column-id}`      (removeListColumn)
  *
- * Column reads (`getList`) come through {@link ./lists-client.ts} via
- * `?$expand=columns` — there is no separate `GET /columns` tool in the PR5
- * surface, so this module is intentionally write-only.
- *
- * Limited to the column types Microsoft Graph documents as creatable through
- * delegated `Sites.Manage.All`: `text`, `number`, `boolean`, `dateTime`,
- * `choice`, `lookup`. Calculated / geolocation / term columns are out of
- * scope — the tool layer enforces this via JSON Schema `enum`.
+ * Column reads come through {@link ./lists-client.ts}; this module is write-only.
  */
 import type { GraphRequester } from './site-client.js';
 import { ListsClient } from './lists-client.js';

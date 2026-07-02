@@ -8,6 +8,27 @@
  * 3. Validate Origin headers per MCP Streamable HTTP spec
  */
 import fs from 'fs/promises';
+import path from 'node:path';
+
+/**
+ * Directory the orchestrator mounts service credentials into (read-only).
+ * SSOT for the `TOKENS_DIR`-or-`/tokens` literal repeated across every worker.
+ * @returns `process.env.TOKENS_DIR` when set and non-empty, else `/tokens`.
+ */
+export function tokensDir(): string {
+  const dir = process.env.TOKENS_DIR;
+  return dir && dir.length > 0 ? dir : '/tokens';
+}
+
+/**
+ * Load a credential file by name from {@link tokensDir}.
+ * @param name - File name under the tokens directory (e.g. `bot_token`).
+ * @returns Trimmed file contents.
+ * @throws {Error} With errno cause forwarded (ENOENT/EACCES/EISDIR/…).
+ */
+export async function loadTokenFile(name: string): Promise<string> {
+  return loadToken(path.join(tokensDir(), name));
+}
 
 /**
  * Load token from file (used for secrets management)
@@ -24,9 +45,6 @@ export async function loadToken(tokenPath: string): Promise<string> {
     // Differentiate error types for better debugging
     const code = (error as NodeJS.ErrnoException).code;
 
-    // Forward `cause` so callers that need the original errno (e.g.
-    // mcp-context7's optional-key fallback) can read `(e.cause as
-    // ErrnoException).code` without falling back to message matching.
     if (code === 'ENOENT') {
       throw new Error(`Token file not found: ${tokenPath}`, { cause: error });
     } else if (code === 'EACCES') {
@@ -40,6 +58,29 @@ export async function loadToken(tokenPath: string): Promise<string> {
     }
   }
 }
+
+/**
+ * Core allowlist of env var names safe to pass to child processes.
+ * Never includes secret-carrying names (`MCP_*_AUTH_TOKEN`, API keys).
+ */
+export const BASE_SAFE_ENV_KEYS: readonly string[] = [
+  // Process / shell environment
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  // macOS: required by Swift runtime / Xcode toolchain
+  'DEVELOPER_DIR',
+  'SDKROOT',
+  '__CF_USER_TEXT_ENCODING',
+];
 
 /**
  * Validate JSON-RPC message structure
@@ -158,8 +199,7 @@ export function validateWorkerUrl(url: string): boolean {
   const port = Number(parsed.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
 
-  // URL constructor lowercases hostname, so also check the original string
-  // to reject uppercase input (Docker DNS is lowercase)
+  // URL constructor lowercases hostname; check raw string to reject uppercase input.
   const hostnameStart = url.indexOf('://') + 3;
   const hostnameEnd = url.indexOf(':', hostnameStart);
   const rawHostname = url.substring(hostnameStart, hostnameEnd);
@@ -173,9 +213,7 @@ export function validateWorkerUrl(url: string): boolean {
   if (parsed.pathname !== '/') return false;
   if (parsed.search !== '') return false;
   if (parsed.hash !== '') return false;
-  // The password sub-condition is defense-in-depth: the raw-hostname check above already
-  // rejects any URL with credentials (they shift the colon position). The branch is kept
-  // for correctness but is unreachable in practice — hence c8 ignore on the || right side.
+  // Credentials are already rejected by the raw-hostname check above.
   /* c8 ignore next */
   if (parsed.username !== '' || parsed.password !== '') return false;
 

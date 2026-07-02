@@ -69,6 +69,9 @@ export {
 // Security
 export {
   loadToken,
+  loadTokenFile,
+  tokensDir,
+  BASE_SAFE_ENV_KEYS,
   validateJSONRPCMessage,
   validateParams,
   validateSessionId,
@@ -77,6 +80,10 @@ export {
   validateOrigin,
   HOST_GATEWAY_ALIAS,
 } from './security.js';
+
+// Tool-handler validation wrappers (SSOT for the two withValidation families)
+export { withResultValidation, withClientValidation } from './tool-validation.js';
+export type { ToolResult, ClientValidationOptions } from './tool-validation.js';
 
 // Transport
 export { handleMCPPost, handleMCPDelete, readSessionId } from './transport.js';
@@ -95,6 +102,10 @@ export { SSEStream, createSSEStream, sendJSONResponse } from './sse.js';
 // Server Factory
 export { createMCPServer, textResult, jsonResult, errorResult } from './server.js';
 export type { MCPServerAuth, MCPServerOptions, MCPServer } from './server.js';
+
+// Declarative worker boot (SSOT for every worker's main())
+export { bootWorker } from './boot.js';
+export type { BootWorkerOptions, NotConfiguredPolicy } from './boot.js';
 
 // Timeouts
 export { TIMEOUTS } from './timeouts.js';
@@ -123,6 +134,15 @@ export {
   PROACTIVE_REFRESH_SECONDS,
 } from './oauth-client.js';
 export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';
+
+// Shared reactive refresh-retry loop (ADR-060/069) — SSOT for all OAuth consumers
+export { authedRequest, authedSdkCall, RefreshLock } from './oauth-authed-request.js';
+export type {
+  AuthedRefreshContext,
+  AuthedRequestOptions,
+  AuthedSdkCallOptions,
+  AuthedTokenState,
+} from './oauth-authed-request.js';
 
 // Connection status tracking (workers with external dependencies)
 export {

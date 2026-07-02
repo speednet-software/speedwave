@@ -51,7 +51,7 @@ Summarised against the plugin contract table in `CLAUDE.md`:
 - **`plugin.json` schema** — the `port` field remains structurally valid (optional `u16`), so already-signed plugin ZIPs continue to install. The value is ignored at compose render time with a deprecation warning. Plugin authors should drop the field from new releases.
 - **Hub env var convention** — `WORKER_<SLUG_UPPER>_URL` is still injected into the hub, now always ending in `:3000`. Hub code that parses `WORKER_*_URL` is unchanged.
 - **Token mount, workspace mount, security constraints** — all unchanged.
-- **Coordination** — the `speedwave-plugins` sibling repository updates `template/scaffold/plugin.json`, `presale/plugin.json`, and the `figma` PRD to drop `port`; plugins are re-signed and republished.
+- **Coordination** — the `speedwave-plugins` sibling repository updates its `template/scaffold/plugin.json` to drop `port`; existing plugin manifests are re-signed and republished.
 
 ## Alternatives rejected
 

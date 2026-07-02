@@ -1,3 +1,5 @@
+//! Self-update flow: download, verify, swap, and rollback of the app bundle.
+
 use crate::build;
 use crate::bundle;
 use crate::compose::{self, SecurityCheck};
@@ -10,23 +12,52 @@ use std::path::PathBuf;
 // Types
 // ---------------------------------------------------------------------------
 
+/// Pre-update snapshot used to roll back a project on failure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateSnapshot {
+    /// Project the snapshot belongs to.
     pub project: String,
+    /// The compose file at snapshot time.
     pub compose_yml: String,
+    /// Plugin manifests enabled at snapshot time.
     #[serde(default)]
     pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
+/// Marker on update failures from `compose_down` onwards — containers may be
+/// partially or fully torn down, so a rollback is warranted. Early failures
+/// (prereq/security/build/render) leave old containers running; no marker there.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainersTornDown;
+
+impl std::fmt::Display for ContainersTornDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "containers were torn down before the failure")
+    }
+}
+
+impl std::error::Error for ContainersTornDown {}
+
+/// Outcome of a container update for one project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContainerUpdateResult {
+    /// Whether the update succeeded.
     pub success: bool,
+    /// Number of images rebuilt.
     pub images_rebuilt: u32,
+    /// Number of containers recreated.
     pub containers_recreated: u32,
+    /// Error message if the update failed.
     pub error: Option<String>,
 }
 
 pub use crate::validation::validate_project_name;
+
+/// Returns `true` when the error carries [`ContainersTornDown`], i.e. the
+/// update failed after `compose_down` and a rollback is warranted.
+pub fn is_torn_down(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ContainersTornDown>().is_some()
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot helpers
@@ -102,16 +133,8 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
     let path = snapshot_path_in(data_dir, project);
     let json = serde_json::to_string_pretty(&snapshot)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    std::fs::rename(&tmp_path, &path)?;
+    // Durable atomic write (fsync data + parent dir, 0o600).
+    crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
     Ok(())
 }
 
@@ -125,13 +148,13 @@ fn load_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
     Ok(snapshot)
 }
 
+/// Saves a rollback snapshot of the project's compose state.
 pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_path = compose::compose_output_path(project)?;
     let compose_yml = match std::fs::read_to_string(&compose_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // First-time restart (compose.yml never rendered yet) — proceed
-            // without a rollback snapshot rather than blocking the restart.
+            // First-time restart: no compose.yml yet, proceed without a snapshot.
             log::warn!(
                 "save_snapshot: no compose.yml at {} — rollback will be unavailable for this restart",
                 compose_path.display()
@@ -167,18 +190,8 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-
-    // Restrict permissions before rename to avoid TOCTOU window where the file
-    // briefly exists with umask-derived permissions after atomic rename.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    std::fs::rename(&tmp_path, &path)?;
+    // Durable atomic write: fsync data + parent dir, owner-only (0o600).
+    crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
 
     Ok(())
 }
@@ -191,36 +204,51 @@ fn load_snapshot(project: &str) -> anyhow::Result<UpdateSnapshot> {
     Ok(snapshot)
 }
 
-/// Prunes previous-bundle images iff bundle ID changed. Callers MUST
-/// invoke only after new containers are confirmed running (atomicity).
+/// `true` when any configured project OTHER than `target` has running
+/// containers — their live resource mounts forbid the dir swap.
+fn other_projects_running(runtime: &crate::runtime::LockedRuntime, target: &str) -> bool {
+    let Ok(cfg) = crate::config::load_user_config() else {
+        return false;
+    };
+    cfg.projects.iter().filter(|p| p.name != target).any(|p| {
+        runtime
+            .compose_ps(&p.name)
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Prunes superseded per-image tags (+ legacy single-id tags on migration).
+/// Callers MUST invoke only after new containers are confirmed running (atomicity).
 #[cfg(any(test, feature = "test-support"))]
 pub fn maybe_prune_previous_bundle(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+    maybe_prune_previous_bundle_inner(runtime, state, manifest);
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
 fn maybe_prune_previous_bundle(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    maybe_prune_previous_bundle_inner(runtime, applied_bundle_id, new_bundle_id);
+    maybe_prune_previous_bundle_inner(runtime, state, manifest);
 }
 
 fn maybe_prune_previous_bundle_inner(
     runtime: &crate::runtime::LockedRuntime,
-    applied_bundle_id: Option<&str>,
-    new_bundle_id: &str,
+    state: &bundle::BundleState,
+    manifest: &bundle::BundleManifest,
 ) {
-    if let Some(old_id) = build::should_prune_bundle(applied_bundle_id, new_bundle_id) {
-        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-            log::warn!("Failed to prune old bundle images: {e}");
-        }
-    }
+    build::prune_superseded_images(
+        runtime,
+        &state.applied_image_hashes,
+        state.applied_bundle_id.as_deref(),
+        manifest,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +284,16 @@ fn apply_update_transaction_inner(
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
         save_snapshot(project)?;
         compose::save_compose(project, compose_yml)?;
-        runtime.compose_down(project)?;
-        crate::runtime::compose_validate_with_retry(runtime, project)?;
-        runtime.compose_up_recreate(project)?;
+        // Past this point the project's containers may be partially or fully
+        // torn down; all failures carry ContainersTornDown so CLI rolls back.
+        runtime
+            .compose_down(project)
+            .map_err(|e| e.context(ContainersTornDown))?;
+        crate::runtime::compose_validate_with_retry(runtime, project)
+            .map_err(|e| e.context(ContainersTornDown))?;
+        runtime
+            .compose_up_recreate(project)
+            .map_err(|e| e.context(ContainersTornDown))?;
         Ok(())
     })
 }
@@ -301,6 +336,7 @@ fn apply_rollback_transaction_inner(
     })
 }
 
+/// Rebuilds images and recreates containers for a project.
 pub fn update_containers(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
@@ -316,13 +352,15 @@ pub fn update_containers(
         config::resolve_project_config(&project_path, &user_config, project);
 
     // 2. Re-render compose.yml with current template (includes plugin image rebuild)
+    // Reconstruct host-bridge env from disk (ADR-074).
+    let host_bridges = compose::host_bridges_from_disk();
     let compose_yml = compose::render_compose(
         project,
         &project_dir,
         &resolved,
         &integrations,
         Some(runtime),
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     // 3a. OS prerequisite check
@@ -361,12 +399,11 @@ pub fn update_containers(
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
 
-    // Build OUTSIDE the compose lock — see ADR-066. If build fails, no
-    // snapshot is written and running containers are untouched.
-    let images_rebuilt = build::build_images_for_bundle(
+    // Build OUTSIDE the compose lock (ADR-066), missing-only per image (ADR-072).
+    let images_rebuilt = build::build_missing_images_locked(
         runtime,
         &build::enabled_images(&integrations),
-        &new_manifest.bundle_id,
+        &new_manifest,
     )
     .map_err(|e| {
         anyhow::anyhow!(
@@ -374,10 +411,21 @@ pub fn update_containers(
         )
     })?;
 
+    // Sync claude-resources after the build, before recreate; skip if another project runs.
+    if other_projects_running(runtime, project) {
+        log::warn!(
+            "claude-resources sync skipped: another project is running; \
+             open Speedwave Desktop to finish applying the update"
+        );
+    } else {
+        let build_root = build::resolve_build_root()?;
+        bundle::sync_claude_resources(&build_root)
+            .map_err(|e| anyhow::anyhow!("claude-resources sync failed: {e}"))?;
+    }
+
     apply_update_transaction(runtime, project, &compose_yml)?;
 
     // 9. Wait for containers to stabilize before health check.
-    //    A crash-looping container may briefly show state=="running".
     std::thread::sleep(std::time::Duration::from_secs(
         consts::CONTAINER_STABILIZATION_DELAY_SECS,
     ));
@@ -402,11 +450,7 @@ pub fn update_containers(
         );
     }
 
-    maybe_prune_previous_bundle(
-        runtime,
-        bundle_state.applied_bundle_id.as_deref(),
-        &new_manifest.bundle_id,
-    );
+    maybe_prune_previous_bundle(runtime, &bundle_state, &new_manifest);
 
     Ok(ContainerUpdateResult {
         success: true,
@@ -416,6 +460,34 @@ pub fn update_containers(
     })
 }
 
+/// Which compose a rollback should recreate from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackComposeChoice {
+    /// Snapshot passed the security check — restore it verbatim.
+    UseSnapshot,
+    /// Snapshot predates a new invariant; a clean fresh render supersedes it.
+    UseFreshRender,
+    /// Neither snapshot nor fresh render is safe — abort the rollback.
+    Abort,
+}
+
+/// Picks the rollback source: snapshot if it passes, else a clean fresh render
+/// (forward-fix for snapshots predating a new invariant), else abort. `fresh` is
+/// `None` when no fresh render could be produced.
+fn choose_rollback_compose(
+    snapshot_violations: &[compose::SecurityViolation],
+    fresh: Option<(&str, &[compose::SecurityViolation])>,
+) -> RollbackComposeChoice {
+    if snapshot_violations.is_empty() {
+        return RollbackComposeChoice::UseSnapshot;
+    }
+    match fresh {
+        Some((_, [])) => RollbackComposeChoice::UseFreshRender,
+        _ => RollbackComposeChoice::Abort,
+    }
+}
+
+/// Restores a project from its rollback snapshot.
 pub fn rollback_containers(
     runtime: &crate::runtime::LockedRuntime,
     project: &str,
@@ -424,11 +496,7 @@ pub fn rollback_containers(
 
     let snapshot = load_snapshot(project)?;
 
-    // OS prerequisite check.
-    // Note: intentionally NOT using SYSTEM_CHECK_FAILED_PREFIX here — rollback
-    // is only triggered via CLI/Tauri update flow, not from the main Desktop
-    // startup path. The "Rollback aborted" prefix makes the context clearer
-    // than the generic "System check failed:" prefix.
+    // OS prerequisite check (uses a "Rollback aborted" prefix, not SYSTEM_CHECK_FAILED_PREFIX).
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
@@ -446,24 +514,78 @@ pub fn rollback_containers(
     let user_config = config::load_user_config()?;
     let project_dir = user_config.require_project(project)?.dir.clone();
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
-    let violations = SecurityCheck::run(
+    let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
         project,
         &snapshot.plugin_manifests,
         &expected_paths,
     );
-    if !violations.is_empty() {
-        let msgs: Vec<String> = violations
-            .iter()
-            .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
-            .collect();
-        anyhow::bail!(
-            "Rollback aborted — snapshot compose.yml failed security check:\n{}",
-            msgs.join("\n")
-        );
-    }
 
-    apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
+    // A snapshot from an older Speedwave can fail a newly added invariant;
+    // forward-fix from a clean fresh render instead of stranding the containers.
+    let fresh = if snapshot_violations.is_empty() {
+        None
+    } else {
+        render_fresh_compose_for_rollback(runtime, &user_config, project, &project_dir)
+    };
+    let fresh_check = fresh.as_ref().map(|(yml, manifests)| {
+        let v = SecurityCheck::run(yml, project, manifests, &expected_paths);
+        (yml.as_str(), v)
+    });
+
+    match choose_rollback_compose(
+        &snapshot_violations,
+        fresh_check.as_ref().map(|(yml, v)| (*yml, v.as_slice())),
+    ) {
+        RollbackComposeChoice::UseSnapshot => {
+            apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
+        }
+        RollbackComposeChoice::UseFreshRender => {
+            // The choice is UseFreshRender only when fresh rendered a clean compose.
+            let yml = fresh.map(|(yml, _)| yml).unwrap_or(snapshot.compose_yml);
+            log::warn!(
+                "rollback: snapshot compose predates a current invariant; \
+                 recovering from a freshly rendered compose instead"
+            );
+            apply_rollback_transaction(runtime, project, &yml)
+        }
+        RollbackComposeChoice::Abort => {
+            let msgs: Vec<String> = snapshot_violations
+                .iter()
+                .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
+                .collect();
+            anyhow::bail!(
+                "Rollback aborted — snapshot compose.yml failed security check:\n{}",
+                msgs.join("\n")
+            );
+        }
+    }
+}
+
+/// Renders a fresh compose from the current config for a rollback forward-fix.
+/// `None` on render failure so the caller aborts instead of applying it.
+fn render_fresh_compose_for_rollback(
+    runtime: &crate::runtime::LockedRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+    project: &str,
+    project_dir: &str,
+) -> Option<(String, Vec<crate::plugin::PluginManifest>)> {
+    let project_path = std::path::PathBuf::from(project_dir);
+    let (resolved, integrations) =
+        config::resolve_project_config(&project_path, user_config, project);
+    let host_bridges = compose::host_bridges_from_disk();
+    let compose_yml = compose::render_compose(
+        project,
+        project_dir,
+        &resolved,
+        &integrations,
+        Some(runtime),
+        &host_bridges,
+    )
+    .map_err(|e| log::warn!("rollback forward-fix: fresh render failed: {e}"))
+    .ok()?;
+    let manifests = crate::plugin::list_installed_plugins().unwrap_or_default();
+    Some((compose_yml, manifests))
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +596,31 @@ pub fn rollback_containers(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_update_syncs_resources_after_build_before_recreate() {
+        let source = include_str!("update.rs");
+        let build_pos = source
+            .find("build_missing_images_locked(")
+            .expect("update must build images");
+        let sync_pos = source
+            .find("sync_claude_resources(&build_root)")
+            .expect("CLI update must sync claude-resources");
+        let guard_pos = source
+            .find("other_projects_running(runtime, project)")
+            .expect("sync must be guarded against other running projects");
+        assert!(
+            guard_pos < sync_pos,
+            "live-mount guard must precede the resources swap"
+        );
+        let txn_pos = source
+            .find("apply_update_transaction(runtime, project, &compose_yml)")
+            .expect("update transaction must exist");
+        assert!(
+            build_pos < sync_pos && sync_pos < txn_pos,
+            "sync must land after the build and before the recreate"
+        );
+    }
 
     #[test]
     fn test_snapshot_save_and_load_roundtrip() {
@@ -647,15 +794,11 @@ mod tests {
         }
     }
 
-    // Behavioural tests for `apply_update_transaction` and
-    // `apply_rollback_transaction` live in `tests/apply_transaction_behaviour.rs`
-    // — they need a fresh `OnceLock` for `data_dir()`, which is only possible
-    // in a separate integration-test binary.
+    // Behavioural tests for apply_update_transaction / apply_rollback_transaction live in tests/apply_transaction_behaviour.rs.
 
     #[test]
     fn test_rollback_with_empty_plugin_manifests_is_valid() {
-        // Old snapshots may have empty plugin_manifests. Security check
-        // should still pass if compose YAML has no plugin services.
+        // Old snapshots may have empty plugin_manifests; security check still passes with no plugin services.
         let snapshot = UpdateSnapshot {
             project: "test".to_string(),
             compose_yml: "version: '3'\nservices: {}\n".to_string(),
@@ -679,9 +822,7 @@ mod tests {
 
     #[test]
     fn test_update_checks_os_prereqs() {
-        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
-        // SecurityCheck in update_containers. Same approach as
-        // test_build_before_compose_down_in_update_containers.
+        // Structural test: check_os_prereqs() must run before SecurityCheck in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -705,8 +846,7 @@ mod tests {
 
     #[test]
     fn test_rollback_checks_os_prereqs() {
-        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
-        // SecurityCheck in rollback_containers.
+        // Structural test: check_os_prereqs() must run before SecurityCheck in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -730,9 +870,7 @@ mod tests {
 
     #[test]
     fn test_update_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
-        // in update_containers. Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -756,9 +894,7 @@ mod tests {
 
     #[test]
     fn test_rollback_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
-        // in rollback_containers. Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -823,9 +959,7 @@ mod tests {
 
     #[test]
     fn test_save_snapshot_sets_parent_permissions() {
-        // Structural test: verify save_snapshot() (production, not _in) delegates
-        // to secure_snapshot_dirs. Protects against accidental removal of the
-        // permission-setting call.
+        // Structural test: save_snapshot() (production, not _in) must delegate to secure_snapshot_dirs.
         let source = include_str!("update.rs");
 
         // Find the production save_snapshot function (not save_snapshot_in)
@@ -847,6 +981,35 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_writers_use_durable_helper() {
+        // Both snapshot writers must use write_restricted_file_atomic, not bare fs::write+rename.
+        let source = include_str!("update.rs");
+        for func in ["fn save_snapshot(", "fn save_snapshot_in("] {
+            let start = source
+                .find(func)
+                .unwrap_or_else(|| panic!("{func} must exist"));
+            let body = &source[start..];
+            // Slice to the next column-0 fn (not attributes) so inner #[cfg(unix)] blocks stay in the body.
+            let end = ["\npub fn ", "\nfn "]
+                .iter()
+                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+                .min()
+                .unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("write_restricted_file_atomic"),
+                "{func} must use the durable write_restricted_file_atomic helper"
+            );
+            assert!(
+                !body.contains("std::fs::rename("),
+                "{func} must not hand-roll write+rename (use the durable helper)"
+            );
+        }
+    }
+
+    // SSOT guard: asserts CONTAINER_STABILIZATION_DELAY_SECS stays sane.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
     fn test_stabilization_delay_is_reasonable() {
         assert!(
             consts::CONTAINER_STABILIZATION_DELAY_SECS >= 1,
@@ -862,13 +1025,7 @@ mod tests {
 
     #[test]
     fn test_render_compose_called_with_runtime_in_update_containers() {
-        // Structural test: render_compose in update_containers must pass Some(runtime),
-        // not None — this ensures plugin images are checked/rebuilt during CLI updates.
-        //
-        // A behavioral test is not feasible here because render_compose, build_images_for_bundle,
-        // and config::load_user_config are all free functions (not trait methods), making
-        // mocking prohibitively complex. The source-text test is the established pattern
-        // in this file — see test_build_before_compose_down_in_update_containers.
+        // Structural test: render_compose in update_containers must pass Some(runtime), not None.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -898,24 +1055,46 @@ mod tests {
     }
 
     #[test]
+    fn test_update_containers_reconstructs_host_bridges() {
+        // Structural guard (ADR-074): update must feed disk-reconstructed host bridges into render_compose.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let build_pos = fn_body.find("host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("render_compose(")
+            .expect("render_compose call must exist in update_containers");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "update_containers must build host_bridges_from_disk() before render_compose"
+        );
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "update_containers must not pass an empty HostBridgesInfo to render_compose"
+        );
+        // Also assert the call site actually receives &host_bridges as its argument.
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
+    }
+
+    #[test]
     fn test_update_containers_plugin_rebuild_via_render_compose() {
-        // Cross-file structural test: verifies the full path
-        // update_containers → render_compose(Some(runtime)) → ensure_plugin_images.
-        //
-        // update_containers passes Some(runtime) to render_compose (verified by
-        // test_render_compose_called_with_runtime_in_update_containers). Here we
-        // verify that render_compose's body calls ensure_plugin_images, completing
-        // the behavioral chain.
-        //
-        // This cross-file test is justified because update_containers depends on
-        // free functions (render_compose, build_images_for_bundle, load_user_config) that
-        // cannot be mocked without major test infrastructure — the same reasoning
-        // documented in test_build_before_compose_down_in_update_containers.
-        let compose_source = include_str!("compose.rs");
+        // Cross-file structural test: render_compose's body must call ensure_plugin_images.
+        let compose_source = include_str!("compose/mod.rs");
 
         let fn_start = compose_source
             .find("pub fn render_compose(")
-            .expect("render_compose function must exist in compose.rs");
+            .expect("render_compose function must exist in the compose module");
         let fn_body = &compose_source[fn_start..];
 
         assert!(
@@ -926,27 +1105,190 @@ mod tests {
     }
 
     #[test]
-    fn test_buildkit_prune_in_prune_old_bundle_images() {
-        // Structural test: prune_buildkit_cache must be called inside
-        // prune_old_bundle_images — this ensures BuildKit cache is cleaned
-        // alongside old tagged images during bundle updates.
+    fn test_no_buildkit_prune_in_routine_prune_paths() {
+        // Structural test (ADR-072): prune_buildkit_cache must not be called in the routine prune paths.
         let source = include_str!("build.rs");
 
-        let fn_start = source
-            .find("fn prune_old_bundle_images(")
-            .expect("prune_old_bundle_images function must exist in build.rs");
-        let fn_body = &source[fn_start..];
+        for fn_name in [
+            "fn prune_old_bundle_images(",
+            "fn prune_replaced_images(",
+            "fn prune_orphan_current_bundle_images(",
+        ] {
+            let fn_start = source
+                .find(fn_name)
+                .unwrap_or_else(|| panic!("{fn_name} must exist in build.rs"));
+            let fn_body = &source[fn_start..];
+            let fn_end = fn_body[1..]
+                .find("\npub fn ")
+                .or_else(|| fn_body[1..].find("\nfn "))
+                .unwrap_or(fn_body.len());
+            let fn_body = &fn_body[..fn_end];
 
-        // Find the end of the function (next `pub fn` or `fn ` at top level)
+            assert!(
+                !fn_body.contains("prune_buildkit_cache"),
+                "{fn_name} must not prune the BuildKit cache (routine prune path)"
+            );
+        }
+    }
+
+    #[test]
+    fn update_containers_never_writes_bundle_state() {
+        // ADR-072 single-writer rule: only Desktop persists bundle state; the CLI only reads it.
+        let source = include_str!("update.rs");
+        // Split literal so this assertion line isn't itself a match.
+        let needle = format!("{}{}", "save_", "bundle_state");
+        assert!(
+            !source.contains(&needle),
+            "update.rs must not persist bundle state (CLI is a non-writer)"
+        );
+    }
+
+    #[test]
+    fn is_torn_down_true_when_marker_present() {
+        let err = anyhow::anyhow!("compose_up failed").context(ContainersTornDown);
+        assert!(is_torn_down(&err));
+    }
+
+    #[test]
+    fn is_torn_down_false_without_marker() {
+        let err = anyhow::anyhow!("prereq check failed");
+        assert!(!is_torn_down(&err));
+    }
+
+    #[test]
+    fn is_torn_down_false_for_unrelated_context() {
+        let err = anyhow::anyhow!("build failed").context("image rebuild error");
+        assert!(!is_torn_down(&err));
+    }
+
+    const FRESH_YAML: &str = "version: '3'\nservices: {}\n";
+
+    fn slack_missing_workspace_violation() -> compose::SecurityViolation {
+        compose::SecurityViolation {
+            container: "mcp-slack".into(),
+            rule: compose::SecurityRule::SlackMissingWorkspaceMount,
+            message: "Slack service is missing required /workspace mount".into(),
+            remediation: "Slack must mount /workspace:rw (ADR-071 file downloads).",
+        }
+    }
+
+    #[test]
+    fn choose_rollback_uses_snapshot_when_snapshot_passes_check() {
+        let choice = choose_rollback_compose(&[], Some((FRESH_YAML, &[])));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::UseSnapshot,
+            "a clean snapshot must be restored verbatim"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_forward_fixes_when_snapshot_fails_but_fresh_passes() {
+        // The v0.13.3 Slack case: the snapshot compose predates the /workspace
+        // mount, so the new SecurityCheck flags it — but a freshly rendered
+        // compose is clean. Rollback must forward-fix, not abort.
+        let snap = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &[])));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::UseFreshRender,
+            "a snapshot that only fails because it predates a new invariant must \
+             be superseded by a clean fresh render, not abort the rollback"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_aborts_when_both_snapshot_and_fresh_fail() {
+        // A genuine security problem the fresh render also exhibits must still abort.
+        let snap = vec![slack_missing_workspace_violation()];
+        let fresh = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &fresh)));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::Abort,
+            "if even the fresh render fails the check, rollback must abort (real issue)"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_aborts_when_snapshot_fails_and_fresh_render_unavailable() {
+        // Fresh render could not be produced (e.g. render error) — no safe
+        // forward path, so abort rather than apply a failing snapshot.
+        let snap = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, None);
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::Abort,
+            "no clean fresh render means no safe forward-fix — abort"
+        );
+    }
+
+    #[test]
+    fn rollback_containers_forward_fixes_instead_of_bailing_on_snapshot_check() {
+        // A failing snapshot must route through choose_rollback_compose
+        // (forward-fix), not an unconditional bail after the security check.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("pub fn rollback_containers(")
+            .expect("rollback_containers must exist");
+        let fn_body = &source[fn_start..];
         let fn_end = fn_body[1..]
-            .find("\npub fn ")
-            .or_else(|| fn_body[1..].find("\nfn "))
+            .find("\nfn ")
+            .or_else(|| fn_body[1..].find("\npub fn "))
+            .map(|i| i + 1)
             .unwrap_or(fn_body.len());
         let fn_body = &fn_body[..fn_end];
-
         assert!(
-            fn_body.contains("prune_buildkit_cache"),
-            "prune_old_bundle_images must call prune_buildkit_cache to clear BuildKit cache"
+            fn_body.contains("choose_rollback_compose("),
+            "rollback_containers must delegate the snapshot/fresh decision to \
+             choose_rollback_compose"
+        );
+        assert!(
+            fn_body.contains("render_fresh_compose_for_rollback("),
+            "rollback_containers must attempt a fresh render for the forward-fix path"
+        );
+    }
+
+    #[test]
+    fn compose_down_marker_appears_before_validate_in_transaction() {
+        // Structural guard: compose_down must carry ContainersTornDown before validate.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("fn apply_update_transaction_inner(")
+            .expect("apply_update_transaction_inner must exist");
+        let body = &source[fn_start..];
+        let down_pos = body
+            .find("compose_down(project)")
+            .expect("compose_down call must exist");
+        let validate_pos = body
+            .find("compose_validate_with_retry(")
+            .expect("compose_validate call must exist");
+        let recreate_pos = body
+            .find("compose_up_recreate(project)")
+            .expect("compose_up_recreate call must exist");
+        assert!(
+            down_pos < validate_pos && validate_pos < recreate_pos,
+            "compose_down must precede validate which must precede recreate"
+        );
+        let down_section = &body[down_pos..validate_pos];
+        assert!(
+            down_section.contains("ContainersTornDown"),
+            "compose_down must have ContainersTornDown marker"
+        );
+        let validate_section = &body[validate_pos..recreate_pos];
+        assert!(
+            validate_section.contains("ContainersTornDown"),
+            "compose_validate_with_retry must have ContainersTornDown marker"
+        );
+        let recreate_end = body[recreate_pos..]
+            .find('\n')
+            .map(|n| recreate_pos + n)
+            .unwrap_or(body.len());
+        let recreate_section =
+            &body[recreate_pos..recreate_end + 80.min(body.len() - recreate_end)];
+        assert!(
+            recreate_section.contains("ContainersTornDown"),
+            "compose_up_recreate must have ContainersTornDown marker"
         );
     }
 }

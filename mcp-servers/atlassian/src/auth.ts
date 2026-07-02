@@ -12,11 +12,8 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { ts, withSetupGuidance } from '@speedwave/mcp-shared';
+import { ts, withSetupGuidance, tokensDir } from '@speedwave/mcp-shared';
 import type { AtlassianConfig } from './types.js';
-
-/** Directory the orchestrator mounts service credentials into (read-only). */
-const TOKENS_DIR = process.env.TOKENS_DIR || '/tokens';
 
 /** Required credential file names. */
 const REQUIRED_FILES = ['site_url', 'email', 'api_token'] as const;
@@ -25,12 +22,12 @@ const REQUIRED_FILES = ['site_url', 'email', 'api_token'] as const;
  * Read and trim a required credential file. Returns `null` (with a guidance log)
  * if the file is missing or empty — the worker then starts in "not configured"
  * mode rather than crashing.
- * @param name - File name under {@link TOKENS_DIR}.
+ * @param name - Credential file name under {@link tokensDir}.
  * @returns Trimmed contents, or `null` if missing/empty.
  */
 async function readRequired(name: string): Promise<string | null> {
   try {
-    const value = (await fs.readFile(path.join(TOKENS_DIR, name), 'utf-8')).trim();
+    const value = (await fs.readFile(path.join(tokensDir(), name), 'utf-8')).trim();
     if (!value) {
       console.warn(`${ts()} ${withSetupGuidance(`Atlassian credential '${name}' is empty.`)}`);
       return null;
@@ -52,12 +49,12 @@ async function readRequired(name: string): Promise<string | null> {
 /**
  * Read an optional allowlist file (comma- or whitespace-separated). Missing file
  * or empty contents yield an empty list (= unrestricted).
- * @param name - File name under {@link TOKENS_DIR}.
+ * @param name - File name under {@link tokensDir}.
  * @returns Deduplicated, trimmed, upper-cased keys (Atlassian keys are upper-case).
  */
 async function readAllowlist(name: string): Promise<string[]> {
   try {
-    const raw = (await fs.readFile(path.join(TOKENS_DIR, name), 'utf-8')).trim();
+    const raw = (await fs.readFile(path.join(tokensDir(), name), 'utf-8')).trim();
     if (!raw) return [];
     const keys = raw
       .split(/[\s,]+/)

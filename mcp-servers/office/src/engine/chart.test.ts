@@ -9,7 +9,7 @@ import { validateChartSpec } from './chart.js';
 const { runPythonScript, resolveOutputPath } = vi.hoisted(() => ({
   runPythonScript: vi.fn(async () => ({ ok: true })),
   resolveOutputPath: vi.fn(
-    async (n: string | undefined, base: string) => `/workspace/.speedwave-office/${n ?? base}`
+    async (n: string | undefined, base: string) => `/workspace/.speedwave/office/${n ?? base}`
   ),
 }));
 vi.mock('../subprocess.js', () => ({ runPythonScript }));
@@ -120,7 +120,7 @@ describe('renderChart', () => {
   it('validates, invokes the python script, and returns a FileResult (png default)', async () => {
     const r = await renderChart(goodSpec);
     expect(r).toEqual({
-      path: '/workspace/.speedwave-office/chart-' + r.path.split('chart-')[1],
+      path: '/workspace/.speedwave/office/chart-' + r.path.split('chart-')[1],
       bytes: 1234,
       format: 'png',
       preview: '',

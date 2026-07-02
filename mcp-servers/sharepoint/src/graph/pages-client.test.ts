@@ -58,9 +58,7 @@ describe('PagesClient URL builders', () => {
   });
 
   it('webpartItemPath omits section/column ids — Graph routes by webpart id', () => {
-    // Per-web-part PATCH/DELETE goes to the documented `/webParts/{id}` form.
-    // The PR4 empty-segments form (`.../horizontalSections/columns/webparts/{id}`)
-    // returned `Resource not found` from Graph (live-tested).
+    // Per-web-part PATCH/DELETE uses the `/webParts/{id}` form, not the empty-segments form.
     const r = fakeRequester();
     expect(new PagesClient(r).webpartItemPath('p1', 'wp1')).toBe(
       `/sites/${SITE_ID}/pages/p1/${PAGE_RESOURCE}/webParts/wp1`
@@ -356,13 +354,11 @@ describe('PagesClient request helpers', () => {
   });
 
   it('htmlToPlainText strips tags and decodes safe entities (preserves &lt; / &gt;)', () => {
-    // Stripping tags first leaves spaces at tag boundaries; that is fine for
-    // the screen-reader / search-index field the value is used for.
+    // Stripping tags first leaves spaces at tag boundaries.
     expect(htmlToPlainText('<p>Hello&nbsp;<b>world</b> &amp; goodbye</p>')).toBe(
       'Hello world & goodbye'
     );
-    // Angle-bracket entities are preserved verbatim — never decoded back to
-    // `<` / `>` to keep the `value` field XSS-safe for downstream consumers.
+    // Angle-bracket entities are preserved verbatim, never decoded back to `<` / `>`.
     expect(htmlToPlainText('&lt;tag&gt;')).toBe('&lt;tag&gt;');
     expect(htmlToPlainText('&amp;lt;script&amp;gt;')).toBe('&lt;script&gt;');
     expect(htmlToPlainText('&quot;quoted&quot; &#39;single&#39;')).toBe('"quoted" \'single\'');
@@ -388,8 +384,7 @@ describe('PagesClient request helpers', () => {
   });
 
   it('deletePage DELETEs at /sites/{site-id}/pages/{page-id} (no cast)', async () => {
-    // deletePage uses the base /pages collection — the sitePage cast is for
-    // GET/PATCH only. We assert that explicitly to lock the behaviour in.
+    // deletePage uses the base /pages collection; the sitePage cast is GET/PATCH only.
     const r = fakeRequester();
     await new PagesClient(r).deletePage('p1');
     expect(r.graphRequest).toHaveBeenCalledWith('DELETE', `/sites/${SITE_ID}/pages/p1`);
@@ -410,8 +405,7 @@ describe('PagesClient never accepts a site_id from callers (ADR-060)', () => {
     await pages.listPages();
     await pages.getPage('p1');
     await pages.publishPage('p1');
-    // Every URL builder must call back through GraphRequester — never cache
-    // or accept a caller-supplied site id.
+    // Every URL builder calls back through GraphRequester, never a caller-supplied site id.
     expect(calls).toBeGreaterThanOrEqual(3);
   });
 });
@@ -471,9 +465,7 @@ describe('Table-of-contents helpers', () => {
   });
 
   it('injectHeadingAnchors leaves empty headings (no visible text) untouched', () => {
-    // Empty headings are extracted as 0-result, so we feed them with no
-    // matching heading and verify they survive verbatim — the renderer must
-    // not invent ids for non-content blocks.
+    // Empty headings survive verbatim; no id is invented for non-content blocks.
     const input = '<h1>Real</h1><h2>   </h2><h2><img alt=""/></h2>';
     const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'real', text: 'Real' }]);
     expect(out).toContain('<h2>   </h2>');
@@ -482,9 +474,7 @@ describe('Table-of-contents helpers', () => {
   });
 
   it('injectHeadingAnchors leaves headings past the supplied anchor list untouched', () => {
-    // Source HTML has 3 real headings but caller supplied only 1 anchor;
-    // the trailing headings must remain unchanged rather than crash or
-    // receive a stray id.
+    // 3 real headings but only 1 anchor supplied; trailing headings stay unchanged.
     const input = '<h1>One</h1><h2>Two</h2><h2>Three</h2>';
     const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'one', text: 'One' }]);
     expect(out).toBe('<h1 id="one">One</h1><h2>Two</h2><h2>Three</h2>');
@@ -492,9 +482,7 @@ describe('Table-of-contents helpers', () => {
 
   it('slugifyHeading produces kebab-case ASCII', () => {
     expect(slugifyHeading('Hello World')).toBe('hello-world');
-    // NFKD decomposes a + combining acute; bare `Ł`/`ł` are not decomposable
-    // and fall through the non-ASCII filter as separators (single letters
-    // without accents survive).
+    // NFKD decomposes accented letters; bare `Ł`/`ł` fall through as separators.
     expect(slugifyHeading('Café — naprawdę')).toBe('cafe-naprawde');
     expect(slugifyHeading('   --- ')).toBe('');
   });

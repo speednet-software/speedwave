@@ -73,6 +73,39 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
+# Version skew between baked binary and pinned CLAUDE_VERSION
+# ---------------------------------------------------------------------------
+
+@test "warns when installed claude version differs from pinned CLAUDE_VERSION" {
+    cat > "$STUBS_DIR/claude" << 'EOF'
+#!/bin/bash
+echo "0.0.1 (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: image has Claude Code 0.0.1"* ]]
+    [[ "$output" == *"$PINNED_VERSION"* ]]
+}
+
+@test "no version-skew warning when installed version matches the pin" {
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: image has Claude Code"* ]]
+}
+
+@test "no version-skew warning when claude --version output is unparseable" {
+    cat > "$STUBS_DIR/claude" << 'EOF'
+#!/bin/bash
+echo "garbage output"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: image has Claude Code"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # CLAUDE_VERSION env var forwarded to install-claude.sh
 # ---------------------------------------------------------------------------
 
@@ -128,15 +161,8 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# set -e kills the entrypoint when HOME is not writable (the Windows bug)
-#
-# On Windows the CLAUDE_HOME 9p mount defaulted to uid 0 while the container
-# runs as uid 1000; with metadata enforcing ownership, the entrypoint's first
-# write to ${HOME} hit EACCES and `set -euo pipefail` exited non-zero BEFORE
-# `exec sleep infinity`, so the container went Exited ("cannot exec in a
-# stopped state"). The host-side fix is uid=1000 in the wsl.conf automount
-# options; this test pins the invariant that a non-writable HOME is fatal, so
-# the entrypoint can never silently "succeed" into a half-set-up home.
+# set -e kills the entrypoint when HOME is not writable: non-writable HOME
+# is a fatal error, never a silent half-set-up success.
 # ---------------------------------------------------------------------------
 
 @test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
@@ -196,9 +222,8 @@ EOF
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # skills is a real directory of per-entry symlinks (not a whole-directory
-    # symlink) so per-integration entries can be gated on/off without disturbing
-    # the core entries that share the directory.
+    # skills is a real directory of per-entry symlinks, not a whole-directory
+    # symlink.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -L "$HOME/.claude/skills/my-skill.md" ]
@@ -208,12 +233,29 @@ EOF
 @test "resource directory exists but is empty when source is absent" {
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # The entrypoint always creates the four resource dirs (so plugin and
-    # integration links can be added per-entry); if the source mount has no
-    # skills/ then the directory just stays empty.
+    # The entrypoint always creates the four resource dirs; an absent source
+    # mount leaves the directory empty.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -z "$(ls -A "$HOME/.claude/skills")" ]
+}
+
+@test "links the bundled core web-authoring skills from the real resources tree" {
+    # Point at the real claude-resources tree; top-level core skills are
+    # unconditionally linked (no integration gating, no ENABLED_SERVICES).
+    real_resources="$BATS_TEST_DIRNAME/../../containers/claude-resources"
+    export SPEEDWAVE_RESOURCES="$real_resources"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/.claude/skills" ]
+    [ ! -L "$HOME/.claude/skills" ]
+
+    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase; do
+        [ -L "$HOME/.claude/skills/$skill" ]
+        [ "$(readlink "$HOME/.claude/skills/$skill")" = "$real_resources/skills/$skill" ]
+        [ -f "$HOME/.claude/skills/$skill/SKILL.md" ]
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -341,11 +383,11 @@ EOF
 # Default command keeps container alive (sleep infinity)
 # ---------------------------------------------------------------------------
 
-@test "default command is sleep infinity (not interactive shell)" {
-    # Verify that entrypoint execs 'sleep infinity' when no args given.
-    # We can't run it on macOS (sleep infinity is Linux-only), so we
-    # check the script source directly.
-    grep -q 'exec sleep infinity' "$ENTRYPOINT"
+@test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
+    # No-args branch must keep PID1 alive AND responsive to SIGTERM —
+    # bare `exec sleep infinity` ignored TERM and ate the 10s kill timeout.
+    grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
+    ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
 }
 
 # ---------------------------------------------------------------------------
@@ -399,23 +441,24 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# ~/.claude.json onboarding pre-seed — conditional on credentials (ADR-052)
-#
-# Onboarding is skipped (pre-seeded .claude.json) ONLY when the user is already
-# logged in. With credentials absent we leave .claude.json uncreated so `claude`
-# opens the OAuth login flow itself instead of the user having to type /login.
+# ~/.claude.json pre-seed: always pre-accepts the /workspace trust dialog;
+# onboarding completes only when logged in (ADR-052).
 # ---------------------------------------------------------------------------
 
-@test "does NOT create ~/.claude.json when credentials are absent (so auto-login shows)" {
+@test "pre-accepts /workspace trust+project-onboarding but skips login onboarding when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude.json" ]
     [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # No credentials → onboarding NOT skipped → claude shows the login prompt.
-    [ ! -e "${TEST_HOME}/.claude.json" ]
+    [ -f "${TEST_HOME}/.claude.json" ]
+    # Per-workspace flags are always-on (independent of login).
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasCompletedProjectOnboarding": true' "${TEST_HOME}/.claude.json"
+    # No credentials → top-level login onboarding NOT completed → claude still shows the login prompt.
+    ! grep -q '"hasCompletedOnboarding"' "${TEST_HOME}/.claude.json"
 }
 
-@test "creates ~/.claude.json with hasCompletedOnboarding when credentials exist" {
+@test "creates ~/.claude.json with onboarding AND trust when credentials exist" {
     # Simulate a logged-in user: credentials present, no .claude.json yet.
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     [ ! -e "${TEST_HOME}/.claude.json" ]
@@ -423,14 +466,65 @@ EOF
     [ "$status" -eq 0 ]
     [ -f "${TEST_HOME}/.claude.json" ]
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasCompletedProjectOnboarding": true' "${TEST_HOME}/.claude.json"
 }
 
-@test "does not overwrite an existing ~/.claude.json (even with credentials)" {
+@test "pre-seeded ~/.claude.json is valid JSON in both credential states" {
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    rm -f "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
+}
+
+@test "preserves existing ~/.claude.json keys when no credentials (no merge)" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
+    # Without credentials the merge does not run; the file is left untouched.
     [ "$(cat "${TEST_HOME}/.claude.json")" = '{"my":"existing-state"}' ]
+}
+
+@test "merges onboarding+trust into an existing ~/.claude.json when credentials exist" {
+    # Headless Desktop login leaves oauthAccount but no hasCompletedOnboarding;
+    # the CLI TUI would re-onboard unless the entrypoint backfills it.
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    printf '{"oauthAccount":{"userID":"u1"}}' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 -c "import json; json.load(open('${TEST_HOME}/.claude.json'))"
+    grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
+    grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
+    # Existing oauthAccount is preserved (not clobbered).
+    grep -q '"userID": "u1"' "${TEST_HOME}/.claude.json"
+}
+
+@test "merge is idempotent when onboarding fields already present" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    printf '{"hasCompletedOnboarding":true,"installMethod":"native","projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Already complete → no rewrite; assert by value (format-agnostic), not grep.
+    python3 -c "import json; assert json.load(open('${TEST_HOME}/.claude.json'))['hasCompletedOnboarding'] is True"
+}
+
+@test "onboarding merge degrades gracefully on corrupt credentialed .claude.json" {
+    printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
+    # File exists, has credentials, but is NOT valid JSON → node parse fails.
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    # Best-effort: entrypoint still exits 0, file left intact, no stale tmp.
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
+    [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
+    # The skip is logged (stderr), never silent.
+    [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -464,22 +558,131 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# settings.json: symlink from resources
+# settings.json: WRITABLE copy (NOT a symlink) — Claude Code writes it via
+# /effort and /model; the resources mount is read-only so a symlink → EROFS.
 # ---------------------------------------------------------------------------
 
-@test "symlinks settings.json from resources" {
+@test "seeds settings.json as a writable copy, not a symlink" {
     echo '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"}}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    [ -L "${TEST_HOME}/.claude/settings.json" ]
-    [ "$(readlink "${TEST_HOME}/.claude/settings.json")" = "${SPEEDWAVE_RESOURCES}/settings.json" ]
+    [ -f "${TEST_HOME}/.claude/settings.json" ]
+    [ ! -L "${TEST_HOME}/.claude/settings.json" ]
+    [ -w "${TEST_HOME}/.claude/settings.json" ]
     grep -q "statusLine" "${TEST_HOME}/.claude/settings.json"
 }
 
-@test "skips settings.json symlink when not in resources" {
+@test "replaces a stale settings.json symlink with a writable copy" {
+    # Older builds linked settings.json into the read-only resources mount.
+    echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    ln -s "${SPEEDWAVE_RESOURCES}/settings.json" "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ ! -L "${TEST_HOME}/.claude/settings.json" ]
+    [ -f "${TEST_HOME}/.claude/settings.json" ]
+}
+
+@test "preserves a user's modified settings.json across restarts" {
+    echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Simulate /effort low writing the user's choice into the copy.
+    echo '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Use node for assertion — merge output is pretty-printed JSON (spaces after colons).
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "skips settings.json when not in resources" {
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
+}
+
+@test "merges new template keys into existing settings.json without overwriting user values" {
+    # Template ships with effortLevel=high and a new key newKey=42.
+    printf '{"effortLevel":"high","newKey":42}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # User already has settings.json with effortLevel set to low.
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # User's effortLevel choice is preserved.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+    # New template key is added.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.newKey===42?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "merge degrades gracefully when node fails (corrupt settings.json)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # On-disk file is not valid JSON; node parse fails → silent continue.
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    # Entrypoint must still exit 0 — the merge failure is best-effort.
+    [ "$status" -eq 0 ]
+    # On-disk file is unchanged (node exited non-zero, || true swallowed it).
+    run cat "${TEST_HOME}/.claude/settings.json"
+    [[ "$output" == "NOT_JSON" ]]
+}
+
+@test "merge leaves no stale .tmp file after successful settings.json merge" {
+    printf '{"effortLevel":"high","newKey":1}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # Atomic write: .tmp must be renamed away, not left behind.
+    [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+    # Destination must be valid JSON (not truncated).
+    run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8'))"
+    [ "$status" -eq 0 ]
+}
+
+# E1 (ADR-073): a stale /model in settings.json that disagrees with the
+# injected ANTHROPIC_MODEL is dropped, so the routed model wins on next start.
+@test "drops a stale settings.json model that disagrees with ANTHROPIC_MODEL" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low","model":"opus"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="openrouter/z-ai/glm-5.2" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    # The stale "model" key is removed (Claude Code then uses the env).
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
+    # Unrelated user keys are preserved.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps settings.json model when ANTHROPIC_MODEL is unset (account default)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
+    # No ANTHROPIC_MODEL exported → user's /model preference must survive.
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps settings.json model when it matches ANTHROPIC_MODEL" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="claude-opus-4-8" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "drops a FOREIGN settings.json model when ANTHROPIC_MODEL is unset (CR#1)" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # Account-default path (no ANTHROPIC_MODEL) but a leaked provider/model id —
+    # must be dropped, else Claude Code sends it on the /anthropic passthrough → 404.
+    printf '{"model":"openrouter/z-ai/glm-5.2"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -707,16 +910,16 @@ EOF
     # Setup plugin resources
     local plugins_dir
     plugins_dir="$(mktemp -d)"
-    mkdir -p "${plugins_dir}/presale/skills"
-    mkdir -p "${plugins_dir}/presale/commands"
-    echo "# Plugin Skill" > "${plugins_dir}/presale/skills/presale-skill.md"
-    echo "# Plugin Command" > "${plugins_dir}/presale/commands/presale-cmd.md"
+    mkdir -p "${plugins_dir}/example-plugin/skills"
+    mkdir -p "${plugins_dir}/example-plugin/commands"
+    echo "# Plugin Skill" > "${plugins_dir}/example-plugin/skills/example-plugin-skill.md"
+    echo "# Plugin Command" > "${plugins_dir}/example-plugin/commands/example-plugin-cmd.md"
 
     local patched
     patched="$(mktemp)"
     sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
 
-    SPEEDWAVE_PLUGINS="presale" run bash "$patched" true
+    SPEEDWAVE_PLUGINS="example-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
     # Resource dirs must be real directories (not symlinks to RO mount)
@@ -727,15 +930,15 @@ EOF
 
     # Both core and plugin entries accessible
     [ -L "${TEST_HOME}/.claude/skills/core-skill.md" ]
-    [ -L "${TEST_HOME}/.claude/skills/presale-skill.md" ]
+    [ -L "${TEST_HOME}/.claude/skills/example-plugin-skill.md" ]
     [ -L "${TEST_HOME}/.claude/commands/core-command.md" ]
-    [ -L "${TEST_HOME}/.claude/commands/presale-cmd.md" ]
+    [ -L "${TEST_HOME}/.claude/commands/example-plugin-cmd.md" ]
 
     # Content is correct
     grep -q "Core Skill" "${TEST_HOME}/.claude/skills/core-skill.md"
-    grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/presale-skill.md"
+    grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/example-plugin-skill.md"
     grep -q "Core Command" "${TEST_HOME}/.claude/commands/core-command.md"
-    grep -q "Plugin Command" "${TEST_HOME}/.claude/commands/presale-cmd.md"
+    grep -q "Plugin Command" "${TEST_HOME}/.claude/commands/example-plugin-cmd.md"
 
     rm -rf "$plugins_dir" "$patched"
 }
@@ -810,16 +1013,12 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Migration: ~/.claude/<resource_type> mode flips between runs.
-# claude-home is a persistent volume, so a stale layout from a previous
-# start can poison the current one if the entrypoint doesn't normalize it.
+# claude-home is a persistent volume; the entrypoint normalizes stale layouts.
 # ---------------------------------------------------------------------------
 
 @test "plugin mode replaces stale whole-directory symlink left from no-plugins run" {
-    # Reproduce the scenario from the bug: project was started without plugins
-    # (skills became a symlink to read-only resources), then a plugin was
-    # installed and the project restarted. Without normalization the per-entry
-    # ln below would resolve through the symlink and try to write into the
-    # read-only resources mount, killing the container with `set -e`.
+    # No-plugins run leaves skills as a symlink to read-only resources; a later
+    # plugin run must replace it instead of writing through it.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core skill" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
 
@@ -864,9 +1063,8 @@ EOF
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
-    # Simulate a previous plugin run leaving a stale plugin link behind: it must
-    # NOT be tracked in the state file (we did not create it), so the entrypoint
-    # should leave it alone — only links it owns get cleaned up.
+    # Untracked stale plugin link (not in the state file): the entrypoint leaves
+    # it alone — only links it owns get cleaned up.
     mkdir -p "$HOME/.claude/skills"
     ln -sfn "/some/old/plugin/path/leftover" "$HOME/.claude/skills/leftover"
 
@@ -1008,10 +1206,23 @@ setup_integrations_fixture() {
     done
 }
 
-# Regression guard for the toggle-off path: ~/.claude is persistent across
-# container restarts, so a once-linked integration skill must disappear when
-# the user toggles the integration off. Without state-file cleanup the link
-# would linger and Claude would call tools whose worker is no longer running.
+@test "ENABLED_SERVICES=slack links and unlinks the slack skill (ADR-071)" {
+    mkdir -p "$RESOURCES_DIR/skills/integrations/slack"
+    echo "# Slack" > "$RESOURCES_DIR/skills/integrations/slack/SKILL.md"
+
+    ENABLED_SERVICES="slack" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -L "${TEST_HOME}/.claude/skills/slack" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills/slack")" = "$RESOURCES_DIR/skills/integrations/slack" ]
+
+    # Toggle off — the link must disappear (managed-links cleanup).
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/skills/slack" ]
+}
+
+# ~/.claude persists across restarts; a toggled-off integration link must be
+# cleaned up via the state file.
 @test "toggle off removes previously-linked integration skill" {
     setup_integrations_fixture
 
@@ -1203,4 +1414,49 @@ setup_os_subservice_fixture() {
     [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
     # `os` itself must NOT be linked as a skill — only its sub-services exist as skills.
     [ ! -e "${TEST_HOME}/.claude/skills/os" ]
+}
+
+# ---------------------------------------------------------------------------
+# Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) —
+# in the container PID1 would otherwise ignore TERM and eat the 10s timeout.
+# ---------------------------------------------------------------------------
+
+@test "SIGTERM during startup phase exits promptly via top trap" {
+    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM
+    # lands mid-startup, before the ready marker exists.
+    unset SPEEDWAVE_SKIP_HUB_WAIT
+    bash "$ENTRYPOINT" &
+    pid=$!
+    sleep 0.4
+    [ ! -f "$CLAUDE_READY_MARKER" ] || skip "startup finished too fast to test the window"
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
+}
+
+@test "keep-alive exits 0 on SIGTERM via trap" {
+    bash "$ENTRYPOINT" &
+    pid=$!
+    for _ in $(seq 1 50); do
+        [ -f "$CLAUDE_READY_MARKER" ] && break
+        sleep 0.1
+    done
+    [ -f "$CLAUDE_READY_MARKER" ]
+    kill -TERM "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    set +e
+    wait "$pid"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ]
 }

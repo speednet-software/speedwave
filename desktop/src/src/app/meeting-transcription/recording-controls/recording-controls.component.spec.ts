@@ -5,26 +5,39 @@ import { TranscriptionService } from '../../services/transcription.service';
 import type { AudioSourceInfo, CapabilitiesAck, StartAck } from '../../models/transcript';
 
 const SOURCES: AudioSourceInfo[] = [
-  { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
+  { source: { kind: 'system_wide' }, label: 'System (everything)' },
   {
-    source: { kind: 'process', selector: { by: 'pid', pid: 42 } },
-    label: 'teams2',
-    app_id: 'com.microsoft.teams2',
+    source: { kind: 'microphone', device: null },
+    label: 'Microphone (default input)',
   },
 ];
 
 /** Sources list led by a "Whole meeting" mixed entry (the real backends do this). */
 const SOURCES_WITH_MIXED: AudioSourceInfo[] = [
   {
-    source: { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
+    source: { kind: 'mixed', mic: null },
     label: 'Whole meeting (system audio + your microphone)',
-    app_id: null,
   },
-  { source: { kind: 'system_wide' }, label: 'System (everything)', app_id: null },
+  { source: { kind: 'system_wide' }, label: 'System (everything)' },
   {
     source: { kind: 'microphone', device: null },
     label: 'Microphone (default input)',
-    app_id: null,
+  },
+];
+
+/** Mixed default + two named mics (the shape macOS/Windows now emit). */
+const SOURCES_WITH_MICS: AudioSourceInfo[] = [
+  {
+    source: { kind: 'mixed', mic: null },
+    label: 'Whole meeting (system audio + your microphone)',
+  },
+  {
+    source: { kind: 'microphone', device: 'BuiltInMicrophoneDevice' },
+    label: 'Microphone: MacBook Pro Microphone (default)',
+  },
+  {
+    source: { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
+    label: 'Microphone: USB MIC',
   },
 ];
 
@@ -41,7 +54,6 @@ describe('RecordingControlsComponent', () => {
 
   const caps: CapabilitiesAck = {
     capabilities: {
-      supports_per_process: true,
       supports_system_audio: true,
       supports_microphone: false,
       note: 'Requires macOS 14.4+',
@@ -51,13 +63,11 @@ describe('RecordingControlsComponent', () => {
   /** A model list with at least one downloaded Whisper model. */
   const modelsWithSmall = {
     whisper: [{ key: 'small', downloaded: true, size_bytes: 488_000_000, path: '/m/small' }],
-    diarization: [],
     total_bytes_used: 488_000_000,
   };
   /** A model list with nothing downloaded. */
   const modelsEmpty = {
     whisper: [{ key: 'small', downloaded: false, size_bytes: 488_000_000, path: null }],
-    diarization: [],
     total_bytes_used: 0,
   };
 
@@ -102,8 +112,8 @@ describe('RecordingControlsComponent', () => {
     // A host that only exposes mic sources. sourceIndex stays 0; the mixed
     // computed reads sources()[0] safely (it's a microphone, not undefined).
     svc.listAudioSources.mockResolvedValueOnce([
-      { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A', app_id: null },
-      { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B', app_id: null },
+      { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A' },
+      { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B' },
     ]);
     await component.ngOnInit();
     fixture.detectChanges();
@@ -136,27 +146,61 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
     await component.start();
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
+  });
+
+  it('derives named mics from the source list and strips the "Microphone:" prefix', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    expect(component.mics().map((m) => m.name)).toEqual([
+      'MacBook Pro Microphone (default)',
+      'USB MIC',
+    ]);
+    expect(component.mics()[1].uid).toBe('AppleUSBAudioEngine:USB MIC:1');
+  });
+
+  it('shows the mic picker only when the source uses a mic', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    // Default source is mixed → picker shown.
+    expect(fixture.nativeElement.querySelector('[data-testid="mic-select"]')).not.toBeNull();
+    // Switching to System (no mic source in this list) hides it — but here all
+    // non-mixed entries are mics, so assert directly via the computed instead.
+    expect(component.micSelectable()).toBe(true);
+  });
+
+  it('overlays the chosen mic onto the mixed source at start()', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    component.onMic('AppleUSBAudioEngine:USB MIC:1');
+    await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(
-      { kind: 'mixed', system: { kind: 'system_wide' }, mic: null },
-      'pl',
-      null
+      {
+        kind: 'mixed',
+        mic: 'AppleUSBAudioEngine:USB MIC:1',
+      },
+      'pl'
     );
   });
 
-  it('forwards the expectedSpeakers hint when the user sets it (0 stays null = auto)', async () => {
+  it('overlays the chosen mic onto a mic-only source at start()', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
-    // Default 0 → null (auto).
+    component.onSource(1); // the default built-in mic entry
+    component.onMic('AppleUSBAudioEngine:USB MIC:1');
     await component.start();
-    expect(svc.startRecording).toHaveBeenLastCalledWith(SOURCES[0].source, 'pl', null);
-    component.onSpeakers(4);
-    component.onSource(1);
+    expect(svc.startRecording).toHaveBeenCalledWith(
+      { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
+      'pl'
+    );
+  });
+
+  it('keeps the system default mic (null) when none is picked', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenLastCalledWith(SOURCES[1].source, 'pl', 4);
-    // Out-of-range clamps to 0-20.
-    component.onSpeakers(999);
-    expect(component.expectedSpeakers()).toBe(20);
-    component.onSpeakers(-5);
-    expect(component.expectedSpeakers()).toBe(0);
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
   });
 
   it('shows the acceleration badge and language toggle', async () => {
@@ -168,22 +212,6 @@ describe('RecordingControlsComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="language-select"]')).not.toBeNull();
   });
 
-  it('hides the per-app note when per-process is supported', async () => {
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="per-app-note"]')).toBeNull();
-  });
-
-  it('shows the per-app note when per-process is NOT supported', async () => {
-    svc.getCapabilities.mockResolvedValueOnce({
-      ...caps,
-      capabilities: { ...caps.capabilities, supports_per_process: false },
-    });
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="per-app-note"]')).not.toBeNull();
-  });
-
   it('starts recording the chosen source + language and emits started', async () => {
     await component.ngOnInit();
     component.onLanguage('en');
@@ -191,7 +219,7 @@ describe('RecordingControlsComponent', () => {
     const spy = vi.fn();
     component.started.subscribe(spy);
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en', null);
+    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en');
     expect(component.recording()).toBe(true);
     expect(spy).toHaveBeenCalledWith('sess-1');
   });
@@ -238,7 +266,11 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.hasModel()).toBe(false);
-    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();
+    const note = fixture.nativeElement.querySelector('[data-testid="no-model-note"]');
+    expect(note).not.toBeNull();
+    // Points users to Settings, not a removed model picker (no hardcoded size).
+    expect(note.textContent).toContain('Settings');
+    expect(note.textContent).not.toContain('Models panel');
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(true);
   });
 
@@ -250,5 +282,12 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockResolvedValue(modelsWithSmall);
     await component.refreshModelAvailability();
     expect(component.hasModel()).toBe(true);
+  });
+
+  it('refreshModelAvailability fails open (modelsKnown=false) on a listModels error', async () => {
+    await component.ngOnInit();
+    svc.listModels.mockRejectedValueOnce(new Error('boom'));
+    await component.refreshModelAvailability();
+    expect(component.modelsKnown()).toBe(false);
   });
 });

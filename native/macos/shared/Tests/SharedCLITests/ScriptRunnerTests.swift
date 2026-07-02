@@ -55,9 +55,7 @@ final class ScriptRunnerTests: XCTestCase {
     func testEscapeAppleScriptNeutralizesDoShellScript() {
         let payload = "harmless\"\ndo shell script \"rm -rf /\"\n\""
         let result = escapeAppleScript(payload)
-        // Newlines are stripped, quotes are escaped — no breakout possible.
-        // The text "do shell script" remains in the output but is harmless:
-        // escaped quotes prevent AppleScript from interpreting it as a command.
+        // Newlines stripped, quotes escaped — no breakout possible.
         XCTAssertFalse(result.contains("\n"))
         XCTAssertTrue(result.contains("\\\""))
     }
@@ -166,8 +164,7 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseDelimitedDropsRowsWithLiteralDelimiterInValue() {
-        // A row whose field count after splitting on "||" doesn't match fields is silently dropped.
-        // "foo||bar||baz" splits into 3 parts but only 2 fields → dropped.
+        // Rows whose field count after splitting on "||" mismatches fields are dropped.
         let result = parseDelimited("foo||bar||baz", fields: ["x", "y"])
         XCTAssertEqual(result.count, 0)
     }
@@ -188,6 +185,68 @@ final class ScriptRunnerTests: XCTestCase {
     func testParseDelimitedFewerFieldsThanData() {
         let result = parseDelimited("a||b||c", fields: ["x"])
         XCTAssertEqual(result.count, 0)
+    }
+
+    // MARK: - parseEmailDetail (shared by AppleMailClient/OutlookClient getEmail)
+
+    func testParseEmailDetailHappyPath() throws {
+        let output = "Hello||alice@example.com||2024-01-01||true||bob@x.com,carol@y.com||Body text"
+        let dict = try parseEmailDetail(output, id: "msg-1")
+        XCTAssertEqual(dict["id"] as? String, "msg-1")
+        XCTAssertEqual(dict["subject"] as? String, "Hello")
+        XCTAssertEqual(dict["sender"] as? String, "alice@example.com")
+        XCTAssertEqual(dict["date"] as? String, "2024-01-01")
+        XCTAssertEqual(dict["read"] as? Bool, true)
+        XCTAssertEqual(dict["to"] as? [String], ["bob@x.com", "carol@y.com"])
+        XCTAssertEqual(dict["body"] as? String, "Body text")
+    }
+
+    func testParseEmailDetailBodyContainingDelimiter() throws {
+        // Body may itself contain "||" — fields 6+ must be re-joined verbatim.
+        let output = "Subj||from@x||2024-01-01||false||to@x||line1 || line2 || line3"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["read"] as? Bool, false)
+        XCTAssertEqual(dict["body"] as? String, "line1 || line2 || line3")
+    }
+
+    func testParseEmailDetailEmptyToListFiltersToEmptyArray() throws {
+        // A trailing comma / empty to-field must yield [] not [""] .
+        let output = "Subj||from@x||2024-01-01||true||||Body"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["to"] as? [String], [])
+    }
+
+    func testParseEmailDetailTrimsFieldWhitespace() throws {
+        let output = " Subj || from@x || 2024-01-01 || true || a@x , b@y || Body "
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["subject"] as? String, "Subj")
+        XCTAssertEqual(dict["sender"] as? String, "from@x")
+        XCTAssertEqual(dict["to"] as? [String], ["a@x", "b@y"])
+        XCTAssertEqual(dict["body"] as? String, "Body")
+    }
+
+    func testParseEmailDetailReadFalseWhenNotLiteralTrue() throws {
+        let output = "Subj||from@x||2024-01-01||no||to@x||Body"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["read"] as? Bool, false)
+    }
+
+    func testParseEmailDetailThrowsOnTooFewFields() {
+        // Only 5 fields → must throw .scriptFailed("Unexpected email format").
+        let output = "Subj||from@x||2024-01-01||true||to@x"
+        XCTAssertThrowsError(try parseEmailDetail(output, id: "id")) { error in
+            guard case ScriptError.scriptFailed(let msg) = error else {
+                return XCTFail("expected .scriptFailed, got \(error)")
+            }
+            XCTAssertEqual(msg, "Unexpected email format")
+        }
+    }
+
+    func testParseEmailDetailExactlySixFieldsHasEmptyBody() throws {
+        // Boundary: exactly 6 fields with an empty body field is valid.
+        let output = "Subj||from@x||2024-01-01||true||to@x||"
+        let dict = try parseEmailDetail(output, id: "id")
+        XCTAssertEqual(dict["body"] as? String, "")
     }
 
     // MARK: - ScriptError Descriptions
@@ -220,11 +279,7 @@ final class ScriptRunnerTests: XCTestCase {
 
     // MARK: - Classifier Tests
 
-    // These fixtures verify the classifier's substring-match invariant, not production TCC stderr strings.
-    // Actual macOS stderr for TCC denials (e.g. "execution error: Not authorized to send Apple events to Mail. (-1743)")
-    // is NOT matched by the current "not allowed" / "not permitted" / "assistive access" substrings —
-    // a pre-existing gap in macOS TCC stderr coverage that predates and is independent of this refactor.
-    // Tracking and closing that gap is out of scope here.
+    // These fixtures verify the classifier's substring-match invariant, not production TCC stderr.
 
     func testClassifyFailureNotAllowed() {
         let err = ScriptRunner.classifyFailure(stderr: "osascript: not allowed to send Apple events")

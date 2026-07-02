@@ -1,17 +1,23 @@
 import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
+import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
-import { calculateCost } from '../chat/pricing';
-import { DEFAULT_CONTEXT_TOKENS, isLocalProvider, type LlmConfigResponse } from '../models/llm';
-import { applyPatch, type Patch } from './json-patch';
+import { LoggerService } from './logger.service';
+import { isBareSlash } from '../chat/slash/slash.service';
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  isLocalProvider,
+  isTerminalCostSource,
+  type LlmConfigResponse,
+  type ResponseUsage,
+} from '../models/llm';
 import {
   DEFAULT_STATE_TREE,
   type ConversationEntryState,
   type ConversationStateTree,
-  type LogMsgEnvelope,
   type MessageBlockState,
 } from '../models/state-tree';
 import {
@@ -31,6 +37,7 @@ import {
   type TurnUsage,
   type QueuedMessage,
   type WireContentBlock,
+  type ConversationTranscript,
 } from '../models/chat';
 
 // Re-export types consumed by components
@@ -53,6 +60,37 @@ const SESSION_START_TIMEOUT_MS = 30_000;
 /** Polling interval while waiting for a session to start. */
 const SESSION_START_POLL_MS = 500;
 
+/**
+ * Returns null for anything but the two known backend phrasings.
+ * @param raw - Raw error message from the backend.
+ */
+export function mapContextOverflowError(raw: string): string | null {
+  if (/exceeds the available context size/i.test(raw) || /context length exceeded/i.test(raw)) {
+    return 'This conversation’s history is larger than the selected model’s context window. Pick a model with a bigger window, or start a new conversation.';
+  }
+  return null;
+}
+
+/**
+ * Claude Code's own message points at `/login`, which doesn't apply here.
+ * @param raw - Raw error message from the backend.
+ */
+export function mapNotLoggedInError(raw: string): string | null {
+  if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
+    return 'Not logged in. Go to Settings and choose an LLM provider.';
+  }
+  return null;
+}
+
+/**
+ * Gate predicate: the backend failure means the session is unauthenticated, so
+ * the UI routes to auth_required (display mapping stays in `mapNotLoggedInError`).
+ * @param msg - Raw error message from the backend.
+ */
+export function isNotAuthenticatedError(msg: string): boolean {
+  return msg.includes('not authenticated');
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -72,53 +110,40 @@ export class ChatStateService {
 
   /** ADR-045 — current queued message (null when slot is empty). */
   private _pendingQueue: QueuedMessage | null = null;
+  /** Queue accepted before the session id was known; flushed on first seed. */
+  private _queueAwaitingSession = false;
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
     return this._pendingQueue;
   }
 
-  private _sessionStats: SessionStats | null = null;
+  /** Session cost/usage stats signal — drives the OnPush footer reactively. */
+  private readonly _sessionStats = signal<SessionStats | null>(null);
   /** Session cost/usage stats from the most recent result. */
   get sessionStats(): SessionStats | null {
-    return this._sessionStats;
+    return this._sessionStats();
+  }
+  /** Read-only signal mirror so OnPush components re-render on stats changes. */
+  readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
+
+  /** input_tokens from the most recent successful Result; survives stream reset. */
+  get lastSuccessfulInputTokens(): number | null {
+    return this._lastSuccessfulInputTokens;
   }
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  /**
-   * Context window for the active model. `null` until populated from a
-   * stream value, SSOT lookup, persisted config, or the Anthropic default
-   * fallback. ADR-041 forbids guessing a value for local providers, so
-   * `null` propagates to the UI and the footer hides the `used / max` ratio
-   * rather than showing 200K.
-   */
+  private _lastSuccessfulInputTokens: number | null = null;
+  /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
-  /**
-   * Active LLM provider id from `get_llm_config().provider`. Drives the
-   * "is local?" check in `resolveContextWindow` — Anthropic gets the
-   * DEFAULT_CONTEXT_TOKENS bottom fallback; local providers do not.
-   */
+  /** Active LLM provider id from `get_llm_config().provider`. */
   private _currentProvider: string | null = null;
 
-  /**
-   * Last-known persisted context window from `claude.llm.context_tokens`
-   * (`get_llm_config`). Refreshed on init / project change / explicit
-   * `refreshLlmConfigCache()` calls (Settings invokes that after save).
-   * Populated from the real provider API for local providers
-   * (Ollama / LM Studio / llama.cpp) and from the SSOT for Anthropic, so
-   * the chat footer can show an accurate `used / max` ratio before any
-   * stream-level value lands.
-   */
+  /** Last-known persisted context window from `claude.llm.context_tokens`. */
   private _persistedContextTokens: number | null = null;
 
-  /**
-   * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
-   * starts) and `stopConversation` (turn cancelled). Used across awaits by
-   * `submitAnswer` to detect whether the turn it was answering has since
-   * been superseded, so late backend errors from the dying turn can be
-   * suppressed.
-   */
+  /** Monotonically increasing turn id; bumped on `sendMessage` and `stopConversation`. */
   private _turnId = 0;
   /** Test-only read access. */
   get turnId(): number {
@@ -129,32 +154,57 @@ export class ChatStateService {
   private listenerReady = false;
   private initialized = false;
   private startingSession = false;
+  /**
+   * Bumped whenever a resume supersedes the session; a stale background
+   * start_chat that finishes later no-ops instead of clobbering the resume.
+   */
+  private _sessionGeneration = 0;
+
+  /** Durable session id; survives a container restart that nulls live stats. */
+  private _lastKnownSessionId: string | null = null;
+  /** Optimistic session id stamped on resume (drawer accent before first Result). */
+  private _optimisticSessionId: string | null = null;
+  /** Re-entrancy guard for resumeConversation. */
+  private _resumeInProgress = false;
+  /** Set by a mounted ChatComponent to ask the user on context overflow; null when unmounted. */
+  private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
+
+  /** Durable session id (test/Component read). */
+  get lastKnownSessionId(): string | null {
+    return this._lastKnownSessionId;
+  }
+  /** Optimistic resume stamp (read by the view-session-id getter). */
+  get optimisticSessionId(): string | null {
+    return this._optimisticSessionId;
+  }
+
+  /**
+   * Unregistering (null) makes overflow default to auto-resume.
+   * @param cb - Decider callback, or null to unregister.
+   */
+  setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
+    this._resumeDecider = cb;
+  }
+
+  /** Clears durable + optimistic session tracking (new conversation / delete). */
+  clearSessionTracking(): void {
+    this._lastKnownSessionId = null;
+    this._optimisticSessionId = null;
+  }
+
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
   private clipboard = inject(Clipboard);
+  private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
-  /**
-   * ADR-042 / ADR-043 — full state-tree signal driven by JSON Patches.
-   *
-   * Held alongside the legacy `_messages`/`_currentBlocks` shape during
-   * the bridge period. Backend pushes patches into a per-session MsgStore;
-   * `subscribeToSession` wires `chat_patch::<id>` events through
-   * `applyLogMsg`, which routes to `applyPatch` for `JsonPatch` variants
-   * and to a wholesale replace for `Resync`.
-   */
+  /** ADR-042 — full state-tree signal, rebuilt after every mutation. */
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   /** Public read-only signal exposed to components. */
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
 
-  /**
-   * ADR-042 — Project the state-tree's committed entries onto the legacy
-   * `ChatMessage[]` shape so components can read state-tree as their
-   * source of truth without changing their templates. The trailing
-   * "live streaming" entry (no committed UUID, no meta) is excluded —
-   * `currentBlocksFromState` exposes it separately for the streaming view.
-   */
+  /** ADR-042 — committed state-tree entries projected onto `ChatMessage[]`. */
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
     stateEntriesToChatMessages(this._state().entries)
   );
@@ -162,25 +212,41 @@ export class ChatStateService {
   /** ADR-042 — projection of `state().is_streaming` onto a signal. */
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
 
+  /** True while a resumed conversation's transcript is being fetched. */
+  private readonly _loadingTranscript = signal<boolean>(false);
+  /** Read-only signal: drives the transcript-loading spinner. */
+  readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
+
+  /** Mark the start of a transcript fetch (shows the loader). */
+  beginTranscriptLoad(): void {
+    this._loadingTranscript.set(true);
+  }
+
+  /** Mark the end of a transcript fetch (hides the loader). */
+  endTranscriptLoad(): void {
+    this._loadingTranscript.set(false);
+  }
+
   /**
-   * Signal mirror of {@link canRetryLastAssistant}. Backed by the same
-   * `_state` projection that drives `messagesFromState`, so OnPush
-   * components binding `[disabled]="!retryEnabled()"` re-evaluate without
-   * a manual `markForCheck` whenever the retry anchor flips.
+   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
+   * bumps the generation to no-op in-flight starts. Returns a flag-clearing disposer.
    */
+  beginStartingSession(): () => void {
+    this.startingSession = true;
+    this._sessionGeneration += 1;
+    return () => {
+      this.startingSession = false;
+    };
+  }
+
+  /** Signal mirror of {@link canRetryLastAssistant}. */
   readonly retryEnabled: Signal<boolean> = computed(() => {
     const tree = this._state();
     if (tree.is_streaming || !tree.session_id) return false;
     return findRetryAnchorIn(tree.entries, 'committed') !== null;
   });
 
-  /**
-   * ADR-042 — projection of the live (uncommitted) trailing entry's blocks.
-   * "Live" means: the trailing entry is an assistant turn that has no
-   * meta yet (Result hasn't fired) AND no committed UUID. Once Result
-   * settles meta or commits the UUID the entry is no longer live and
-   * its blocks belong on `messagesFromState` instead.
-   */
+  /** ADR-042 — projection of the live (uncommitted) trailing entry's blocks. */
   readonly currentBlocksFromState: Signal<readonly MessageBlock[]> = computed(() => {
     const entries = this._state().entries;
     const last = entries[entries.length - 1];
@@ -193,11 +259,6 @@ export class ChatStateService {
   readonly pendingQueueFromState: Signal<QueuedMessage | null> = computed(
     () => this._state().pending_queue
   );
-
-  /** Per-session unlisten handle for `chat_patch::<id>` subscriptions. */
-  private patchUnlisten: UnlistenFn | null = null;
-  /** Active session id we've subscribed to (avoids re-subscribe loops). */
-  private subscribedSessionId: string | null = null;
 
   /**
    * Test-only setter for private backing fields.
@@ -214,44 +275,16 @@ export class ChatStateService {
   ): void {
     if (state.messages !== undefined) this._messages = state.messages;
     if (state.currentBlocks !== undefined) this._currentBlocks = state.currentBlocks;
-    if (state.sessionStats !== undefined) this._sessionStats = state.sessionStats;
+    if (state.sessionStats !== undefined) this._sessionStats.set(state.sessionStats);
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
   }
 
-  /** Subscribers notified on every state change (components call markForCheck). */
-  private changeListeners: Array<() => void> = [];
-
-  /**
-   * Registers a callback invoked on every state mutation.
-   * @param cb - The callback to invoke on change.
-   */
-  onChange(cb: () => void): () => void {
-    this.changeListeners.push(cb);
-    return () => {
-      this.changeListeners = this.changeListeners.filter((l) => l !== cb);
-    };
-  }
-
-  /** Notifies all registered change listeners. */
+  /** Rebuilds the state-tree signal from legacy fields after a mutation. */
   private notifyChange(): void {
-    // ADR-042/043 — keep the state-tree signal in lockstep with the legacy
-    // fields. Every notifyChange call rebuilds the state-tree from the
-    // post-mutation legacy state, so consumers can read either the legacy
-    // gettters (`messages`, `currentBlocks`, `isStreaming`, `sessionStats`,
-    // `pendingQueue`) or the unified `state()` signal and see consistent
-    // values. The backend MsgStore keeps history; this rebuild keeps the
-    // live signal honest without introducing drift.
     this.rebuildStateTree();
-    for (const cb of this.changeListeners) {
-      cb();
-    }
   }
 
-  /**
-   * Project the legacy fields onto a fresh `ConversationStateTree` and
-   * write it to `_state`. Called from `notifyChange()` so the signal
-   * always reflects the latest mutation.
-   */
+  /** Project legacy fields onto a fresh `ConversationStateTree` and write `_state`. */
   private rebuildStateTree(): void {
     this._state.set(
       buildStateTreeFromLegacy({
@@ -259,7 +292,7 @@ export class ChatStateService {
         currentBlocks: this._currentBlocks,
         isStreaming: this.isStreaming,
         pendingQueue: this._pendingQueue,
-        sessionStats: this._sessionStats,
+        sessionStats: this._sessionStats(),
         model: this._model,
       })
     );
@@ -267,25 +300,23 @@ export class ChatStateService {
 
   /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
-    console.debug(
-      '[chat-state] init: listenerReady=%s initialized=%s',
-      this.listenerReady,
-      this.initialized
+    this.log.debug(
+      `[chat-state] init: listenerReady=${this.listenerReady} initialized=${this.initialized}`
     );
     if (!this.listenerReady) {
       this.listenerReady = true;
       await this.setupStreamListener();
       this.setupProjectStateListeners();
+      this.setupRestartResumeListeners();
       // Best-effort cache warm so the chat footer has a context window
       // ready before the first Result chunk lands.
       void this.refreshLlmConfigCache();
     }
     if (!this.initialized) {
       this.initialized = true;
-      // Start chat session in the background — don't await so the UI stays
-      // responsive.  If the user sends a message before start_chat completes,
-      // sendMessage's auto-retry handles "no active session" transparently.
-      if (this.projectState.status === 'ready') {
+      // Start session in background (UI stays responsive); sendMessage
+      // auto-retries on "no active session" if a message races start_chat.
+      if (this.projectState.status() === 'ready') {
         this.startChatSession();
       } else {
         const unsub = this.projectState.onProjectReady(() => {
@@ -297,20 +328,38 @@ export class ChatStateService {
   }
 
   private async startChatSession(): Promise<void> {
-    const project = this.projectState.activeProject;
+    const project = this.projectState.activeProject();
+    // A resume owns the session; a remount must not clobber it with a fresh start.
+    // newConversation/delete null _lastKnownSessionId, so this gates only resume.
+    if (this._resumeInProgress || this._lastKnownSessionId) {
+      this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
+      return;
+    }
     if (project && !this.startingSession) {
       this.startingSession = true;
-      console.debug('[chat-state] startChatSession: project=%s', project);
+      const gen = this._sessionGeneration;
+      this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
         await this.tauri.invoke('start_chat', { project });
-        console.debug('[chat-state] startChatSession: success');
+        this.log.debug('[chat-state] startChatSession: success');
       } catch (err) {
+        // A resume superseded this start while it was in flight — don't surface
+        // its failure as the resumed session's error.
+        if (gen !== this._sessionGeneration) {
+          this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
+          return;
+        }
         const msg = String(err);
-        if (msg.includes('not authenticated')) {
-          this.projectState.status = 'auth_required';
+        if (isNotAuthenticatedError(msg)) {
+          this.projectState.status.set('auth_required');
           this.notifyChange();
         } else {
-          console.error('Failed to start chat session:', err);
+          // Non-auth start failure is fatal — surface it in project state so
+          // the UI shows an error instead of a silently dead chat.
+          this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
+          this.projectState.status.set('error');
+          this.projectState.error = `Failed to start chat session: ${msg}`;
+          this.notifyChange();
         }
       } finally {
         this.startingSession = false;
@@ -328,7 +377,11 @@ export class ChatStateService {
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
     if (!hasContent || this.isStreaming) return;
-    console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
+    // Drop whitespace-only or bare-slash input before streaming; hasContent
+    // misses these and the backend would bail with a stray error bubble.
+    const isBlankOrSlash = chatInput.text.trim().length === 0 || isBareSlash(chatInput.text);
+    if (chatInput.attachments.length === 0 && isBlankOrSlash) return;
+    this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
     const displayBlocks: MessageBlock[] = [];
     const surfaceText = displayText ?? chatInput.text;
@@ -444,8 +497,8 @@ export class ChatStateService {
           return;
         } catch (retryErr) {
           const retryMsg = String(retryErr);
-          if (retryMsg.includes('not authenticated')) {
-            this.projectState.status = 'auth_required';
+          if (isNotAuthenticatedError(retryMsg)) {
+            this.projectState.status.set('auth_required');
             this.isStreaming = false;
             this.notifyChange();
             return;
@@ -477,21 +530,16 @@ export class ChatStateService {
   }
 
   /**
-   * Records one slot's answer for a multi-question AskUserQuestion block
-   * Optimistically advances the block's `current_index` to the
-   * next unanswered slot, then forwards to the host. On error, reverts the
-   * slot and appends an error block.
+   * Records one slot's answer for a multi-question AskUserQuestion block.
    * @param toolUseId   tool_use_id of the AskUserQuestion control_request.
    * @param questionIdx slot index being answered (0-based).
-   * @param value       chosen value (single string; multi-select labels are
-   *                    pre-joined with `", "` by the renderer).
+   * @param value       chosen value (multi-select labels pre-joined with `", "`).
    */
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
 
-    // Snapshot the pre-mutation current_index so the error path can revert
-    // to it precisely — resetting to questionIdx would be wrong if the user
-    // submitted out of order.
+    // Snapshot the pre-mutation current_index so the error path reverts precisely
+    // (resetting to questionIdx breaks on out-of-order submits).
     let prevIndex: number | null = null;
 
     this._currentBlocks = this._currentBlocks.map((b) => {
@@ -516,12 +564,10 @@ export class ChatStateService {
         answer: value,
       });
     } catch (err) {
-      // If stopConversation ran while submit_question_answer was in flight,
-      // `_turnId` has moved on. Suppress the error block: the user
-      // deliberately cancelled — a "Broken pipe" / "no active session"
-      // surfacing would be confusing noise.
+      // If stop ran while submit was in flight (`_turnId` moved on), suppress the
+      // error: the user cancelled, so a "Broken pipe" surfacing is just noise.
       if (capturedTurn !== this._turnId) {
-        console.debug('[chat-state] submitAnswer: suppressing error after stop', err);
+        this.log.debug(`[chat-state] submitAnswer: suppressing error after stop: ${String(err)}`);
         return;
       }
       this.isStreaming = false;
@@ -545,9 +591,8 @@ export class ChatStateService {
   }
 
   /**
-   * Stops the current Claude turn. Safe to call when not streaming (no-op).
-   * Synchronously resets UI state so the input is re-enabled immediately,
-   * then fires the backend stop in the background.
+   * Stops the current Claude turn (no-op when not streaming). Resets UI state
+   * synchronously to re-enable input, then fires the backend stop in background.
    */
   async stopConversation(): Promise<void> {
     if (!this.isStreaming) return;
@@ -555,16 +600,10 @@ export class ChatStateService {
     // 1. Invalidate any in-flight / buffered stream events from the dying turn.
     this._turnId += 1;
 
-    // 2. Synchronous UI reset — must precede any await so re-entrant calls see
-    //    isStreaming=false and early-return (prevents double invoke of stop_chat).
+    // 2. Synchronous UI reset, before any await, so re-entrant calls early-return.
     this.isStreaming = false;
 
-    // 3. Preserve the partial assistant reply but drop ask_user blocks and
-    //    finalize running tool_use blocks. The interrupt aborts the in-flight
-    //    turn; Claude will not answer any rendered question (the matching
-    //    tool_use_id is abandoned), so ask_user is unanswerable. Running tools
-    //    would otherwise render a permanent "running" spinner inside a closed
-    //    message — flip them to status: 'error' with an "Interrupted" marker.
+    // 3. Keep the partial reply; drop ask_user blocks; mark running tools errored.
     const keptBlocks = this._currentBlocks
       .filter((b) => b.type !== 'ask_user')
       .map((b) => {
@@ -593,18 +632,17 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
-    // 4. Fire the backend interrupt. "no active session" is benign (idle or
-    //    already exited); any other failure means the turn may still be
-    //    running on the backend, so surface an error block to the user.
+    // 4. Fire the backend interrupt. "no active session" is benign (idle/exited);
+    //    any other failure means the turn may still run, so surface an error.
     try {
       await this.tauri.invoke('stop_chat');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('no active session')) {
-        console.debug('[chat-state] stopConversation: backend already idle', err);
+        this.log.debug(`[chat-state] stopConversation: backend already idle: ${msg}`);
         return;
       }
-      console.error('[chat-state] stopConversation: invoke failed', err);
+      this.log.error(`[chat-state] stopConversation: invoke failed: ${msg}`);
       this._messages = [
         ...this._messages,
         {
@@ -675,7 +713,13 @@ export class ChatStateService {
       }
 
       case 'SystemInit':
-        this._model = chunk.data.model;
+        if (chunk.data.model) this._model = chunk.data.model;
+        // ADR-045: seed the session id at stream start so queue/retry work
+        // during the FIRST turn (before any Result carries it).
+        if (chunk.data.session_id) {
+          this.seedSessionId(chunk.data.session_id);
+          void this.flushDeferredQueue(chunk.data.session_id);
+        }
         break;
 
       case 'RateLimit':
@@ -685,19 +729,16 @@ export class ChatStateService {
             utilization: chunk.data.utilization,
             resets_at: chunk.data.resets_at,
           };
-          // Update existing sessionStats immediately if present
-          if (this._sessionStats) {
-            this._sessionStats = { ...this._sessionStats, rate_limit: this._rateLimit };
+          const cur = this._sessionStats();
+          if (cur) {
+            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
           }
         }
         break;
 
       case 'Result': {
         if (chunk.data.result_text) {
-          // Only append result_text when no streamed text blocks exist yet.
-          // Claude Code always copies the full response into `result`, so for
-          // normal turns the text was already streamed via Text deltas.  Slash
-          // commands (e.g. /cost) produce *only* a result — no text deltas.
+          // Append result_text only when no streamed text blocks exist (e.g. slash commands).
           const hasStreamedText = this._currentBlocks.some((b) => b.type === 'text');
           if (!hasStreamedText) {
             this._currentBlocks = [
@@ -707,7 +748,12 @@ export class ChatStateService {
           }
         }
         const resolvedModel = chunk.data.model ?? (this._model || undefined);
-        const meta = buildEntryMeta(chunk.data, resolvedModel);
+        // Suppress the live cost preview for local (no real cost; reconcile confirms null).
+        const meta = buildEntryMeta(
+          chunk.data,
+          resolvedModel,
+          isLocalProvider(this._currentProvider)
+        );
         if (this._currentBlocks.length > 0) {
           const assistantUuid = chunk.data.assistant_uuid;
           const assistantEntry: ChatMessage = {
@@ -731,30 +777,38 @@ export class ChatStateService {
           chunk.data.context_window_size,
           resolvedModel
         );
-        this._sessionStats = {
+        // Local has no real cost; Claude Code's estimate is meaningless → null
+        // (no $0.00x flicker before reconcile confirms the free/null SSOT value).
+        const livePreviewCost =
+          !isLocalProvider(this._currentProvider) &&
+          typeof chunk.data.total_cost === 'number' &&
+          Number.isFinite(chunk.data.total_cost)
+            ? chunk.data.total_cost
+            : null;
+        this._sessionStats.set({
           session_id: chunk.data.session_id,
-          total_cost: chunk.data.total_cost ?? 0,
+          total_cost: livePreviewCost,
           usage: chunk.data.usage,
           model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
-        };
-        // ADR-042/043 — once the backend has committed a session id,
-        // attach the patch-stream subscription so future events update
-        // the state-tree signal in lock-step with the legacy chunk path.
-        // Idempotent for the same session id.
+        });
+        // Durable id so a later container restart (model switch) can resume this session.
         if (chunk.data.session_id) {
-          void this.subscribeToSession(chunk.data.session_id);
+          this._lastKnownSessionId = chunk.data.session_id;
+          void this.flushDeferredQueue(chunk.data.session_id);
         }
+        if (typeof chunk.data.usage?.input_tokens === 'number') {
+          this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
+        }
+        // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
+        void this.reconcileFooterCost(chunk.data.assistant_uuid);
         break;
       }
 
       case 'UserMessageCommit': {
-        // ADR-046: the parser has seen `user.message.id` for the most recent
-        // user prompt. Commit it onto the last user entry that still lacks a
-        // UUID — walking from the end handles out-of-order arrivals where the
-        // commit chunk lands after several intermediate events.
+        // ADR-046: commit the parsed UUID onto the last user entry missing one.
         const uuid = chunk.data.uuid;
         const idx = findLastUserIndexMissingUuid(this._messages);
         if (idx >= 0) {
@@ -772,12 +826,12 @@ export class ChatStateService {
         break;
       }
 
-      case 'Error':
-        this._currentBlocks = [
-          ...this._currentBlocks,
-          { type: 'error', content: chunk.data.content },
-        ];
-        // Finalize as error turn
+      case 'Error': {
+        const errContent =
+          mapContextOverflowError(chunk.data.content) ??
+          mapNotLoggedInError(chunk.data.content) ??
+          chunk.data.content;
+        this._currentBlocks = [...this._currentBlocks, { type: 'error', content: errContent }];
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -785,13 +839,12 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         break;
+      }
 
       case 'QueueDrained': {
-        // ADR-045: backend sent the queued payload to stdin as the next
-        // turn. Mirror that into local state so the composer's "queued: …"
-        // line clears, and synthesise the user entry so the streamed
-        // response below has its retry anchor in place.
+        // ADR-045: backend sent the queued payload to stdin; mirror to local state.
         this._pendingQueue = null;
+        this._queueAwaitingSession = false;
         this._messages = [
           ...this._messages,
           {
@@ -812,20 +865,30 @@ export class ChatStateService {
     this.notifyChange();
   }
 
-  /** Clears all chat state to start a fresh conversation. */
-  resetForNewConversation(): void {
-    console.debug('[chat-state] resetForNewConversation');
+  /**
+   * Resets the per-conversation stream/usage fields shared by new-conversation
+   * and project-switch clears. Callers add their own extra fields + notify.
+   */
+  private resetCoreStreamState(): void {
     this._messages = [];
     this._currentBlocks = [];
     this.isStreaming = false;
-    this._sessionStats = null;
+    this._sessionStats.set(null);
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
+  }
+
+  /** Clears all chat state to start a fresh conversation. */
+  resetForNewConversation(): void {
+    this.log.debug('[chat-state] resetForNewConversation');
+    this.resetCoreStreamState();
     this._pendingQueue = null;
+    this._queueAwaitingSession = false;
     this.initialized = false;
     this.startingSession = false;
+    this.clearSessionTracking();
     this.notifyChange();
   }
 
@@ -836,69 +899,89 @@ export class ChatStateService {
   loadMessages(msgs: ChatMessage[]): void {
     this._messages = msgs;
     this.notifyChange();
-  }
-
-  /**
-   * Seeds the session id immediately after a resume so retry / queue can run
-   * without waiting for the first `Result` event. Stamps a minimal stats
-   * object — token counters / cost stay zero until the next live turn fills
-   * them in.
-   * @param sessionId - Resumed JSONL session uuid.
-   */
-  seedResumedSession(sessionId: string): void {
-    if (!sessionId) return;
-    if (this._sessionStats?.session_id === sessionId) return;
-    // The seed is replaced as soon as the next `Result` chunk arrives with
-    // an authoritative `context_window_size`.
-    const seeded = this.resolveContextWindow(undefined, this._sessionStats?.model);
-    this._sessionStats = {
-      total_cost: 0,
-      context_window_size: seeded,
-      total_output_tokens: 0,
-      ...this._sessionStats,
-      session_id: sessionId,
-    };
-    this.notifyChange();
-  }
-
-  /**
-   * Queue a message to be sent as the next turn (ADR-045). Replace
-   * semantics — calling this while a slot is already occupied displaces the
-   * previous queued message and returns its preview text. Returns `null`
-   * when the slot was empty before this call.
-   *
-   * The composer calls this when the user hits send while
-   * `isStreaming === true`. Backend drains the slot when the running turn
-   * emits its `Result` event.
-   * @param text - The message to queue.
-   */
-  async queueMessage(text: string): Promise<string | null> {
-    const sessionId = this._sessionStats?.session_id;
-    if (!sessionId || !text) return null;
-    try {
-      const prior = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
-        'queue_message',
-        { sessionId, text }
-      );
-      this._pendingQueue = { text, queued_at: Date.now() };
-      this.notifyChange();
-      return prior?.text ?? null;
-    } catch (err) {
-      console.warn('[chat-state] queueMessage: backend invoke failed', err);
-      return null;
+    // Re-reconcile the last turn from the proxy SSOT — corrects a cost that was
+    // still `deferred` when the live retry gave up. Terminal costs are idempotent.
+    const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && m.uuid);
+    if (lastAssistant?.uuid) {
+      void this.reconcileFooterCost(lastAssistant.uuid);
     }
   }
 
   /**
-   * Cancel the queued message for the active session. No-op when no slot
-   * is occupied or no session is active. Composer wires this to the X
-   * button on the "queued: …" preview line.
+   * Seeds the session id (resume or stream-start SystemInit) so retry / queue
+   * can run before the first `Result`.
+   * @param sessionId - Session uuid from a resume or a SystemInit chunk.
    */
-  async cancelQueuedMessage(): Promise<void> {
-    const sessionId = this._sessionStats?.session_id;
+  seedSessionId(sessionId: string): void {
+    if (!sessionId) return;
+    this._lastKnownSessionId = sessionId;
+    const cur = this._sessionStats();
+    if (cur?.session_id === sessionId) return;
+    // The seed is replaced as soon as the next `Result` chunk arrives with
+    // an authoritative `context_window_size`.
+    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    this._sessionStats.set({
+      total_cost: null,
+      context_window_size: seeded,
+      total_output_tokens: 0,
+      ...cur,
+      session_id: sessionId,
+    });
+    this.notifyChange();
+  }
+
+  /**
+   * Queue a message as the next turn (ADR-045); replace semantics. The local
+   * slot fills immediately; before the first session id (init not yet parsed)
+   * the backend registration is deferred to {@link flushDeferredQueue} so an
+   * early queue is never silently dropped.
+   * @param text - The message to queue.
+   * @returns the displaced queued text, or `null` if the slot was empty.
+   */
+  async queueMessage(text: string): Promise<string | null> {
+    if (!text) return null;
+    const prior = this._pendingQueue?.text ?? null;
+    this._pendingQueue = { text, queued_at: Date.now() };
+    this.notifyChange();
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
-      // No session yet — but local slot may still be set if we got ahead
-      // of the first Result. Clear locally either way.
+      this._queueAwaitingSession = true;
+      return prior;
+    }
+    try {
+      const displaced = await this.tauri.invoke<{ text: string; queued_at: number } | null>(
+        'queue_message',
+        { sessionId, text }
+      );
+      return displaced?.text ?? prior;
+    } catch (err) {
+      this.log.warn(`[chat-state] queueMessage: backend invoke failed: ${String(err)}`);
+      return prior;
+    }
+  }
+
+  /**
+   * Registers a deferred queued message once the session id becomes known.
+   * @param sessionId - Session id from the first SystemInit or Result seed.
+   */
+  private async flushDeferredQueue(sessionId: string): Promise<void> {
+    if (!this._queueAwaitingSession) return;
+    this._queueAwaitingSession = false;
+    const queued = this._pendingQueue;
+    if (!queued) return;
+    try {
+      await this.tauri.invoke('queue_message', { sessionId, text: queued.text });
+    } catch (err) {
+      this.log.warn(`[chat-state] flushDeferredQueue: backend invoke failed: ${String(err)}`);
+    }
+  }
+
+  /** Cancel the queued message for the active session; no-op when empty. */
+  async cancelQueuedMessage(): Promise<void> {
+    this._queueAwaitingSession = false;
+    const sessionId = this._sessionStats()?.session_id;
+    if (!sessionId) {
+      // No session yet — clear the local slot anyway.
       this._pendingQueue = null;
       this.notifyChange();
       return;
@@ -906,23 +989,16 @@ export class ChatStateService {
     try {
       await this.tauri.invoke('cancel_queued_message', { sessionId });
     } catch (err) {
-      console.warn('[chat-state] cancelQueuedMessage: backend invoke failed', err);
+      this.log.warn(`[chat-state] cancelQueuedMessage: backend invoke failed: ${String(err)}`);
     }
     this._pendingQueue = null;
     this.notifyChange();
   }
 
   /**
-   * Copies the textual content of the message at `index` to the system
-   * clipboard via Angular CDK's `Clipboard` service. Returns `true` on
-   * success, `false` on failure (out-of-range index, empty content, write
-   * rejection). Block kinds that carry no user-facing prose — `tool_use`,
-   * `thinking`, `ask_user` — are elided; `text` and `error` blocks are
-   * joined with a blank line.
-   *
-   * The component layer owns the "copied" indicator timing so this method can
-   * stay pure and testable.
+   * Copies the message at `index` to the clipboard; elides tool/thinking/ask_user blocks.
    * @param index - Index into `messages` of the entry to copy.
+   * @returns `true` on success, `false` on out-of-range / empty / write failure.
    */
   copyMessage(index: number): boolean {
     const msg = this._messages[index];
@@ -931,31 +1007,17 @@ export class ChatStateService {
     if (!text) return false;
     const ok = this.clipboard.copy(text);
     if (!ok) {
-      console.warn('[chat-state] copyMessage: clipboard write failed');
+      this.log.warn('[chat-state] copyMessage: clipboard write failed');
     }
     return ok;
   }
 
-  /**
-   * Returns whether the last assistant turn can be retried (ADR-046).
-   * Requires:
-   *   - not streaming (would race with the live turn),
-   *   - a session id from the most recent Result chunk,
-   *   - a user entry preceding the last assistant entry whose UUID is committed.
-   *
-   * The component layer reads this on every change-detection cycle to gate
-   * the retry button — it must be cheap and side-effect free.
-   */
+  /** Returns whether the last assistant turn can be retried (ADR-046). */
   canRetryLastAssistant(): boolean {
     return this.findRetryAnchor() !== null;
   }
 
-  /**
-   * Walks the message list from the end to find the retry anchor: the user
-   * entry immediately preceding the last committed assistant entry. Returns
-   * `null` when no such pair exists, when streaming, or when the session id
-   * is missing.
-   */
+  /** Finds the retry anchor: user entry before the last committed assistant entry. */
   private findRetryAnchor(): {
     sessionId: string;
     userUuid: string;
@@ -963,22 +1025,13 @@ export class ChatStateService {
     userIdx: number;
   } | null {
     if (this.isStreaming) return null;
-    const sessionId = this._sessionStats?.session_id;
+    const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) return null;
     const anchor = findRetryAnchorIn(this._messages, 'Committed');
     return anchor === null ? null : { sessionId, ...anchor };
   }
 
-  /**
-   * Retries the last assistant turn via the backend `retry_last_turn` Tauri
-   * command (ADR-046). Trims the last assistant entry from local state,
-   * stamps `edited_at` on the anchor user entry, flips `isStreaming` so the
-   * input bar disables and the next stream chunks are accepted, and asks the
-   * backend to relaunch Claude Code with `--resume-session-at`.
-   *
-   * On backend failure the optimistic state changes are reverted and an error
-   * block is appended so the user sees what went wrong.
-   */
+  /** Retries the last assistant turn via the backend `retry_last_turn` command (ADR-046). */
   async retryLastAssistant(): Promise<void> {
     const anchor = this.findRetryAnchor();
     if (!anchor) return;
@@ -999,7 +1052,7 @@ export class ChatStateService {
         userUuid,
       });
     } catch (err) {
-      console.error('[chat-state] retryLastAssistant: invoke failed', err);
+      this.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
       this._messages = [
         ...before,
         {
@@ -1020,19 +1073,14 @@ export class ChatStateService {
    */
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
-      if (this.projectState.status === 'switching') {
-        this._messages = [];
-        this._currentBlocks = [];
-        this.isStreaming = false;
-        this._sessionStats = null;
-        this._model = '';
-        this._rateLimit = null;
-        this._totalOutputTokens = 0;
-        this._contextWindowSize = null;
+      if (this.projectState.status() === 'switching') {
+        this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
+        // A genuine project switch starts fresh — never resume the prior project.
+        this.clearSessionTracking();
         this.notifyChange();
-      } else if (this.projectState.status === 'ready') {
+      } else if (this.projectState.status() === 'ready') {
         // Project just settled — re-pull the persisted context tokens so
         // the chat footer reflects whatever the user picked in Settings.
         void this.refreshLlmConfigCache();
@@ -1040,12 +1088,212 @@ export class ChatStateService {
     });
   }
 
+  /** Resumes the conversation only after a restart, not a project-switch. */
+  private setupRestartResumeListeners(): void {
+    this.projectState.onRestartBegin(async () => {
+      if (this.isStreaming) await this.stopConversation();
+    });
+    this.projectState.onRestartComplete(() => {
+      void this.decideResumeAfterRestart();
+    });
+  }
+
+  /** Resume-vs-ask decision after a restart; reads the NEW model's window first. */
+  private async decideResumeAfterRestart(): Promise<void> {
+    const id = this._lastKnownSessionId;
+    if (!id) return;
+    // The ready-triggered cache refresh is async and may still hold the previous
+    // model's window — re-read so the fit decision sees the post-restart model.
+    await this.refreshLlmConfigCache();
+    if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
+      void this.resumeConversation(id);
+      return;
+    }
+    // History may not fit: ask if a chat view is mounted; else auto-resume
+    // (the non-lossy choice — never silently drop history on an unmounted view).
+    if (this._resumeDecider) {
+      const choice = await this._resumeDecider();
+      if (choice === 'resume') void this.resumeConversation(id);
+      else void this.startFreshSession();
+    } else {
+      void this.resumeConversation(id);
+    }
+  }
+
   /**
-   * Fallback chain for the chat footer's context-window value.
-   * Order: live stream value → Anthropic SSOT lookup → persisted
-   * `claude.llm.context_tokens` → previous `_contextWindowSize` → for
-   * Anthropic only: {@link DEFAULT_CONTEXT_TOKENS}. Local providers
-   * propagate `null` instead — ADR-041 "never guess".
+   * Resets tracking first so the new session isn't gated by the stale durable id.
+   */
+  private async startFreshSession(): Promise<void> {
+    this.resetForNewConversation();
+    await this.startChatSession();
+  }
+
+  /**
+   * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
+   * @param sessionId - session UUID to resume.
+   */
+  async resumeConversation(sessionId: string): Promise<void> {
+    if (this._resumeInProgress) return;
+    this._resumeInProgress = true;
+
+    this.resetForNewConversation();
+    this.beginTranscriptLoad();
+    // Mark start in progress so a racing send waits instead of tearing down this
+    // resumed session; disposer released in the `finally` below.
+    const endStartingSession = this.beginStartingSession();
+    // Stamp session id optimistically so drawer accent follows click without flicker.
+    this._optimisticSessionId = sessionId;
+    // Early durable stamp: needed even when the transcript fetch fails, so the
+    // remount guard in startChatSession and a later restart-resume see this session.
+    this._lastKnownSessionId = sessionId;
+
+    try {
+      const project = this.projectState.activeProject();
+      if (!project) return;
+
+      // Run transcript fetch and resume_conversation in parallel; both independent.
+      const transcriptPromise = this.tauri
+        .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
+        .catch((err) => {
+          this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
+          return null;
+        });
+      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
+
+      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
+      if (transcript) {
+        this.loadMessages(toChatMessages(transcript));
+      } else {
+        // Resume succeeded but the transcript fetch failed: keep the session
+        // live and say why the scrollback is empty instead of failing silently.
+        this.loadMessages([
+          {
+            role: 'assistant',
+            blocks: [
+              {
+                type: 'error' as const,
+                content:
+                  'Could not load this conversation’s history. The session was resumed — new messages will work, but earlier ones are not shown.',
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ]);
+      }
+      // Seed session id immediately so retry/queue work without waiting for live Result.
+      this.seedSessionId(sessionId);
+    } catch (err) {
+      // Drop the optimistic accent so a failed resume isn't shown as active.
+      this._optimisticSessionId = null;
+      this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
+      const msg = String(err);
+      if (isNotAuthenticatedError(msg)) {
+        await this.projectState.retryAuth();
+      } else {
+        this.loadMessages([
+          ...this.messagesFromState(),
+          {
+            role: 'assistant',
+            blocks: [{ type: 'error' as const, content: `Failed to resume session: ${err}` }],
+            timestamp: Date.now(),
+          },
+        ]);
+      }
+    } finally {
+      this.endTranscriptLoad();
+      endStartingSession();
+      this._resumeInProgress = false;
+    }
+  }
+
+  /**
+   * Backoff schedule (ms) for re-reconciling a `deferred` OpenRouter cost.
+   * Spans ~60s total: `/generation` can take ~30s+ to price a large turn.
+   */
+  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+
+  /**
+   * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6),
+   * retrying on a backoff while OpenRouter cost is `deferred`. Best-effort.
+   * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
+   * @param attempt - Backoff index for a deferred re-reconcile (0 on the first call).
+   */
+  private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
+    if (!assistantUuid) return;
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    // A newer turn (or a stop) bumps `_turnId`; abandon a stale deferred retry.
+    const capturedTurn = this._turnId;
+    try {
+      const u = await this.tauri.invoke<ResponseUsage | null>('get_usage_for_response', {
+        project,
+        responseId: assistantUuid,
+      });
+      if (!u) return;
+      // Non-terminal cost (deferred / no sidecar yet) keeps the live preview;
+      // only a terminal cost_source overwrites footer/per-message (deferred retries below).
+      if (isTerminalCostSource(u.cost_source)) {
+        // Per-message cost from the SSOT; null (unpriced) hides the segment.
+        this.overwriteEntryCost(assistantUuid, u.cost_usd);
+        // Footer = this conversation's turns only; skipped when no live session.
+        const cur = this._sessionStats();
+        if (cur) {
+          const responseIds = this.conversationResponseIds(assistantUuid);
+          const conversationCost = await this.tauri.invoke<number | null>('get_conversation_cost', {
+            project,
+            responseIds,
+          });
+          this._sessionStats.set({ ...cur, total_cost: conversationCost });
+        }
+        this.notifyChange();
+      }
+      const backoff = ChatStateService.DEFERRED_RECONCILE_BACKOFF_MS;
+      if (u.cost_source === 'deferred' && attempt < backoff.length) {
+        setTimeout(() => {
+          if (capturedTurn === this._turnId) {
+            void this.reconcileFooterCost(assistantUuid, attempt + 1);
+          }
+        }, backoff[attempt]);
+      }
+    } catch (err) {
+      // Footer stays on the live value; reconcile is best-effort.
+      this.log.debug(`[chat-state] reconcileFooterCost best-effort failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Response ids of the current conversation's assistant turns, for the footer
+   * cost sum.
+   * @param latestUuid - just-finished turn's assistant uuid (caller guards non-empty).
+   */
+  private conversationResponseIds(latestUuid: string): string[] {
+    const ids = new Set<string>();
+    for (const m of this._messages) {
+      if (m.role === 'assistant' && m.uuid) ids.add(m.uuid);
+    }
+    ids.add(latestUuid);
+    return [...ids];
+  }
+
+  /**
+   * Overwrite an assistant entry's per-message cost from the proxy SSOT.
+   * @param uuid - assistant_uuid identifying the entry.
+   * @param cost - proxy cost in USD, or null/unpriced → hide the segment.
+   */
+  private overwriteEntryCost(uuid: string, cost: number | null): void {
+    const idx = this._messages.findIndex((m) => m.uuid === uuid && m.meta);
+    if (idx < 0) return;
+    const m = this._messages[idx];
+    const nextCost = typeof cost === 'number' && Number.isFinite(cost) ? cost : undefined;
+    this._messages = [
+      ...this._messages.slice(0, idx),
+      { ...m, meta: { ...m.meta, cost: nextCost } },
+      ...this._messages.slice(idx + 1),
+    ];
+  }
+
+  /**
+   * Context-window fallback: live → SSOT → persisted → previous → Anthropic default; local stays `null`.
    * @param liveValue - Authoritative value carried by the stream (highest priority).
    * @param model - Resolved model id used for the SSOT lookup.
    */
@@ -1061,29 +1309,20 @@ export class ChatStateService {
     return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
   }
 
-  /**
-   * Re-reads `get_llm_config().context_tokens` from the backend and updates
-   * the cache used by the chat fallback chain. Public so Settings can call
-   * it after `update_llm_config` settles — without that, the chat footer
-   * would keep showing the previous model's window until the next session.
-   */
+  /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
   async refreshLlmConfigCache(): Promise<void> {
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
-      // If we have no live stream value yet, surface the persisted one
-      // through `_contextWindowSize` so the next `notifyChange` rebuilds
-      // session stats with the right `used / max`.
-      if (this._persistedContextTokens && !this._sessionStats?.usage) {
+      // With no live stream value, surface the persisted one.
+      if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
       this.notifyChange();
     } catch (err) {
-      // Browser dev mode or backend unavailable — log so backend renames /
-      // serialisation regressions surface during development without
-      // disrupting the UI.
-      console.debug('[chat-state] refreshLlmConfigCache failed', err);
+      // Browser dev mode or backend unavailable.
+      this.log.debug(`[chat-state] refreshLlmConfigCache failed: ${String(err)}`);
     }
   }
 
@@ -1092,107 +1331,27 @@ export class ChatStateService {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
-        // Metadata-only chunks never mutate _messages / _currentBlocks and
-        // are legitimate between or after turns (e.g. trailing RateLimit).
-        if (chunk.chunk_type === 'SystemInit' || chunk.chunk_type === 'RateLimit') {
+        // Chunks legitimate between/after turns: metadata (SystemInit,
+        // trailing RateLimit) and QueueDrained — the drain fires right AFTER
+        // Result flipped isStreaming=false and itself starts the next turn.
+        if (
+          chunk.chunk_type === 'SystemInit' ||
+          chunk.chunk_type === 'RateLimit' ||
+          chunk.chunk_type === 'QueueDrained'
+        ) {
           this.handleStreamChunk(chunk);
           return;
         }
-        // Content-bearing chunks belong to a specific turn. If isStreaming is
-        // false (stopConversation already ran, or the turn already finished),
-        // drop the chunk so it cannot write into _messages or flip isStreaming
-        // back on. That single check is sufficient in single-threaded JS:
-        // stopConversation sets isStreaming = false synchronously before any
-        // await, so every subsequent event-loop tick observes the reset.
+        // Drop content-bearing chunks when not streaming.
         if (!this.isStreaming) return;
         this.handleStreamChunk(chunk);
       });
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {
-        console.error('Failed to set up stream listener:', err);
-        this.projectState.status = 'error';
+        this.log.error(`[chat-state] Failed to set up stream listener: ${String(err)}`);
+        this.projectState.status.set('error');
         this.projectState.error = `Failed to set up stream listener: ${err}`;
       }
-    }
-  }
-
-  /**
-   * ADR-042/043 — subscribe to a session's JSON-Patch stream.
-   *
-   * Calls the `subscribe_session` Tauri command, listens on the resolved
-   * `chat_patch::<session_id>` event channel, and routes each `LogMsg`
-   * payload through `applyLogMsg`. Idempotent: re-subscribing to the same
-   * session is a no-op; switching to a different session unsubscribes
-   * the previous one first.
-   * @param sessionId The Claude Code session id to subscribe to.
-   */
-  async subscribeToSession(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    if (this.subscribedSessionId === sessionId) return;
-    await this.unsubscribeFromSession();
-    let ack: { event_name: string };
-    try {
-      ack = await this.tauri.invoke<{ event_name: string }>('subscribe_session', {
-        sessionId,
-      });
-    } catch (err) {
-      console.warn('[chat-state] subscribeToSession: invoke failed', err);
-      return;
-    }
-    try {
-      const unlisten = await this.tauri.listen<LogMsgEnvelope>(ack.event_name, (event) => {
-        this.applyLogMsg(event.payload);
-      });
-      this.patchUnlisten = unlisten;
-      this.subscribedSessionId = sessionId;
-    } catch (err) {
-      console.warn('[chat-state] subscribeToSession: listen failed', err);
-    }
-  }
-
-  /** Drop the active patch subscription, if any. */
-  async unsubscribeFromSession(): Promise<void> {
-    if (this.patchUnlisten) {
-      try {
-        this.patchUnlisten();
-      } catch (err) {
-        console.warn('[chat-state] unsubscribeFromSession failed', err);
-      }
-      this.patchUnlisten = null;
-    }
-    this.subscribedSessionId = null;
-  }
-
-  /**
-   * Apply a single `LogMsg` envelope to the state-tree signal. Pure
-   * router — `JsonPatch` runs through the RFC 6902 reducer, `Resync`
-   * does a wholesale replace, and lifecycle markers update specific
-   * fields. Test-only API: components consume `state` (the read-only
-   * signal) instead of calling this directly.
-   * @internal
-   * @param msg One `LogMsg` envelope from `MsgStore.history_plus_stream()`.
-   */
-  applyLogMsg(msg: LogMsgEnvelope): void {
-    if (msg.type === 'json_patch') {
-      try {
-        const patch = msg.data as Patch;
-        this._state.set(applyPatch(this._state(), patch));
-      } catch (err) {
-        console.warn('[chat-state] applyLogMsg: bad patch dropped', err);
-      }
-      return;
-    }
-    if (msg.type === 'resync') {
-      this._state.set(msg.data);
-      return;
-    }
-    if (msg.type === 'session_started') {
-      this._state.update((s) => ({ ...s, session_id: msg.data.session_id }));
-      return;
-    }
-    if (msg.type === 'session_ended') {
-      this._state.update((s) => ({ ...s, is_streaming: false }));
-      return;
     }
   }
 }
@@ -1208,13 +1367,7 @@ function appendOrCreateTextBlock(blocks: MessageBlock[], content: string): Messa
 }
 
 function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): MessageBlock[] {
-  // Anthropic returns redacted thinking blocks by default for Opus 4.7
-  // (and others when summaries are not requested) — the model still does
-  // the reasoning, but the streamed `thinking` text is empty and only the
-  // signature (encrypted thinking, used for multi-turn continuity) is sent.
-  // Skip empty deltas so we don't render an empty collapsible. If the API
-  // ever sends a non-empty delta later in the same turn, we still attach
-  // it to a fresh thinking block.
+  // Anthropic returns redacted thinking blocks by default; skip empty deltas.
   if (!content) return blocks;
   const last = blocks[blocks.length - 1];
   if (last && last.type === 'thinking') {
@@ -1234,26 +1387,7 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
 }
 
 /**
- * Builds per-turn metadata for the assistant entry just finalized by a
- * `Result` chunk. Prefers the backend's authoritative `turn_cost`; falls
- * back to `calculateCost()` against the per-model pricing table when the
- * backend didn't provide it. Returns `undefined` when the chunk carries
- * no usage or model information.
- * @param data - Relevant fields copied from the `Result` chunk payload.
- * @param data.turn_usage - Per-turn token usage (required for fallback cost).
- * @param data.turn_cost - Authoritative per-turn cost from the backend.
- * @param data.model - Model id attached to the `Result` chunk, if any.
- * @param resolvedModel - Model id already resolved by the reducer.
- */
-/**
- * Locates the retry anchor — the (assistant, user) pair at the tail of
- * `entries` whose user entry can be replayed via `retry_last_turn`
- * (ADR-046). Returns the matched indices and the user uuid, or `null`.
- *
- * `committedTag` is parametrised because the legacy ChatMessage shape
- * uses 'Committed' while the state-tree shape uses 'committed'. An
- * `undefined` `uuid_status` is treated as committed for backward
- * compatibility with pre-ADR-046 transcript entries.
+ * Locates the retry anchor: the (assistant, user) pair replayable via `retry_last_turn` (ADR-046).
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
  */
@@ -1285,13 +1419,23 @@ function findRetryAnchorIn(
   return null;
 }
 
+/**
+ * Builds per-turn metadata for the assistant entry finalized by a `Result` chunk.
+ * @param data - Fields copied from the `Result` payload.
+ * @param data.turn_usage - Token usage for the turn.
+ * @param data.turn_cost - Cost (USD) for the turn.
+ * @param data.model - Model id from the payload, if present.
+ * @param resolvedModel - Model id already resolved by the reducer.
+ * @param suppressCost - Skip the cost preview (local has no real cost).
+ */
 function buildEntryMeta(
   data: {
     turn_usage?: TurnUsage;
     turn_cost?: number;
     model?: string;
   },
-  resolvedModel: string | undefined
+  resolvedModel: string | undefined,
+  suppressCost = false
 ): EntryMeta | undefined {
   const { turn_usage, turn_cost } = data;
   const model = data.model ?? resolvedModel;
@@ -1302,14 +1446,10 @@ function buildEntryMeta(
   if (model) meta.model = model;
   if (turn_usage) meta.usage = turn_usage;
 
-  // Cost: prefer backend turn_cost (authoritative); fallback to computed cost
-  // from pricing.ts when usage is available. Leave undefined otherwise so
-  // the renderer hides the segment rather than showing $0.000.
-  if (turn_cost !== undefined) {
+  // Cost preview = backend turn_cost only; reconcileFooterCost replaces it with
+  // the proxy SSOT. No frontend pricing — undefined hides the segment.
+  if (!suppressCost && turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
-  } else if (model && turn_usage) {
-    const computed = calculateCost(model, turn_usage);
-    if (computed !== null) meta.cost = computed;
   }
   return meta;
 }
@@ -1334,10 +1474,7 @@ function completeToolBlock(
 }
 
 /**
- * Returns the index of the most recent user entry that has not yet had a UUID
- * committed onto it (ADR-046). Returns -1 when no such entry exists. Walking
- * from the end is correct because `UserMessageCommit` chunks always belong to
- * the latest pending user prompt — earlier prompts already carry their UUIDs.
+ * Index of the most recent user entry missing a UUID, or -1 if none (ADR-046).
  * @param msgs - Snapshot of `_messages` at the time the commit chunk arrives.
  */
 function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
@@ -1359,13 +1496,7 @@ export interface LegacyStateSnapshot {
 }
 
 /**
- * Project legacy ChatStateService fields onto a `ConversationStateTree`.
- *
- * The patch protocol (ADR-042) defines `state()` as the source of truth.
- * During the bridge period, this projection rebuilds the state-tree from
- * the legacy fields after every mutation so the signal stays consistent
- * without introducing drift. Once a forklift removes the legacy fields,
- * this becomes obsolete.
+ * Project legacy ChatStateService fields onto a `ConversationStateTree` (ADR-042).
  * @param src - Snapshot of legacy backing fields.
  */
 export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): ConversationStateTree {
@@ -1407,6 +1538,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     output_tokens: src.sessionStats?.usage?.output_tokens ?? 0,
     cache_read_tokens: src.sessionStats?.usage?.cache_read_tokens ?? 0,
     cache_write_tokens: src.sessionStats?.usage?.cache_write_tokens ?? 0,
+    // Safe lossy projection: the state-tree total is display-only and never
+    // rendered as $; the authoritative unpriced/null cost lives in total_cost.
     cost: src.sessionStats?.total_cost ?? 0,
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };
@@ -1421,9 +1554,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
 }
 
 /**
- * Project committed `state().entries` onto the legacy `ChatMessage[]` shape.
- * The trailing live-streaming entry (uuid_status=pending and no meta) is
- * dropped — it lives separately under `currentBlocksFromState`.
+ * Project committed `state().entries` onto the legacy `ChatMessage[]` shape;
+ * the trailing live-streaming entry is dropped (it lives under `currentBlocksFromState`).
  * @param entries - State-tree entries to convert.
  */
 export function stateEntriesToChatMessages(
@@ -1500,6 +1632,15 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
+      default: {
+        // Unknown Rust MessageBlock variant with no TS arm (ADR-042 drift).
+        const unknownKind = (b as { kind: string }).kind;
+        pluginLogWarn(
+          `[chat-state] stateBlocksToMessageBlocks: dropping unknown block kind "${unknownKind}"`
+        ).catch(() => {});
+        out.push({ type: 'error', content: `Unsupported message block: ${unknownKind}` });
+        break;
+      }
     }
   }
   return out;
@@ -1565,11 +1706,7 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
 }
 
 /**
- * Flattens a message's blocks into a copy-friendly plain-text string. Tool
- * inputs and outputs are intentionally elided — the user wants the assistant's
- * prose, not the JSON of every Bash command. Thinking blocks, ask_user, and
- * tool_use are dropped; text and error contents are concatenated with a blank
- * line between blocks for readability.
+ * Flatten blocks into plain text; elides tool inputs/outputs, thinking, and ask_user.
  * @param blocks - The message blocks to flatten.
  */
 export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
@@ -1579,4 +1716,103 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
     else if (b.type === 'error') parts.push(b.content);
   }
   return parts.join('\n\n').trim();
+}
+
+/**
+ * Null handling is asymmetric: unknown history defaults to fits (resume),
+ * unknown window defaults to doesn't fit (ask) — local models with no discovery.
+ * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
+ * @param windowTokens - Target model's context window, or null if undiscovered.
+ */
+export function historyFitsTarget(
+  historyTokens: number | null,
+  windowTokens: number | null
+): boolean {
+  if (historyTokens == null) return true;
+  if (windowTokens == null) return false;
+  return historyTokens < windowTokens;
+}
+
+/** Raw tool_use block shape from Rust history.rs (flat, no nested `tool`). */
+interface HistoryToolUseBlock {
+  type: 'tool_use';
+  tool_name: string;
+  input_json: string;
+}
+
+/** Raw tool_result block from Rust history.rs (consumed during normalization). */
+interface HistoryToolResultBlock {
+  type: 'tool_result';
+  content: string;
+  is_error: boolean;
+}
+
+/**
+ * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
+ * @param transcript - Backend conversation transcript to convert.
+ */
+export function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
+  return transcript.messages.map((msg) => {
+    const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
+    const rawBlocks =
+      msg.blocks && msg.blocks.length > 0
+        ? (msg.blocks as unknown as (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[])
+        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
+    const blocks = normalizeHistoryBlocks(rawBlocks);
+    const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
+    // Propagate JSONL uuid and mark Committed so retry accepts it as anchor (ADR-046).
+    const base: ChatMessage = { role, blocks, timestamp };
+    if (msg.uuid) {
+      base.uuid = msg.uuid;
+      base.uuid_status = 'Committed';
+    }
+    // Restore the per-message footer (model · tokens) on resume.
+    if (msg.model !== undefined || msg.usage !== undefined) {
+      base.meta = {};
+      if (msg.model !== undefined) base.meta.model = msg.model;
+      if (msg.usage !== undefined) base.meta.usage = msg.usage;
+    }
+    return base;
+  });
+}
+
+/**
+ * Converts blocks from backend history format to live-chat format, merging tool_result into tool_use.
+ * @param blocks - Raw blocks from the backend history payload.
+ */
+function normalizeHistoryBlocks(
+  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+): MessageBlock[] {
+  const result: MessageBlock[] = [];
+
+  for (const block of blocks) {
+    if (block.type === 'tool_use' && !('tool' in block)) {
+      const hist = block as HistoryToolUseBlock;
+      result.push({
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: '',
+          tool_name: hist.tool_name,
+          input_json: hist.input_json,
+          status: 'done',
+          result: '',
+          result_is_error: false,
+        },
+      });
+    } else if (block.type === 'tool_result') {
+      const hist = block as HistoryToolResultBlock;
+      const prev = result[result.length - 1];
+      if (prev?.type === 'tool_use') {
+        const base = { ...prev.tool, result: hist.content };
+        prev.tool = hist.is_error
+          ? { ...base, status: 'error' as const, result_is_error: true as const }
+          : { ...base, status: 'done' as const, result_is_error: false as const };
+      }
+    } else {
+      result.push(block as MessageBlock);
+    }
+  }
+
+  return result;
 }

@@ -1,9 +1,13 @@
+//! Resolution and staging of bundled assets (build context, Node, binaries).
+
 use crate::{build, consts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Filename of the bundled manifest describing the shipped app version.
 pub const BUNDLE_MANIFEST_FILE: &str = "bundle-manifest.json";
+/// Filename of the persisted bundle reconciliation state.
 pub const BUNDLE_STATE_FILE: &str = "bundle-state.json";
 
 const REQUIRED_CLAUDE_RESOURCES: &[&str] = &[
@@ -13,16 +17,23 @@ const REQUIRED_CLAUDE_RESOURCES: &[&str] = &[
     "output-styles/Speedwave.md",
 ];
 
+/// Kind of a bundled asset, controlling how it is validated/staged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BundledAssetKind {
+    /// A regular file.
     File,
+    /// A directory tree.
     Directory,
+    /// A file that must be executable.
     ExecutableFile,
 }
 
+/// One asset shipped in the app bundle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BundledAssetSpec {
+    /// Path relative to the bundle resources root.
     pub path: &'static str,
+    /// Asset kind.
     pub kind: BundledAssetKind,
 }
 
@@ -59,38 +70,7 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `host_exec` worker (ADR-054) — a host process like `mcp-os` (not a
-    // container, not in `build::IMAGES`), bundled the same way: its built JS
-    // + the `@speedwave/mcp-shared` dependency tree, resolved by
-    // `build::resolve_host_exec_script` at `host_exec/host_exec/dist/index.js`.
-    // No Mach-O of its own → no `sign-bundled-binaries.sh` entry (same as
-    // `mcp-os/os/dist`).
-    BundledAssetSpec {
-        path: "host_exec/host_exec/dist/index.js",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/dist",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/package.json",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/package-lock.json",
-        kind: BundledAssetKind::File,
-    },
-    BundledAssetSpec {
-        path: "host_exec/shared/node_modules",
-        kind: BundledAssetKind::Directory,
-    },
-    BundledAssetSpec {
-        path: "host_exec/host_exec/node_modules/@speedwave/mcp-shared",
-        kind: BundledAssetKind::Directory,
-    },
-    // `oauth` worker (ADR-060) — same bundling shape as `host_exec`. Resolved
-    // by `build::resolve_oauth_script` at `oauth/oauth/dist/index.js`.
+    // `oauth` worker (ADR-060): host process like `mcp-os`, not in `build::IMAGES`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
         kind: BundledAssetKind::File,
@@ -150,15 +130,25 @@ const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "notes-cli",
         kind: BundledAssetKind::ExecutableFile,
     },
+    BundledAssetSpec {
+        path: "audio-capture-cli",
+        kind: BundledAssetKind::ExecutableFile,
+    },
 ];
+
+/// Bundle-relative path of the nerdctl-full tarball (Windows offline install).
+pub const NERDCTL_TARBALL_ASSET: &str = "wsl/nerdctl-full.tar.gz";
+
+/// Bundle-relative path of the Ubuntu WSL rootfs tarball (Windows offline install).
+pub const UBUNTU_ROOTFS_ASSET: &str = "wsl/ubuntu-rootfs.tar.gz";
 
 const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
-        path: "wsl/nerdctl-full.tar.gz",
+        path: NERDCTL_TARBALL_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
-        path: "wsl/ubuntu-rootfs.tar.gz",
+        path: UBUNTU_ROOTFS_ASSET,
         kind: BundledAssetKind::File,
     },
     BundledAssetSpec {
@@ -171,34 +161,88 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
 ];
 
+/// Manifest of the currently shipped app bundle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleManifest {
+    /// App version string.
     pub app_version: String,
+    /// Reconcile id (app_version + image hashes + resources hash). Triggers
+    /// resources sync + project restore; image rebuilds are per-image (ADR-072).
     pub bundle_id: String,
-    pub build_context_hash: String,
+    /// Per-image build-input hash (image name → 16-char hex) used to tag images.
+    /// One entry per `build::IMAGES`; empty ⇒ legacy pre-ADR-072, regenerated.
+    #[serde(default)]
+    pub image_hashes: std::collections::BTreeMap<String, String>,
+    /// Hash of the claude-resources tree.
     pub claude_resources_hash: String,
 }
 
+impl BundleManifest {
+    /// Build-input hash for image `name`; errors on names outside the catalogue.
+    pub(crate) fn image_hash(&self, name: &str) -> anyhow::Result<&str> {
+        self.image_hashes
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("no image hash for '{name}' in bundle manifest"))
+    }
+
+    /// Full image tag (`name:hash`) for image `name`.
+    pub fn image_tag(&self, name: &str) -> anyhow::Result<String> {
+        Ok(build::image_ref(name, self.image_hash(name)?))
+    }
+
+    /// Manifest mapping every catalogue image to `uniform_hash` — keeps legacy
+    /// `name:test-bundle`-style tags working in tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(uniform_hash: &str) -> Self {
+        Self {
+            app_version: "0.0.0-test".to_string(),
+            bundle_id: uniform_hash.to_string(),
+            image_hashes: build::IMAGES
+                .iter()
+                .map(|img| (img.name.to_string(), uniform_hash.to_string()))
+                .collect(),
+            claude_resources_hash: uniform_hash.to_string(),
+        }
+    }
+}
+
+/// Ordered stages of bundle reconciliation after an app upgrade.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleReconcilePhase {
+    /// Reconciliation not yet started.
     Pending,
+    /// Claude resources synced to the data dir.
     ResourcesSynced,
+    /// Container images rebuilt.
     ImagesBuilt,
+    /// Previously running projects restarted.
     ProjectsRestored,
+    /// Reconciliation complete.
     #[default]
     Done,
 }
 
+/// Persisted reconciliation state across restarts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleState {
+    /// Reconcile id currently applied, if any.
     pub applied_bundle_id: Option<String>,
+    /// Per-image hashes currently applied; drives replaced-tag pruning.
+    /// Empty on first run after migration from the single-id format.
+    #[serde(default)]
+    pub applied_image_hashes: std::collections::BTreeMap<String, String>,
+    /// Current reconciliation phase.
     pub phase: BundleReconcilePhase,
+    /// Projects to restart once reconciliation reaches that phase.
     pub pending_running_projects: Vec<String>,
+    /// Last error encountered, if reconciliation failed.
     pub last_error: Option<String>,
 }
 
 impl BundleReconcilePhase {
+    /// `true` if this phase precedes `other` in reconciliation order.
     pub fn is_before(self, other: Self) -> bool {
         self.order() < other.order()
     }
@@ -214,63 +258,161 @@ impl BundleReconcilePhase {
     }
 }
 
+/// Loads the bundle manifest from the resolved build root.
 pub fn load_current_bundle_manifest() -> anyhow::Result<BundleManifest> {
     load_current_bundle_manifest_from(&build::resolve_build_root()?)
 }
 
 /// Env-free core of [`load_current_bundle_manifest`]: takes an explicit build
-/// root so tests can inject a path and never read the process-global
-/// `SPEEDWAVE_RESOURCES_DIR` (which other tests mutate — see the test-isolation
-/// guard). The public no-arg shim resolves the root from env at the call site.
+/// root instead of reading `SPEEDWAVE_RESOURCES_DIR` from env.
 pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<BundleManifest> {
     let manifest_path = build_root.join(BUNDLE_MANIFEST_FILE);
+    let mut resources_version = None;
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
-        return serde_json::from_str(&data).map_err(anyhow::Error::from);
+        let manifest: BundleManifest = serde_json::from_str(&data)?;
+        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
+        if !manifest.image_hashes.is_empty() {
+            return Ok(manifest);
+        }
+        resources_version = Some(manifest.app_version);
     }
     generate_bundle_manifest(
         env!("CARGO_PKG_VERSION"),
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
+    .map_err(|e| {
+        // An older Desktop's tree lacks new image inputs — name the real remedy.
+        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+            Some(v) => anyhow::anyhow!(
+                "installed Desktop resources are v{v} but this binary is v{}: {e}. \
+                 Update Speedwave Desktop, then run `speedwave update`.",
+                env!("CARGO_PKG_VERSION")
+            ),
+            None => e,
+        }
+    })
 }
 
-/// `claude_version` is mixed into `bundle_id` because it's a build-arg to
-/// Containerfile.claude — not covered by `build_context_hash`. Bumping the pin
-/// must trigger image rebuild on the next reconciliation.
+/// App version stamped in the on-disk manifest; `None` when absent/unreadable.
+/// Never regenerates — safe on incomplete (older-Desktop) trees.
+pub fn manifest_app_version_in(build_root: &Path) -> Option<String> {
+    let data = std::fs::read_to_string(build_root.join(BUNDLE_MANIFEST_FILE)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&data)
+        .ok()?
+        .get("app_version")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Per-image hashes cover each image's declared `hash_inputs` + build args;
+/// `claude_version` overrides the `CLAUDE_VERSION` build-arg value so callers
+/// (desktop build.rs, CLI fallback, tests) control the pin. See ADR-072.
 pub fn generate_bundle_manifest(
     app_version: &str,
     claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
-    let build_context_hash = digest_paths(&[
-        ("containers", &build_root.join("containers")),
-        ("mcp-servers", &build_root.join("mcp-servers")),
-    ])?;
+    // Each distinct input is hashed once (mcp-servers/shared feeds every worker).
+    let mut component_cache: std::collections::HashMap<&str, String> =
+        std::collections::HashMap::new();
+    let mut image_hashes = std::collections::BTreeMap::new();
+    for img in build::IMAGES {
+        let mut components: Vec<(&str, &str)> = Vec::with_capacity(img.hash_inputs.len());
+        for input in img.hash_inputs {
+            if !component_cache.contains_key(input) {
+                let hash = digest_paths(&[(input, &build_root.join(input))])?;
+                component_cache.insert(input, hash);
+            }
+        }
+        for input in img.hash_inputs {
+            components.push((input, component_cache[input].as_str()));
+        }
+        let effective_args: Vec<(&str, &str)> = img
+            .build_args
+            .iter()
+            .map(|(k, v)| {
+                (
+                    *k,
+                    if *k == "CLAUDE_VERSION" {
+                        claude_version
+                    } else {
+                        *v
+                    },
+                )
+            })
+            .collect();
+        image_hashes.insert(
+            img.name.to_string(),
+            image_content_hash(img.name, &effective_args, &components),
+        );
+    }
+
     let claude_resources_hash = digest_paths(&[(
         "claude-resources",
         &build_root.join("containers").join("claude-resources"),
     )])?;
-
-    let mut bundle_hasher = Sha256::new();
-    bundle_hasher.update(app_version.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(build_context_hash.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(claude_resources_hash.as_bytes());
-    bundle_hasher.update(b":");
-    bundle_hasher.update(claude_version.as_bytes());
-    let mut bundle_id = bytes_to_hex(&bundle_hasher.finalize());
-    bundle_id.truncate(16);
+    let bundle_id = reconcile_id(app_version, &image_hashes, &claude_resources_hash);
 
     Ok(BundleManifest {
         app_version: app_version.to_string(),
         bundle_id,
-        build_context_hash,
+        image_hashes,
         claude_resources_hash,
     })
 }
 
+/// Pure hash of one image's build inputs: name + per-input component hashes +
+/// effective build args. 16-char hex, used as the image tag suffix.
+pub(crate) fn image_content_hash(
+    name: &str,
+    build_args: &[(&str, &str)],
+    components: &[(&str, &str)],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update(b"\0");
+    for (path, hash) in components {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    for (key, value) in build_args {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\0");
+    }
+    let mut hash = bytes_to_hex(&hasher.finalize());
+    hash.truncate(16);
+    hash
+}
+
+/// Reconcile id: app_version + sorted per-image hashes + resources hash.
+/// app_version deliberately included — rationale in ADR-072.
+fn reconcile_id(
+    app_version: &str,
+    image_hashes: &std::collections::BTreeMap<String, String>,
+    claude_resources_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(app_version.as_bytes());
+    hasher.update(b"\0");
+    for (name, hash) in image_hashes {
+        hasher.update(name.as_bytes());
+        hasher.update(b":");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(claude_resources_hash.as_bytes());
+    let mut id = bytes_to_hex(&hasher.finalize());
+    id.truncate(16);
+    id
+}
+
+/// Loads the persisted bundle state, defaulting if absent or unreadable.
 pub fn load_bundle_state() -> BundleState {
     bundle_state_path()
         .ok()
@@ -278,20 +420,13 @@ pub fn load_bundle_state() -> BundleState {
         .unwrap_or_default()
 }
 
-pub fn load_bundle_state_in(data_dir: &Path) -> BundleState {
-    let path = data_dir.join(BUNDLE_STATE_FILE);
-    load_bundle_state_from(&path).unwrap_or_default()
-}
-
+/// Persists the bundle reconciliation state.
 pub fn save_bundle_state(state: &BundleState) -> anyhow::Result<()> {
     let path = bundle_state_path()?;
     save_bundle_state_to(state, &path)
 }
 
-pub fn save_bundle_state_in(state: &BundleState, data_dir: &Path) -> anyhow::Result<()> {
-    save_bundle_state_to(state, &data_dir.join(BUNDLE_STATE_FILE))
-}
-
+/// Atomically syncs claude-resources from the build root into the data dir.
 pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
     let source = build_root.join("containers").join("claude-resources");
     validate_claude_resources(&source)?;
@@ -330,6 +465,7 @@ pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bundled assets required for `target_os` (`macos` | `windows`).
 pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAssetSpec>> {
     let mut assets = COMMON_BUNDLED_ASSETS.to_vec();
     match target_os {
@@ -340,6 +476,7 @@ pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAss
     Ok(assets)
 }
 
+/// Validates every required bundled asset exists at `resources_root`.
 pub fn validate_bundled_runtime_assets(
     resources_root: &Path,
     target_os: &str,
@@ -349,6 +486,57 @@ pub fn validate_bundled_runtime_assets(
         validate_bundled_asset(resources_root, asset, allow_stubs)?;
     }
     Ok(())
+}
+
+/// Finds a bundled asset by bundle-relative path across every known resources
+/// root (env var, exe dir, Tauri Windows `resources/` layout, Desktop marker).
+pub fn find_bundled_asset(relative_path: &str) -> Option<PathBuf> {
+    let roots = bundled_resource_roots(
+        std::env::var(consts::BUNDLE_RESOURCES_ENV)
+            .ok()
+            .map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+        resources_marker_dir(consts::data_dir()),
+    );
+    find_bundled_asset_in(&roots, relative_path)
+}
+
+/// Candidate resources roots in priority order; pure core of [`find_bundled_asset`].
+/// The exe parent covers a binary living one level inside the resources root.
+fn bundled_resource_roots(
+    env_root: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    marker_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.extend(env_root);
+    if let Some(dir) = exe_dir {
+        roots.push(dir.clone());
+        roots.push(dir.join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR));
+        if let Some(parent) = dir.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.extend(marker_root);
+    roots
+}
+
+/// Reads the Desktop-written resources marker under `data_dir`; absolute only.
+fn resources_marker_dir(data_dir: &Path) -> Option<PathBuf> {
+    let marker = data_dir.join(consts::RESOURCES_MARKER);
+    let content = std::fs::read_to_string(marker).ok()?;
+    let path = PathBuf::from(content.trim());
+    path.is_absolute().then_some(path)
+}
+
+/// First root that actually contains `relative_path`.
+fn find_bundled_asset_in(roots: &[PathBuf], relative_path: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(relative_path))
+        .find(|candidate| candidate.exists())
 }
 
 fn bundle_state_path() -> anyhow::Result<PathBuf> {
@@ -367,13 +555,22 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
 
     let json = serde_json::to_string_pretty(state)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    // Restrict permissions before rename — rename preserves the inode (and
-    // thus the mode bits) on Unix, so the final file inherits 0o600.
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(json.as_bytes())?;
+        // fsync before rename — APFS/virtiofs can persist the rename before data blocks (torn write).
+        crate::fs_perms::fsync_file_durable(&file)
+            .map_err(|e| anyhow::anyhow!("fsync bundle-state before rename: {e}"))?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -497,13 +694,29 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
+/// Host build-output dir names that are never image content — skipped from digests here,
+/// pruned by bundle-build-context.{sh,ps1}, and ignored via `containers/.dockerignore`
+/// (alignment test-enforced).
+pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+
 fn collect_directory_entries(
     dir: &Path,
     prefix: &str,
     out: &mut Vec<(String, Vec<u8>)>,
 ) -> anyhow::Result<()> {
     if !dir.exists() {
-        anyhow::bail!("Missing directory for bundle digest: {}", dir.display());
+        anyhow::bail!("Missing path for bundle digest: {}", dir.display());
+    }
+    // Reject symlinks: the copier dereferences them, changing content without changing the hash.
+    if dir.is_symlink() {
+        anyhow::bail!(
+            "symlink not allowed in image hash inputs: {}",
+            dir.display()
+        );
+    }
+    if dir.is_file() {
+        out.push((prefix.to_string(), std::fs::read(dir)?));
+        return Ok(());
     }
 
     let mut children: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -512,9 +725,20 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
-        // Skip symlinks to prevent infinite recursion from circular links
-        if child.is_symlink() {
+        if child.is_dir()
+            && child
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| HOST_BUILD_OUTPUT_DIRS.contains(&n))
+        {
             continue;
+        }
+        // Reject symlinks: the copier dereferences them, changing content without changing the hash.
+        if child.is_symlink() {
+            anyhow::bail!(
+                "symlink not allowed in image hash inputs: {}",
+                child.display()
+            );
         }
         let rel_name = child
             .strip_prefix(dir)
@@ -541,12 +765,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            // fsync each file — staging→target rename must not outlive the data (torn-write).
+            let file = std::fs::File::open(&dst_path)
+                .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
+            crate::fs_perms::fsync_file_durable(&file)
+                .map_err(|e| anyhow::anyhow!("fsync {}: {e}", dst_path.display()))?;
         }
     }
     Ok(())
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -554,6 +783,233 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_top_level_symlinked_file_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.sh");
+        std::fs::write(&real, "x").unwrap();
+        let link = tmp.path().join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&link, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_paths_rejects_symlinked_hash_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).unwrap();
+        let mut out = Vec::new();
+        let err = collect_directory_entries(&dir, "p", &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+        let ps1 = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+            .expect("bundle-build-context.ps1 should exist");
+        let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
+            .expect("containers/.dockerignore should exist");
+
+        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
+        let sh_line = sh
+            .lines()
+            .find(|l| l.contains("-prune"))
+            .expect("-prune find line should exist in .sh");
+        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
+        let mut sh_names: Vec<&str> = sh_tokens
+            .windows(2)
+            .filter(|w| w[0] == "-name")
+            .map(|w| w[1])
+            .collect();
+        sh_names.sort_unstable();
+
+        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
+        let ps1_line = ps1
+            .lines()
+            .find(|l| l.contains(" -in "))
+            .expect("-in prune line should exist in .ps1");
+        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
+        ps1_names.sort_unstable();
+
+        let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
+        expected.sort_unstable();
+
+        assert_eq!(
+            sh_names, expected,
+            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        assert_eq!(
+            ps1_names, expected,
+            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        for name in HOST_BUILD_OUTPUT_DIRS {
+            assert!(
+                dockerignore
+                    .lines()
+                    .any(|l| l.trim() == format!("**/{name}/")),
+                "containers/.dockerignore must contain '**/{name}/' (HOST_BUILD_OUTPUT_DIRS)"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_node_modules_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/index.ts"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("node_modules/pkg/index.js"), "dep").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/index.ts")), "{rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.contains("node_modules")),
+            "node_modules must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
+        // node_modules/.bin/<tool> symlinks must be skipped, not bailed on.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+        let real = dir.join("node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("node_modules/.bin/vitest")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        let mut out = Vec::new();
+        let res = collect_directory_entries(&dir, "p", &mut out);
+        assert!(
+            res.is_ok(),
+            "must not bail on node_modules symlinks: {res:?}"
+        );
+        assert!(out.iter().any(|(r, _)| r.ends_with("package.json")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_directory_entries_skips_nested_node_modules() {
+        // The skip applies at every recursion depth, not just the top level.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hub");
+        let nested = dir.join("packages/pkg/node_modules/.bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let real = dir.join("packages/pkg/node_modules/tool/tool.js");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nested.join("tool")).unwrap();
+        std::fs::write(dir.join("packages/pkg/index.ts"), "real").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        assert!(out.iter().any(|(r, _)| r.ends_with("pkg/index.ts")));
+        assert!(!out.iter().any(|(r, _)| r.contains("node_modules")));
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_target_and_dist_directories() {
+        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
+        // COPY source) — both are host build outputs racing parallel test lanes.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proxy");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "real").unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/proxy.d"), "junk").unwrap();
+        std::fs::create_dir_all(dir.join("nested/dist")).unwrap();
+        std::fs::write(dir.join("nested/dist/index.js"), "built").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.iter().any(|r| r.ends_with("src/main.rs")), "{rels:?}");
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.contains("target") || r.contains("dist")),
+            "target/ and dist/ must be excluded: {rels:?}"
+        );
+    }
+
+    #[test]
+    fn collect_directory_entries_keeps_files_named_target_or_dist() {
+        // The skip is directory-gated: plain FILES with these names are content.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("svc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target"), "a file, not a build dir").unwrap();
+        std::fs::write(dir.join("dist"), "also a file").unwrap();
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(rels.contains(&"p/target"), "{rels:?}");
+        assert!(rels.contains(&"p/dist"), "{rels:?}");
+    }
+
+    #[test]
+    fn target_and_dist_changes_do_not_alter_manifest_hash() {
+        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
+        // (mcp-servers/*/dist) must not perturb or race the image hashes.
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/proxy/target/debug")).unwrap();
+        std::fs::write(
+            tmp.path().join("containers/proxy/target/debug/proxy.d"),
+            "cargo junk",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp-servers/hub/dist")).unwrap();
+        std::fs::write(tmp.path().join("mcp-servers/hub/dist/index.js"), "built").unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(before.image_hashes, after.image_hashes);
+        assert_eq!(before.bundle_id, after.bundle_id);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn node_modules_changes_do_not_alter_manifest_hash() {
+        // node_modules is not image content; adding it must not change any image hash (ADR-072).
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        let nm = tmp.path().join("mcp-servers/hub/node_modules/.bin");
+        std::fs::create_dir_all(&nm).unwrap();
+        let real = tmp
+            .path()
+            .join("mcp-servers/hub/node_modules/vitest/vitest.mjs");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "x").unwrap();
+        std::os::unix::fs::symlink(&real, nm.join("vitest")).unwrap();
+        let after = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
+        assert_eq!(
+            before.image_hashes, after.image_hashes,
+            "node_modules must not affect image hashes"
+        );
+    }
 
     fn write_resource_tree(root: &Path) {
         std::fs::create_dir_all(root.join("containers/claude-resources/output-styles")).unwrap();
@@ -572,6 +1028,41 @@ mod tests {
             "# style",
         )
         .unwrap();
+    }
+
+    /// Materializes every `hash_inputs` path of every catalogue image so
+    /// `generate_bundle_manifest` can digest a synthetic build root.
+    fn write_build_tree(root: &Path) {
+        write_resource_tree(root);
+        for img in build::IMAGES {
+            for input in img.hash_inputs {
+                let path = root.join(input);
+                // Inputs with an extension are files; the rest are directories.
+                if Path::new(input).extension().is_some() {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    if !path.exists() {
+                        std::fs::write(&path, format!("stub for {input}")).unwrap();
+                    }
+                } else {
+                    std::fs::create_dir_all(&path).unwrap();
+                    let stub = path.join("src.ts");
+                    if !stub.exists() {
+                        std::fs::write(&stub, format!("content of {input}")).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Image names whose hash differs between two manifests.
+    fn changed_images(a: &BundleManifest, b: &BundleManifest) -> Vec<String> {
+        a.image_hashes
+            .iter()
+            .filter(|(name, hash)| b.image_hashes.get(*name) != Some(*hash))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn write_common_bundled_assets(root: &Path) {
@@ -607,29 +1098,6 @@ mod tests {
         std::fs::write(mcp_shared_dest.join("dist/index.js"), "export {};").unwrap();
         std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
-
-        // host_exec worker — staged the same way as mcp-os (ADR-054).
-        std::fs::create_dir_all(root.join("host_exec/host_exec/dist")).unwrap();
-        std::fs::create_dir_all(root.join("host_exec/shared/dist")).unwrap();
-        std::fs::create_dir_all(root.join("host_exec/shared/node_modules/pkg")).unwrap();
-        std::fs::write(
-            root.join("host_exec/host_exec/dist/index.js"),
-            "console.log('ok');",
-        )
-        .unwrap();
-        std::fs::write(root.join("host_exec/shared/dist/index.js"), "export {};").unwrap();
-        std::fs::write(root.join("host_exec/shared/package.json"), "{}").unwrap();
-        std::fs::write(root.join("host_exec/shared/package-lock.json"), "{}").unwrap();
-        std::fs::write(
-            root.join("host_exec/shared/node_modules/pkg/index.js"),
-            "module.exports = {};",
-        )
-        .unwrap();
-        let he_shared_dest = root.join("host_exec/host_exec/node_modules/@speedwave/mcp-shared");
-        std::fs::create_dir_all(he_shared_dest.join("dist")).unwrap();
-        std::fs::write(he_shared_dest.join("dist/index.js"), "export {};").unwrap();
-        std::fs::write(he_shared_dest.join("package.json"), "{}").unwrap();
-        std::fs::write(he_shared_dest.join("package-lock.json"), "{}").unwrap();
 
         // oauth worker — staged the same way as mcp-os (ADR-060).
         std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
@@ -680,6 +1148,7 @@ mod tests {
                 write_executable(&root.join("calendar-cli"));
                 write_executable(&root.join("mail-cli"));
                 write_executable(&root.join("notes-cli"));
+                write_executable(&root.join("audio-capture-cli"));
             }
             "windows" => {
                 std::fs::create_dir_all(root.join("wsl")).unwrap();
@@ -697,48 +1166,152 @@ mod tests {
     #[test]
     fn manifest_generation_is_deterministic() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
 
         let a = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
         let b = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
         assert_eq!(a, b);
         assert_eq!(a.bundle_id.len(), 16);
+        for img in build::IMAGES {
+            let hash = a.image_hashes.get(img.name).expect("hash for every image");
+            assert_eq!(hash.len(), 16, "16-char hash for {}", img.name);
+        }
     }
 
     #[test]
-    fn manifest_generation_changes_with_content() {
+    fn claude_input_change_rebuilds_only_claude() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
 
         let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
-        std::fs::write(
-            temp.path().join("containers/Containerfile.claude"),
-            "FROM changed",
-        )
-        .unwrap();
+        std::fs::write(temp.path().join("containers/entrypoint.sh"), "changed").unwrap();
         let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
 
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_CLAUDE.to_string()]
+        );
         assert_ne!(before.bundle_id, after.bundle_id);
-        assert_ne!(before.build_context_hash, after.build_context_hash);
     }
 
     #[test]
-    fn manifest_generation_changes_with_claude_version() {
+    fn worker_input_change_is_isolated() {
         let temp = tempfile::tempdir().unwrap();
-        write_resource_tree(temp.path());
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(temp.path().join("mcp-servers/slack/src.ts"), "changed").unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_MCP_SLACK.to_string()]
+        );
+    }
+
+    #[test]
+    fn shared_change_fans_out_to_all_workers_but_not_claude() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(temp.path().join("mcp-servers/shared/src.ts"), "changed").unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        let changed = changed_images(&before, &after);
+        assert!(!changed.contains(&build::IMAGE_CLAUDE.to_string()));
+        assert!(!changed.contains(&build::IMAGE_MCP_PLAYWRIGHT.to_string()));
+        for img in build::IMAGES {
+            let is_shared_consumer = img.hash_inputs.contains(&"mcp-servers/shared");
+            assert_eq!(
+                changed.contains(&img.name.to_string()),
+                is_shared_consumer,
+                "shared change must rebuild exactly its consumers: {}",
+                img.name
+            );
+        }
+    }
+
+    #[test]
+    fn claude_version_changes_only_claude_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
 
         let before = generate_bundle_manifest("1.2.3", "2.1.143", temp.path()).unwrap();
         let after = generate_bundle_manifest("1.2.3", "2.1.153", temp.path()).unwrap();
 
+        assert_eq!(
+            changed_images(&before, &after),
+            vec![build::IMAGE_CLAUDE.to_string()],
+            "bumping CLAUDE_VERSION must rebuild only the claude image"
+        );
+        assert_ne!(before.bundle_id, after.bundle_id);
+    }
+
+    #[test]
+    fn resources_change_alters_no_image_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        std::fs::write(
+            temp.path().join("containers/claude-resources/CLAUDE.md"),
+            "# changed",
+        )
+        .unwrap();
+        let after = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+
+        assert!(changed_images(&before, &after).is_empty());
+        assert_ne!(before.claude_resources_hash, after.claude_resources_hash);
         assert_ne!(
             before.bundle_id, after.bundle_id,
-            "bumping CLAUDE_VERSION must change bundle_id so the claude image is rebuilt"
+            "resources change must trigger reconcile (sync + restore) without rebuilds"
         );
+    }
+
+    #[test]
+    fn app_version_changes_only_bundle_id() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let before = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap();
+        let after = generate_bundle_manifest("1.2.4", "2.1.0", temp.path()).unwrap();
+
+        assert_eq!(before.image_hashes, after.image_hashes);
+        assert_ne!(
+            before.bundle_id, after.bundle_id,
+            "a release must trigger restore (render code lives in the binary) with 0 rebuilds"
+        );
+    }
+
+    #[test]
+    fn image_hash_and_tag_helpers() {
+        let manifest = BundleManifest::for_tests("abc123");
+        assert_eq!(manifest.image_hash(build::IMAGE_CLAUDE).unwrap(), "abc123");
         assert_eq!(
-            before.build_context_hash, after.build_context_hash,
-            "build_context_hash covers files only — CLAUDE_VERSION is mixed into bundle_id directly"
+            manifest.image_tag(build::IMAGE_MCP_HUB).unwrap(),
+            "speedwave-mcp-hub:abc123"
         );
+        assert!(manifest.image_hash("speedwave-nonexistent").is_err());
+    }
+
+    #[test]
+    fn for_tests_covers_every_catalogue_image() {
+        let manifest = BundleManifest::for_tests("t1");
+        for img in build::IMAGES {
+            assert!(manifest.image_hashes.contains_key(img.name));
+        }
+    }
+
+    #[test]
+    fn missing_hash_input_fails_manifest_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+        std::fs::remove_file(temp.path().join("containers/entrypoint.sh")).unwrap();
+
+        let err = generate_bundle_manifest("1.2.3", "2.1.0", temp.path()).unwrap_err();
+        assert!(err.to_string().contains("Missing path for bundle digest"));
     }
 
     #[test]
@@ -747,6 +1320,10 @@ mod tests {
         let path = temp.path().join("bundle-state.json");
         let state = BundleState {
             applied_bundle_id: Some("abc123".to_string()),
+            applied_image_hashes: std::collections::BTreeMap::from([
+                ("speedwave-claude".to_string(), "h1".to_string()),
+                ("speedwave-mcp-hub".to_string(), "h2".to_string()),
+            ]),
             phase: BundleReconcilePhase::ImagesBuilt,
             pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
             last_error: Some("boom".to_string()),
@@ -755,6 +1332,188 @@ mod tests {
         save_bundle_state_to(&state, &path).unwrap();
         let loaded = load_bundle_state_from(&path).unwrap();
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn legacy_state_file_parses_preserving_existing_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bundle-state.json");
+        // Pre-ADR-072 shape: no applied_image_hashes field.
+        std::fs::write(
+            &path,
+            r#"{
+                "applied_bundle_id": "old16charbundleid",
+                "phase": "images_built",
+                "pending_running_projects": ["alpha", "beta"],
+                "last_error": "boom"
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_bundle_state_from(&path).unwrap();
+        assert_eq!(
+            loaded.applied_bundle_id.as_deref(),
+            Some("old16charbundleid")
+        );
+        assert!(loaded.applied_image_hashes.is_empty());
+        assert_eq!(loaded.phase, BundleReconcilePhase::ImagesBuilt);
+        assert_eq!(loaded.pending_running_projects, vec!["alpha", "beta"]);
+        assert_eq!(loaded.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn new_state_file_readable_by_legacy_shape() {
+        // Old releases deserialize the new file (serde ignores unknown fields).
+        #[derive(Deserialize)]
+        struct LegacyBundleState {
+            applied_bundle_id: Option<String>,
+            phase: BundleReconcilePhase,
+            pending_running_projects: Vec<String>,
+        }
+
+        let state = BundleState {
+            applied_bundle_id: Some("aggregate-id".to_string()),
+            applied_image_hashes: std::collections::BTreeMap::from([(
+                "speedwave-claude".to_string(),
+                "h1".to_string(),
+            )]),
+            phase: BundleReconcilePhase::Done,
+            pending_running_projects: vec!["alpha".to_string()],
+            last_error: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let legacy: LegacyBundleState = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy.applied_bundle_id.as_deref(), Some("aggregate-id"));
+        assert_eq!(legacy.phase, BundleReconcilePhase::Done);
+        assert_eq!(legacy.pending_running_projects, vec!["alpha"]);
+    }
+
+    #[test]
+    fn legacy_manifest_json_is_regenerated() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+        // Pre-ADR-072 manifest: no image_hashes field.
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{
+                "app_version": "0.9.0",
+                "bundle_id": "legacy0123456789",
+                "build_context_hash": "deadbeef",
+                "claude_resources_hash": "cafebabe"
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = load_current_bundle_manifest_from(temp.path()).unwrap();
+        assert!(
+            !manifest.image_hashes.is_empty(),
+            "legacy manifest must be discarded and regenerated from the tree"
+        );
+        assert_ne!(manifest.bundle_id, "legacy0123456789");
+    }
+
+    /// Regeneration over an OLDER Desktop's incomplete tree must name the
+    /// real remedy (update the Desktop app), not a bare digest error.
+    #[test]
+    fn stale_resources_regeneration_error_names_desktop_update() {
+        let temp = tempfile::tempdir().unwrap();
+        // Legacy manifest + no build tree: digesting the new catalogue fails.
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Update Speedwave Desktop"),
+            "error must name the remedy: {msg}"
+        );
+        assert!(msg.contains("v0.1.0"), "error must name the stale version");
+    }
+
+    /// Same failure with a matching app_version keeps the raw error (a real
+    /// corruption, not a version skew).
+    #[test]
+    fn same_version_regeneration_error_stays_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            format!(
+                r#"{{"app_version": "{}", "bundle_id": "x0123456789abcd", "claude_resources_hash": "cafebabe"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let err = load_current_bundle_manifest_from(temp.path()).unwrap_err();
+        assert!(!err.to_string().contains("Update Speedwave Desktop"));
+    }
+
+    #[test]
+    fn manifest_app_version_reads_without_regenerating() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+        std::fs::write(
+            temp.path().join(BUNDLE_MANIFEST_FILE),
+            r#"{"app_version": "0.13.3", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_app_version_in(temp.path()).as_deref(),
+            Some("0.13.3")
+        );
+        std::fs::write(temp.path().join(BUNDLE_MANIFEST_FILE), "not json").unwrap();
+        assert_eq!(manifest_app_version_in(temp.path()), None);
+    }
+
+    #[test]
+    fn bundled_resource_roots_priority_and_layouts() {
+        let roots = bundled_resource_roots(
+            Some(PathBuf::from("/env")),
+            Some(PathBuf::from("/install/bin")),
+            Some(PathBuf::from("/marker")),
+        );
+        assert_eq!(roots[0], PathBuf::from("/env"), "env override wins");
+        assert!(roots.contains(&PathBuf::from("/install/bin")));
+        assert!(
+            roots.contains(
+                &PathBuf::from("/install/bin").join(consts::TAURI_WINDOWS_RESOURCES_SUBDIR)
+            ),
+            "Tauri Windows resources/ layout covered"
+        );
+        assert!(roots.contains(&PathBuf::from("/install")));
+        assert_eq!(roots.last().unwrap(), &PathBuf::from("/marker"));
+        assert!(bundled_resource_roots(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn find_bundled_asset_in_returns_first_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(b.join("wsl")).unwrap();
+        std::fs::write(b.join(NERDCTL_TARBALL_ASSET), "x").unwrap();
+        assert_eq!(
+            find_bundled_asset_in(&[a.clone(), b.clone()], NERDCTL_TARBALL_ASSET),
+            Some(b.join(NERDCTL_TARBALL_ASSET))
+        );
+        assert_eq!(find_bundled_asset_in(&[a], NERDCTL_TARBALL_ASSET), None);
+        assert_eq!(find_bundled_asset_in(&[], NERDCTL_TARBALL_ASSET), None);
+    }
+
+    #[test]
+    fn resources_marker_dir_requires_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "missing marker");
+        std::fs::write(dir.path().join(consts::RESOURCES_MARKER), "relative/path").unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), None, "relative rejected");
+        let abs = dir.path().join("resources");
+        std::fs::write(
+            dir.path().join(consts::RESOURCES_MARKER),
+            abs.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resources_marker_dir(dir.path()), Some(abs));
     }
 
     #[test]
@@ -798,6 +1557,19 @@ mod tests {
             .any(|asset| asset.path == "mcp-os/os/dist/index.js"));
     }
 
+    /// Drift guard: every signed macOS Mach-O (sign-bundled-binaries.sh
+    /// SIGN_TARGETS / tauri.macos.conf.json bundle.resources) must also be a
+    /// required bundled asset, or it ships unverified. audio-capture-cli was
+    /// missing here while present in both other lists.
+    #[test]
+    fn required_bundled_assets_for_macos_include_audio_capture_cli() {
+        let assets = required_bundled_assets("macos").unwrap();
+        assert!(
+            assets.iter().any(|asset| asset.path == "audio-capture-cli"),
+            "audio-capture-cli must be a required macOS bundled asset"
+        );
+    }
+
     #[test]
     fn validate_bundled_runtime_assets_accepts_complete_macos_tree() {
         let temp = tempfile::tempdir().unwrap();
@@ -816,6 +1588,17 @@ mod tests {
 
         let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
         assert!(err.to_string().contains("notes-cli"));
+    }
+
+    #[test]
+    fn validate_bundled_runtime_assets_rejects_missing_audio_capture_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        write_common_bundled_assets(temp.path());
+        write_platform_bundled_assets(temp.path(), "macos");
+        std::fs::remove_file(temp.path().join("audio-capture-cli")).unwrap();
+
+        let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
+        assert!(err.to_string().contains("audio-capture-cli"));
     }
 
     #[test]
@@ -840,14 +1623,6 @@ mod tests {
                 .join("mcp-os/os/node_modules/@speedwave/mcp-shared"),
         )
         .unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/host_exec/dist")).unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/shared/dist")).unwrap();
-        std::fs::create_dir_all(temp.path().join("host_exec/shared/node_modules")).unwrap();
-        std::fs::create_dir_all(
-            temp.path()
-                .join("host_exec/host_exec/node_modules/@speedwave/mcp-shared"),
-        )
-        .unwrap();
         std::fs::create_dir_all(temp.path().join("lima/bin")).unwrap();
         std::fs::create_dir_all(temp.path().join("lima/share")).unwrap();
         std::fs::create_dir_all(temp.path().join("nodejs/bin")).unwrap();
@@ -855,9 +1630,6 @@ mod tests {
         std::fs::write(temp.path().join("mcp-os/os/dist/index.js"), "").unwrap();
         std::fs::write(temp.path().join("mcp-os/shared/package.json"), "").unwrap();
         std::fs::write(temp.path().join("mcp-os/shared/package-lock.json"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/host_exec/dist/index.js"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/shared/package.json"), "").unwrap();
-        std::fs::write(temp.path().join("host_exec/shared/package-lock.json"), "").unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/shared/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("oauth/shared/node_modules")).unwrap();
@@ -876,6 +1648,7 @@ mod tests {
         std::fs::write(temp.path().join("calendar-cli"), "").unwrap();
         std::fs::write(temp.path().join("mail-cli"), "").unwrap();
         std::fs::write(temp.path().join("notes-cli"), "").unwrap();
+        std::fs::write(temp.path().join("audio-capture-cli"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
     }

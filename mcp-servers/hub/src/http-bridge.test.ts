@@ -30,12 +30,7 @@ import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-
 import * as authTokens from './auth-tokens.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Tests for HTTP Bridge
-//
-// Purpose: Test bridge creation and method delegation to workers
-// - Verify all methods exist on bridges
-// - Verify correct method names (camelCase) are passed to workers
-// - Verify parameters are passed correctly
+// Tests for HTTP Bridge (method delegation to workers, auth, session handling, errors)
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('http-bridge', () => {
@@ -732,10 +727,10 @@ describe('http-bridge', () => {
         string,
         Record<string, Record<string, unknown>>
       >;
-      mutableRegistry['presale'] = {
+      mutableRegistry['example-plugin'] = {
         searchCustomers: {
           name: 'searchCustomers',
-          service: 'presale',
+          service: 'example-plugin',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: ['crm'],
@@ -744,16 +739,16 @@ describe('http-bridge', () => {
         },
       };
 
-      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
 
-      const bridge = buildServiceBridge('presale', callWorker);
+      const bridge = buildServiceBridge('example-plugin', callWorker);
 
       expect(bridge).toHaveProperty('searchCustomers');
       expect(typeof bridge.searchCustomers).toBe('function');
 
       // Cleanup
-      delete mutableRegistry['presale'];
-      delete process.env.WORKER_PRESALE_URL;
+      delete mutableRegistry['example-plugin'];
+      delete process.env.WORKER_EXAMPLE_PLUGIN_URL;
     });
 
     it('should create bridge for plugin service from ENABLED_SERVICES via initializeAllBridges', async () => {
@@ -2077,8 +2072,7 @@ describe('http-bridge', () => {
     });
 
     it('classifies ENOTFOUND errors (DNS_ERROR) from ping failures', async () => {
-      // Throw an error with code=ENOTFOUND so classifyHealthError returns DNS_ERROR.
-      // postPing's catch block calls classifyHealthError; the /health fallback also fails.
+      // DNS error classification from ping failure
       const dnsError = Object.assign(new Error('getaddrinfo ENOTFOUND mcp-slack'), {
         code: 'ENOTFOUND',
       });
@@ -2110,7 +2104,7 @@ describe('http-bridge', () => {
     });
 
     it('returns error code as-is for unknown error codes', async () => {
-      // An error with a code that is not ENOTFOUND or ECONNREFUSED hits line 214 (return code)
+      // Unknown error code returned as-is
       const customError = Object.assign(new Error('custom error'), { code: 'ECUSTOM' });
       fetchMock.mockRejectedValue(customError);
 
@@ -2312,8 +2306,7 @@ describe('http-bridge', () => {
     });
 
     it('classifies a thrown non-Error value as UNKNOWN', async () => {
-      // Throwing a string (not an Error instance) hits line 208:
-      //   if (!(error instanceof Error)) return 'UNKNOWN'
+      // Non-Error values classified as UNKNOWN
       fetchMock.mockRejectedValue('plain string error');
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -2327,8 +2320,7 @@ describe('http-bridge', () => {
     });
 
     it('classifies AbortError (name=AbortError) as TIMEOUT', async () => {
-      // Throwing an error with name=AbortError hits line 209:
-      //   if (error.name === 'AbortError') return 'TIMEOUT'
+      // AbortError classified as TIMEOUT
       const abortError = new Error('The operation was aborted');
       abortError.name = 'AbortError';
       fetchMock.mockRejectedValue(abortError);
@@ -2343,8 +2335,7 @@ describe('http-bridge', () => {
     });
 
     it('classifies TLS error messages as TLS_ERROR', async () => {
-      // Throwing an error with "TLS" in the message hits line 216:
-      //   if (error.message.includes('TLS') || error.message.includes('SSL')) return 'TLS_ERROR'
+      // TLS/SSL error messages classified as TLS_ERROR
       const tlsError = new Error('TLS handshake failed');
       fetchMock.mockRejectedValue(tlsError);
 

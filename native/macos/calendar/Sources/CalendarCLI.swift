@@ -23,69 +23,34 @@ struct EventStoreGate: PermissionGate {
 /// Commands: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event
 @main
 struct CalendarCLI {
+    static let commandList =
+        "check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event"
+
     static func main() {
-        let args = CommandLine.arguments
-        guard args.count >= 2 else {
-            exitWithError("Usage: calendar-cli <command> [json-args]\nCommands: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event")
-        }
-
-        let command = args[1]
-
-        // check_permission: verify macOS TCC access without performing any operation.
-        // Returns JSON {"granted": true/false, "status": "..."} on stdout, always exits 0.
-        // Pattern: see also reminders/Sources/RemindersCLI.swift check_permission
-        if command == "check_permission" {
-            let store = EKEventStore()
-            let gate = EventStoreGate(store: store)
-            print(performCheckPermission(gate: gate, entity: .calendar))
-            return
-        }
-
-        let jsonArgs = args.count >= 3 ? args[2] : "{}"
-
-        guard let argsData = jsonArgs.data(using: .utf8),
-              let params = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
-        else {
-            exitWithError("Invalid JSON arguments: \(jsonArgs)")
-        }
-
+        // Shared store for access guard and handlers; check_permission uses its own gate.
         let store = EKEventStore()
-        let (accessGranted, accessError) = requestCalendarAccess(store: store)
-
-        guard accessGranted else {
-            let msg = accessError?.localizedDescription ?? "Unknown error"
-            exitWithError("Calendar access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Calendars")
-        }
-
-        do {
-            let result: Any
-            switch command {
-            case "list_calendars":
-                result = try listCalendars(store: store)
-            case "list_events":
-                result = try listEvents(store: store, params: params)
-            case "get_event":
-                result = try getEvent(store: store, params: params)
-            case "create_event":
-                result = try createEvent(store: store, params: params)
-            case "update_event":
-                result = try updateEvent(store: store, params: params)
-            case "delete_event":
-                result = try deleteEvent(store: store, params: params)
-            default:
-                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event")
-            }
-
-            let data = try JSONSerialization.data(
-                withJSONObject: result,
-                options: [.prettyPrinted, .sortedKeys]
-            )
-            if let json = String(data: data, encoding: .utf8) {
-                print(json)
-            }
-        } catch {
-            exitWithError(error.localizedDescription)
-        }
+        runCLI(
+            cliName: "calendar-cli",
+            commandList: commandList,
+            entity: .calendar,
+            checkPermissionGate: { _ in EventStoreGate(store: EKEventStore()) },
+            accessGuard: {
+                let (granted, error) = requestCalendarAccess(store: store)
+                guard granted else {
+                    let msg = error?.localizedDescription ?? "Unknown error"
+                    return "Calendar access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Calendars"
+                }
+                return nil
+            },
+            commands: [
+                "list_calendars": { _ in try listCalendars(store: store) },
+                "list_events": { try listEvents(store: store, params: $0) },
+                "get_event": { try getEvent(store: store, params: $0) },
+                "create_event": { try createEvent(store: store, params: $0) },
+                "update_event": { try updateEvent(store: store, params: $0) },
+                "delete_event": { try deleteEvent(store: store, params: $0) },
+            ]
+        )
     }
 }
 

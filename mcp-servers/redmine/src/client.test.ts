@@ -1652,9 +1652,6 @@ describe('RedmineClient', () => {
 
       // The retry count should be set
       expect(mockError.config.__retryCount).toBe(1);
-
-      // Note: We can't easily test the setTimeout delay without useFakeTimers
-      // which vitest handles differently. The important part is the retry count logic.
     });
 
     it('should pass response through the success handler', () => {

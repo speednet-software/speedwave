@@ -20,7 +20,9 @@ docs/
 ├── guides/                    <- CLI, desktop, integrations, IDE bridge
 ├── architecture/              <- overview, security, containers, platform matrix
 ├── contributing/              <- dev setup, testing
-└── adr/                       <- Architecture Decision Records
+├── adr/                       <- Architecture Decision Records
+├── accessibility/             <- accessibility guidelines
+└── troubleshooting.md         <- troubleshooting and common issues
 ```
 
 ## Rules

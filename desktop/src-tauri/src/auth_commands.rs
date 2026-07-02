@@ -42,19 +42,86 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn anthropic_logout(project: String) -> Result<(), String> {
+    check_project(&project)?;
+    tokio::task::spawn_blocking(move || {
+        log::info!("anthropic_logout: project={project}");
+        speedwave_runtime::claude_home::remove_claude_credentials(
+            speedwave_runtime::consts::data_dir().as_path(),
+            &project,
+        )
+        .map(|_| ())
+        .map_err(|e| {
+            log::error!("anthropic_logout: error: {e}");
+            e.to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Migrates the project's `claude.llm` (default shape when absent) so
+/// `is_unconfigured()` sees the post-migration, evidence-aware answer.
+fn migrated_llm_for(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+    evidence: speedwave_runtime::config::AnthropicEvidence,
+) -> speedwave_runtime::config::LlmConfig {
+    let mut llm = user_config
+        .find_project(project)
+        .and_then(|p| p.claude.as_ref())
+        .and_then(|c| c.llm.clone())
+        .unwrap_or_default();
+    speedwave_runtime::config::migrate_llm(&mut llm, evidence);
+    llm
+}
+
+/// True when the project's migrated LLM config resolves an active provider.
+/// Shared by `get_auth_status` and the reconcile restore guard.
+pub(crate) fn project_llm_configured_in(
+    data_dir: &std::path::Path,
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+) -> bool {
+    let evidence = speedwave_runtime::config::AnthropicEvidence::detect_in(data_dir, project);
+    !migrated_llm_for(user_config, project, evidence).is_unconfigured()
+}
+
+#[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        // check_claude_auth → ensure_exec_healthy can call compose_up_recreate;
-        // block on bundle reconcile first.
         crate::containers_cmd::ensure_images_ready()?;
         log::info!("get_auth_status: project={project}");
         let api_key_configured = auth::has_api_key(&project);
-        let oauth_authenticated = setup_wizard::check_claude_auth(&project).unwrap_or(false);
-        Ok(AuthStatusResponse {
+        // Real OAuth state = credentials file present (provider-independent).
+        let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
+            speedwave_runtime::consts::data_dir().as_path(),
+            &project,
+        );
+        // R7: non-anthropic providers never need Anthropic auth.
+        let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
+        let needs_anthropic_auth =
+            setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        let evidence = if api_key_configured {
+            speedwave_runtime::config::AnthropicEvidence::ApiKey
+        } else if oauth_authenticated {
+            speedwave_runtime::config::AnthropicEvidence::Oauth
+        } else {
+            speedwave_runtime::config::AnthropicEvidence::None
+        };
+        // Migrated (not raw) shape — must agree with needs_anthropic_auth, which
+        // itself already evaluates the equivalent post-migration answer.
+        let migrated = migrated_llm_for(&user_config, &project, evidence);
+        // False for explicit v2 logout/dangling and credential-less fresh; a
+        // blockless project WITH credentials fabricates (v0.13.3 default population).
+        let provider_configured = !migrated.is_unconfigured();
+        Ok(AuthStatusResponse::from_flags(
             api_key_configured,
             oauth_authenticated,
-        })
+            needs_anthropic_auth,
+            provider_configured,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -70,37 +137,8 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Strips the `\\?\` extended-length prefix from a Windows path when the
-/// remainder begins with `<drive>:\` or `<drive>:/` (`\\?\C:\…` -> `C:\…`).
-/// Returns the input unchanged for paths that don't match `\\?\<drive>:\`
-/// (UNC paths, already-stripped paths, POSIX paths, anything else). The
-/// function is purely pattern-based on the input string and does not inspect
-/// the host OS. Bare `\\?\C:` (no separator) is intentionally left alone —
-/// `Set-Location 'C:'` would set drive-relative cwd, which is not what the
-/// user copied a project path for; passing the original string through means
-/// PowerShell raises a clear "path not found" error rather than silently
-/// changing drive.
-///
-/// The Tauri folder picker on Windows can return canonicalized paths with
-/// the `\\?\` prefix; neither PowerShell `Set-Location` nor `cd` handles
-/// these, and they are not user-readable. This helper unifies the path so
-/// the rendered command is paste-ready.
-pub(crate) fn strip_windows_extended_length_prefix(path: &str) -> &str {
-    let b = path.as_bytes();
-    if b.len() >= 7
-        && b[0] == b'\\'
-        && b[1] == b'\\'
-        && b[2] == b'?'
-        && b[3] == b'\\'
-        && b[4].is_ascii_alphabetic()
-        && b[5] == b':'
-        && (b[6] == b'\\' || b[6] == b'/')
-    {
-        &path[4..]
-    } else {
-        path
-    }
-}
+/// `\\?\` prefix stripper — re-export of the runtime SSOT.
+pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
 /// Escapes a string for safe interpolation inside a PowerShell single-quoted
 /// literal. PowerShell single-quote literals are literal — only embedded
@@ -109,16 +147,9 @@ pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Pure, host-platform-agnostic command assembly. The `is_windows` flag
-/// selects PowerShell-shaped output (Set-Location, `;`, $env:, '' escape,
-/// \\?\ prefix stripping) versus POSIX-shaped output (cd, &&, export,
-/// '\'' escape). The flag is taken as a parameter — not derived inside the
-/// function from `cfg!()` — so both branches are reachable from unit tests
-/// on macOS where `make test-desktop` runs.
-///
-/// The trailing command is `speedwave login --project '<project>'` — once
-/// stored, the OAuth token is per-project, so the exact name is bound into
-/// the copy-paste so it works regardless of CWD.
+/// Pure command assembly. `is_windows` selects PowerShell-shaped output
+/// (Set-Location, `;`, $env:, '' escape, \\?\ stripping) vs POSIX (cd, &&,
+/// export, '\'' escape).
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
     project_dir: &str,
@@ -148,26 +179,44 @@ pub(crate) fn build_auth_command_for_platform(
                 ps_escape_single_quoted(project),
             )
         } else {
+            // Absolute path always: a shell spawned right after the wizard
+            // (before any PATH refresh) has no `speedwave` on PATH yet.
+            let cli_path = format!(
+                "{}\\{}\\speedwave.exe",
+                ddir,
+                speedwave_runtime::consts::CLI_BIN_SUBDIR
+            );
             format!(
-                "Set-Location '{}'; speedwave login --project '{}'",
+                "Set-Location '{}'; & '{}' login --project '{}'",
                 ps_escape_single_quoted(pdir),
+                ps_escape_single_quoted(&cli_path),
                 ps_escape_single_quoted(project),
             )
         }
-    } else if needs_env_pin {
-        format!(
-            "export {}='{}' && cd '{}' && speedwave login --project '{}'",
-            speedwave_runtime::consts::DATA_DIR_ENV,
-            shell_escape_single_quoted(&data_dir_str),
-            shell_escape_single_quoted(project_dir),
-            shell_escape_single_quoted(project),
-        )
     } else {
-        format!(
-            "cd '{}' && speedwave login --project '{}'",
-            shell_escape_single_quoted(project_dir),
-            shell_escape_single_quoted(project),
-        )
+        // Path::join normalizes a trailing slash on data_dir (no `…/.speedwave//bin`).
+        let cli_path = data_dir
+            .join(speedwave_runtime::consts::CLI_BIN_SUBDIR)
+            .join("speedwave")
+            .to_string_lossy()
+            .into_owned();
+        if needs_env_pin {
+            format!(
+                "export {}='{}' && cd '{}' && '{}' login --project '{}'",
+                speedwave_runtime::consts::DATA_DIR_ENV,
+                shell_escape_single_quoted(&data_dir_str),
+                shell_escape_single_quoted(project_dir),
+                shell_escape_single_quoted(&cli_path),
+                shell_escape_single_quoted(project),
+            )
+        } else {
+            format!(
+                "cd '{}' && '{}' login --project '{}'",
+                shell_escape_single_quoted(project_dir),
+                shell_escape_single_quoted(&cli_path),
+                shell_escape_single_quoted(project),
+            )
+        }
     }
 }
 
@@ -189,10 +238,8 @@ fn build_auth_command(
     )
 }
 
-/// Resolves the inputs both auth surfaces need: the project's directory (from
-/// user config), the active data dir, and the default data dir (for the
-/// `SPEEDWAVE_DATA_DIR` pin decision). Shared so `get_auth_command` (copy-paste)
-/// and `start_oauth_login` (auto-spawn) cannot drift.
+/// Resolves the project directory, active data dir, and default data dir.
+/// Shared by `get_auth_command` and `start_oauth_login` to prevent drift.
 pub(crate) fn resolve_project_dirs(
     project: &str,
 ) -> Result<(String, std::path::PathBuf, Option<std::path::PathBuf>), String> {
@@ -240,9 +287,7 @@ mod tests {
 
     #[test]
     fn get_auth_status_waits_for_image_readiness() {
-        // Race guard: setup_wizard::check_claude_auth → ensure_exec_healthy →
-        // compose_up_recreate. UI polls auth status at startup; without the
-        // gate, polling during reconcile surfaces "image not available".
+        // Race guard: get_auth_status must gate on image readiness before exec.
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
@@ -258,12 +303,292 @@ mod tests {
         let ensure_pos = fn_body
             .find("ensure_images_ready")
             .expect("get_auth_status must call ensure_images_ready");
-        let inner_call_pos = fn_body
-            .find("setup_wizard::check_claude_auth")
-            .expect("get_auth_status must delegate to setup_wizard::check_claude_auth");
+        let oauth_pos = fn_body
+            .find("has_anthropic_oauth_credentials")
+            .expect("get_auth_status must read real OAuth state via credentials presence");
         assert!(
-            ensure_pos < inner_call_pos,
-            "ensure_images_ready must come BEFORE setup_wizard::check_claude_auth"
+            ensure_pos < oauth_pos,
+            "ensure_images_ready must come BEFORE the OAuth state read"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_oauth_is_credentials_presence_not_check_claude_auth() {
+        // The badge must reflect real login, not check_claude_auth's Ok(true)
+        // skip for non-anthropic providers.
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source.find("pub async fn get_auth_status(").unwrap();
+        // End at the next item after the command (avoids matching test names
+        // below that mention check_claude_auth by design).
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            !fn_body.contains("check_claude_auth"),
+            "oauth_authenticated must not come from the provider-gated check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_populates_needs_anthropic_auth_from_predicate() {
+        // R7: the gate field must come from project_needs_anthropic_auth, not be
+        // hardcoded — else non-anthropic providers strand on "auth required".
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("project_needs_anthropic_auth"),
+            "get_auth_status must derive needs_anthropic_auth from the predicate"
+        );
+        assert!(
+            fn_body.contains("needs_anthropic_auth,"),
+            "get_auth_status must return the needs_anthropic_auth field"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_derives_provider_configured_from_is_unconfigured() {
+        // provider_configured defaults to FALSE for fresh/missing (no provider
+        // chosen yet), same as an explicit v2 logout.
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("!migrated.is_unconfigured()"),
+            "get_auth_status must derive provider_configured from the SSOT is_unconfigured gate"
+        );
+        assert!(
+            fn_body.contains("migrated_llm_for"),
+            "provider_configured must evaluate a migrated shape, not the raw stored config"
+        );
+        assert!(
+            fn_body.contains("provider_configured,"),
+            "get_auth_status must return the provider_configured field"
+        );
+    }
+
+    /// A never-migrated `LlmConfig::default()` must yield
+    /// `provider_configured == false` via `get_auth_status`.
+    #[test]
+    fn provider_configured_is_false_for_fresh_llm_default() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig::default()),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
+        assert!(
+            !provider_configured,
+            "a never-touched LlmConfig::default() must read as not configured"
+        );
+    }
+
+    /// State transition: once an active provider is selected, the same
+    /// derivation flips to `true` — proves the expression isn't vacuously false.
+    #[test]
+    fn provider_configured_is_true_once_active_provider_resolves() {
+        let mut llm = speedwave_runtime::config::LlmConfig::default();
+        assert!(llm.set_active_to_anthropic());
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(llm),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
+        assert!(provider_configured);
+    }
+
+    /// Edge case: project exists but `claude` is `None` entirely — must not
+    /// panic, defaults to not-configured (no credentials, no llm block).
+    #[test]
+    fn provider_configured_is_false_when_claude_override_absent() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
+        assert!(!provider_configured);
+    }
+
+    /// Legacy v1 config with a saved API key must still migrate to
+    /// "configured", not just the OAuth (no-key) path.
+    #[test]
+    fn migrated_llm_for_reads_configured_for_legacy_v1_with_api_key() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig {
+                        provider: Some("anthropic".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::ApiKey,
+        );
+        let provider_configured = !migrated.is_unconfigured();
+        assert!(provider_configured);
+    }
+
+    /// Edge case: unknown project name must not panic — mirrors
+    /// `find_project` returning `None` for a name absent from `projects`.
+    #[test]
+    fn migrated_llm_for_returns_none_for_unknown_project() {
+        let user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        assert!(migrated_llm_for(
+            &user_config,
+            "missing",
+            speedwave_runtime::config::AnthropicEvidence::None
+        )
+        .is_unconfigured());
+    }
+
+    /// Upgrade rescue: a project with no `claude.llm` block but on-disk
+    /// Anthropic credentials must read as configured (v0.13.3 default population).
+    #[test]
+    fn blockless_project_with_oauth_evidence_reads_configured() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            });
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::Oauth,
+        );
+        assert!(!migrated.is_unconfigured());
+        let entry = migrated.active_provider().expect("active entry");
+        assert_eq!(entry.id, "anthropic");
+        assert!(!entry.has_api_key);
+    }
+
+    /// An unmigrated legacy v1 raw config must not make `provider_configured`
+    /// and `needs_anthropic_auth` disagree in the same response.
+    #[test]
+    fn migrated_llm_for_reconciles_legacy_v1_raw_contradiction() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(speedwave_runtime::config::LlmConfig {
+                        provider: Some("anthropic".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            });
+
+        let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");
+        assert!(needs_anthropic_auth, "legacy v1 anthropic needs OAuth");
+
+        let migrated = migrated_llm_for(
+            &user_config,
+            "proj",
+            speedwave_runtime::config::AnthropicEvidence::None,
+        );
+        let provider_configured = !migrated.is_unconfigured();
+        assert!(
+            provider_configured,
+            "a legacy v1 anthropic config must read as configured once migrated, \
+             matching needs_anthropic_auth's already-correct 'true'"
+        );
+    }
+
+    // -- anthropic_logout --
+
+    #[test]
+    fn anthropic_logout_calls_credentials_ssot_with_check_project() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn anthropic_logout(")
+            .expect("anthropic_logout Tauri command must exist");
+        let fn_end = source[fn_start..]
+            .find("// ----")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("check_project"),
+            "anthropic_logout must validate the project"
+        );
+        assert!(
+            fn_body.contains("remove_claude_credentials"),
+            "anthropic_logout must clear credentials via the runtime SSOT, not reimplement deletion"
         );
     }
 
@@ -301,7 +626,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "cd '/Users/test/Projects' && speedwave login --project 'myproj'"
+            "cd '/Users/test/Projects' && '/Users/test/.speedwave/bin/speedwave' login --project 'myproj'"
         );
         assert!(!cmd.contains("export"));
     }
@@ -320,7 +645,7 @@ mod tests {
         )));
         assert!(cmd.contains("/Users/test/.speedwave-dev"));
         assert!(cmd.contains("cd '/Users/test/Projects'"));
-        assert!(cmd.ends_with("speedwave login --project 'myproj'"));
+        assert!(cmd.ends_with("speedwave' login --project 'myproj'"));
     }
 
     #[test]
@@ -342,7 +667,10 @@ mod tests {
             std::path::Path::new("/data/.speedwave"),
             None,
         );
-        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
+        assert_eq!(
+            cmd,
+            "cd '/projects' && '/data/.speedwave/bin/speedwave' login --project 'p'"
+        );
     }
 
     #[test]
@@ -366,7 +694,7 @@ mod tests {
         );
         assert!(cmd.contains("O'\\''Brien"));
         assert!(cmd.contains("cd '"));
-        assert!(cmd.ends_with("speedwave login --project 'p'"));
+        assert!(cmd.ends_with("speedwave' login --project 'p'"));
     }
 
     #[test]
@@ -416,7 +744,10 @@ mod tests {
             !cmd.contains("export"),
             "trailing slash should not trigger export prefix (Path normalizes)"
         );
-        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
+        assert_eq!(
+            cmd,
+            "cd '/projects' && '/Users/test/.speedwave/bin/speedwave' login --project 'p'"
+        );
     }
 
     #[test]
@@ -442,14 +773,12 @@ mod tests {
             std::path::Path::new("/data"),
             Some(std::path::Path::new("/data")),
         );
-        assert_eq!(cmd, "cd '' && speedwave login --project 'p'");
+        assert_eq!(cmd, "cd '' && '/data/bin/speedwave' login --project 'p'");
     }
 
     #[test]
     fn build_auth_command_includes_project_in_login_argument() {
-        // Sanity check: the project name actually flows into the trailing
-        // `--project '<name>'`. Catches a future bug where the call-site in
-        // get_auth_command forgets to thread `project` through.
+        // Project name must flow into the trailing `--project '<name>'`.
         let cmd = build_auth_command(
             "specific-project-name",
             "/proj",
@@ -461,9 +790,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_escapes_single_quote_in_project_name() {
-        // Defensive: validate_project_name forbids `'`, but the renderer
-        // must defensively escape — otherwise relaxing validation later
-        // would silently break the output.
+        // Defensive escaping in case validation is relaxed.
         let cmd = build_auth_command(
             "weird'name",
             "/proj",
@@ -474,9 +801,6 @@ mod tests {
     }
 
     // -- strip_windows_extended_length_prefix tests --
-    // build_auth_command_for_platform is infallible by design — every input is a valid
-    // PathBuf or &str chosen by the user. No error-path or state-transition tests apply
-    // to pure functions.
 
     #[test]
     fn strip_prefix_uppercase_drive() {
@@ -596,7 +920,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-Location 'C:\Users\test\Projects'; speedwave login --project 'myproj'"
+            r"Set-Location 'C:\Users\test\Projects'; & 'C:\Users\test\.speedwave\bin\speedwave.exe' login --project 'myproj'"
         );
         assert!(!cmd.contains("&&"));
         assert!(!cmd.contains("export"));
@@ -657,7 +981,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-Location 'C:\Users\NikodemDeja\testproject'; speedwave login --project 'p'"
+            r"Set-Location 'C:\Users\NikodemDeja\testproject'; & 'C:\Users\NikodemDeja\.speedwave\bin\speedwave.exe' login --project 'p'"
         );
         assert!(!cmd.contains(r"\\?\"));
         assert!(!cmd.contains(" && "));
@@ -714,8 +1038,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
-        // Custom data dir containing a `'` must use PS doubling (`''`),
-        // never POSIX backslash escaping (`'\''`). Closes review gap.
+        // Custom data dir must use PS doubling (''), not POSIX ('\').
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -733,10 +1056,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
-        // Defence-in-depth: if data_dir ever carries `\\?\` (e.g. a future
-        // "choose data directory" picker on Windows), the env var must be
-        // set to a clean, paste-ready path — not the raw extended-length
-        // form which subsequent tools would mishandle.
+        // Defence-in-depth: if data_dir carries \\?\, env var must be cleaned.
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -764,8 +1084,7 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_project_name() {
-        // Defensive escaping for project names containing `'`. validate_project_name
-        // forbids them — but renderer must escape regardless.
+        // Defensive escaping in case validation changes.
         let cmd = build_auth_command_for_platform(
             "weird'name",
             r"C:\proj",
@@ -779,13 +1098,33 @@ mod tests {
     // ── AuthStatusResponse wire-format ─────────────────────────────────────
 
     #[test]
-    fn auth_status_response_serializes_two_fields() {
-        let resp = crate::types::AuthStatusResponse {
-            api_key_configured: true,
-            oauth_authenticated: false,
-        };
+    fn auth_status_response_serializes_all_fields() {
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true,  // api_key_configured
+            false, // oauth_authenticated
+            true,  // needs_anthropic_auth
+            false, // provider_configured
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
+        assert_eq!(json["needs_anthropic_auth"], true);
+        assert_eq!(json["provider_configured"], false);
+        // Derived discriminant rides the same response (snake_case wire string).
+        assert_eq!(json["status"], "no_provider");
+    }
+
+    #[test]
+    fn auth_status_response_status_ready_wire_string() {
+        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, true);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "ready");
+    }
+
+    #[test]
+    fn auth_status_response_status_auth_required_wire_string() {
+        let resp = crate::types::AuthStatusResponse::from_flags(false, false, true, true);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "auth_required");
     }
 }

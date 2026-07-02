@@ -448,7 +448,6 @@ describe('createCodeExecutorHandlers', () => {
       });
 
       // undefined is converted to "null" to avoid MCP validation errors
-      // (JSON.stringify(undefined) returns undefined, not a string!)
       expect(result.content[0].text).toBe('null');
     });
 
@@ -800,8 +799,7 @@ describe('createCodeExecutorHandlers', () => {
     });
 
     it('should use timeout from registry SSOT (tool metadata declares timeoutClass)', async () => {
-      // This test verifies the SOLID refactoring: timeout class comes from tool metadata
-      // not from hardcoded regex patterns in handlers.ts
+      // timeout class comes from tool metadata, not hardcoded regex patterns
       vi.mocked(executorModule.executeCode).mockResolvedValue(
         createMockExecuteResult({ result: 'ok' })
       );

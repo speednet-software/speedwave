@@ -4,8 +4,7 @@ import { sanitize, RULE_COUNT } from './sanitizer';
 describe('sanitize', () => {
   it('rule count matches Rust SSOT EXPECTED_RULE_COUNT', () => {
     // Mirrors `EXPECTED_RULE_COUNT` in crates/speedwave-runtime/src/log_sanitizer.rs.
-    // Bump both together when adding a rule.
-    expect(RULE_COUNT).toBe(21);
+    expect(RULE_COUNT).toBe(22);
   });
 
   it('redacts Bearer tokens', () => {
@@ -23,6 +22,23 @@ describe('sanitize', () => {
   it('redacts Slack tokens', () => {
     const out = sanitize('xoxb-1234567890-abcdef');
     expect(out).toContain('***REDACTED_SLACK_TOKEN***');
+  });
+
+  it('redacts Slack rotating refresh tokens (xoxe-1-…)', () => {
+    const out = sanitize('refresh with xoxe-1-A1B2C3D4E5');
+    expect(out).toContain('***REDACTED_SLACK_TOKEN***');
+    expect(out).not.toContain('xoxe-1-');
+  });
+
+  it('redacts Slack rotated access tokens (xoxe.xoxp-…) in full', () => {
+    const out = sanitize('rotated access xoxe.xoxp-FAKE-TOKEN-VALUE');
+    expect(out).toContain('***REDACTED_SLACK_TOKEN***');
+    // The whole token must be consumed — no bare `xoxe.` prefix left behind.
+    expect(out).not.toContain('xoxe.');
+  });
+
+  it('does not redact the bare word xoxe without a token body', () => {
+    expect(sanitize('the xoxe prefix marks rotating tokens')).toContain('xoxe prefix');
   });
 
   it('redacts GitHub PAT', () => {

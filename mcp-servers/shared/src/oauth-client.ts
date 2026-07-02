@@ -1,16 +1,7 @@
 /**
  * Worker → oauth-worker client (ADR-060).
- *
- * Used by OAuth-consuming workers (e.g. SharePoint) to ask the host-side oauth
- * worker for a fresh access token when their current one expires/401s. The
- * caller's service id is derived by the oauth worker from the bearer token
- * mounted at `/secrets/oauth-auth-token-<service>` — there is NO `service`
- * parameter sent on the wire.
- *
- * Env inputs (set by `apply_oauth_config` in compose.rs):
- *   WORKER_OAUTH_URL                  — base URL of the oauth worker
- *   OAUTH_BEARER_PATH                 — path inside the container to the bearer
- *                                       (default `/secrets/oauth-auth-token-<service>`)
+ *   WORKER_OAUTH_URL    — base URL of the oauth worker
+ *   OAUTH_BEARER_PATH   — bearer path (default `/secrets/oauth-auth-token-<service>`)
  */
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -28,10 +19,7 @@ export type OAuthRefreshCode =
   | 'malformed'
   | 'tool_error';
 
-/**
- * Typed error thrown when Microsoft refuses the refresh because the granted scopes
- * are a strict subset of the requested scopes (re-consent flow trigger).
- */
+/** Typed error thrown when granted scopes are a strict subset of requested (re-consent trigger). */
 export class OAuthScopeMismatchError extends Error {
   /**
    * Construct a scope-mismatch error.
@@ -61,17 +49,11 @@ export class OAuthRefreshError extends Error {
   }
 }
 
-/**
- * Refresh when the JWT `exp` claim is within this many seconds of now. Avoids
- * the 401→refresh→retry round-trip and the race window where the host oauth
- * watchdog has just respawned the worker.
- */
+/** Refresh when the JWT `exp` claim is within this many seconds of now. */
 export const PROACTIVE_REFRESH_SECONDS = 120;
 
 /**
- * Read the `exp` claim (UNIX seconds) from a Microsoft Graph access token (JWT).
- * Returns `null` for malformed/non-JWT tokens; callers treat that as "do not
- * refresh proactively" so legacy or test tokens keep working via the 401 path.
+ * Read the `exp` claim (UNIX seconds) from a JWT; `null` for malformed/non-JWT tokens.
  * @param token - JWT access token
  */
 export function readJwtExp(token: string): number | null {
@@ -88,9 +70,7 @@ export function readJwtExp(token: string): number | null {
 }
 
 /**
- * True when the access token's `exp` claim is within `seconds` of now (or in
- * the past). Returns `false` for unparseable tokens — they go through the
- * reactive 401 path.
+ * True when the token's `exp` is within `seconds` of now; `false` for unparseable tokens.
  * @param token - JWT access token
  * @param seconds - refresh window
  * @param nowMs - injectable clock for tests
@@ -130,19 +110,14 @@ interface MCPToolsCallResponse {
 }
 
 /**
- * Refresh the caller's access token by calling the oauth worker. Returns the
- * parsed response body (`{expiresIn, grantedScopes}`) on success. The caller
- * then re-reads `/tokens/access_token` — the oauth worker has written the new
- * value during this call.
- *
- * Retries once on a 401 (handles supervisor restart that rotated the bearer).
+ * Refresh the caller's access token by calling the oauth worker. Retries once on 401.
  * @param options - service id and optional overrides
  * @throws {OAuthScopeMismatchError} if the granted scopes are insufficient
  * @throws {OAuthRefreshError} for any other failure
  */
 export async function refreshAccessToken(
   options: OAuthRefreshOptions
-): Promise<{ expiresIn: number; grantedScopes: string[] }> {
+): Promise<{ expiresIn: number; grantedScopes: string[]; rateLimited?: boolean }> {
   const workerUrl = process.env[options.workerUrl ?? 'WORKER_OAUTH_URL'];
   if (!workerUrl) {
     throw new OAuthRefreshError(
@@ -162,8 +137,7 @@ export async function refreshAccessToken(
         `bearer file ${bearerPath} is empty; oauth worker did not provision this consumer`
       );
     }
-    // Loopback HTTP call to the host-side oauth worker — if it hangs we want
-    // to fail the caller's tool invocation rather than block its handler.
+    // Fail fast if the oauth worker hangs.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
     let response: Response;
@@ -183,10 +157,7 @@ export async function refreshAccessToken(
         signal: controller.signal,
       });
     } catch (err) {
-      // undici/Node's fetch throws TypeError("fetch failed") on TCP refused
-      // (stale ephemeral port after worker respawn). Wrap as typed errors so
-      // callers can branch without parsing message strings. Worker URL stays
-      // out of the user-facing message — it leaks the ephemeral oauth port.
+      // Wrap fetch failures as typed errors; worker URL stays out of user-facing messages.
       if (err instanceof Error && err.name === 'AbortError') {
         console.warn(`oauth worker timeout at ${workerUrl}`);
         const secs = TIMEOUTS.TOKEN_REFRESH_MS / 1000;
@@ -243,7 +214,7 @@ export async function refreshAccessToken(
   }
 
   // jsonResult shape: { content: [{type:'text', text: JSON.stringify(data)}] }
-  let payload: { expiresIn?: unknown; grantedScopes?: unknown };
+  let payload: { expiresIn?: unknown; grantedScopes?: unknown; rateLimited?: unknown };
   try {
     payload = JSON.parse(text) as { expiresIn?: unknown; grantedScopes?: unknown };
   } catch {
@@ -257,5 +228,7 @@ export async function refreshAccessToken(
   return {
     expiresIn,
     grantedScopes: grantedScopes.map((s) => String(s)),
+    // True when the worker skipped the IdP round-trip (token still valid, not rewritten).
+    rateLimited: payload.rateLimited === true,
   };
 }

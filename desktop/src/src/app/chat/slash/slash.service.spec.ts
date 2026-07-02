@@ -1,7 +1,24 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { SlashService, type SlashDiscovery } from './slash.service';
+import { SlashService, isBareSlash, type SlashDiscovery } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
+
+describe('isBareSlash', () => {
+  it('matches a lone slash, with or without surrounding whitespace', () => {
+    expect(isBareSlash('/')).toBe(true);
+    expect(isBareSlash('  /  ')).toBe(true);
+    expect(isBareSlash('\n/\t')).toBe(true);
+  });
+
+  it('rejects real commands, text, and blanks', () => {
+    expect(isBareSlash('/code-review')).toBe(false);
+    expect(isBareSlash('what is 2/3?')).toBe(false);
+    expect(isBareSlash('hej')).toBe(false);
+    expect(isBareSlash('')).toBe(false);
+    expect(isBareSlash('   ')).toBe(false);
+  });
+});
 
 class MockTauri {
   invokeMock = vi.fn();
@@ -10,14 +27,23 @@ class MockTauri {
   }
 }
 
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
 describe('SlashService', () => {
   let service: SlashService;
   let tauri: MockTauri;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
     tauri = new MockTauri();
+    mockLogger = makeMockLogger();
     TestBed.configureTestingModule({
-      providers: [{ provide: TauriService, useValue: tauri }],
+      providers: [
+        { provide: TauriService, useValue: tauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
     service = TestBed.inject(SlashService);
   });
@@ -110,9 +136,12 @@ describe('SlashService', () => {
     expect(tauri.invokeMock).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'acme' });
   });
 
-  it('invalidate() swallows errors so UI never crashes', async () => {
+  it('invalidate() swallows errors so UI never crashes but logs via LoggerService', async () => {
     tauri.invokeMock.mockRejectedValue(new Error('invalidation failed'));
     await expect(service.invalidate('acme')).resolves.toBeUndefined();
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('invalidate_slash_cache failed: Error: invalidation failed')
+    );
   });
 
   it('invalidate() with empty projectId is a no-op', async () => {

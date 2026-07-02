@@ -3,37 +3,31 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { TranscriptionSectionComponent } from './transcription-section.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { ModelsAck, TranscriptionConfig } from '../../models/transcript';
+import type { RecommendedModelAck } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
   let component: TranscriptionSectionComponent;
   let fixture: ComponentFixture<TranscriptionSectionComponent>;
   let svc: {
-    getConfig: ReturnType<typeof vi.fn>;
-    setConfig: ReturnType<typeof vi.fn>;
-    listModels: ReturnType<typeof vi.fn>;
+    recommendedModel: ReturnType<typeof vi.fn>;
+    downloadModel: ReturnType<typeof vi.fn>;
+    deleteModel: ReturnType<typeof vi.fn>;
   };
 
-  const offConfig: TranscriptionConfig = {
-    enabled: false,
-    default_language: null,
-    default_live_model: null,
-    keep_audio_after_finalize: null,
+  const notDownloaded: RecommendedModelAck = {
+    key: 'large-v3',
+    display_name: 'Large v3 (multilingual)',
+    size_bytes: 3_100_000_000,
+    downloaded: false,
+    accel_label: 'Metal (GPU)',
   };
-  const models: ModelsAck = {
-    whisper: [
-      { key: 'small', downloaded: true, size_bytes: 79_000_000, path: '/m/small' },
-      { key: 'large-v3', downloaded: false, size_bytes: 2_900_000_000, path: null },
-    ],
-    diarization: [],
-    total_bytes_used: 79_000_000,
-  };
+  const downloaded: RecommendedModelAck = { ...notDownloaded, downloaded: true };
 
   beforeEach(async () => {
     svc = {
-      getConfig: vi.fn(async () => offConfig),
-      setConfig: vi.fn(async () => undefined),
-      listModels: vi.fn(async () => models),
+      recommendedModel: vi.fn(async () => notDownloaded),
+      downloadModel: vi.fn(async () => ({ done: Promise.resolve(), unlisten: () => undefined })),
+      deleteModel: vi.fn(async () => undefined),
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -46,97 +40,81 @@ describe('TranscriptionSectionComponent', () => {
     component = fixture.componentInstance;
   });
 
-  it('shows the privacy disclaimer text', async () => {
+  it('shows the privacy/disclaimer text', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
     const body: string = fixture.nativeElement.textContent ?? '';
     expect(body).toContain('record system audio');
-    expect(body).toContain('runs locally');
-    expect(body).toContain('use the');
+    expect(body).toContain('locally');
+    expect(body).toContain('network');
   });
 
-  it('reads the config; off by default → no extra controls', async () => {
+  it('shows the acceleration label from the backend', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
-    expect(component.enabled()).toBe(false);
-    expect(fixture.nativeElement.querySelector('[data-testid="default-language"]')).toBeNull();
+    const accel = fixture.nativeElement.querySelector('[data-testid="accel-label"]');
+    expect(accel.textContent).toContain('Metal (GPU)');
   });
 
-  it('toggling on shows the default-language / default-live-model / keep-audio controls', async () => {
+  it('not-downloaded → shows size + a download button, no remove button', async () => {
     await component.ngOnInit();
-    await component.toggle();
     fixture.detectChanges();
-    expect(component.enabled()).toBe(true);
-    expect(svc.setConfig).toHaveBeenCalled();
-    expect(fixture.nativeElement.querySelector('[data-testid="default-language"]')).not.toBeNull();
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="default-live-model"]')
-    ).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="keep-audio"]')).not.toBeNull();
-    // The live-model dropdown is populated from the model list.
-    expect(component.liveModelOptions().map((m) => m.key)).toEqual(['small', 'large-v3']);
+    expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="remove-model"]')).toBeNull();
+    const state = fixture.nativeElement.querySelector('[data-testid="model-state"]');
+    expect(state.textContent).toContain('2.9 GB');
+    expect(state.textContent).toContain('best quality for your hardware');
   });
 
-  it('persists the default language', async () => {
-    svc.getConfig.mockResolvedValueOnce({ ...offConfig, enabled: true });
+  it('downloaded → shows a remove button, no download button', async () => {
+    svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.ngOnInit();
-    await component.onLanguage('en');
-    expect(component.defaultLanguage()).toBe('en');
-    expect(svc.setConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ default_language: 'en' })
-    );
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="remove-model"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).toBeNull();
+    const state = fixture.nativeElement.querySelector('[data-testid="model-state"]');
+    expect(state.textContent).toContain('Downloaded');
   });
 
-  it('persists the default live model ("" → null)', async () => {
-    svc.getConfig.mockResolvedValueOnce({ ...offConfig, enabled: true });
+  it('download() invokes downloadModel then re-reads state', async () => {
     await component.ngOnInit();
-    await component.onLiveModel('large-v3');
-    expect(svc.setConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ default_live_model: 'large-v3' })
-    );
-    await component.onLiveModel('');
-    expect(svc.setConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ default_live_model: null })
-    );
+    svc.recommendedModel.mockResolvedValueOnce(downloaded);
+    await component.download('large-v3');
+    expect(svc.downloadModel).toHaveBeenCalledWith('large-v3', expect.any(Function));
+    expect(component.model()?.downloaded).toBe(true);
+    expect(component.busy()).toBe(false);
   });
 
-  it('persists the keep-audio toggle', async () => {
-    svc.getConfig.mockResolvedValueOnce({ ...offConfig, enabled: true });
+  it('remove() invokes deleteModel then re-reads state', async () => {
+    svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.ngOnInit();
-    await component.onKeepAudio(false);
-    expect(svc.setConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ keep_audio_after_finalize: false })
-    );
+    svc.recommendedModel.mockResolvedValueOnce(notDownloaded);
+    await component.remove('large-v3');
+    expect(svc.deleteModel).toHaveBeenCalledWith('large-v3');
+    expect(component.model()?.downloaded).toBe(false);
   });
 
-  it('reflects an existing config (language/model/keep-audio loaded from backend)', async () => {
-    svc.getConfig.mockResolvedValueOnce({
-      enabled: true,
-      default_language: 'en',
-      default_live_model: 'small',
-      keep_audio_after_finalize: false,
-    });
+  it('reports a download error and clears busy', async () => {
     await component.ngOnInit();
-    expect(component.defaultLanguage()).toBe('en');
-    expect(component.defaultLiveModel()).toBe('small');
-    expect(component.keepAudio()).toBe(false);
+    svc.downloadModel.mockRejectedValueOnce(new Error('disk full'));
+    const errSpy = vi.fn();
+    component.errorOccurred.subscribe(errSpy);
+    await component.download('large-v3');
+    expect(errSpy).toHaveBeenCalledWith('disk full');
+    expect(component.busy()).toBe(false);
   });
 
-  it('falls back to off and emits the error when the backend fails', async () => {
-    svc.getConfig.mockRejectedValueOnce(new Error('boom'));
+  it('emits the error when the recommended-model lookup fails', async () => {
+    svc.recommendedModel.mockRejectedValueOnce(new Error('boom'));
     const errSpy = vi.fn();
     component.errorOccurred.subscribe(errSpy);
     await component.ngOnInit();
-    expect(component.enabled()).toBe(false);
     expect(errSpy).toHaveBeenCalledWith('boom');
+    expect(component.model()).toBeNull();
   });
 
-  it('onLanguage ignores invalid values', async () => {
-    svc.getConfig.mockResolvedValueOnce({ ...offConfig, enabled: true });
-    await component.ngOnInit();
-    svc.setConfig.mockClear();
-    await component.onLanguage('de');
-    expect(component.defaultLanguage()).toBe('pl');
-    expect(svc.setConfig).not.toHaveBeenCalled();
+  it('size() formats GB and MB', () => {
+    expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
+    expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('465.4 MB');
   });
 });

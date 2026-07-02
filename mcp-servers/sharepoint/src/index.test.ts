@@ -1,30 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { createMCPServerMock, initializeSharePointClientMock, retryAsyncMock } = vi.hoisted(() => ({
-  createMCPServerMock: vi.fn(),
-  initializeSharePointClientMock: vi.fn(),
-  retryAsyncMock: vi.fn(),
-}));
+const { bootWorkerMock } = vi.hoisted(() => ({ bootWorkerMock: vi.fn() }));
 
 vi.mock('@speedwave/mcp-shared', async () => {
   const actual =
     await vi.importActual<typeof import('@speedwave/mcp-shared')>('@speedwave/mcp-shared');
   return {
     ...actual,
-    createMCPServer: createMCPServerMock,
-    retryAsync: retryAsyncMock,
+    bootWorker: bootWorkerMock,
   };
 });
 
 vi.mock('./client.js', () => ({
-  initializeSharePointClient: initializeSharePointClientMock,
+  initializeSharePointClient: vi.fn(),
 }));
 
 const flushPromises = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-describe('MCP SharePoint Server', () => {
+describe('MCP SharePoint Server entry', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
@@ -32,11 +27,9 @@ describe('MCP SharePoint Server', () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv, MCP_SHAREPOINT_AUTH_TOKEN: 'test-token' };
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    // Default: retryAsync passes through to the fn it receives (simulates immediate success)
-    retryAsyncMock.mockImplementation(async (fn: () => Promise<unknown>) => fn());
+    bootWorkerMock.mockResolvedValue(3002);
   });
 
   afterEach(() => {
@@ -44,74 +37,55 @@ describe('MCP SharePoint Server', () => {
     vi.restoreAllMocks();
   });
 
-  it('health check succeeds when no token save error', async () => {
-    const startMock = vi.fn().mockResolvedValue(3002);
-    createMCPServerMock.mockReturnValue({ start: startMock });
-
-    const mockClient = {
-      getHealthStatus: vi.fn().mockReturnValue({ tokenSaveError: null }),
-    };
-    initializeSharePointClientMock.mockResolvedValue(mockClient);
-
+  it('boots with SharePoint fail-fast policy and the auth env', async () => {
     await import('./index.js');
     await flushPromises();
 
-    const config = createMCPServerMock.mock.calls[0][0];
-    await expect(config.healthCheck()).resolves.toBeUndefined();
+    const opts = bootWorkerMock.mock.calls[0][0];
+    expect(opts.serverName).toBe('mcp-sharepoint');
+    expect(opts.displayName).toBe('SharePoint');
+    expect(opts.authTokenEnv).toBe('MCP_SHAREPOINT_AUTH_TOKEN');
+    expect(opts.onNotConfigured).toBe('fail');
+    expect(opts.host).toBe('0.0.0.0');
+  });
+
+  it('health check resolves when there is no token-save error', async () => {
+    await import('./index.js');
+    await flushPromises();
+
+    const opts = bootWorkerMock.mock.calls[0][0];
+    const client = { getHealthStatus: vi.fn().mockReturnValue({ tokenSaveError: null }) };
+    await expect(opts.makeHealthCheck(client)()).resolves.toBeUndefined();
   });
 
   it('health check throws when token refresh has failed', async () => {
-    const startMock = vi.fn().mockResolvedValue(3002);
-    createMCPServerMock.mockReturnValue({ start: startMock });
+    await import('./index.js');
+    await flushPromises();
 
-    const mockClient = {
+    const opts = bootWorkerMock.mock.calls[0][0];
+    const client = {
       getHealthStatus: vi.fn().mockReturnValue({ tokenSaveError: 'EACCES: permission denied' }),
     };
-    initializeSharePointClientMock.mockResolvedValue(mockClient);
-
-    await import('./index.js');
-    await flushPromises();
-
-    const config = createMCPServerMock.mock.calls[0][0];
-    await expect(config.healthCheck()).rejects.toThrow('Token refresh failed');
+    await expect(opts.makeHealthCheck(client)()).rejects.toThrow('Token refresh failed');
   });
 
-  it('calls process.exit(1) when retryAsync exhausts and client is null', async () => {
-    // retryAsync returns null after exhaustion -> SharePoint fail-fast triggers process.exit(1)
-    retryAsyncMock.mockResolvedValue(null);
-
-    const exitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as unknown as typeof process.exit);
-
+  it('health check throws when the connection resolve failed', async () => {
     await import('./index.js');
     await flushPromises();
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-  });
-
-  it('calls process.exit(1) when MCP_SHAREPOINT_AUTH_TOKEN is absent', async () => {
-    // Remove the auth token env var to exercise the lines 30-34 guard
-    process.env = { ...process.env };
-    delete process.env.MCP_SHAREPOINT_AUTH_TOKEN;
-
-    const exitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as unknown as typeof process.exit);
-
-    await import('./index.js');
-    await flushPromises();
-
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('MCP_SHAREPOINT_AUTH_TOKEN is required')
+    const opts = bootWorkerMock.mock.calls[0][0];
+    const client = {
+      getHealthStatus: vi
+        .fn()
+        .mockReturnValue({ connection: 'failed', connectionError: 'site not found' }),
+    };
+    await expect(opts.makeHealthCheck(client)()).rejects.toThrow(
+      /SharePoint siteId resolve failed/
     );
   });
 
-  it('calls process.exit(1) on unexpected error thrown by main()', async () => {
-    // retryAsync throws an unexpected error → main().catch fires (lines 77-78)
-    retryAsyncMock.mockRejectedValue(new Error('Unexpected crash'));
-
+  it('exits when bootWorker rejects (fatal-error trap)', async () => {
+    bootWorkerMock.mockRejectedValue(new Error('Unexpected crash'));
     const exitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((() => {}) as unknown as typeof process.exit);

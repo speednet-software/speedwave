@@ -20,8 +20,7 @@ describe('ts', () => {
 
   it('emits ISO 8601 with a local offset and millisecond precision', () => {
     const inner = ts().slice(1, -1);
-    // `YYYY-MM-DDTHH:mm:ss.sss±HH:MM` — local time + offset (never bare `Z`),
-    // matching the Rust SSOT `log_ts::log_timestamp()`.
+    // `YYYY-MM-DDTHH:mm:ss.sss±HH:MM`, matching Rust SSOT `log_ts::log_timestamp()`.
     expect(inner).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
   });
 
@@ -36,8 +35,6 @@ describe('ts', () => {
     if (got !== 0) expect(Math.sign(got)).toBe(Math.sign(expectedMin));
   });
 
-  // The container's `TZ` (host TZ, via `tz::detect_host_timezone` + `inject_host_timezone`)
-  // must surface in the prefix — `getTimezoneOffset()` is what `Date` reads from it.
   it.each([
     [-120, '+02:00'], // CEST
     [-330, '+05:30'], // IST

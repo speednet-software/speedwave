@@ -6,60 +6,24 @@
  * @module mcp-redmine
  */
 
-import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
-import { initializeRedmineClient } from './client.js';
+import { bootWorker, ts } from '@speedwave/mcp-shared';
+import { initializeRedmineClient, type RedmineClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const SERVER_NAME = 'mcp-redmine';
-const AUTH_TOKEN = process.env.MCP_REDMINE_AUTH_TOKEN;
-
-async function main(): Promise<void> {
-  console.log(`${ts()} 🚀 Starting ${SERVER_NAME}...`);
-
-  if (!AUTH_TOKEN) {
-    console.error(
-      `${ts()} FATAL: MCP_REDMINE_AUTH_TOKEN is required. ` +
-        `${SERVER_NAME} must not run without authentication.`
-    );
-    process.exit(1);
-  }
-
-  const redmineClient = await retryAsync(initializeRedmineClient, {
-    maxRetries: 3,
-    baseDelayMs: 2000,
-    label: 'Redmine client init',
-  });
-
-  if (!redmineClient) {
-    console.warn(`${ts()} ⚠️  ${notConfiguredMessage('Redmine')}`);
-    console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
-  } else {
-    console.log(`${ts()} ✅ Redmine client initialized`);
-  }
-
-  const tools = createToolDefinitions(redmineClient);
-
-  const server = createMCPServer({
-    name: SERVER_NAME,
-    version: '1.0.0',
-    port: PORT,
-    host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
-    tools,
-    auth: { token: AUTH_TOKEN },
-    healthCheck: async () => {
-      if (!redmineClient) {
-        throw new Error('Redmine client not configured');
-      }
-    },
-  });
-
-  const actualPort = await server.start();
-  process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
-  console.log(`${ts()} ✅ ${SERVER_NAME} started on port ${actualPort} (auth enforced)`);
-}
-
-main().catch((error) => {
+bootWorker<RedmineClient>({
+  serverName: 'mcp-redmine',
+  version: '1.0.0',
+  displayName: 'Redmine',
+  authTokenEnv: 'MCP_REDMINE_AUTH_TOKEN',
+  host: '0.0.0.0',
+  initClient: initializeRedmineClient,
+  makeTools: (client) => createToolDefinitions(client),
+  makeHealthCheck: (client) => async () => {
+    if (!client) {
+      throw new Error('Redmine client not configured');
+    }
+  },
+}).catch((error) => {
   console.error(`${ts()} Fatal error:`, error);
   process.exit(1);
 });

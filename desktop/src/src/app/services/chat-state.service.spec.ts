@@ -2,22 +2,34 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
+  historyFitsTarget,
+  isNotAuthenticatedError,
+  mapContextOverflowError,
+  mapNotLoggedInError,
   messageBlocksToState,
   stateBlocksToMessageBlocks,
+  toChatMessages,
 } from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
-import type { StreamChunk } from '../models/chat';
+import type { ConversationTranscript, StreamChunk } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ChatStateService', () => {
   let service: ChatStateService;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -32,7 +44,12 @@ describe('ChatStateService', () => {
         case 'start_containers':
           return undefined;
         case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: true };
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
         case 'start_chat':
           return undefined;
         case 'send_message':
@@ -43,7 +60,11 @@ describe('ChatStateService', () => {
     };
 
     TestBed.configureTestingModule({
-      providers: [ChatStateService, { provide: TauriService, useValue: mockTauri }],
+      providers: [
+        ChatStateService,
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     });
 
     service = TestBed.inject(ChatStateService);
@@ -53,12 +74,24 @@ describe('ChatStateService', () => {
     service.isStreaming = false;
   });
 
+  describe('loadingTranscript', () => {
+    it('defaults to false', () => {
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('beginTranscriptLoad sets it true, endTranscriptLoad sets it false', () => {
+      service.beginTranscriptLoad();
+      expect(service.loadingTranscriptFromState()).toBe(true);
+      service.endTranscriptLoad();
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+  });
+
   describe('init', () => {
-    it('logs startChatSession error without blocking projectState', async () => {
+    it('surfaces a non-auth startChatSession failure to projectState and the logger', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
 
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat') throw new Error('chat backend crashed');
         if (cmd === 'list_projects')
@@ -71,12 +104,65 @@ describe('ChatStateService', () => {
       await service.init();
       // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
-      // start_chat failure should NOT block projectState — containers are still running,
-      // only the Claude session failed (rate limit, OOM, etc). sendMessage auto-retry
-      // handles session recovery.
-      expect(projectState.status).toBe('ready');
-      expect(errorSpy).toHaveBeenCalledWith('Failed to start chat session:', expect.any(Error));
-      errorSpy.mockRestore();
+
+      // A non-auth start_chat failure surfaces in the UI.
+      expect(projectState.status()).toBe('error');
+      expect(projectState.error).toContain('chat backend crashed');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to start chat session: Error: chat backend crashed')
+      );
+    });
+
+    it('ignores a stale start_chat failure once a resume has superseded it', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      let failStartChat: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') {
+          await new Promise<void>((_resolve, reject) => {
+            failStartChat = () => reject(new Error('chat backend crashed'));
+          });
+        }
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      // A resume supersedes the in-flight start, then the stale start_chat fails.
+      service.beginStartingSession();
+      failStartChat!();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // The superseded failure must NOT clobber the resumed session's state.
+      expect(projectState.status()).not.toBe('error');
+      expect(mockLogger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Failed to start chat session')
+      );
+    });
+
+    it('maps a "not authenticated" startChatSession failure to auth_required (not error)', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') throw new Error('not authenticated');
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(projectState.status()).toBe('auth_required');
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
 
     it('only runs init once', async () => {
@@ -104,7 +190,7 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      expect(projectState.status).toBe('error');
+      expect(projectState.status()).toBe('error');
       expect(projectState.error).toContain('Failed to set up stream listener');
     });
 
@@ -153,8 +239,7 @@ describe('ChatStateService', () => {
         ],
       });
 
-      // Wire format: pure text with the `@…` reference — no `image`
-      // content block ever crosses stdin (avoids the OOM-killing path).
+      // Wire format: pure text with the `@…` reference, no `image` block on stdin.
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [
           {
@@ -196,6 +281,27 @@ describe('ChatStateService', () => {
     it('ignores empty text', async () => {
       await service.sendMessage('');
       expect(service.messages).toHaveLength(0);
+    });
+
+    it('ignores a lone slash or whitespace-only text (skill-menu trigger)', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await service.sendMessage('/');
+      await service.sendMessage('  /  ');
+      await service.sendMessage('   ');
+      // Never streamed, never reached the backend.
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
+      expect(calls).not.toContain('send_message');
+    });
+
+    it('still sends a real slash command', async () => {
+      await service.sendMessage('/code-review');
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
     });
 
     it('ignores when already streaming', async () => {
@@ -261,6 +367,33 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Retry me' });
+    });
+
+    it('waits (no competing start_chat) when a resume start is in progress', async () => {
+      // A racing "no active session" send must wait for the in-flight resume,
+      // not fire a competing start_chat that tears down the resumed session.
+      let sendAttempt = 0;
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') {
+          sendAttempt++;
+          if (sendAttempt === 1) throw new Error('no active session');
+          return undefined;
+        }
+        return undefined;
+      };
+
+      const endStartingSession = service.beginStartingSession();
+      // Release the start shortly after, mimicking resume_conversation finishing.
+      setTimeout(() => endStartingSession(), 20);
+
+      await service.sendMessage('Resumed send');
+
+      expect(calls).not.toContain('start_chat');
+      expect(sendAttempt).toBe(2);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
     });
 
     it('auto-retries on "Broken pipe"', async () => {
@@ -478,6 +611,313 @@ describe('ChatStateService', () => {
       });
     });
 
+    it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      // get_conversation_cost is the SSOT total (no frontend delta sum); the
+      // footer mirrors whatever the aggregator returns.
+      let aggregatorTotal = 0.2;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.2, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') return aggregatorTotal;
+        return undefined;
+      });
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.99 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // First turn: footer = the aggregator total, not CC's 0.99 estimate.
+      expect(service.sessionStats?.total_cost).toBeCloseTo(0.2, 6);
+
+      aggregatorTotal = 0.5; // proxy recorded a second turn; aggregator now sums both.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 1.5 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Footer mirrors the aggregator (Rust sums the sidecar), no frontend delta.
+      expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
+    });
+
+    it('sends all conversation response_ids (both turns) to get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.2;
+        }
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.1 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 0.2 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Both turns' uuids must reach the aggregator, not just the latest.
+      expect(sentIds).toContain('msg_1');
+      expect(sentIds).toContain('msg_2');
+    });
+
+    it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') return null; // proxy hasn't recorded this turn yet
+        if (cmd === 'get_conversation_cost') return 9.99;
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Line not present yet → footer stays on the live CC value, aggregator not consulted.
+      expect(service.sessionStats?.total_cost).toBe(0.42);
+      expect(spy).not.toHaveBeenCalledWith('get_conversation_cost', expect.anything());
+    });
+
+    it('reconcile hides the per-message cost when the proxy SSOT is free/null', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        // Local is free → null cost (rendered "—"), never $0.00.
+        if (cmd === 'get_usage_for_response') return { cost_usd: null, cost_source: 'free' };
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        // CC reports a non-zero turn_cost (local estimate); proxy says free/null.
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', turn_cost: 0.046 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      const entry = service.messages.find((m) => m.uuid === 'msg_1');
+      expect(entry?.meta?.cost).toBeUndefined();
+    });
+
+    it('subscription (null aggregator total) yields null footer ("—"), not CC estimate', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string) => {
+        // The turn's line is present (unpriced); the session aggregator returns
+        // null (nothing priced) → footer stays null ("—"), not CC's estimate.
+        if (cmd === 'get_usage_for_response')
+          return { cost_usd: null, cost_source: 'subscription' };
+        if (cmd === 'get_conversation_cost') return null;
+        return undefined;
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      // Subscription is unpriced → null (rendered "—"), replacing CC's $0.42 estimate.
+      expect(service.sessionStats?.total_cost).toBeNull();
+    });
+
+    it('local provider suppresses the live CC cost preview (no $0.00x flicker)', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      // Simulate an active local provider (no real cost).
+      (service as unknown as { _currentProvider: string | null })._currentProvider = 'local';
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        // CC still emits an estimate for the local model; it must be ignored.
+        data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.002, turn_cost: 0.002 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.sessionStats?.total_cost).toBeNull();
+      const entry = service.messages.find((m) => m.uuid === 'msg_1');
+      expect(entry?.meta?.cost).toBeUndefined();
+    });
+
+    it('re-reconciles a deferred OpenRouter cost once /generation prices it later', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        // First read: OpenRouter cost deferred (null); later reads priced
+        // (actual). Footer aggregator follows the same arc.
+        let priced = false;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return priced
+              ? { cost_usd: 0.0046, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return priced ? 0.0046 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          // model + usage give the entry a `meta` so per-message cost can attach.
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.99,
+            model: 'openrouter/anthropic/claude-haiku-4.5',
+            turn_usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Initial reconcile: deferred keeps the live preview (footer 0.99), not
+        // blanked; per-message stays on its preview (here undefined).
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeUndefined();
+        expect(service.sessionStats?.total_cost).toBe(0.99);
+
+        // OpenRouter finishes pricing; the retry must pick it up.
+        priced = true;
+        await vi.advanceTimersByTimeAsync(5000);
+
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0046, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('deferred reconcile keeps the visible preview cost instead of blanking it (#31)', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        let priced = false;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return priced
+              ? { cost_usd: 0.0046, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return priced ? 0.0046 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.5,
+            turn_cost: 0.5, // CC preview attaches a visible per-message cost
+            model: 'openrouter/anthropic/claude-haiku-4.5',
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Bug #31: deferred must NOT blank the flashed preview — it stays visible.
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.5);
+        expect(service.sessionStats?.total_cost).toBe(0.5);
+
+        // Once OpenRouter prices it, the terminal value overwrites the preview.
+        priced = true;
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0046, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('picks up an OpenRouter cost that /generation prices only after ~30s', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        // OpenRouter can take far longer than the early backoff to price a
+        // large generation; the retry window must outlast that.
+        let elapsed = 0;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return elapsed >= 30_000
+              ? { cost_usd: 0.0858, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return elapsed >= 30_000 ? 0.0858 : null;
+          return undefined;
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.13, // inflated CC live preview
+            turn_cost: 0.13,
+            model: 'openrouter/z-ai/glm-5-turbo',
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Still deferred at first → preview stays.
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.13);
+
+        // Advance past OpenRouter's pricing latency in small steps.
+        for (let t = 0; t < 35_000; t += 5000) {
+          elapsed += 5000;
+          await vi.advanceTimersByTimeAsync(5000);
+        }
+
+        expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0858, 6);
+        expect(service.sessionStats?.total_cost).toBeCloseTo(0.0858, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops re-reconciling a deferred turn once a newer turn supersedes it', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        let calls = 0;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            calls += 1;
+            return { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return null;
+          return undefined; // send_message etc. resolve
+        });
+
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.1 },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        const callsAfterFirst = calls;
+
+        // A new turn (sendMessage bumps `_turnId`) must abandon msg_1's stale
+        // deferred retry instead of firing through its backoff.
+        await service.sendMessage('next question');
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        // No unbounded growth: the superseded retry stopped (allow the in-flight one).
+        expect(calls).toBeLessThanOrEqual(callsAfterFirst + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('Result with empty currentBlocks does not add message', () => {
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -569,15 +1009,15 @@ describe('ChatStateService', () => {
     });
 
     it('does not notify on unknown chunk type', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
+      // No state change ⇒ no rebuild ⇒ the state() signal keeps its identity.
+      const before = service.state();
 
       service.handleStreamChunk({
         chunk_type: 'UnknownFutureType' as StreamChunk['chunk_type'],
         data: {},
       } as StreamChunk);
 
-      expect(cb).not.toHaveBeenCalled();
+      expect(service.state()).toBe(before);
       expect(service.currentBlocks).toHaveLength(0);
       expect(service.isStreaming).toBe(false);
     });
@@ -681,6 +1121,42 @@ describe('ChatStateService', () => {
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('sessionStatsFromState signal (reactive footer)', () => {
+    it('defaults to null and mirrors the getter', () => {
+      expect(service.sessionStatsFromState()).toBeNull();
+      expect(service.sessionStatsFromState()).toBe(service.sessionStats);
+    });
+
+    it('updates reactively on Result without needing another change-detection trigger', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5, usage: { input_tokens: 2, output_tokens: 9 } },
+      });
+      const sig = service.sessionStatsFromState();
+      expect(sig?.session_id).toBe('abc');
+      expect(sig?.total_cost).toBe(0.5);
+      // Signal and getter agree.
+      expect(service.sessionStatsFromState()).toBe(service.sessionStats);
+    });
+
+    it('updates reactively on seedSessionId', () => {
+      service.seedSessionId('11111111-1111-1111-1111-111111111111');
+      expect(service.sessionStatsFromState()?.session_id).toBe(
+        '11111111-1111-1111-1111-111111111111'
+      );
+    });
+
+    it('clears reactively on resetForNewConversation', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5 },
+      });
+      expect(service.sessionStatsFromState()).not.toBeNull();
+      service.resetForNewConversation();
+      expect(service.sessionStatsFromState()).toBeNull();
     });
   });
 
@@ -817,13 +1293,18 @@ describe('ChatStateService', () => {
       expect(service.sessionStats).toBeNull();
     });
 
-    it('notifies change listeners', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
+    it('rebuilds the state-tree signal', () => {
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'x' } });
+      expect(service.state().entries.length).toBeGreaterThan(0);
 
       service.resetForNewConversation();
 
-      expect(cb).toHaveBeenCalled();
+      // Reset wipes legacy fields and the rebuild projects an empty tree.
+      expect(service.state().entries).toEqual([]);
+      expect(service.state().is_streaming).toBe(false);
     });
   });
 
@@ -836,26 +1317,53 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'loaded' });
     });
+
+    it('re-reconciles the last assistant turn from the proxy SSOT on reload', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_usage_for_response') {
+          return { cost_usd: 0.0858, cost_source: 'actual' };
+        }
+        if (cmd === 'get_conversation_cost') return 0.0858;
+        return undefined;
+      });
+
+      service.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        {
+          role: 'assistant',
+          blocks: [{ type: 'text', content: 'a' }],
+          timestamp: 2,
+          uuid: 'gen-1',
+          meta: { cost: 0.13 }, // stale inflated preview from a deferred turn
+        },
+      ]);
+
+      await vi.waitFor(() => {
+        expect(service.messages.find((m) => m.uuid === 'gen-1')?.meta?.cost).toBeCloseTo(0.0858, 6);
+      });
+    });
   });
 
-  describe('onChange', () => {
-    it('notifies listeners on stream chunk', () => {
-      const cb = vi.fn();
-      service.onChange(cb);
-
+  describe('state-tree signal rebuild on mutation', () => {
+    it('rebuilds the signal on a stream chunk so projections refresh', () => {
+      const before = service.state();
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
 
-      expect(cb).toHaveBeenCalled();
+      // A mutating chunk rebuilds the tree to a fresh identity and the
+      // streaming projection reflects the new content.
+      expect(service.state()).not.toBe(before);
+      expect(service.currentBlocksFromState()).toEqual([{ type: 'text', content: 'hi' }]);
+      expect(service.isStreamingFromState()).toBe(true);
     });
 
-    it('returns unsubscribe function', () => {
-      const cb = vi.fn();
-      const unsub = service.onChange(cb);
-      unsub();
-
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-
-      expect(cb).not.toHaveBeenCalled();
+    it('leaves the signal untouched when a chunk produces no state change', () => {
+      const before = service.state();
+      service.handleStreamChunk({
+        chunk_type: 'UnknownFutureType' as StreamChunk['chunk_type'],
+        data: {},
+      } as StreamChunk);
+      expect(service.state()).toBe(before);
     });
   });
 
@@ -1103,12 +1611,42 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('stateBlocksToMessageBlocks unknown-kind handling (ADR-042 drift guard)', () => {
+    it('renders a placeholder error block instead of silently dropping an unknown kind', () => {
+      // Simulate a new Rust MessageBlock variant the TS union does not yet know.
+      const unknown = { kind: 'future_widget', payload: 42 } as unknown as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+
+      const out = stateBlocksToMessageBlocks([unknown]);
+
+      expect(out).toEqual([{ type: 'error', content: 'Unsupported message block: future_widget' }]);
+    });
+
+    it('preserves known blocks around an unknown one rather than aborting the loop', () => {
+      const known = { kind: 'text', content: 'hello' } as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+      const unknown = { kind: 'mystery' } as unknown as Parameters<
+        typeof stateBlocksToMessageBlocks
+      >[0][number];
+
+      const out = stateBlocksToMessageBlocks([known, unknown, known]);
+
+      expect(out).toEqual([
+        { type: 'text', content: 'hello' },
+        { type: 'error', content: 'Unsupported message block: mystery' },
+        { type: 'text', content: 'hello' },
+      ]);
+    });
+  });
+
   describe('auth error routing', () => {
     it('surfaces auth error as auth_required status', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       // Bypass normal init — set ready directly so startChatSession fires
-      projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat')
@@ -1119,13 +1657,13 @@ describe('ChatStateService', () => {
       await service.init();
       // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
-      expect(projectState.status).toBe('auth_required');
+      expect(projectState.status()).toBe('auth_required');
     });
 
     it('routes auth error in sendMessage retry to auth_required', async () => {
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
 
       let callCount = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1143,14 +1681,13 @@ describe('ChatStateService', () => {
 
       await service.init();
       await service.sendMessage('hello');
-      expect(projectState.status).toBe('auth_required');
+      expect(projectState.status()).toBe('auth_required');
     });
   });
 
   describe('session startup timeout', () => {
     it('shows error when startingSession does not clear within deadline', async () => {
-      // Directly invoke sendMessage without full init — we only need the
-      // retry path and the startingSession flag.
+      // Invoke sendMessage without full init.
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'send_message') throw new Error('no active session');
         return undefined;
@@ -1159,15 +1696,7 @@ describe('ChatStateService', () => {
       // Simulate startingSession permanently stuck true
       (service as unknown as { startingSession: boolean }).startingSession = true;
 
-      // Mock Date.now to make the deadline expire immediately.
-      // sendMessage calls: (1) user-msg timestamp, (2) deadline = Date.now() + 30_000,
-      // (3+) while-loop condition Date.now() < deadline.
-      // Track Date.now() calls.  We need the deadline setup call to
-      // return `base` and all subsequent calls to return past the
-      // deadline.  Use a generous threshold: the first 5 calls return
-      // base (covers user-msg timestamp, notifyChange(), deadline setup,
-      // plus any framework overhead).  After that, jump past the
-      // deadline so the while loop exits on the next iteration.
+      // First 5 Date.now() calls return base, the rest return past the deadline.
       const base = 1000000;
       let nowCall = 0;
       const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
@@ -1315,6 +1844,46 @@ describe('ChatStateService', () => {
 
       await service.sendMessage('next turn on same session');
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('QueueDrained after Result dispatches the queued turn (not-streaming gate must pass it)', async () => {
+      // Real dispatch order: Result flips isStreaming=false, THEN the backend
+      // drain emits QueueDrained; dropping it strands the chip + the new turn.
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service._setState({ pendingQueue: { text: 'queued follow-up', queued_at: 1 } });
+      service.isStreaming = true;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Result',
+        data: {
+          session_id: 's-q',
+          total_cost: 0.01,
+          usage: { output_tokens: 5 },
+          result_text: null,
+          context_window_size: 200_000,
+        },
+      });
+      expect(service.isStreaming).toBe(false);
+
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'QueueDrained',
+        data: { session_id: 's-q', text: 'queued follow-up' },
+      });
+      expect(service.pendingQueue).toBeNull();
+      expect(service.isStreaming).toBe(true);
+      const lastUser = [...service.messages].reverse().find((m) => m.role === 'user');
+      expect(
+        lastUser?.blocks.some((b) => b.type === 'text' && b.content === 'queued follow-up')
+      ).toBe(true);
+
+      // The dispatched turn's content must now flow (it used to be dropped).
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Text',
+        data: { content: 'ACK' },
+      });
+      expect(service.currentBlocks.some((b) => b.type === 'text' && b.content === 'ACK')).toBe(
+        true
+      );
     });
 
     it('late content chunks arriving after stopConversation are dropped via _turnId guard', async () => {
@@ -1552,6 +2121,18 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('lastSuccessfulInputTokens', () => {
+    it('exposes input_tokens from the last successful Result and survives reset', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 's1', usage: { input_tokens: 24771, output_tokens: 20 } },
+      });
+      expect(service.lastSuccessfulInputTokens).toBe(24771);
+      (service as unknown as { resetCoreStreamState(): void }).resetCoreStreamState();
+      expect(service.lastSuccessfulInputTokens).toBe(24771); // durable across reset
+    });
+  });
+
   describe('copyMessage', () => {
     let copySpy: ReturnType<typeof vi.fn>;
 
@@ -1618,11 +2199,9 @@ describe('ChatStateService', () => {
       service._setState({
         messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
       });
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const ok = service.copyMessage(0);
       expect(ok).toBe(false);
-      expect(warnSpy).toHaveBeenCalled();
-      warnSpy.mockRestore();
+      expect(mockLogger.warn).toHaveBeenCalled();
     });
   });
 
@@ -1818,7 +2397,9 @@ describe('ChatStateService', () => {
       expect(meta?.cost).toBe(0.018);
     });
 
-    it('falls back to pricing.ts cost calculation when backend omits turn_cost', () => {
+    it('does not compute cost on the frontend when backend omits turn_cost', () => {
+      // No frontend pricing (proxy is SSOT): absent turn_cost leaves cost
+      // undefined until reconcileFooterCost fills it from the proxy.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -1838,7 +2419,9 @@ describe('ChatStateService', () => {
       });
 
       const meta = service.messages[0].meta;
-      expect(meta?.cost).toBeCloseTo(3, 6); // 1M input * $3/1M for Sonnet
+      // model + usage are still recorded; cost stays undefined (no fabrication).
+      expect(meta?.model).toBe('claude-sonnet-4-6');
+      expect(meta?.cost).toBeUndefined();
     });
 
     it('uses SystemInit model when the Result chunk omits `model`', () => {
@@ -1877,13 +2460,9 @@ describe('ChatStateService', () => {
     });
 
     it('simulates patch sequence: Add → Replace meta provisional → Replace meta final', () => {
-      // Mimics the Feature-3 patch stream: text streams in, then a
-      // provisional meta arrives (no turn_cost yet), then a final Result
-      // overrides the provisional values.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hi.' } });
 
-      // Provisional: usage without turn_cost — the frontend should fall
-      // back to pricing.ts. First finalize (provisional Result).
+      // Provisional: no turn_cost → cost stays undefined (no frontend pricing).
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: {
@@ -1901,11 +2480,10 @@ describe('ChatStateService', () => {
         },
       });
 
-      // After provisional: meta.cost is the pricing.ts fallback
-      // Haiku: 1000 * 1 / 1M + 500 * 5 / 1M = 0.001 + 0.0025 = 0.0035
+      // After provisional: model recorded, cost undefined (no frontend pricing).
       const provisional = service.messages[0].meta;
       expect(provisional?.model).toBe('claude-haiku-4-5');
-      expect(provisional?.cost).toBeCloseTo(0.0035, 6);
+      expect(provisional?.cost).toBeUndefined();
 
       // Simulate final Result in a fresh assistant turn — replaces the
       // previous entry behaviour is per-turn. Test that turn_cost wins.
@@ -1978,7 +2556,46 @@ describe('ChatStateService', () => {
       expect(service.pendingQueue?.text).toBe('newer');
     });
 
-    it('queueMessage no-ops without a session id', async () => {
+    it('SystemInit session_id enables queueMessage during the first turn (ADR-045)', async () => {
+      service._setState({ sessionStats: null });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'init-1' },
+      });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+
+      const prior = await service.queueMessage('follow-up');
+      expect(prior).toBeNull();
+      expect(calls).toEqual([
+        { cmd: 'queue_message', args: { sessionId: 'init-1', text: 'follow-up' } },
+      ]);
+      expect(service.pendingQueue?.text).toBe('follow-up');
+    });
+
+    it('SystemInit with empty model seeds the session id without clobbering the model', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: '', session_id: 'init-2' },
+      });
+      expect(service.sessionStats?.session_id).toBe('init-2');
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      expect(service.sessionStats?.model).toBe('claude-opus-4-6');
+    });
+
+    it('queueMessage before any session id fills the local slot and defers the backend', async () => {
       service._setState({ sessionStats: null });
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1987,8 +2604,74 @@ describe('ChatStateService', () => {
       };
       const prior = await service.queueMessage('next');
       expect(prior).toBeNull();
+      // No silent drop: the slot (and chip) exist immediately, backend waits.
       expect(calls).not.toContain('queue_message');
+      expect(service.pendingQueue?.text).toBe('next');
+    });
+
+    it('deferred queue flushes to the backend when SystemInit delivers the session id', async () => {
+      service._setState({ sessionStats: null });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+      await service.queueMessage('early bird');
+      expect(calls).toEqual([]);
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'late-1' },
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([
+          { cmd: 'queue_message', args: { sessionId: 'late-1', text: 'early bird' } },
+        ])
+      );
+      expect(service.pendingQueue?.text).toBe('early bird');
+    });
+
+    it('deferred queue flushes when the first Result delivers the session id', async () => {
+      service._setState({ sessionStats: null });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+      await service.queueMessage('early bird');
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'res-1', total_cost: 0.01 },
+      });
+      await vi.waitFor(() =>
+        expect(calls.filter((c) => c.cmd === 'queue_message')).toEqual([
+          { cmd: 'queue_message', args: { sessionId: 'res-1', text: 'early bird' } },
+        ])
+      );
+    });
+
+    it('cancelling a deferred queue clears the slot and never reaches the backend', async () => {
+      service._setState({ sessionStats: null });
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await service.queueMessage('doomed');
+      await service.cancelQueuedMessage();
       expect(service.pendingQueue).toBeNull();
+
+      // A late session id must NOT resurrect the cancelled message.
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'm', session_id: 'late-2' },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(calls).not.toContain('queue_message');
     });
 
     it('queueMessage no-ops on empty text', async () => {
@@ -2051,7 +2734,7 @@ describe('ChatStateService', () => {
       expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'next' }]);
     });
 
-    it('queueMessage swallows backend errors and leaves slot untouched', async () => {
+    it('queueMessage swallows backend errors and keeps the visible slot', async () => {
       setSession('s-1');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'queue_message') throw new Error('backend down');
@@ -2061,7 +2744,8 @@ describe('ChatStateService', () => {
       const prior = await service.queueMessage('next');
       warnSpy.mockRestore();
       expect(prior).toBeNull();
-      expect(service.pendingQueue).toBeNull();
+      // The chip must not vanish on a failed registration — no silent drop.
+      expect(service.pendingQueue?.text).toBe('next');
     });
 
     it('resetForNewConversation clears pendingQueue', () => {
@@ -2071,8 +2755,8 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── ADR-042/043 — JSON Patch state-tree reducer ──────────────────────────
-  describe('state-tree signal + applyLogMsg', () => {
+  // ── ADR-042 — state-tree signal projections (legacy fields → tree) ──────
+  describe('state-tree signal projections', () => {
     it('initial state matches DEFAULT_STATE_TREE', () => {
       const s = service.state();
       expect(s.session_id).toBeNull();
@@ -2080,118 +2764,6 @@ describe('ChatStateService', () => {
       expect(s.is_streaming).toBe(false);
       expect(s.pending_queue).toBeNull();
       expect(s.session_totals.cost).toBe(0);
-    });
-
-    it('SessionStarted lifecycle commits session_id', () => {
-      service.applyLogMsg({ type: 'session_started', data: { session_id: 'abc-123' } });
-      expect(service.state().session_id).toBe('abc-123');
-    });
-
-    it('JsonPatch sets is_streaming to true via /is_streaming', () => {
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/is_streaming', value: true }],
-      });
-      expect(service.state().is_streaming).toBe(true);
-    });
-
-    it('JsonPatch sequence stays consistent (apply then apply equals composed)', () => {
-      // Bring up an entry then replace its text — final state must match
-      // a single composed patch (associativity property).
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [
-          {
-            op: 'add',
-            path: '/entries/0',
-            value: {
-              index: 0,
-              role: 'assistant',
-              uuid: null,
-              uuid_status: 'pending',
-              blocks: [{ kind: 'text', content: '' }],
-              meta: null,
-              edited_at: null,
-              timestamp: 1,
-            },
-          },
-        ],
-      });
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/entries/0/blocks/0/content', value: 'hi' }],
-      });
-      expect(service.state().entries).toHaveLength(1);
-      const entry = service.state().entries[0];
-      expect(entry.blocks[0]).toEqual({ kind: 'text', content: 'hi' });
-    });
-
-    it('Resync replaces the entire state-tree wholesale', () => {
-      service.applyLogMsg({
-        type: 'session_started',
-        data: { session_id: 'old' },
-      });
-      service.applyLogMsg({
-        type: 'resync',
-        data: {
-          session_id: 'replaced',
-          entries: [],
-          session_totals: {
-            input_tokens: 1,
-            output_tokens: 2,
-            cache_read_tokens: 3,
-            cache_write_tokens: 4,
-            cost: 0.5,
-            turn_count: 1,
-          },
-          pending_queue: null,
-          model: 'opus-4.7',
-          is_streaming: false,
-        },
-      });
-      const s = service.state();
-      expect(s.session_id).toBe('replaced');
-      expect(s.session_totals.input_tokens).toBe(1);
-      expect(s.model).toBe('opus-4.7');
-    });
-
-    it('SessionEnded forces is_streaming back to false', () => {
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/is_streaming', value: true }],
-      });
-      expect(service.state().is_streaming).toBe(true);
-      service.applyLogMsg({ type: 'session_ended' });
-      expect(service.state().is_streaming).toBe(false);
-    });
-
-    it('Bad patch is dropped without throwing or mutating state', () => {
-      const before = service.state();
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      service.applyLogMsg({
-        type: 'json_patch',
-        data: [{ op: 'replace', path: '/missing/key/that/does/not/exist', value: 1 }],
-      });
-      warnSpy.mockRestore();
-      expect(service.state()).toBe(before);
-    });
-
-    it('subscribeToSession invokes subscribe_session and listens on the returned event', async () => {
-      const calls: Array<{ cmd: string; args: unknown }> = [];
-      const listenCalls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
-        calls.push({ cmd, args });
-        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-1' };
-        return undefined;
-      };
-      mockTauri.listen = (async (event: string, _handler: unknown) => {
-        listenCalls.push(event);
-        return () => undefined;
-      }) as typeof mockTauri.listen;
-
-      await service.subscribeToSession('sess-1');
-      expect(calls).toEqual([{ cmd: 'subscribe_session', args: { sessionId: 'sess-1' } }]);
-      expect(listenCalls).toEqual(['chat_patch::sess-1']);
     });
 
     it('messagesFromState mirrors messages getter after streaming a turn', () => {
@@ -2235,28 +2807,14 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'tick' } });
       expect(service.pendingQueueFromState()?.text).toBe('next');
     });
-
-    it('subscribeToSession is idempotent for the same session id', async () => {
-      const calls: Array<{ cmd: string }> = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push({ cmd });
-        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-x' };
-        return undefined;
-      };
-      mockTauri.listen = (async () => () => undefined) as typeof mockTauri.listen;
-      await service.subscribeToSession('sess-x');
-      await service.subscribeToSession('sess-x');
-      const subscribeCalls = calls.filter((c) => c.cmd === 'subscribe_session');
-      expect(subscribeCalls).toHaveLength(1);
-    });
   });
 
-  describe('seedResumedSession', () => {
+  describe('seedSessionId', () => {
     it('stamps the session id when none is set so retry/queue work pre-Result', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
-      service.seedResumedSession('resumed-sess-1');
+      service.seedSessionId('resumed-sess-1');
       expect(service.sessionStats?.session_id).toBe('resumed-sess-1');
-      expect(service.sessionStats?.total_cost).toBe(0);
+      expect(service.sessionStats?.total_cost).toBeNull();
       expect(service.sessionStats?.total_output_tokens).toBe(0);
     });
 
@@ -2272,7 +2830,7 @@ describe('ChatStateService', () => {
         },
       });
       const before = service.sessionStats;
-      service.seedResumedSession('sess-x');
+      service.seedSessionId('sess-x');
       // Same reference — nothing replaced.
       expect(service.sessionStats).toBe(before);
       expect(service.sessionStats?.total_cost).toBe(0.123);
@@ -2280,7 +2838,7 @@ describe('ChatStateService', () => {
 
     it('refuses an empty session id', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
-      service.seedResumedSession('');
+      service.seedSessionId('');
       expect(service.sessionStats).toBeNull();
     });
   });
@@ -2310,21 +2868,17 @@ describe('ChatStateService', () => {
     });
 
     it('logs at debug level on backend failure without throwing', async () => {
-      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') throw new Error('backend gone');
         return undefined;
       };
       await expect(service.refreshLlmConfigCache()).resolves.toBeUndefined();
-      expect(debugSpy).toHaveBeenCalled();
-      debugSpy.mockRestore();
+      expect(mockLogger.debug).toHaveBeenCalled();
     });
 
     it('does not dedupe — every call hits the backend', async () => {
-      // Regression guard: the previous implementation skipped re-fetches
-      // when the active project hadn't changed, which silently broke the
-      // post-save chat-footer refresh. The dedupe was removed because the
-      // command is cheap.
+      // Regression guard: dedupe was removed (cheap command) — skipping
+      // re-fetches per project silently broke the post-save footer refresh.
       let calls = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') {
@@ -2341,9 +2895,7 @@ describe('ChatStateService', () => {
   });
 
   describe('resolveContextWindow priority chain', () => {
-    // resolveContextWindow is private; the chain is exercised through the
-    // public surface (Result-chunk handler / seedResumedSession). We hit it
-    // here through a controlled cast for direct assertions on each tier.
+    // resolveContextWindow is private; cast to assert on each tier directly.
     type Internal = {
       resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
       _persistedContextTokens: number | null;
@@ -2358,14 +2910,19 @@ describe('ChatStateService', () => {
     });
 
     it('falls back to the Anthropic SSOT when no live value is available', async () => {
-      // The ChatStateService injects AnthropicModelsService — populate the
-      // shared cache by going through its public list() once with a fixture
-      // backend.
+      // Populate the injected AnthropicModelsService cache via its public
+      // list() once with a fixture backend.
       const anthropic = TestBed.inject(AnthropicModelsService);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_anthropic_models') {
           return [
-            { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
+            {
+              id: 'claude-opus-4-7',
+              family: 'Opus 4.7',
+              context_tokens: 1_000_000,
+              latest: true,
+              premium: true,
+            },
           ];
         }
         return undefined;
@@ -2394,6 +2951,680 @@ describe('ChatStateService', () => {
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 0;
       expect(internal.resolveContextWindow(undefined, undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+  });
+
+  // ── mapContextOverflowError ────────────────────────────────────────────────
+
+  describe('mapContextOverflowError', () => {
+    it('maps llama.cpp context-overflow to a friendly message; passes others through', () => {
+      expect(mapContextOverflowError('exceeds the available context size (8192 tokens)')).toContain(
+        'larger than the selected model'
+      );
+      expect(mapContextOverflowError('some unrelated error')).toBeNull();
+    });
+
+    it('maps "context length exceeded" variant', () => {
+      expect(mapContextOverflowError('context length exceeded')).toContain(
+        'larger than the selected model'
+      );
+    });
+
+    it('is case-insensitive', () => {
+      expect(
+        mapContextOverflowError('Exceeds The Available Context Size (8192 tokens)')
+      ).not.toBeNull();
+      expect(mapContextOverflowError('Context Length Exceeded')).not.toBeNull();
+    });
+
+    it('returns null for unknown errors', () => {
+      expect(mapContextOverflowError('')).toBeNull();
+      expect(mapContextOverflowError('out of memory')).toBeNull();
+    });
+  });
+
+  // ── mapNotLoggedInError ─────────────────────────────────────────────────────
+
+  describe('mapNotLoggedInError', () => {
+    it('maps Claude Code\'s "not logged in" error to a Settings-pointing message', () => {
+      expect(mapNotLoggedInError('Not logged in · Please run /login')).toContain('Settings');
+      expect(mapNotLoggedInError('some unrelated error')).toBeNull();
+    });
+
+    it('matches "not authenticated" wording variants', () => {
+      expect(mapNotLoggedInError('Not authenticated')).not.toBeNull();
+    });
+
+    it('is case-insensitive', () => {
+      expect(mapNotLoggedInError('NOT LOGGED IN')).not.toBeNull();
+    });
+
+    it('returns null for unknown errors', () => {
+      expect(mapNotLoggedInError('')).toBeNull();
+      expect(mapNotLoggedInError('rate limit exceeded')).toBeNull();
+    });
+  });
+
+  // ── isNotAuthenticatedError gate predicate ─────────────────────────────────
+
+  describe('isNotAuthenticatedError', () => {
+    it('matches the backend "not authenticated" phrasings', () => {
+      expect(
+        isNotAuthenticatedError('Claude is not authenticated. Please authenticate first.')
+      ).toBe(true);
+      expect(isNotAuthenticatedError('not authenticated')).toBe(true);
+    });
+
+    it('is case-sensitive (exact backend phrasing) and rejects unrelated errors', () => {
+      expect(isNotAuthenticatedError('NOT AUTHENTICATED')).toBe(false);
+      expect(isNotAuthenticatedError('Broken pipe (os error 32)')).toBe(false);
+      expect(isNotAuthenticatedError('')).toBe(false);
+    });
+  });
+
+  // ── handleStreamChunk Error — context-overflow mapping ────────────────────
+
+  describe('handleStreamChunk Error — context-overflow mapping', () => {
+    it('replaces a known context-overflow error with the friendly message', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'exceeds the available context size (8192 tokens)' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toContain('larger than the selected model');
+      }
+    });
+
+    it('keeps unknown errors verbatim', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'some unrelated error' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toBe('some unrelated error');
+      }
+    });
+  });
+
+  // ── handleStreamChunk Error — not-logged-in mapping ────────────────────────
+
+  describe('handleStreamChunk Error — not-logged-in mapping', () => {
+    it('replaces Claude Code\'s "not logged in" error with a Settings-pointing message', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'Not logged in · Please run /login' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toBeDefined();
+      if (errBlock?.type === 'error') {
+        expect(errBlock.content).toContain('Settings');
+      }
+    });
+  });
+
+  // ── resume on restart (service-owned, survives an unmounted ChatComponent) ──
+
+  describe('resume on restart', () => {
+    /** Casts onto the private restart-lifecycle notifiers used to drive the path. */
+    type RestartInternal = {
+      notifyRestartBegin(): Promise<void>;
+      notifyReady(): void;
+    };
+    /** Casts onto private token fields so a test can force history (not) fitting. */
+    type TokensInternal = {
+      _lastSuccessfulInputTokens: number | null;
+      _persistedContextTokens: number | null;
+    };
+
+    /**
+     * Fires restart-begin (interrupt) then restart-complete (resume) + flush.
+     * @param projectState - ProjectStateService instance to notify.
+     */
+    async function fireRestart(projectState: ProjectStateService): Promise<void> {
+      await (projectState as unknown as RestartInternal).notifyRestartBegin();
+      projectState.notifyRestartComplete();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    let projectState: ProjectStateService;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      // projectState.init() wires the Tauri listeners that translate
+      // project_switch_started → 'switching' for the switch-clears-id test.
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+    });
+
+    it('resumes the durable session with NO ChatComponent mounted (key regression)', async () => {
+      // No decider registered (component never mounted) → service auto-resumes.
+      service.seedSessionId('sess-1');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-1',
+            messages: [{ role: 'user', blocks: [{ type: 'text', content: 'restored' }] }],
+          };
+        }
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(calls).toContain('resume_conversation');
+      expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
+        type: 'text',
+        content: 'restored',
+      });
+    });
+
+    it('auto-resumes when unmounted even if history does not fit the target window', async () => {
+      service.seedSessionId('sess-2');
+      // History exceeds the window → would prompt if mounted; unmounted ⇒ resume.
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'sess-2', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(calls).toContain('resume_conversation');
+    });
+
+    it('starts a fresh session (not resume) when a decider returns "fresh" and history does not fit', async () => {
+      projectState.status.set('ready');
+      service.seedSessionId('sess-3');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      service.setResumeDecider(() => Promise.resolve('fresh'));
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      // 'fresh' must NOT resume, MUST start a clean session, and clear the durable id.
+      expect(calls).not.toContain('resume_conversation');
+      expect(calls).toContain('start_chat');
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('resumes when the decider returns "resume" and history does not fit', async () => {
+      service.seedSessionId('sess-4');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      service.setResumeDecider(() => Promise.resolve('resume'));
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'sess-4', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(calls).toContain('resume_conversation');
+    });
+
+    it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
+      service.seedSessionId('sess-window');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      // Stale cache from the PREVIOUS model: too small — would wrongly ask.
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const decider = vi.fn(() => Promise.resolve('fresh' as const));
+      service.setResumeDecider(decider);
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        // The post-restart model has a big window: history fits.
+        if (cmd === 'get_llm_config') return { provider: 'anthropic', context_tokens: 200_000 };
+        if (cmd === 'get_conversation') return { session_id: 'sess-window', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(decider).not.toHaveBeenCalled();
+      expect(calls).toContain('resume_conversation');
+    });
+
+    it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
+      service.seedSessionId('sess-shrunk');
+      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      // Stale cache from the PREVIOUS model: big — would wrongly auto-resume.
+      (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
+      const decider = vi.fn(() => Promise.resolve('resume' as const));
+      service.setResumeDecider(decider);
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_llm_config') return { provider: 'local', context_tokens: 8192 };
+        if (cmd === 'get_conversation') return { session_id: 'sess-shrunk', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      // The decision saw the NEW (smaller) window and asked the mounted view.
+      expect(decider).toHaveBeenCalledTimes(1);
+      expect(calls).toContain('resume_conversation'); // decider chose resume
+    });
+
+    it('does nothing on restart when no durable session id is known', async () => {
+      service.clearSessionTracking();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(calls).not.toContain('resume_conversation');
+    });
+
+    it('does not resume on a bare ready (project switch, no restart-complete)', async () => {
+      service.seedSessionId('sess-5');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      (projectState as unknown as RestartInternal).notifyReady();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(calls).not.toContain('resume_conversation');
+    });
+
+    it('clears the durable id on a project switch (switching) so it cannot resume later', async () => {
+      service.seedSessionId('sess-6');
+      expect(service.lastKnownSessionId).toBe('sess-6');
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('interrupts a streaming turn on restart-begin', async () => {
+      const stopSpy = vi.spyOn(service, 'stopConversation').mockResolvedValue();
+      service.isStreaming = true;
+      await (projectState as unknown as RestartInternal).notifyRestartBegin();
+      expect(stopSpy).toHaveBeenCalled();
+    });
+
+    it('does not interrupt on restart-begin when not streaming', async () => {
+      const stopSpy = vi.spyOn(service, 'stopConversation').mockResolvedValue();
+      service.isStreaming = false;
+      await (projectState as unknown as RestartInternal).notifyRestartBegin();
+      expect(stopSpy).not.toHaveBeenCalled();
+    });
+
+    it('adopts a changed session_id from a post-resume Result (fork guard)', () => {
+      service.seedSessionId('old');
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'new', total_cost: 0 },
+      });
+      expect(service.lastKnownSessionId).toBe('new');
+    });
+
+    it('a remount init() mid-resume does not start a competing start_chat', async () => {
+      // Regression: resetForNewConversation zeroed `initialized`, so the remount
+      // init() started a fresh start_chat that clobbered the in-flight resume.
+      projectState.status.set('ready');
+      service.seedSessionId('sess-mid');
+      let releaseResume: (() => void) | null = null;
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-mid',
+            messages: [{ role: 'user', blocks: [{ type: 'text', content: 'restored' }] }],
+          };
+        }
+        if (cmd === 'resume_conversation') {
+          await new Promise<void>((resolve) => {
+            releaseResume = resolve;
+          });
+        }
+        return undefined;
+      };
+
+      const restartDone = fireRestart(projectState);
+      // The llm-config re-read precedes the resume RPC; wait until it's in flight.
+      await vi.waitFor(() => {
+        expect(releaseResume).not.toBeNull();
+      });
+      // Remount while resume is still in flight.
+      await service.init();
+      releaseResume!();
+      await restartDone;
+
+      // The released resume pipeline settles asynchronously; wait for its load.
+      await vi.waitFor(() => {
+        expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
+          type: 'text',
+          content: 'restored',
+        });
+      });
+      // Asserted after full settle: even a late competing start_chat would show.
+      expect(calls).not.toContain('start_chat');
+    });
+
+    it('a remount init() just after resume completes still does not start_chat', async () => {
+      projectState.status.set('ready');
+      service.seedSessionId('sess-done');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'sess-done', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+      // Resume finished: _resumeInProgress is false but _lastKnownSessionId holds.
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(calls).not.toContain('start_chat');
+      expect(service.lastKnownSessionId).toBe('sess-done');
+    });
+
+    it('newConversation reset then init() still starts a fresh session', async () => {
+      // Negative control: the guard must not block the legitimate fresh-start path.
+      projectState.status.set('ready');
+      service.resetForNewConversation();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(calls).toContain('start_chat');
+    });
+  });
+
+  // ── resumeConversation transcript failure (non-blocking notice) ────────────
+
+  describe('resumeConversation transcript failure', () => {
+    it('keeps the session live and shows a notice when get_conversation fails but resume succeeds', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_conversation') throw new Error('jsonl unreadable');
+        return undefined;
+      };
+
+      await service.resumeConversation('sess-notice');
+
+      expect(calls).toContain('resume_conversation');
+      // Session stays live: durable + footer ids seeded so retry/queue work.
+      expect(service.lastKnownSessionId).toBe('sess-notice');
+      expect(service.sessionStats?.session_id).toBe('sess-notice');
+      expect(service.isStreaming).toBe(false);
+      // Non-blocking notice explains the empty scrollback.
+      const blocks = service.messages.flatMap((m) => m.blocks);
+      const notice = blocks.find((b) => b.type === 'error');
+      expect(notice).toBeDefined();
+      expect((notice as { type: 'error'; content: string }).content).toContain('history');
+      expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('shows no notice when the transcript loads successfully', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-ok',
+            messages: [
+              {
+                role: 'user',
+                content: 'hi',
+                timestamp: null,
+                blocks: [{ type: 'text', content: 'hi' }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+
+      await service.resumeConversation('sess-ok');
+
+      const blocks = service.messages.flatMap((m) => m.blocks);
+      expect(blocks.some((b) => b.type === 'error')).toBe(false);
+      expect(service.sessionStats?.session_id).toBe('sess-ok');
+    });
+  });
+
+  // ── historyFitsTarget pure predicate ───────────────────────────────────────
+
+  describe('historyFitsTarget', () => {
+    it('fits, exceeds, and unknown', () => {
+      expect(historyFitsTarget(8000, 131072)).toBe(true);
+      expect(historyFitsTarget(25229, 8192)).toBe(false);
+      expect(historyFitsTarget(null, 8192)).toBe(true); // no history → safe to resume
+      expect(historyFitsTarget(25229, null)).toBe(false); // unknown window → ask, don't auto-resume
+      expect(historyFitsTarget(8192, 8192)).toBe(false); // equal → does NOT fit
+    });
+  });
+
+  // ── toChatMessages per-message meta (resumed footer) ────────────────────────
+
+  describe('toChatMessages per-message meta', () => {
+    it('maps model + usage into ChatMessage.meta', () => {
+      const transcript: ConversationTranscript = {
+        session_id: '00000000-0000-0000-0000-000000000000',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'hi',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: [{ type: 'text', content: 'hi' }],
+            model: 'haiku-4.5',
+            usage: {
+              input_tokens: 9430,
+              output_tokens: 120,
+              cache_read_tokens: 42703,
+              cache_write_tokens: 0,
+            },
+          },
+        ],
+      };
+      const [msg] = toChatMessages(transcript);
+      expect(msg.meta?.model).toBe('haiku-4.5');
+      expect(msg.meta?.usage).toEqual({
+        input_tokens: 9430,
+        output_tokens: 120,
+        cache_read_tokens: 42703,
+        cache_write_tokens: 0,
+      });
+    });
+
+    it('maps model alone when usage absent', () => {
+      const transcript: ConversationTranscript = {
+        session_id: '00000000-0000-0000-0000-000000000000',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'hi',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: [{ type: 'text', content: 'hi' }],
+            model: 'claude-opus-4-8',
+          },
+        ],
+      };
+      const [msg] = toChatMessages(transcript);
+      expect(msg.meta?.model).toBe('claude-opus-4-8');
+      expect(msg.meta?.usage).toBeUndefined();
+    });
+
+    it('leaves meta undefined when neither model nor usage present', () => {
+      const transcript: ConversationTranscript = {
+        session_id: '00000000-0000-0000-0000-000000000000',
+        messages: [
+          {
+            role: 'user',
+            content: 'hello',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: [{ type: 'text', content: 'hello' }],
+          },
+        ],
+      };
+      const [msg] = toChatMessages(transcript);
+      expect(msg.meta).toBeUndefined();
+    });
+  });
+
+  // ── toChatMessages — history tool-block normalization ──────────────────────
+
+  describe('toChatMessages history tool-block normalization', () => {
+    /**
+     * Wraps raw history-shaped blocks into a one-message transcript.
+     * @param blocks - Raw blocks as the backend history payload ships them.
+     */
+    function transcriptWith(blocks: unknown[]): ConversationTranscript {
+      return {
+        session_id: '00000000-0000-0000-0000-000000000000',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: blocks as ConversationTranscript['messages'][number]['blocks'],
+          },
+        ],
+      };
+    }
+
+    it('nests a flat history tool_use into the live-chat shape (done, empty result)', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([{ type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"ls"}' }])
+      );
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: '',
+            tool_name: 'Bash',
+            input_json: '{"command":"ls"}',
+            status: 'done',
+            result: '',
+            result_is_error: false,
+          },
+        },
+      ]);
+    });
+
+    it('merges a tool_result into the preceding tool_use', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_use', tool_name: 'Read', input_json: '{"file_path":"/a.ts"}' },
+          { type: 'tool_result', content: 'file contents', is_error: false },
+        ])
+      );
+      expect(msg.blocks).toHaveLength(1);
+      const block = msg.blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.status).toBe('done');
+        if (block.tool.status === 'done') {
+          expect(block.tool.result).toBe('file contents');
+          expect(block.tool.result_is_error).toBe(false);
+        }
+      }
+    });
+
+    it('marks the merged tool errored when tool_result.is_error is true', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"boom"}' },
+          { type: 'tool_result', content: 'command not found', is_error: true },
+        ])
+      );
+      const block = msg.blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.status).toBe('error');
+        if (block.tool.status === 'error') {
+          expect(block.tool.result).toBe('command not found');
+          expect(block.tool.result_is_error).toBe(true);
+        }
+      }
+    });
+
+    it('drops an orphan tool_result with no preceding tool_use', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'tool_result', content: 'orphan', is_error: false },
+          { type: 'text', content: 'after' },
+        ])
+      );
+      expect(msg.blocks).toEqual([{ type: 'text', content: 'after' }]);
+    });
+
+    it('does not merge a tool_result into a non-tool block', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([
+          { type: 'text', content: 'prose' },
+          { type: 'tool_result', content: 'dangling', is_error: false },
+        ])
+      );
+      expect(msg.blocks).toEqual([{ type: 'text', content: 'prose' }]);
+    });
+
+    it('passes an already-nested tool_use through unchanged', () => {
+      const nested = {
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: 't-live',
+          tool_name: 'Glob',
+          input_json: '{"pattern":"*.ts"}',
+          status: 'done',
+          result: 'a.ts',
+          result_is_error: false,
+        },
+      };
+      const [msg] = toChatMessages(transcriptWith([nested]));
+      expect(msg.blocks).toEqual([nested]);
     });
   });
 });

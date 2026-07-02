@@ -1,19 +1,15 @@
 #!/usr/bin/env bats
-# Verifies that release-please-config.json extra-files stays a subset of
-# .github/workflows/backmerge.yml AUTO_RESOLVE_FILES and VERSION_EXCLUDES.
-#
-# Without this alignment, the automated backmerge main → dev hits add/add
-# conflicts on every file release-please bumped that the auto-resolver
-# doesn't know about. See CLAUDE.md SSOT-alignment note.
+# Verifies backmerge.yml derives VERSION_EXCLUDES/AUTO_RESOLVE_FILES from
+# release-please-config.json extra-files. See CLAUDE.md SSOT note.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 CONFIG="$REPO_ROOT/release-please-config.json"
 BACKMERGE="$REPO_ROOT/.github/workflows/backmerge.yml"
 
-# Extract path strings from extra-files (both plain strings and {path: ...} objects)
+# extra-files paths (plain strings and {path: ...} objects).
 _extra_files() {
     python3 -c "
-import json, sys
+import json
 with open('$CONFIG') as f:
     cfg = json.load(f)
 for item in cfg['packages']['.']['extra-files']:
@@ -24,66 +20,60 @@ for item in cfg['packages']['.']['extra-files']:
 "
 }
 
-# Extract paths from AUTO_RESOLVE_FILES bash array in the YAML
-_auto_resolve_files() {
+# Paths hardcoded in the STATIC_VERSION_FILES bash array in the YAML.
+# Use [[:space:]] (not \s) for BSD awk macOS compatibility.
+_static_version_files() {
     awk '
-        /AUTO_RESOLVE_FILES=\(/ { capture=1; next }
-        capture && /^\s*\)/ { capture=0; next }
+        /STATIC_VERSION_FILES=\(/ { capture=1; next }
+        capture && /^[[:space:]]*\)/ { capture=0; next }
         capture { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0) print }
     ' "$BACKMERGE"
 }
 
-# Extract excluded paths from VERSION_EXCLUDES (strip ':!' prefix and quotes)
-_version_excludes() {
-    awk '
-        /VERSION_EXCLUDES=\(/ { capture=1; next }
-        capture && /^\s*\)/ { capture=0; next }
-        capture {
-            gsub(/^[ \t]+|[ \t]+$/, "");
-            # Each line may have one or more "':!path'" tokens
-            n = split($0, tokens, /[ \t]+/);
-            for (i = 1; i <= n; i++) {
-                t = tokens[i];
-                gsub(/^['\''"]:!/, "", t);
-                gsub(/['\''"]$/, "", t);
-                if (t) print t;
-            }
-        }
-    ' "$BACKMERGE"
+@test "backmerge derives RP_EXTRA_FILES from release-please-config.json via jq" {
+    # The whole point: the per-package list is read from the SSOT, not retyped.
+    grep -q "release-please-config.json" "$BACKMERGE"
+    grep -Eq 'mapfile -t RP_EXTRA_FILES' "$BACKMERGE"
+    grep -Eq 'jq -r .*extra-files' "$BACKMERGE"
 }
 
-@test "every release-please extra-file is in backmerge AUTO_RESOLVE_FILES" {
-    local missing=()
+@test "both arrays are built from RP_EXTRA_FILES + STATIC_VERSION_FILES" {
+    grep -Eq 'VERSION_EXCLUDES\+=\(":!\$f"\)' "$BACKMERGE"
+    grep -Eq 'AUTO_RESOLVE_FILES=\("\$\{RP_EXTRA_FILES\[@\]\}" "\$\{STATIC_VERSION_FILES\[@\]\}"\)' "$BACKMERGE"
+}
+
+@test "no extra-file is hardcoded in STATIC_VERSION_FILES (would duplicate the SSOT)" {
+    local dupes=()
     while IFS= read -r f; do
-        if ! _auto_resolve_files | grep -qxF "$f"; then
-            missing+=("$f")
+        if _static_version_files | grep -qxF "$f"; then
+            dupes+=("$f")
         fi
     done < <(_extra_files)
 
-    if [ "${#missing[@]}" -gt 0 ]; then
-        echo "Files in release-please extra-files but NOT in AUTO_RESOLVE_FILES:"
-        printf '  %s\n' "${missing[@]}"
-        echo ""
-        echo "Add them to AUTO_RESOLVE_FILES in .github/workflows/backmerge.yml"
-        echo "See CLAUDE.md SSOT-alignment section for the procedure."
+    if [ "${#dupes[@]}" -gt 0 ]; then
+        echo "extra-files entries duplicated in STATIC_VERSION_FILES (remove them — they are derived):"
+        printf '  %s\n' "${dupes[@]}"
         return 1
     fi
 }
 
-@test "every release-please extra-file is in backmerge VERSION_EXCLUDES" {
-    local missing=()
-    while IFS= read -r f; do
-        if ! _version_excludes | grep -qxF "$f"; then
-            missing+=("$f")
-        fi
-    done < <(_extra_files)
-
-    if [ "${#missing[@]}" -gt 0 ]; then
-        echo "Files in release-please extra-files but NOT in VERSION_EXCLUDES:"
-        printf '  %s\n' "${missing[@]}"
-        echo ""
-        echo "Add them to VERSION_EXCLUDES in .github/workflows/backmerge.yml"
-        echo "See CLAUDE.md SSOT-alignment section for the procedure."
-        return 1
-    fi
+@test "STATIC_VERSION_FILES holds exactly the release-please files absent from extra-files" {
+    # These are bumped by release-please but never appear in extra-files, so
+    # they must stay inline. Drift here = a missed conflict on backmerge.
+    local expected=(
+        .release-please-manifest.json
+        release-please-config.json
+        .github/workflows/release-please.yml
+        CHANGELOG.md
+        package-lock.json
+        mcp-servers/package-lock.json
+        mcp-servers/playwright/package-lock.json
+        Cargo.lock
+        desktop/src-tauri/Cargo.lock
+    )
+    local actual
+    actual="$(_static_version_files | sort)"
+    local want
+    want="$(printf '%s\n' "${expected[@]}" | sort)"
+    [ "$actual" = "$want" ]
 }

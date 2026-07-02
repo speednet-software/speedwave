@@ -23,11 +23,11 @@ const MOCK_SCHEMA: JsonSchema = {
 const MOCK_PLUGINS = {
   plugins: [
     {
-      slug: 'presale',
-      name: 'Presale CRM',
-      service_id: 'presale',
+      slug: 'example-plugin',
+      name: 'Example Plugin CRM',
+      service_id: 'example-plugin',
       version: '1.2.0',
-      description: 'CRM integration for presale',
+      description: 'CRM integration for example-plugin',
       enabled: true,
       configured: true,
       auth_fields: [],
@@ -144,7 +144,7 @@ async function initAndDetect(
 describe('PluginDetailComponent', () => {
   let mockTauri: MockTauriService;
 
-  function setup(slug = 'presale') {
+  function setup(slug = 'example-plugin') {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = defaultInvokeHandler;
     mockRouter.navigate = vi.fn();
@@ -160,17 +160,15 @@ describe('PluginDetailComponent', () => {
 
     // Set activeProject on the SSOT so loadActiveProject() picks it up
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test-project';
+    projectState.activeProject.set('test-project');
+    projectState.status.set('ready'); // credential saves/uninstalls happen on a ready project
 
     const fixture = TestBed.createComponent(PluginDetailComponent);
     return { component: fixture.componentInstance, fixture };
   }
 
   /**
-   * setup() variant whose get_plugins returns the default plugin carrying an
-   * `instructions` value (and an optional verification_status override).
-   * Collapses the repeated mockTauri + JSON-clone boilerplate the instruction
-   * tests would otherwise duplicate.
+   * setup() variant whose get_plugins returns a plugin with `instructions`.
    * @param instructions - Markdown to put on the plugin's `instructions` field
    * @param verificationStatus - wire `verification_status` (defaults to 'verified')
    * @returns the component + fixture, ready for `initAndDetect`
@@ -199,8 +197,8 @@ describe('PluginDetailComponent', () => {
     await initAndDetect(component, fixture);
 
     expect(component.plugin).not.toBeNull();
-    expect(component.plugin!.slug).toBe('presale');
-    expect(component.plugin!.name).toBe('Presale CRM');
+    expect(component.plugin!.slug).toBe('example-plugin');
+    expect(component.plugin!.name).toBe('Example Plugin CRM');
     expect(component.settings).toEqual(MOCK_SETTINGS);
   });
 
@@ -262,7 +260,7 @@ describe('PluginDetailComponent', () => {
 
     expect(invokeSpy).toHaveBeenCalledWith('plugin_save_settings', {
       project: 'test-project',
-      slug: 'presale',
+      slug: 'example-plugin',
       settings: { currency: 'USD' },
     });
     expect(component.success).toBe('Settings saved');
@@ -297,7 +295,7 @@ describe('PluginDetailComponent', () => {
 
     const desc = fixture.nativeElement.querySelector('[data-testid="plugin-description"]');
     expect(desc).not.toBeNull();
-    expect(desc.textContent).toContain('CRM integration for presale');
+    expect(desc.textContent).toContain('CRM integration for example-plugin');
   });
 
   it('renders manifest instructions as Markdown on the dashboard', async () => {
@@ -589,8 +587,7 @@ describe('PluginDetailComponent', () => {
 
   describe('terminal-minimal tabs + master toggle', () => {
     it('renders three tabs: dashboard / settings / logs', async () => {
-      // `tools` tab was removed (YAGNI — backend never exposed per-plugin
-      // tool stats, so `exposedTools` was always `[]`).
+      // `tools` tab was removed.
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       expect(fixture.nativeElement.querySelector('[data-testid="tab-bar"]')).not.toBeNull();
@@ -648,6 +645,157 @@ describe('PluginDetailComponent', () => {
     });
   });
 
+  describe('plugin OAuth flow', () => {
+    it('handleStartPluginOAuth invokes start_plugin_oauth and tracks request_id', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') return { request_id: 'req-1', expires_in: 3600 };
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.handleStartPluginOAuth();
+      expect(invokeSpy).toHaveBeenCalledWith(
+        'start_plugin_oauth',
+        expect.objectContaining({
+          project: 'test-project',
+          slug: component.plugin!.service_id ?? component.plugin!.slug,
+        })
+      );
+      expect(component.oauthStatus).toBe('starting');
+    });
+
+    it('surfaces an error when start_plugin_oauth rejects', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') throw new Error('not configured yet');
+        return undefined;
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthStatusMessage).toContain('not configured');
+    });
+
+    it('handleCancelPluginOAuth clears flow state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.oauthStatus = 'awaiting_redirect';
+      component.oauthRedirectUri = 'http://127.0.0.1:5000/callback';
+      await component.handleCancelPluginOAuth();
+      expect(component.oauthStatus).toBeNull();
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('progress event surfaces the redirect URI on awaiting_redirect', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'awaiting_redirect',
+        message: 'http://127.0.0.1:5005/callback',
+        request_id: 'rid',
+      });
+      await Promise.resolve();
+      expect(component.oauthRedirectUri).toBe('http://127.0.0.1:5005/callback');
+    });
+
+    it('replays an awaiting_redirect event that arrived before start_plugin_oauth resolved', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_plugin_oauth') {
+          // Event can arrive before the IPC return resolves; must be buffered.
+          mockTauri.dispatchEvent('plugin_oauth_progress', {
+            status: 'awaiting_redirect',
+            message: 'http://127.0.0.1:6001/callback',
+            request_id: 'rid-early',
+          });
+          await Promise.resolve();
+          return { request_id: 'rid-early', expires_in: 60 };
+        }
+        return defaultInvokeHandler(cmd);
+      };
+      await component.handleStartPluginOAuth();
+      expect(component.oauthStatus).toBe('awaiting_redirect');
+      expect(component.oauthRedirectUri).toBe('http://127.0.0.1:6001/callback');
+    });
+
+    it('progress success reloads the plugin and requests a restart', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+      const projectState = TestBed.inject(ProjectStateService);
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'success',
+        message: '',
+        request_id: 'rid',
+      });
+      // Success handler awaits loadPlugin before requestRestart; drain macrotasks.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(restartSpy).toHaveBeenCalled();
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('progress error clears flow state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+      component.oauthRedirectUri = 'http://127.0.0.1:5005/callback';
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'error',
+        message: 'invalid_grant',
+        request_id: 'rid',
+      });
+      await Promise.resolve();
+      expect(component.oauthStatus).toBe('error');
+      expect(component.oauthRedirectUri).toBeNull();
+    });
+
+    it('ignores progress events for a stale request_id', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'start_plugin_oauth'
+          ? Promise.resolve({ request_id: 'rid', expires_in: 60 })
+          : defaultInvokeHandler(cmd);
+      await component.handleStartPluginOAuth();
+
+      mockTauri.dispatchEvent('plugin_oauth_progress', {
+        status: 'success',
+        message: '',
+        request_id: 'OTHER-rid',
+      });
+      await Promise.resolve();
+      // status stays 'starting' from handleStartPluginOAuth — the stale event is dropped.
+      expect(component.oauthStatus).toBe('starting');
+    });
+
+    it('cleans up the plugin_oauth_progress listener on destroy', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      expect(mockTauri.listenHandlers['plugin_oauth_progress']).toBeDefined();
+      component.ngOnDestroy();
+      expect(mockTauri.listenHandlers['plugin_oauth_progress']).toBeUndefined();
+    });
+  });
+
   describe('danger zone / uninstall', () => {
     it('renders the danger zone on the dashboard tab', async () => {
       const { component, fixture } = setup();
@@ -683,8 +831,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Open confirm prompt by clicking the uninstall button (UI-driven path
-      // — keeps OnPush change detection consistent with real user interaction).
+      // Open confirm prompt by clicking the uninstall button.
       const uninstallBtn = fixture.nativeElement.querySelector(
         '[data-testid="uninstall-btn"]'
       ) as HTMLButtonElement;
@@ -711,7 +858,7 @@ describe('PluginDetailComponent', () => {
       component.confirmingRemove = true;
       await component.onConfirmUninstall();
 
-      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
+      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'example-plugin' });
     });
 
     it('on success, signals restart and navigates back to /plugins', async () => {
@@ -719,6 +866,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
       await component.onConfirmUninstall();
 
@@ -758,8 +906,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Hold remove_plugin pending so we observe the buttons in their
-      // mid-flight (`removing = true`) state before the invoke resolves.
+      // Hold remove_plugin pending to observe the mid-flight button state.
       let resolveFn!: () => void;
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'remove_plugin') {
@@ -777,11 +924,9 @@ describe('PluginDetailComponent', () => {
       uninstallBtn.click();
       fixture.detectChanges();
 
-      // Kick off uninstall but do not await — we want to observe the UI
-      // while the invoke is still pending.
+      // Kick off uninstall without await; observe UI while invoke pending.
       const promise = component.onConfirmUninstall();
-      // Yield once so onConfirmUninstall sets `removing = true` and calls
-      // markForCheck before we re-render.
+      // Yield so onConfirmUninstall sets `removing = true` before re-render.
       await new Promise((r) => setTimeout(r, 0));
       fixture.detectChanges();
 
@@ -806,32 +951,32 @@ describe('PluginDetailComponent', () => {
   describe('credentials section in Settings tab', () => {
     /**
      * Mock plugin entry with two auth_fields — one required PAT, one
-     * optional OAuth token. Mirrors the figma plugin manifest shape.
+     * optional OAuth token. Mirrors a host-bridged plugin manifest shape.
      */
     const PLUGIN_WITH_AUTH = {
       plugins: [
         {
-          slug: 'figma',
-          name: 'Figma DS Bridge',
-          service_id: 'figma',
+          slug: 'example-plugin',
+          name: 'Example Plugin Bridge',
+          service_id: 'example-plugin',
           version: '0.1.1',
-          description: 'Figma integration',
+          description: 'Example Plugin integration',
           enabled: false,
           configured: false,
           auth_fields: [
             {
-              key: 'figma_pat',
-              label: 'Figma Personal Access Token',
+              key: 'example_pat',
+              label: 'Example Plugin Personal Access Token',
               field_type: 'password',
-              placeholder: 'figd_...',
+              placeholder: 'tok_...',
               is_secret: true,
               required: true,
             },
             {
-              key: 'figma_mcp_oauth',
-              label: 'Figma Remote MCP OAuth Token',
+              key: 'example_oauth',
+              label: 'Example Plugin OAuth Token',
               field_type: 'password',
-              placeholder: 'fmcp_...',
+              placeholder: 'oauth_...',
               is_secret: true,
               required: false,
             },
@@ -847,7 +992,7 @@ describe('PluginDetailComponent', () => {
       ],
     };
 
-    function setupWithAuth(slug = 'figma') {
+    function setupWithAuth(slug = 'example-plugin') {
       const mockTauri = new MockTauriService();
       mockTauri.invokeHandler = (cmd: string) => {
         switch (cmd) {
@@ -877,7 +1022,7 @@ describe('PluginDetailComponent', () => {
       });
 
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       return { component: fixture.componentInstance, fixture, mockTauri };
@@ -936,7 +1081,8 @@ describe('PluginDetailComponent', () => {
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
+      projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;
@@ -954,13 +1100,13 @@ describe('PluginDetailComponent', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await component.onSaveCredentials({
-        credentials: { figma_pat: 'figd_REAL_TOKEN' },
+        credentials: { example_pat: 'tok_REAL_TOKEN' },
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('save_plugin_credentials', {
         project: 'test-project',
-        slug: 'figma',
-        credentials: { figma_pat: 'figd_REAL_TOKEN' },
+        slug: 'example-plugin',
+        credentials: { example_pat: 'tok_REAL_TOKEN' },
       });
       expect(component.success).toContain('1 field');
     });
@@ -970,7 +1116,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
 
       await component.onSaveCredentials({
-        credentials: { figma_pat: 'a', figma_mcp_oauth: 'b' },
+        credentials: { example_pat: 'a', example_oauth: 'b' },
       });
 
       expect(component.success).toContain('2 fields');
@@ -988,7 +1134,7 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'x' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'x' } });
 
       expect(component.error).toContain('signature verification failed');
       expect(component.success).toBe('');
@@ -998,7 +1144,7 @@ describe('PluginDetailComponent', () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       // Intentionally do NOT init — plugin stays null
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.onSaveCredentials({ credentials: { figma_pat: 'x' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'x' } });
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(component.error).toContain('No active project');
       expect(fixture).toBeDefined();
@@ -1009,17 +1155,15 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(projectState.needsRestart).toBe(true);
     });
 
     it('save refreshes the plugin entry so the configured badge can flip', async () => {
-      // PLUGIN_WITH_AUTH starts configured:false. After a successful save,
-      // loadPlugin re-fetches; if the backend now reports configured:true,
-      // the component reflects it. We simulate that by switching the
-      // get_plugins response post-save.
+      // Simulate backend reporting configured:true after save.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       expect(component.plugin?.configured).toBe(false);
@@ -1032,14 +1176,13 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(component.plugin?.configured).toBe(true);
     });
 
     it('save success message survives a post-save refresh failure', async () => {
-      // Invariant (2) from runPluginMutation: a loadPlugin failure must not
-      // clobber the success message — the credentials were already saved.
+      // Credentials already saved; loadPlugin failure must not clobber success message.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       mockTauri.invokeHandler = (cmd: string) => {
@@ -1048,7 +1191,7 @@ describe('PluginDetailComponent', () => {
         return Promise.resolve(undefined);
       };
 
-      await component.onSaveCredentials({ credentials: { figma_pat: 'figd_X' } });
+      await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
       expect(component.success).toContain('Credentials saved');
       expect(component.error).toBe('');
@@ -1087,7 +1230,7 @@ describe('PluginDetailComponent', () => {
 
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credentials', {
         project: 'test-project',
-        slug: 'figma',
+        slug: 'example-plugin',
       });
       expect(component.success).toContain('cleared');
     });
@@ -1108,6 +1251,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
+      projectState.status.set('ready'); // action happens on a ready project
 
       await component.onResetCredentials();
 
@@ -1146,20 +1290,20 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
-      await component.onClearField('figma_pat');
+      await component.onClearField('example_pat');
 
       expect(invokeSpy).toHaveBeenCalledWith('delete_plugin_credential_field', {
         project: 'test-project',
-        slug: 'figma',
-        key: 'figma_pat',
+        slug: 'example-plugin',
+        key: 'example_pat',
       });
-      expect(component.success).toContain('figma_pat');
+      expect(component.success).toContain('example_pat');
     });
 
     it('onClearField sets an error (not silent return) when plugin is null', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.onClearField('figma_pat');
+      await component.onClearField('example_pat');
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(component.error).toContain('No active project');
       expect(fixture).toBeDefined();
@@ -1167,7 +1311,7 @@ describe('PluginDetailComponent', () => {
 
     it('passes configured_fields to the credentials form so the "set" badge renders', async () => {
       const withConfigured = JSON.parse(JSON.stringify(PLUGIN_WITH_AUTH));
-      withConfigured.plugins[0].configured_fields = ['figma_pat'];
+      withConfigured.plugins[0].configured_fields = ['example_pat'];
       const mockTauri = new MockTauriService();
       mockTauri.invokeHandler = (cmd: string) => {
         switch (cmd) {
@@ -1190,12 +1334,12 @@ describe('PluginDetailComponent', () => {
         imports: [PluginDetailComponent],
         providers: [
           { provide: TauriService, useValue: mockTauri },
-          { provide: ActivatedRoute, useValue: createRouteStub('figma') },
+          { provide: ActivatedRoute, useValue: createRouteStub('example-plugin') },
           { provide: Router, useValue: mockRouter },
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;
       await initAndDetect(component, fixture);
@@ -1236,12 +1380,13 @@ describe('PluginDetailComponent', () => {
         imports: [PluginDetailComponent],
         providers: [
           { provide: TauriService, useValue: mockTauri },
-          { provide: ActivatedRoute, useValue: createRouteStub('figma') },
+          { provide: ActivatedRoute, useValue: createRouteStub('example-plugin') },
           { provide: Router, useValue: mockRouter },
         ],
       });
       const projectState = TestBed.inject(ProjectStateService);
-      projectState.activeProject = 'test-project';
+      projectState.activeProject.set('test-project');
+      projectState.status.set('ready'); // credential saves happen on a ready project
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;

@@ -23,8 +23,7 @@ function mockMatchMedia(prefersDark: boolean): {
     matches: prefersDark,
     media: '(prefers-color-scheme: dark)',
     onchange: null,
-    // Honour `options.signal` like a real EventTarget so AbortController-based
-    // teardown is exercised faithfully by the tests.
+    // Honour `options.signal` like a real EventTarget.
     addEventListener: (
       _: string,
       fn: (e: MediaQueryListEvent) => void,
@@ -58,14 +57,7 @@ function mockMatchMedia(prefersDark: boolean): {
   };
 }
 
-/**
- * Build a fresh in-memory `Storage`-shaped object for each test. Some test
- * runner / Node combinations (notably odd-numbered Node releases under the
- * `--localstorage-file` experimental flag) leave the global `localStorage`
- * accessor with an unusable shape — `getItem` / `setItem` may be missing or
- * throw. Installing our own implementation per-test removes that variance
- * and gives us deterministic state regardless of jsdom version.
- */
+/** Build a fresh in-memory `Storage`-shaped object for each test. */
 function makeMemoryStorage(): Storage {
   const data = new Map<string, string>();
   return {
@@ -114,9 +106,9 @@ describe('ThemeService', () => {
   }
 
   // Happy path
-  it('defaults to crimson when nothing is stored and removes data-theme', () => {
+  it('defaults to ember when nothing is stored and removes data-theme', () => {
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
@@ -129,33 +121,40 @@ describe('ThemeService', () => {
 
   it('writes data-theme + persists when setTheme switches to a non-default theme', () => {
     const svc = create();
-    svc.setTheme('amber');
-    expect(svc.theme()).toBe<ThemeId>('amber');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('amber');
-    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('amber');
-  });
-
-  it('removes data-theme when switching back to the crimson default', () => {
-    const svc = create();
-    svc.setTheme('amber');
     svc.setTheme('crimson');
     expect(svc.theme()).toBe<ThemeId>('crimson');
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('crimson');
   });
 
+  it('removes data-theme when switching back to the ember default', () => {
+    const svc = create();
+    svc.setTheme('crimson');
+    svc.setTheme('ember');
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('ember');
+  });
+
   // Edge cases
-  it('treats unknown stored values as crimson', () => {
+  it('treats unknown stored values as ember', () => {
     localStorage.setItem(THEME_STORAGE_KEY, 'bogus');
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
-  it('treats an empty stored value as crimson', () => {
+  it('treats a previously persisted amber (now removed) as the ember default', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'amber');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('treats an empty stored value as ember', () => {
     localStorage.setItem(THEME_STORAGE_KEY, '');
     const svc = create();
-    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(svc.theme()).toBe<ThemeId>('ember');
   });
 
   it('is a no-op when setTheme is called with the current theme', () => {
@@ -186,9 +185,9 @@ describe('ThemeService', () => {
     });
 
     const svc = create();
-    expect(() => svc.setTheme('amber')).not.toThrow();
-    expect(svc.theme()).toBe<ThemeId>('amber');
-    expect(document.documentElement.getAttribute('data-theme')).toBe('amber');
+    expect(() => svc.setTheme('crimson')).not.toThrow();
+    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
   });
 
   // ── Mode axis (light / dark / auto) ──────────────────────────────────────
@@ -363,8 +362,7 @@ describe('ThemeService', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
     });
 
-    // Pins the literal the anti-FOUC script in index.html depends on — a rename
-    // of MODE_STORAGE_KEY without updating index.html would flash on every boot.
+    // Pins the literal the anti-FOUC script in index.html depends on.
     it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
       expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
     });

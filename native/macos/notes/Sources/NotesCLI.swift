@@ -7,96 +7,66 @@ import SharedCLI
 /// Commands: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note
 @main
 struct NotesCLI {
+    static let commandList =
+        "check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note"
+
     static func main() {
-        let args = CommandLine.arguments
-        guard args.count >= 2 else {
-            exitWithError("Usage: notes-cli <command> [json-args]\nCommands: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
-        }
-
-        let command = args[1]
-
-        // check_permission: verify macOS Automation access for Notes through the
-        // unified PermissionGate (AppleEventsGate). The TCC layer is determined by
-        // AEDeterminePermissionToAutomateTarget; the data-access layer is verified
-        // by the AppleScript probe (`permissionCheckScript`) running as
-        // gate.verifyDataAccess(). 30s timeout matches the original probe budget
-        // (Notes can take longer than Mail to enumerate).
-        // Pattern: see also mail/Sources/MailCLI.swift check_permission
-        if command == "check_permission" {
-            let allowLaunch = args.contains("--launch")
-            let gate = AppleEventsGate(
-                targetBundleId: "com.apple.Notes",
-                dataAccessScript: permissionCheckScript,
-                dataAccessTimeout: 30,
-                pidResolver: NSWorkspacePidResolver(),
-                appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
-            )
-            print(performCheckPermission(gate: gate, entity: .notes))
-            return
-        }
-
-        let jsonArgs = args.count >= 3 ? args[2] : "{}"
-
-        guard let argsData = jsonArgs.data(using: .utf8),
-              let params = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
-        else {
-            exitWithError("Invalid JSON arguments: \(jsonArgs)")
-        }
-
-        do {
-            let result: Any
-            switch command {
-            case "list_folders":
-                result = try NotesClient.listFolders()
-            case "list_notes":
-                let limit = params["limit"] as? Int ?? 20
-                let folder = params["folder"] as? String
-                result = try NotesClient.listNotes(limit: limit, folder: folder)
-            case "get_note":
-                guard let id = params["id"] as? String else {
-                    throw NotesCLIError.missingField("id")
-                }
-                result = try NotesClient.getNote(id: id)
-            case "search_notes":
-                guard let query = params["query"] as? String else {
-                    throw NotesCLIError.missingField("query")
-                }
-                let limit = params["limit"] as? Int ?? 20
-                result = try NotesClient.searchNotes(query: query, limit: limit)
-            case "create_note":
-                guard let title = params["title"] as? String else {
-                    throw NotesCLIError.missingField("title")
-                }
-                let body = params["body"] as? String
-                let folder = params["folder"] as? String
-                result = try NotesClient.createNote(title: title, body: body, folder: folder)
-            case "update_note":
-                guard let id = params["id"] as? String else {
-                    throw NotesCLIError.missingField("id")
-                }
-                let title = params["title"] as? String
-                let body = params["body"] as? String
-                result = try NotesClient.updateNote(id: id, title: title, body: body)
-            case "delete_note":
-                guard let id = params["id"] as? String else {
-                    throw NotesCLIError.missingField("id")
-                }
-                result = try NotesClient.deleteNote(id: id)
-            default:
-                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
-            }
-
-            let data = try JSONSerialization.data(
-                withJSONObject: result,
-                options: [.prettyPrinted, .sortedKeys]
-            )
-            if let json = String(data: data, encoding: .utf8) {
-                print(json)
-            }
-        } catch {
-            exitWithError(error.localizedDescription)
-        }
+        // check_permission validates Notes automation via AppleEventsGate.
+        runCLI(
+            cliName: "notes-cli",
+            commandList: commandList,
+            entity: .notes,
+            checkPermissionGate: { args in
+                let allowLaunch = args.contains("--launch")
+                return AppleEventsGate(
+                    targetBundleId: "com.apple.Notes",
+                    dataAccessScript: permissionCheckScript,
+                    dataAccessTimeout: 30,
+                    pidResolver: NSWorkspacePidResolver(),
+                    appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
+                )
+            },
+            commands: NotesCLI.commands
+        )
     }
+
+    static let commands: [String: ([String: Any]) throws -> Any] = [
+        "list_folders": { _ in try NotesClient.listFolders() },
+        "list_notes": { params in
+            try NotesClient.listNotes(
+                limit: params["limit"] as? Int ?? 20,
+                folder: params["folder"] as? String
+            )
+        },
+        "get_note": { params in
+            guard let id = params["id"] as? String else { throw NotesCLIError.missingField("id") }
+            return try NotesClient.getNote(id: id)
+        },
+        "search_notes": { params in
+            guard let query = params["query"] as? String else { throw NotesCLIError.missingField("query") }
+            return try NotesClient.searchNotes(query: query, limit: params["limit"] as? Int ?? 20)
+        },
+        "create_note": { params in
+            guard let title = params["title"] as? String else { throw NotesCLIError.missingField("title") }
+            return try NotesClient.createNote(
+                title: title,
+                body: params["body"] as? String,
+                folder: params["folder"] as? String
+            )
+        },
+        "update_note": { params in
+            guard let id = params["id"] as? String else { throw NotesCLIError.missingField("id") }
+            return try NotesClient.updateNote(
+                id: id,
+                title: params["title"] as? String,
+                body: params["body"] as? String
+            )
+        },
+        "delete_note": { params in
+            guard let id = params["id"] as? String else { throw NotesCLIError.missingField("id") }
+            return try NotesClient.deleteNote(id: id)
+        },
+    ]
 }
 
 // MARK: - Error Handling

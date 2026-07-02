@@ -136,9 +136,7 @@ describe('paginate', () => {
     });
 
     it('extracts items when fetcher returns a plain array (no wrapper object)', async () => {
-      // When the fetched response is itself an array (none of the known keys match),
-      // extractItems falls through all key checks and returns the array directly
-      // via the `if (Array.isArray(result))` branch.
+      // A plain-array response is returned by the Array.isArray fallback.
       const mockFetcher = vi
         .fn()
         .mockResolvedValueOnce([{ id: 1 }, { id: 2 }] as unknown as {

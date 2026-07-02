@@ -5,7 +5,7 @@ import { BridgeConnectionComponent } from './bridge-connection.component';
 import { PluginBridgeService } from '../../services/plugin-bridge.service';
 import type { PluginBridgeStatus, PluginBridgeCredentials } from '../../models/plugin';
 
-const SLUG = 'figma';
+const SLUG = 'example-plugin';
 
 function running(
   overrides: Partial<Extract<PluginBridgeStatus, { running: true }>> = {}
@@ -16,7 +16,7 @@ function running(
     port: 60123,
     paired: false,
     partner_connected: false,
-    display_name: 'Figma Bridge',
+    display_name: 'Example Plugin Bridge',
     ...overrides,
   };
 }

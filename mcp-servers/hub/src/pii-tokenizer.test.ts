@@ -301,7 +301,6 @@ describe('pii-tokenizer', () => {
     it('tokenizes a valid Polish IBAN', () => {
       const context = createPIIContext();
       // Valid Polish IBAN (mod-97 check digit = 1)
-      // PL61109010140000071219812874 is a well-known valid test IBAN
       const data = { account: 'PL61109010140000071219812874' };
       const result = tokenizePII(data, context) as Record<string, string>;
 
@@ -573,6 +572,37 @@ describe('pii-tokenizer', () => {
       const result = tokenizePII(data, context) as Record<string, string>;
 
       expect(result.credential).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+    });
+
+    it('does NOT tokenize author fields — prose metadata, not authentication', () => {
+      const data = {
+        author: 'Paweł Kowalski',
+        authors: 'Anna, Marek',
+        author_name: 'Sławek Jakubowski',
+        message_author: 'Ania Nowak',
+        coAuthor: 'Jan',
+      };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.author).toBe('Paweł Kowalski');
+      expect(result.authors).toBe('Anna, Marek');
+      expect(result.author_name).toBe('Sławek Jakubowski');
+      expect(result.message_author).toBe('Ania Nowak');
+      expect(result.coAuthor).toBe('Jan');
+    });
+
+    it('still tokenizes authorization, oauth and author_token (real auth keys)', () => {
+      const data = {
+        authorization: 'Bearer xyz',
+        oauth: 'grant',
+        author_token: 'tok-123',
+      };
+      const result = tokenizePII(data, context) as Record<string, string>;
+
+      expect(result.authorization).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+      expect(result.oauth).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
+      // 'author' segment is stripped but the remaining '_token' still matches.
+      expect(result.author_token).toMatch(/\[SENSITIVE_FIELD:TOKEN_[A-F0-9]+\]/);
     });
 
     it('is case-insensitive for key names', () => {

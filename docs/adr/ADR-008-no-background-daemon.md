@@ -1,56 +1,44 @@
 # ADR-008: No Background Daemon — Desktop App Is Sufficient
 
-## Status
-
-**Rejected** — a system-level daemon was considered but rejected in favour of the simpler Desktop app approach.
-
-## Context
-
-The IDE Bridge must be running for Claude (inside a container) to communicate with the IDE on the host. One option was a background daemon registered via launchd (macOS) or Windows Service — similar to Dropbox, 1Password, or Docker Desktop.
+> **Status:** Accepted — a system-level daemon was considered and rejected in favour of tying host services to the Desktop app.
+> **Context:** The IDE Bridge must run on the host for Claude (inside a container) to reach the IDE. One option was a launchd / Windows Service daemon, like Dropbox or Docker Desktop.
 
 ## Decision
 
-**We do not install a system service.** The IDE Bridge starts and stops together with the Speedwave Desktop app (`Speedwave.app` / `speedwave.exe`). When the Desktop app is not running, IDE Bridge is not available.
+Speedwave installs no system service. The IDE Bridge (and the other host-side services: mcp-os, host_exec, oauth) start and stop together with the Desktop app. When the Desktop app is not running, the IDE Bridge is not available. The CLI runs containers and attaches to Claude directly and never needs the IDE Bridge.
 
-## Rationale
+## Why
 
-1. **KISS** — a system service adds installation complexity (platform-specific registration, uninstall cleanup, privilege escalation) with marginal benefit. Most users launch the Desktop app before starting a coding session anyway.
-2. **TCC permissions on macOS** — a bundled `.app` inherits macOS permissions (Reminders, Calendar, Mail) declared in `Info.plist`. A standalone daemon would require separate TCC entitlements and a more complex permission flow[^22].
-3. **No orphan processes** — tying the IDE Bridge lifecycle to the Desktop app guarantees clean shutdown. A system daemon risks becoming an orphan after a failed update or uninstall.
-4. **CLI does not need IDE Bridge** — `speedwave` in a terminal runs containers and attaches to Claude directly. IDE integration is a Desktop-only feature, so a daemon offers no benefit to CLI users.
+- **KISS** — a system service adds platform-specific registration, uninstall cleanup, and privilege escalation with marginal benefit. Most users open the Desktop app before a coding session anyway.
+- **macOS TCC permissions** — a bundled `.app` inherits the Reminders / Calendar / Mail permissions declared in its `Info.plist`. A standalone daemon would need separate TCC entitlements and a more complex consent flow.
+- **No orphan processes** — tying host services to the Desktop app guarantees clean shutdown. A daemon risks being orphaned after a failed update or uninstall.
+- **CLI does not benefit** — IDE integration is Desktop-only, so a daemon offers nothing to terminal users.
 
-## Trade-offs
+## Lifecycle behaviour
 
-- If the user closes the Desktop app window, the window hides to the system tray and all host-side processes continue running (IDE Bridge, mcp-os). The app fully exits only when the user clicks "Quit" in the tray menu.
-  - When the user clicks "Quit" from the tray menu, containers are stopped: on Windows via per-project `compose_down` (WSL2 distro is system-managed — Speedwave does not own its lifecycle); on macOS by letting `limactl stop --force` hard-power the Lima VM off, reaping every container in one shot. mcp-os is killed, IDE Bridge is shut down. This matches the Docker Desktop model — closing the app stops all managed containers.
-  - This is an acceptable trade-off given the simplicity gained.
-- If a future requirement demands "always-on" host services (e.g., headless server usage), this decision can be revisited by adding an optional system service.
+- Closing the window hides the app to the system tray when a tray icon is available; host services keep running. If no tray icon is available, the close proceeds to a real exit. When hidden, the app fully exits only on tray "Quit" (or Cmd+Q / SIGTERM / SIGINT).
+- On exit, containers are stopped per platform (see below), mcp-os is killed, and the IDE Bridge is shut down — matching the Docker Desktop model.
+- A `CLEANUP_ONCE` guard runs the cleanup body exactly once across the signal handler, `WindowEvent::Destroyed`, and `RunEvent::ExitRequested`. Cleanup runs on a background thread so the Tauri event loop is never blocked, and `stop_vm()` errors are logged but never block termination.
 
-## Lima VM Lifecycle on Exit (macOS)
+## Platform-specific exit cleanup
 
-On macOS, the Lima VM is stopped when the Desktop app exits (`limactl stop --force`). This frees the ~9–32 GiB of RAM that QEMU/VZ reserves for the VM (hypervisors do not support memory ballooning, so the RAM is not returned to the system while the VM is running)[^23].
+The choice of whether to run per-project `compose_down` at exit follows who owns container lifetime:
 
-- **Trade-off:** Next startup is slower due to VM cold boot (Lima VM typically takes several seconds to restart on first use after a stop). `ensure_ready()` starts the stopped VM automatically — the user sees no manual intervention required.
-- **Windows is unaffected:** WSL2 on Windows has its own memory management at the hypervisor level, and stopping the WSL2 distro would affect all workloads in it — not just Speedwave.
-- **Signal handlers (SIGTERM/SIGINT):** Cleanup runs on process signals as well as graceful close. A `CLEANUP_ONCE` guard ensures the cleanup body runs exactly once across all three call sites: the signal handler, `WindowEvent::Destroyed` (window closed without tray), and `RunEvent::ExitRequested` (tray Quit, Cmd+Q, or SIGTERM via the Tauri runtime — paths where the main window is hidden rather than destroyed).
-- **Non-blocking:** All cleanup (container stop, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
-- **`stop_vm()` errors are non-fatal:** Callers log warnings and continue. Exit cleanup must never block app termination. If the VM is left in a `"Stopping"` state, `ensure_ready()` on next launch detects this and polls until the VM finishes stopping, then starts it.
+- **macOS (Lima):** `LimaRuntime::stop_vm` issues `limactl stop --force`, hard-powering the Apple Virtualization Framework VM off and reaping every container at once. Running `compose_down` first would be redundant and slow (nerdctl's graceful-stop timeout). Stopping the VM also frees the RAM the hypervisor reserves; the next launch pays a cold-boot cost, which `ensure_ready()` handles automatically.
+- **Windows (WSL2):** `stop_vm()` is a no-op for `WslRuntime` (it does not override the default; only `LimaRuntime` does), because the WSL2 distro is managed by the Windows host, not by Speedwave — terminating it would hit unrelated workloads. Per-project `compose_down` is therefore the only mechanism that stops Speedwave's containers at exit.
 
-## Platform-specific exit cleanup strategy
+## Rejected alternative
 
-The decision to skip `compose_down` on macOS while running it on Windows is driven by where container lifetime is owned:
+- **launchd / Windows Service daemon** — rejected for the four reasons above. If an "always-on" headless-server requirement ever emerges, this decision can be revisited by adding an optional service.
 
-- **macOS (Lima):** `LimaRuntime::stop_vm` issues `limactl stop --force`, which hard-powers the Apple Virtualization Framework VM off[^24]. Every container inside the VM dies with it. Running `compose_down` per project before stopping the VM is redundant and costs ~10 s per project (nerdctl's hard-coded graceful-stop timeout, see [^25]).
-- **Windows (WSL2):** `WslRuntime::stop_vm` is a no-op[^26] because the `Speedwave` WSL2 distro is managed by the Windows host, not by Speedwave. Running `wsl --terminate Speedwave` would affect workloads unrelated to Speedwave. `compose_down` is therefore the only mechanism that stops Speedwave's containers at app exit.
+## Where it lives in code
 
----
+- `stop_vm()` default no-op (inherited by `WslRuntime`) — `crates/speedwave-runtime/src/runtime/mod.rs` (the `ContainerRuntime` trait default).
+- `LimaRuntime::stop_vm` (the `limactl stop --force` override) — `crates/speedwave-runtime/src/runtime/lima.rs`.
+- `WslRuntime` (no `stop_vm` override) — `crates/speedwave-runtime/src/runtime/wsl.rs`.
+- Exit cleanup, `CLEANUP_ONCE`, and the tray-Quit / window-destroyed / exit-requested handling — `desktop/src-tauri/src/main.rs`.
+- VM network rationale for why host-side probes run inside the VM — `docs/architecture/platform-matrix.md`.
 
-[^22]: [macOS TCC — Transparency Consent and Control](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)
+## References
 
-[^23]: [QEMU does not support memory ballooning with Apple Hypervisor](https://github.com/lima-vm/lima/discussions/1534)
-
-[^24]: [Lima `limactl stop --force` uses Apple Virtualization Framework](https://github.com/lima-vm/lima/blob/v2.0.2/pkg/instance/stop.go) — `--force` skips the guest-side graceful shutdown.
-
-[^25]: [nerdctl hard-coded 10 s graceful-stop timeout](https://github.com/containerd/nerdctl/blob/v2.0.0/pkg/cmd/container/stop.go) — see `defaultStopTimeout`.
-
-[^26]: `ContainerRuntime::stop_vm` default no-op + no `WslRuntime` override: `crates/speedwave-runtime/src/runtime/mod.rs:142-149` and `crates/speedwave-runtime/src/runtime/wsl.rs`.
+- [macOS TCC — Transparency, Consent, and Control](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)

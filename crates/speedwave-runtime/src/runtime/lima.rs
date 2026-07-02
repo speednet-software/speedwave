@@ -8,18 +8,12 @@ pub struct LimaRuntime {
     runner: Box<dyn CommandRunner>,
     restart_ready_delay: std::time::Duration,
     vm_stop_poll_delay: std::time::Duration,
-    /// Override for the deadline used in the `Stopping` arm of
-    /// `ensure_ready_inner`. `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
-    /// Note: `stop_vm()` always uses `LIMA_VM_STOP_TIMEOUT_SECS` directly;
-    /// this field only affects the Stopping polling loop in `ensure_ready`.
-    /// Tests can shrink this so the deadline-exceeded path can be exercised
-    /// in milliseconds rather than 30+ seconds.
+    /// Deadline for the `Stopping` arm of `ensure_ready_inner`.
+    /// `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
     vm_stop_timeout: Option<std::time::Duration>,
 }
 
-/// Returns the Lima SSH config path for the VM.
-/// Lima generates a complete ssh.config with IdentityFile, Port, ControlMaster, Ciphers, etc.
-/// Using `-F ssh.config` ensures all SSH options match what Lima expects.
+/// Returns the Lima-generated `ssh.config` path for the VM.
 fn ssh_config_path() -> anyhow::Result<PathBuf> {
     let lima_dir = crate::binary::lima_home()
         .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for LIMA_HOME"))?;
@@ -74,21 +68,15 @@ impl LimaRuntime {
         self
     }
 
-    /// Overrides the deadline duration used in the `Stopping` arm of
-    /// `ensure_ready_inner`. Tests use this to exercise the
-    /// "stuck in Stopping state" error path in milliseconds rather than
-    /// the production `LIMA_VM_STOP_TIMEOUT_SECS` value.
+    /// Overrides the `Stopping`-arm deadline in `ensure_ready_inner`.
     #[cfg(test)]
     fn with_stop_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.vm_stop_timeout = Some(timeout);
         self
     }
 
-    /// Returns `Ok(())` if the VM is running, or a clear error if stopped/missing.
-    ///
-    /// All `ContainerRuntime` trait methods that use `limactl shell` call this
-    /// guard to avoid triggering limactl's interactive "Do you want to start?"
-    /// prompt, which hangs in non-TTY environments (e.g. Tauri).
+    /// Returns `Ok(())` if the VM is running, or an error if stopped/missing.
+    /// Guards `limactl shell` calls against limactl's interactive start prompt.
     fn require_running(&self) -> anyhow::Result<()> {
         if self.is_available() {
             Ok(())
@@ -105,11 +93,8 @@ impl LimaRuntime {
     }
 }
 
-/// Recursively copies `src` directory contents into `dst`, creating directories as needed.
-///
-/// Symlinked *files* are dereferenced (the target content is copied).
-/// Symlinked *directories* are skipped entirely to prevent infinite recursion from circular
-/// symlinks. This is safe because Speedwave's build context never relies on directory symlinks.
+/// Recursively copies `src` into `dst`, creating directories as needed.
+/// Symlinked files are dereferenced; symlinked directories are skipped.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -124,6 +109,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            // Durable before the guest reads it over virtiofs.
+            if let Ok(f) = std::fs::File::open(&dst_path) {
+                let _ = crate::fs_perms::fsync_file_durable(&f);
+            }
         }
     }
     Ok(())
@@ -144,15 +133,7 @@ fn prepare_build_context_with_home(build_root: &Path, home: &Path) -> anyhow::Re
     Ok(cache)
 }
 
-/// Backoffs applied between retry attempts of `retry_on_eof`.
-///
-/// On macOS, `nerdctl` invoked through `limactl shell` occasionally bails out
-/// with `level=fatal msg=EOF` while tearing down containers — this is a known
-/// race in the SSH transport between containerd and the Lima VM and the host.
-/// A short backoff is enough to let containerd finish whatever it was doing
-/// in the previous call. With 3 attempts the third entry (`1 s`) is unused;
-/// it is kept here so widening the retry window in the future is a one-line
-/// change.
+/// Backoffs applied between `retry_on_eof` retry attempts.
 const RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(200),
     std::time::Duration::from_millis(500),
@@ -162,12 +143,8 @@ const RETRY_DELAYS: [std::time::Duration; 3] = [
 /// Maximum number of attempts (initial call + retries) for `retry_on_eof`.
 const RETRY_MAX_ATTEMPTS: usize = 3;
 
-/// Returns `true` if the error string looks like an `EOF` from `limactl shell`.
-///
-/// The exact wording observed in practice is `level=fatal msg=EOF`. We also
-/// treat a bare `EOF` at the end of the message as the same condition, because
-/// some failure paths trim the level/msg prefix when they bubble up through
-/// `runner.run()`.
+/// Returns `true` if the error string looks like an `EOF` from `limactl shell`
+/// (`level=fatal msg=EOF` or a trailing bare `EOF`).
 fn is_eof_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
     if msg.contains("fatal msg=EOF") {
@@ -177,10 +154,8 @@ fn is_eof_error(err: &anyhow::Error) -> bool {
     trimmed == "EOF" || trimmed.ends_with(": EOF") || trimmed.ends_with("\nEOF")
 }
 
-/// Runs `f` up to `RETRY_MAX_ATTEMPTS` times, retrying only when the error
-/// looks like a transient `EOF` from `limactl shell`. Other errors propagate
-/// immediately (no retry). The retry boundary is logged at `info` so we can
-/// see it in the wild without spamming `warn!` on success.
+/// Runs `f` up to `RETRY_MAX_ATTEMPTS` times, retrying only on a transient
+/// `EOF` from `limactl shell`. Other errors propagate immediately.
 fn retry_on_eof<T>(label: &str, f: impl FnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
     retry_on_eof_with_delays(label, &RETRY_DELAYS, f)
 }
@@ -213,14 +188,8 @@ fn retry_on_eof_with_delays<T>(
     }
 }
 
-/// Lima-flavoured `compose down + cleanup`. Wraps the compose-down call in
-/// `retry_on_eof` to absorb the `level=fatal msg=EOF` hiccups that `limactl
-/// shell` produces during shutdown, then runs the per-container cleanup with
-/// the same retry policy.
-///
-/// Behavioural parity with `super::compose_down_and_cleanup`:
-/// * cleanup runs even when compose-down fails
-/// * the compose-down error is the function's return value
+/// Lima-flavoured `compose down + cleanup` with `retry_on_eof` on each step.
+/// Cleanup runs even when compose-down fails; the compose-down error is returned.
 fn compose_down_and_cleanup_with_retry(
     runner: &dyn CommandRunner,
     cmd: &str,
@@ -228,6 +197,7 @@ fn compose_down_and_cleanup_with_retry(
     compose_down_args: &[&str],
     nerdctl_prefix: &[&str],
 ) -> anyhow::Result<()> {
+    super::parallel_stop_project_containers(runner, cmd, project, nerdctl_prefix);
     let down_result = retry_on_eof("compose_down", || {
         runner.run(cmd, compose_down_args).map(|_| ())
     });
@@ -248,8 +218,7 @@ fn force_remove_project_networks_with_retry(
     project: &str,
     nerdctl_prefix: &[&str],
 ) {
-    // Each network ls/rm goes through retry_on_eof. The shared algorithm in
-    // mod.rs handles the rest of the orchestration.
+    // Each network ls/rm goes through retry_on_eof.
     super::force_remove_project_networks_with_run_fn(cmd, project, nerdctl_prefix, |c, a| {
         let label = if a.contains(&"ls") {
             "network_ls"
@@ -260,120 +229,37 @@ fn force_remove_project_networks_with_retry(
     });
 }
 
-/// Lima-flavoured force-remove. Same shape as
-/// `super::force_remove_project_containers`, but every per-container `rm -f`
-/// is wrapped in `retry_on_eof`, and the **last** attempt appends `--time=0`
-/// so nerdctl skips the graceful SIGTERM/SIGKILL window. Without `--time=0`
-/// the last attempt would just hit the same EOF: at that point we want a hard
-/// kill, not another graceful stop.
+/// Lima-flavoured force-remove. Each `rm -f` batch is wrapped in `retry_on_eof`;
+/// the last attempt appends `--time=0` to skip the graceful stop window.
 fn force_remove_project_containers_with_retry(
     runner: &dyn CommandRunner,
     cmd: &str,
     project: &str,
     nerdctl_prefix: &[&str],
 ) {
-    let filter = format!("label=com.docker.compose.project={project}");
-    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
-    ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
-
-    // ps is read-only; an EOF here just means we lose the id list, not a
-    // half-removed container. Keep the original best-effort behaviour.
-    let id_targets = match runner.run(cmd, &ps_args) {
-        Ok(output) => super::cleanup_targets_from_ps_output(&output),
-        Err(e) => {
-            log::debug!("force_remove_project_containers: ps failed for {project}: {e}");
-            Vec::new()
-        }
-    };
-    let name_targets = super::configured_project_container_names(project);
-
-    if id_targets.is_empty() && name_targets.is_empty() {
-        return;
-    }
-
-    if !id_targets.is_empty() {
-        log::info!(
-            "force_remove_project_containers: removing {} stale container id(s) for {project}",
-            id_targets.len()
-        );
-        let label = format!("force_remove_project_containers ids({project})");
-        let mut attempt = 0usize;
-        let result = retry_on_eof(&label, || {
-            attempt += 1;
-            // On the final attempt we escalate to `--time=0` so nerdctl
-            // sends SIGKILL immediately instead of waiting for another
-            // graceful stop window that we already know times out.
-            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
-            run_rm_force_lima(runner, cmd, nerdctl_prefix, &id_targets, force_kill)
-        });
-        if let Err(e) = result {
-            log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
-        }
-    }
-
-    for container_name in &name_targets {
-        let single_target = vec![container_name.clone()];
-        let label = format!("force_remove_project_containers name({container_name})");
-        let mut attempt = 0usize;
-        let result = retry_on_eof(&label, || {
-            attempt += 1;
-            // Same `--time=0` escalation as the id branch above: we'd rather
-            // hard-kill the container than log another graceful-stop EOF.
-            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
-            run_rm_force_lima(runner, cmd, nerdctl_prefix, &single_target, force_kill)
-        });
-        match result {
-            Ok(()) => {}
-            Err(e) if super::is_missing_container_error(&e) => {
-                log::debug!(
-                    "force_remove_project_containers: {project} target '{container_name}' already gone: {e}"
-                );
-            }
-            Err(e) => {
-                log::warn!(
-                    "force_remove_project_containers: rm -f by name failed for {project} target '{container_name}': {e}"
-                );
-            }
-        }
-    }
-}
-
-/// Runs `nerdctl rm -f [--time=0] <targets...>` through the supplied runner.
-/// `force_kill` toggles the `--time=0` flag so callers can escalate to a hard
-/// kill on the final retry without duplicating the argv plumbing.
-fn run_rm_force_lima(
-    runner: &dyn CommandRunner,
-    cmd: &str,
-    nerdctl_prefix: &[&str],
-    targets: &[String],
-    force_kill: bool,
-) -> anyhow::Result<()> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-
-    let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
-    rm_args.extend_from_slice(&["rm", "-f"]);
-    if force_kill {
-        rm_args.push("--time=0");
-    }
-    for target in targets {
-        rm_args.push(target.as_str());
-    }
-    runner.run(cmd, &rm_args).map(|_| ())
+    super::force_remove_project_containers_with_run_fn(
+        runner,
+        cmd,
+        project,
+        nerdctl_prefix,
+        |targets| {
+            let label = format!("force_remove_project_containers({project})");
+            let mut attempt = 0usize;
+            retry_on_eof(&label, || {
+                attempt += 1;
+                // Final attempt escalates to `--time=0` (immediate SIGKILL).
+                let force_kill = attempt == RETRY_MAX_ATTEMPTS;
+                super::run_rm_force(runner, cmd, nerdctl_prefix, targets, force_kill)
+            })
+        },
+    );
 }
 
 impl ContainerRuntime for LimaRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let vm = consts::lima_vm_name();
-        // Clean up stale systemd healthcheck timers before compose up.
-        // nerdctl creates transient systemd timers for container healthchecks,
-        // but doesn't always clean them up on container stop/remove.
-        // If a stale timer exists, nerdctl compose up fails with:
-        //   "Unit <hash>.timer was already loaded or has a fragment file"
-        // This is a known nerdctl bug — we work around it by purging orphan timers.
-        // Intentionally discarding result: cleanup is best-effort.
+        // Purge orphan systemd healthcheck timers before compose up (best-effort).
         let _ = self.runner.run(
             "limactl",
             &[
@@ -412,6 +298,12 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
+        // No compose.yml → nothing was ever started (deferred no-provider
+        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
+        if super::compose_down_is_noop(&compose_file) {
+            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            return Ok(());
+        }
         compose_down_and_cleanup_with_retry(
             &*self.runner,
             "limactl",
@@ -461,16 +353,10 @@ impl ContainerRuntime for LimaRuntime {
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
         let vm = consts::lima_vm_name();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        // Propagate the host's real TERM so Claude Code can negotiate the
-        // keyboard protocol (Shift+Enter) instead of seeing a forced xterm.
+        // Propagate the host's real TERM for keyboard-protocol negotiation.
         let term_env = super::resolved_term_env();
 
-        // Both transports below (direct SSH, `limactl shell`) round-trip the
-        // remote command through a POSIX shell on the VM side, so every
-        // argument must be `shlex`-quoted before we hand it off — see
-        // `super::shell_quote_argv`. Without this, arguments containing `(`,
-        // `)`, `'`, backticks, etc. break remote bash with `syntax error
-        // near unexpected token`.
+        // Both transports go through a POSIX shell; shell-quote every arg (see `super::shell_quote_argv`).
         let nerdctl_argv: Vec<&str> = [
             "sudo",
             "nerdctl",
@@ -490,19 +376,7 @@ impl ContainerRuntime for LimaRuntime {
         .collect();
         let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
 
-        // Use direct SSH with Lima's generated ssh.config instead of `limactl shell`.
-        // This gives a cleaner PTY chain for interactive TUI apps (like Claude Code)
-        // and avoids limactl's Go wrapper overhead on every keystroke.
-        //
-        // CRITICAL: We use `-F ssh.config` to get Lima's full SSH configuration:
-        // - IdentityFile (authentication key)
-        // - Port (Lima's random SSH port, e.g. 52593)
-        // - ControlMaster/ControlPath (connection reuse)
-        // - Ciphers (fast AES-GCM ciphers)
-        // Without these, SSH hangs waiting for auth or connects to wrong port.
-        //
-        // If ssh_config_path() fails (home dir unavailable), fall back to limactl shell.
-        // This is slower but functional — limactl handles SSH config internally.
+        // Direct SSH with `-F ssh.config`; fall back to `limactl shell` if ssh_config_path() fails.
         let ssh_config = match ssh_config_path() {
             Ok(path) => path,
             Err(e) => {
@@ -530,10 +404,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         self.require_running()?;
-        // For piped I/O (chat.rs, auth checks): use limactl shell without PTY.
-        // No -it on nerdctl exec, just -i for stdin forwarding.
-        // `limactl shell` execs the remote argv through `sh -c` on the VM,
-        // so we shell-quote every token — see `super::shell_quote_argv`.
+        // Piped I/O: `limactl shell` without PTY (`-i`); execs through `sh -c`, so shell-quote every token.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl_argv: Vec<&str> = [
             "sudo",
@@ -685,9 +556,7 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
         let tail_str = tail.to_string();
-        // `--timestamps` prefixes every line with an RFC3339 stamp so the
-        // System health log view can render full date + time, not just the
-        // hour the application happened to log internally.
+        // `--timestamps` prefixes every line with an RFC3339 stamp.
         self.runner.run_with_stderr(
             "limactl",
             &[
@@ -729,6 +598,32 @@ impl ContainerRuntime for LimaRuntime {
                 "-d",
                 "--force-recreate",
                 "--remove-orphans",
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
+        super::validate_builtin_service_name(service)?;
+        self.require_running()?;
+        let compose_file = super::compose_file_path(project)?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::lima_vm_name(),
+                "--",
+                "sudo",
+                "nerdctl",
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "up",
+                "-d",
+                "--force-recreate",
+                service,
             ],
         )?;
         Ok(())
@@ -811,9 +706,7 @@ impl ContainerRuntime for LimaRuntime {
         }
         let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         args.extend(tag_refs);
-        // Without `force`, nerdctl rmi refuses if a running container still
-        // references the image — caller logs warn-only and the image
-        // gets retried on the next update cycle once the container is gone.
+        // Without `force`, nerdctl rmi refuses if a running container references the image.
         if let Err(e) = self.runner.run("limactl", &args) {
             log::warn!("lima rmi failed: {e}");
         }
@@ -840,6 +733,7 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn prune_unused_images(&self) -> anyhow::Result<()> {
+        // `image prune` (no --all) removes only dangling images.
         self.require_running()?;
         self.runner.run(
             "limactl",
@@ -849,9 +743,8 @@ impl ContainerRuntime for LimaRuntime {
                 "--",
                 "sudo",
                 "nerdctl",
-                "system",
+                "image",
                 "prune",
-                "--all",
                 "--force",
             ],
         )?;
@@ -985,9 +878,12 @@ impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
-        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
+        // Provisioning-grade budget: the first boot after a Lima bump downloads
+        // the guest nerdctl-full archive inside `limactl start`.
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
-            "Lima VM '{}' is stopped, starting (timeout: {}s)",
+            "Lima VM '{}' is stopped, starting (timeout: {}s; a one-time \
+             container-tooling download may run first)",
             vm,
             timeout.as_secs()
         );
@@ -995,8 +891,8 @@ impl LimaRuntime {
             .run_with_timeout("limactl", &["start", vm], timeout)
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to start Lima VM '{vm}': {e}. \
-                     Please restart Speedwave or check system resources.",
+                    "Failed to start Lima VM '{vm}': {e}. {}",
+                    consts::LIMA_START_PROVISION_HINT
                 )
             })?;
         log::info!("Lima VM '{}' started successfully", vm);
@@ -1085,7 +981,7 @@ impl LimaRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;
@@ -1132,8 +1028,7 @@ mod tests {
     fn test_is_eof_error_rejects_non_eof_messages() {
         assert!(!is_eof_error(&anyhow::anyhow!("permission denied")));
         assert!(!is_eof_error(&anyhow::anyhow!("No such container: foo")));
-        // "EOF" appearing mid-message should not match — we only retry the
-        // exact "fatal msg=EOF" / trailing-EOF shape limactl produces.
+        // "EOF" appearing mid-message must not match.
         assert!(!is_eof_error(&anyhow::anyhow!(
             "EOF reached but file still open"
         )));
@@ -1207,19 +1102,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // run_rm_force_lima --time=0 escalation
+    // run_rm_force --time=0 escalation (shared SSOT argv builder in mod.rs)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_run_rm_force_lima_appends_time_zero_only_when_force_kill() {
+    fn test_run_rm_force_appends_time_zero_only_when_force_kill() {
         let runner = MockRunner::new()
             .with_response("nerdctl rm -f a", "")
             .with_response("nerdctl rm -f --time=0 a", "");
 
         // Graceful path — no --time=0
-        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], false).unwrap();
+        crate::runtime::run_rm_force(&runner, "nerdctl", &[], &["a".to_string()], false).unwrap();
         // Force-kill path — emits --time=0
-        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
+        crate::runtime::run_rm_force(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
     }
 
     /// End-to-end check that `force_remove_project_containers_with_retry`
@@ -1237,9 +1132,7 @@ mod tests {
                 if key.contains(" ps -a ") {
                     return Ok("stale-id\n".to_string());
                 }
-                // First two `rm -f` (without --time=0) fail with EOF; the
-                // third — with --time=0 — succeeds. This is the real-world
-                // shape we observed during shutdown.
+                // First two `rm -f` fail with EOF; the third (--time=0) succeeds.
                 if key.contains("rm -f --time=0") {
                     return Ok(String::new());
                 }
@@ -1255,8 +1148,7 @@ mod tests {
             calls: Arc::clone(&calls),
         };
 
-        // Use a project name with no compose file on disk, so only the id
-        // branch fires (configured_project_container_names returns empty).
+        // Project name with no compose file on disk, so only the id branch fires.
         let project = format!(
             "lima-retry-test-{}",
             std::time::SystemTime::UNIX_EPOCH
@@ -1265,10 +1157,7 @@ mod tests {
                 .subsec_nanos()
         );
 
-        // We exercise the full helper rather than retry_on_eof directly so
-        // that the escalation logic is verified end-to-end. The production
-        // backoff (200 ms / 500 ms) runs through real sleep here, but it's
-        // bounded to ~700 ms which is fine for a unit test.
+        // Exercise the full helper so escalation is verified end-to-end.
         force_remove_project_containers_with_retry(&runner, "nerdctl", &project, &[]);
 
         let observed = calls.lock().unwrap().clone();
@@ -1349,11 +1238,8 @@ mod tests {
     #[test]
     fn test_ssh_config_path_contains_lima_vm() {
         let path = ssh_config_path().expect("ssh_config_path should succeed");
-        // Compare via Path components — separators differ across host OSes
-        // (`/` vs `\`) and a substring check would false-fail on Windows.
-        // The semantic claim is the data-dir-relative tail `lima/<vm>/ssh.config`;
-        // asserting only that tail keeps the test tempdir-robust without naming
-        // the production `data_dir()` singleton.
+        // Compare via Path components (separators differ across host OSes);
+        // assert only the data-dir-relative tail `lima/<vm>/ssh.config`.
         let vm = consts::lima_vm_name();
         let expected_tail = std::path::Path::new(consts::LIMA_SUBDIR)
             .join(vm)
@@ -1374,10 +1260,8 @@ mod tests {
         let program = cmd.get_program().to_string_lossy().to_string();
         assert_eq!(program, "ssh", "container_exec should use ssh as program");
 
-        // The remote command (last positional arg after `--`) must be a
-        // single shell-quoted string that any POSIX shell can parse back
-        // into the original argv. We assert on its content rather than on
-        // the surrounding ssh flags.
+        // The remote command (last positional arg after `--`) is a single
+        // shell-quoted string; assert on its content, not the ssh flags.
         let remote_cmd = cmd
             .get_args()
             .last()
@@ -1397,10 +1281,7 @@ mod tests {
             remote_cmd.contains("claude"),
             "remote_cmd should include user command, got: {remote_cmd}"
         );
-        // Anchor on the literal "nerdctl exec -it -e" prefix instead of a
-        // bare " -p"/" -it " substring — `shlex` leaves alphanumeric tokens
-        // unquoted, so the prefix appears verbatim and the match is precise
-        // (no false-positive on "-pt"/"-pd" or ambiguous boundaries).
+        // Anchor on the literal "nerdctl exec -it -e" prefix for a precise match.
         assert!(
             remote_cmd.contains("nerdctl exec -it -e"),
             "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
@@ -1411,22 +1292,12 @@ mod tests {
         );
     }
 
-    /// Regression: arguments containing `(`, `)`, `'`, backticks, `$`, and
-    /// newlines used to break remote bash with `syntax error near unexpected
-    /// token`, because we passed `cmd` as separate argv tokens to `ssh`/
-    /// `limactl` which then re-joined them through a remote `sh -c`. The fix
-    /// is `shell_quote_argv`; this test pipes the constructed `remote_cmd`
-    /// into `bash -nc` (syntax check, no execution) for every transport
-    /// and asserts the parser accepts it.
+    /// Regression: args with shell metacharacters once broke remote bash.
+    /// Pipes the constructed `remote_cmd` into `bash -nc` per transport.
     #[test]
     #[serial_test::serial(env_term)]
     fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
-        // Pull the smallest set of nasty inputs that historically bit us:
-        // - parens, em-dash, periods (the local-LLM identity prompt)
-        // - bare apostrophe (English contractions)
-        // - backticks + `$()` (command substitution attempts)
-        // - newlines (multi-line prompts)
-        // - double quotes
+        // Inputs with shell metacharacters that historically bit us.
         let nasty_args: &[&[&str]] = &[
             // The exact shape that broke production.
             &[
@@ -1434,8 +1305,7 @@ mod tests {
                 "--append-system-prompt",
                 "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
             ],
-            // Bare apostrophe — single-quote bash style is "'\''", we
-            // must close, escape, reopen.
+            // Bare apostrophe.
             &["sh", "-c", "echo it's working"],
             // Backticks + dollar — must NOT be evaluated remotely.
             &["sh", "-c", "echo `whoami` $HOME $(id)"],
@@ -1445,8 +1315,7 @@ mod tests {
             &["sh", "-c", r#"echo "hello \"world\"""#],
         ];
 
-        // Pin TERM so the interactive prefix is deterministic — container_exec
-        // now propagates the host's real TERM. Guard restores it on drop.
+        // Pin TERM so the interactive prefix is deterministic.
         let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
         let term_env = crate::runtime::resolved_term_env();
 
@@ -1490,7 +1359,11 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec",
+            );
 
             // Same check for the piped variant.
             let runner = mock_runner_with_vm_running();
@@ -1508,31 +1381,12 @@ mod tests {
                 .copied()
                 .chain(args.iter().copied())
                 .collect();
-            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+            crate::runtime::test_support::assert_quoting_roundtrips(
+                &remote_cmd,
+                &expected,
+                "container_exec_piped",
+            );
         }
-    }
-
-    /// Verifies that `remote_cmd` is a valid POSIX shell command by
-    /// round-tripping through `shlex::split` and asserting the parsed
-    /// argv equals the original. If the quoting were broken, the
-    /// parser would either fail (returning `None`) or would split into
-    /// a different argv shape than what we encoded.
-    ///
-    /// We deliberately do NOT spawn `bash -n` here even though it would
-    /// be the canonical syntax check: Git Bash on `windows-latest`
-    /// corrupts multi-byte UTF-8 in command-line args/scripts, see Git
-    /// for Windows / claude-code#31295. A pure-Rust roundtrip via the
-    /// same `shlex` crate that produced the quoting is the lossless,
-    /// platform-independent equivalent.
-    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
-        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
-            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
-        });
-        assert_eq!(
-            parsed, expected_argv,
-            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
-             remote_cmd: {remote_cmd:?}",
-        );
     }
 
     #[test]
@@ -1564,8 +1418,7 @@ mod tests {
             remote_cmd.contains("test_container"),
             "remote_cmd should include container name, got: {remote_cmd}"
         );
-        // Anchor on the literal "nerdctl exec -i -e" prefix — see the
-        // comment in `test_container_exec_has_path_env` for rationale.
+        // Anchor on the literal "nerdctl exec -i -e" prefix.
         assert!(
             remote_cmd.contains("nerdctl exec -i -e"),
             "remote_cmd should start the nerdctl invocation with -i (no TTY), got: {remote_cmd}"
@@ -1695,56 +1548,76 @@ mod tests {
 
     #[test]
     fn test_compose_down_runs_compose_command() {
+        // compose_down short-circuits when no compose.yml exists; create one so
+        // this test exercises the real command path (cleaned up after).
+        let compose_file = crate::runtime::compose_file_path("testproject").unwrap();
+        let compose_path = std::path::PathBuf::from(&compose_file);
+        if let Some(parent) = compose_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&compose_path, "services: {}").unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_path);
+
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
-        // down + ps + rm-container + network-ls (no rm because make_recording_runner's
-        // network-ls response is empty by default).
+        // prestop-ps + down + ps + rm-container + network-ls (no rm: ls empty).
         assert_eq!(
             commands.len(),
-            4,
-            "compose_down should issue 4 commands (down + ps + rm + network-ls), got: {:?}",
+            5,
+            "compose_down should issue 5 commands (prestop-ps + down + ps + rm + network-ls), got: {:?}",
             *commands
         );
 
         assert!(
-            commands[0].contains("nerdctl compose"),
+            commands[0].contains("ps -q --filter label=com.docker.compose.project=testproject"),
+            "first command is the parallel pre-stop ps, got: {}",
+            commands[0]
+        );
+        assert!(
+            commands[1].contains("nerdctl compose"),
             "command should be nerdctl compose, got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("down"),
+            commands[1].contains("down"),
             "command should include 'down', got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("-p testproject"),
+            commands[1].contains("-p testproject"),
             "command should include project name, got: {}",
-            commands[0]
+            commands[1]
         );
         assert!(
-            commands[0].contains("--remove-orphans"),
+            commands[1].contains("--remove-orphans"),
             "command should include --remove-orphans, got: {}",
-            commands[0]
+            commands[1]
         );
 
-        // Second command: ps -a to find ghost containers
+        // After down: ps -a to find ghost containers
         assert!(
-            commands[1].contains("ps -a"),
-            "second command should be ps -a, got: {}",
-            commands[1]
-        );
-        assert!(
-            commands[1].contains("com.docker.compose.project=testproject"),
-            "second command should filter by project label, got: {}",
-            commands[1]
-        );
-        assert!(
-            commands[2].contains("rm -f stale-id"),
-            "third command should remove stale container id, got: {}",
+            commands[2].contains("ps -a"),
+            "third command should be ps -a, got: {}",
             commands[2]
+        );
+        assert!(
+            commands[2].contains("com.docker.compose.project=testproject"),
+            "third command should filter by project label, got: {}",
+            commands[2]
+        );
+        assert!(
+            commands[3].contains("rm -f stale-id"),
+            "fourth command should remove stale container id, got: {}",
+            commands[3]
         );
     }
 
@@ -1828,8 +1701,8 @@ mod tests {
             "error should mention VM start failure, got: {err_msg}"
         );
         assert!(
-            err_msg.contains("restart Speedwave"),
-            "error should suggest restarting, got: {err_msg}"
+            err_msg.contains(consts::LIMA_START_PROVISION_HINT),
+            "error should carry the download cause + retry hint, got: {err_msg}"
         );
     }
 
@@ -1842,8 +1715,6 @@ mod tests {
         let start_count = Arc::new(AtomicUsize::new(0));
 
         // Track how many times `limactl start` is called.
-        // First call: VM is "Stopped" → start succeeds → subsequent status checks return "Running".
-        // Second call (serialized by lock): VM is "Running" → no start needed.
         struct ConcurrentRunner {
             start_count: Arc<AtomicUsize>,
         }
@@ -1901,7 +1772,6 @@ mod tests {
         assert!(r2.is_ok(), "thread 2 should succeed: {:?}", r2);
 
         // The lock ensures only one thread actually calls `limactl start`.
-        // The second thread sees "Running" after acquiring the lock.
         assert_eq!(
             start_count.load(Ordering::SeqCst),
             1,
@@ -1988,6 +1858,44 @@ mod tests {
             commands[0].contains("-p testproject"),
             "command should include project name, got: {}",
             commands[0]
+        );
+    }
+
+    /// ADR-073: single-service recreate targets exactly the named service,
+    /// keeps --force-recreate, and never removes orphans (the rest of the
+    /// stack must stay untouched).
+    #[test]
+    fn test_compose_up_service_targets_one_service() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.compose_up_service("testproject", "proxy").unwrap();
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].ends_with("--force-recreate proxy"),
+            "service must be the last argv token: {}",
+            commands[0]
+        );
+        assert!(
+            !commands[0].contains("--remove-orphans"),
+            "single-service recreate must not remove orphans: {}",
+            commands[0]
+        );
+    }
+
+    /// Unknown service names are rejected before reaching the engine argv.
+    #[test]
+    fn test_compose_up_service_rejects_unknown_service() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(rt
+            .compose_up_service("testproject", "evil; rm -rf")
+            .is_err());
+        assert!(rt.compose_up_service("testproject", "mcp-unknown").is_err());
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "no engine command may run for a rejected service"
         );
     }
 
@@ -2224,6 +2132,26 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_unused_images_uses_image_prune_not_system_prune_all() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.prune_unused_images().unwrap();
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].contains("nerdctl image prune --force"),
+            "prune_unused_images must use `image prune` (keeps tagged images of stopped projects), \
+             not `system prune --all` (which removes them); got: {}",
+            commands[0]
+        );
+        assert!(
+            !commands[0].contains("--all"),
+            "prune_unused_images must NOT pass --all: got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
     fn test_build_image_passes_build_args() {
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
@@ -2384,9 +2312,7 @@ mod tests {
             "",
         );
         let rt = LimaRuntime::with_runner(Box::new(runner));
-        // force=true must add --force to the rmi args so nerdctl removes
-        // images that are still referenced by a running container (the
-        // explicit-uninstall path).
+        // force=true must add --force to the rmi args.
         assert!(rt.remove_images(&tags, true).is_ok());
     }
 
@@ -2794,8 +2720,7 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_stopping_deadline_exceeded_returns_err() {
-        // Runner whose `list --format` query always reports `Stopping`, so
-        // `ensure_ready_inner`'s Stopping arm spins until the deadline fires.
+        // Runner whose `list --format` always reports `Stopping`.
         struct AlwaysStoppingRunner;
         impl CommandRunner for AlwaysStoppingRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -2810,9 +2735,7 @@ mod tests {
             }
         }
 
-        // 1 ms stop timeout + zero poll delay → deadline expires on the first
-        // iteration, so we exercise the real bail-out path in milliseconds
-        // instead of the production 30 s value.
+        // 1 ms stop timeout + zero poll delay → deadline expires on the first iteration.
         let rt = LimaRuntime::with_runner(Box::new(AlwaysStoppingRunner))
             .with_zero_vm_stop_poll_delay()
             .with_stop_timeout(std::time::Duration::from_millis(1));

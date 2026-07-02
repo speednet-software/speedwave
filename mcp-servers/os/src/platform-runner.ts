@@ -1,18 +1,12 @@
 /**
- * Platform Runner — Cross-platform CLI binary dispatcher
- *
- * Detects the current platform and resolves the correct native CLI binary
- * for OS integrations (Reminders, Calendar, Mail, Notes).
- *
- * Platforms:
- * - macOS: 4 Swift binaries (reminders-cli, calendar-cli, mail-cli, notes-cli)
- * - Windows: 1 Rust binary (native-os-cli) with domain.command syntax
+ * Cross-platform native CLI dispatcher: macOS Swift binaries, Windows Rust binary.
  */
 
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
+import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 
 import { ALLOWED_COMMANDS } from './tools/index.js';
 
@@ -49,24 +43,13 @@ export interface PlatformPaths {
 // Binary Resolution
 //=============================================================================
 
-/**
- * Detect whether we are running in dev mode or production (bundled).
- * Dev: binaries are in native/macos/<pkg>/.build/release/ or target/release/
- * Prod: binaries are alongside the app (Resources/ on macOS)
- */
+/** Detect whether we are running in dev mode or production (bundled). */
 function isDevMode(): boolean {
-  // In production, __dirname would be inside .app bundle or dist/
-  // In dev, we run from mcp-servers/os/dist/ or src/
   return !process.env.SPEEDWAVE_PROD;
 }
 
-/**
- * Resolve the project root directory.
- * In dev mode, this is the monorepo root (parent of mcp-servers/).
- */
+/** Resolve the monorepo root directory (3 levels up from src/ or dist/). */
 function resolveProjectRoot(): string {
-  // platform-runner.ts lives at mcp-servers/os/src/ (dev) or mcp-servers/os/dist/ (built)
-  // Project root is 3 levels up from src/ or dist/
   return path.resolve(import.meta.dirname, '..', '..', '..');
 }
 
@@ -139,26 +122,10 @@ export function resolvePaths(): PlatformPaths {
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
- * Allowlist of environment variable names safe to pass to CLI child processes.
- * Prevents leaking secrets (MCP_OS_AUTH_TOKEN, API keys, etc.) to subprocesses.
+ * Allowlist of env var names safe to pass to CLI child processes.
+ * Sourced from the shared core ({@link BASE_SAFE_ENV_KEYS}).
  */
-export const SAFE_ENV_KEYS: readonly string[] = [
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  // macOS: required by Swift runtime / Xcode toolchain
-  'DEVELOPER_DIR',
-  'SDKROOT',
-  '__CF_USER_TEXT_ENCODING',
-];
+export const SAFE_ENV_KEYS: readonly string[] = BASE_SAFE_ENV_KEYS;
 
 /** Build a filtered environment object containing only safe keys. */
 export function buildChildEnv(): NodeJS.ProcessEnv {

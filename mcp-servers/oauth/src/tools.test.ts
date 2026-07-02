@@ -23,6 +23,7 @@ describe('oauth tools', () => {
 
   const sharepointState: OAuthState = {
     provider: 'microsoft',
+    grantType: 'refresh_token',
     providerData: {
       clientId: '11111111-1111-1111-1111-111111111111',
       tenantId: 'common',
@@ -127,8 +128,7 @@ describe('oauth tools', () => {
     });
 
     it('rejects when ctx is missing entirely', async () => {
-      // `ctx?.caller` defaults to '' when ctx itself is undefined — covers
-      // the `?? ''` branch in resolveCaller (tools.ts:79).
+      // ctx undefined → caller defaults to '' (resolveCaller ?? branch, tools.ts:79).
       const tools = buildTools(deps);
       const refresh = tools.find((t) => t.tool.name === 'refresh')!;
       const result = await refresh.handler({}, undefined);
@@ -137,10 +137,7 @@ describe('oauth tools', () => {
     });
 
     it('falls back to Date.now / static registry when overrides absent', async () => {
-      // Covers `deps.now ?? Date.now` and the registry fallback when
-      // `deps.providers` is omitted. We do NOT actually call Microsoft — fetch
-      // is mocked, but the branch coverage we care about (real registry →
-      // microsoftProvider → refreshMicrosoftToken → fetch) is exercised.
+      // Covers `deps.now ?? Date.now` and static registry fallback when `deps.providers` omitted.
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       await seedState(sharepointState);
       const fetchSpy = vi
@@ -226,6 +223,31 @@ describe('oauth tools', () => {
       expect(await readAuditLog()).toContain('action=refresh outcome=ok');
     });
 
+    it('clamps an absurd expiresIn instead of throwing RangeError', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState);
+      refreshResult = {
+        ok: true,
+        value: {
+          accessToken: 'a',
+          refreshToken: 'r',
+          expiresIn: 1e16, // would overflow Date without the clamp
+          grantedScopes: sharepointState.scopes,
+        },
+      };
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      const result = await refresh.handler({}, ctxFor('sharepoint'));
+      expect(result.isError).toBeFalsy();
+      const newState = JSON.parse(
+        await readFile(join(stateDir, 'sharepoint.json'), 'utf8')
+      ) as OAuthState;
+      // expiresAt is a valid, parseable, future ISO date (clamped, not NaN/throw).
+      expect(Number.isNaN(Date.parse(newState.expiresAt))).toBe(false);
+      expect(Date.parse(newState.expiresAt)).toBeGreaterThan(now);
+    });
+
     it('keeps old refresh token when Microsoft does not rotate', async () => {
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       await seedState(sharepointState);
@@ -248,7 +270,7 @@ describe('oauth tools', () => {
       expect(newState.refreshToken).toBe('old-refresh');
     });
 
-    it('refuses when access token still valid AND within rate-limit window', async () => {
+    it('rate-limit with valid token: success-noop, no IdP call, audited', async () => {
       await seedBearerMap({ 'bearer-sp': 'sharepoint' });
       // last refresh 10 minutes ago, access valid for 50 more minutes → rate-limit
       await seedState({
@@ -260,10 +282,66 @@ describe('oauth tools', () => {
       const refresh = tools.find((t) => t.tool.name === 'refresh')!;
 
       const result = await refresh.handler({}, ctxFor('sharepoint'));
-      expect(result.isError).toBe(true);
-      expect(getTextResult(result)).toContain('rate_limited');
+      // Success-noop: caller that lost the single-flight race re-reads the fresh token.
+      expect(result.isError).toBeFalsy();
+      const payload = JSON.parse(getTextResult(result)) as {
+        expiresIn: number;
+        grantedScopes: string[];
+        rateLimited?: boolean;
+      };
+      expect(payload.rateLimited).toBe(true);
+      expect(payload.expiresIn).toBe(50 * 60);
+      expect(payload.grantedScopes).toEqual(sharepointState.grantedScopes);
       expect(refreshCalls).toHaveLength(0);
       expect(await readAuditLog()).toContain('outcome=error:rate_limited');
+    });
+
+    it('serializes concurrent refreshes per service (one IdP call)', async () => {
+      await seedBearerMap({ 'bearer-sp': 'sharepoint' });
+      await seedState(sharepointState); // expired → first caller refreshes
+      const tools = buildTools(deps);
+      const refresh = tools.find((t) => t.tool.name === 'refresh')!;
+
+      let resolveRefresh!: (r: RefreshResult) => void;
+      const gate = new Promise<RefreshResult>((r) => {
+        resolveRefresh = r;
+      });
+      deps.providers = {
+        microsoft: {
+          ...microsoftSpy,
+          refresh: async (req) => {
+            refreshCalls.push({ ...req, providerData: { ...req.providerData } });
+            return gate;
+          },
+        },
+      };
+
+      const first = refresh.handler({}, ctxFor('sharepoint'));
+      const second = refresh.handler({}, ctxFor('sharepoint'));
+      // Let the first caller reach the provider before releasing it.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(refreshCalls).toHaveLength(1);
+      // Winner persists a fresh expiresAt/lastRefreshAt at `now`...
+      now = Date.parse('2026-05-15T12:00:05Z');
+      resolveRefresh({
+        ok: true,
+        value: {
+          accessToken: 'race-token',
+          refreshToken: 'race-refresh',
+          expiresIn: 3600,
+          grantedScopes: ['s'],
+        },
+      });
+      const [r1, r2] = await Promise.all([first, second]);
+      expect(r1.isError).toBeFalsy();
+      expect(r2.isError).toBeFalsy();
+      // Exactly one IdP call; assert outcomes as a set (async order unpinned).
+      expect(refreshCalls).toHaveLength(1);
+      const payloads = [r1, r2].map(
+        (r) => JSON.parse(getTextResult(r)) as { rateLimited?: boolean }
+      );
+      const rateLimited = payloads.filter((p) => p.rateLimited === true);
+      expect(rateLimited).toHaveLength(1); // the loser hit the rate-limit noop
     });
 
     it('allows refresh when access token expired even within rate-limit window', async () => {
@@ -435,9 +513,7 @@ describe('oauth tools', () => {
         await seedBearerMap({ 'bearer-sp': 'sharepoint' });
         await seedState(sharepointState);
         const stateFile = join(stateDir, 'sharepoint.json');
-        // Read-only parent dir → unlink fails with EACCES (non-ENOENT).
-        // Keep the audit log outside the locked dir so the error path can
-        // still record the outcome.
+        // Read-only parent dir → unlink fails with EACCES (non-ENOENT); audit log kept outside locked dir.
         const isolatedAudit = join(tokensBase, 'audit.log');
         await chmod(stateDir, 0o500);
         try {

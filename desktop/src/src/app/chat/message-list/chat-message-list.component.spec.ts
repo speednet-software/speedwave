@@ -22,11 +22,7 @@ describe('ChatMessageListComponent', () => {
     fixture.componentRef.setInput('messages', []);
   });
 
-  /**
-   * Replays `ngOnChanges` after a manual property set — mirrors what Angular
-   * does when a template binding changes. Signal `input()` does NOT trigger
-   * lifecycle `ngOnChanges`, so tests must invoke it explicitly.
-   */
+  /** Replays `ngOnChanges` after a manual property set. */
   function fakeOnChanges(): void {
     component.ngOnChanges();
   }
@@ -54,6 +50,40 @@ describe('ChatMessageListComponent', () => {
     expect(rendered.length).toBe(0);
   });
 
+  // ── Transcript loading spinner ────────────────────────────────────────
+
+  it('shows the transcript spinner when loadingTranscript is true and messages are empty', () => {
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('loadingTranscript', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeTruthy();
+  });
+
+  it('hides the transcript spinner once messages have loaded', () => {
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+    ]);
+    fixture.componentRef.setInput('loadingTranscript', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeFalsy();
+  });
+
+  it('does not show the transcript spinner when loadingTranscript is false', () => {
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('loadingTranscript', false);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const spinner = fixture.nativeElement.querySelector('[data-testid="chat-transcript-loading"]');
+    expect(spinner).toBeFalsy();
+  });
+
   // ── Streaming: last entry has streaming=true ──────────────────────────
 
   it('appends a streaming placeholder when isStreaming is true and currentBlocks has content', () => {
@@ -72,9 +102,7 @@ describe('ChatMessageListComponent', () => {
     );
     expect(streamingEl).not.toBeNull();
 
-    // When the last block is a text block, the per-block streaming caret renders
-    // (data-testid="streaming-caret") and the message-level cursor is suppressed
-    // by lastBlockIsText.
+    // A text last block renders the per-block streaming caret.
     const caret = fixture.nativeElement.querySelector('[data-testid="streaming-caret"]');
     expect(caret).not.toBeNull();
   });
@@ -175,10 +203,7 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('re-arms auto-scroll on a new message even after the user scrolled up', () => {
-    // Product decision: a new turn (length grew) snaps the view back to the
-    // bottom unconditionally. Streaming deltas that arrive on the *same*
-    // turn still respect a manual scroll-up, but the next user-visible
-    // message wins so the freshly-arrived content is always in sight.
+    // A new turn snaps the view back to the bottom unconditionally.
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ]);

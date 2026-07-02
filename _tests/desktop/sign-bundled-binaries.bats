@@ -7,9 +7,8 @@ setup() {
     SRC_TAURI="$(mktemp -d "${BATS_TEST_TMPDIR}/sign-bundled.XXXXXX")"
     export SRC_TAURI
 
-    # Force the script's `uname` check to return "Darwin" on any host so tests
-    # exercise the Darwin-only branches on Linux CI too. PATH shim is undone
-    # automatically when the subshell exits after each test.
+    # Force the script's `uname` to return "Darwin" so Darwin-only branches run
+    # on Linux CI too.
     UNAME_SHIM_DIR="${BATS_TEST_TMPDIR}/uname-shim"
     mkdir -p "$UNAME_SHIM_DIR"
     cat > "$UNAME_SHIM_DIR/uname" <<'EOF'
@@ -28,23 +27,14 @@ with_darwin_uname() {
     PATH="$UNAME_SHIM_DIR:$PATH" "$@"
 }
 
-# Tauri copies a small synthetic Mach-O into each expected path, so the script's
-# existence + file-type checks pass. We cannot invoke codesign in tests (no real
-# cert), so these helpers mirror the production layout but stop short of signing.
+# Helpers mirror the production layout but stop short of signing (no real cert).
 
 write_mach_o() {
-    # Minimal Mach-O 64-bit magic number (cafebabe / feedfacf) — enough for
-    # `file(1)` to classify as Mach-O. Not executable in practice, which is
-    # fine since we mock codesign below.
     mkdir -p "$(dirname "$1")"
-    # Use the system /bin/ls as a known-valid Mach-O binary on macOS; on Linux
-    # it's ELF and the Mach-O check will fail — tests only exercise the
-    # Mach-O-assertion path via the negative test, not positive execution.
+    # /bin/ls is Mach-O on macOS, ELF on Linux.
     if [[ "$(uname)" == "Darwin" ]]; then
         cp /bin/ls "$1"
     else
-        # On Linux, copy an ELF file as a stand-in; tests that need a true
-        # Mach-O are skipped on Linux.
         cp /bin/ls "$1" 2>/dev/null || printf '\x7fELF' > "$1"
     fi
     chmod +x "$1"
@@ -74,9 +64,7 @@ populate_targets() {
 }
 
 @test "exits 0 on non-Darwin host (no uname shim)" {
-    # Without the shim, real `uname` decides: macOS returns Darwin and the
-    # script continues past the guard; Linux returns Linux and it exits early.
-    # Either way, with no signing identity set, the final exit code is 0.
+    # With no signing identity set, the final exit code is 0 on any host.
     unset APPLE_SIGNING_IDENTITY
 
     run "$SCRIPT"
@@ -121,9 +109,7 @@ populate_targets() {
 }
 
 @test "SIGN_TARGETS covers every executable resource in tauri.macos.conf.json" {
-    # Prevents the "added binary to tauri.macos.conf.json but forgot
-    # SIGN_TARGETS" regression. Extracts executable resource keys (those
-    # that don't end with /) and verifies each has a SIGN_TARGETS entry.
+    # Every executable resource key (not ending in /) must have a SIGN_TARGETS entry.
     local macos_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.macos.conf.json"
     [ -f "$macos_conf" ]
 
@@ -195,10 +181,7 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
-    # speedwave is pure Rust — no restricted APIs, no entitlements needed.
-    # The entry must end with ":" followed by end-of-value. Match the full
-    # array-element form explicitly so the test doesn't accidentally rely on
-    # shell quoting around the colon.
+    # speedwave is pure Rust — no entitlements; its entry ends with ":".
     grep -E '"\$SRC_TAURI/cli/speedwave:"[[:space:]]*$' "$SCRIPT"
 }
 
@@ -211,16 +194,12 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "post-sign verification rejects plists with zero entitlement keys" {
-    # Guard against silent verification pass when grep '<key>' yields nothing
-    # (malformed plist, truncated file, future format change). Without this
-    # guard the while-loop never executes and signing reports success.
+    # Guard against silent pass when grep '<key>' yields nothing (malformed plist).
     grep -qF 'contains no <key> entries' "$SCRIPT"
 }
 
 @test "sign_macho fails fast when entitlements plist is missing" {
-    # Binary path is validated; plist path must be validated too. Without
-    # this check codesign produces a cryptic error instead of a friendly
-    # "create the plist" hint.
+    # Plist path must be validated too, not just the binary path.
     grep -qF 'entitlements plist does not exist' "$SCRIPT"
 }
 
@@ -258,9 +237,7 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "each single-capability plist declares exactly one <key>" {
-    # Prevents least-privilege drift. node.plist is exempt — V8 needs both
-    # allow-jit and allow-unsigned-executable-memory and the two are
-    # structurally inseparable.
+    # One <key> per plist; node.plist is exempt (V8 needs two).
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     local plist keys
     for plist in virtualization.plist calendars.plist reminders.plist apple-events.plist; do
@@ -293,10 +270,7 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "verify_identifier function is defined for native CLI sub-identifier check" {
-    # Sub-identifier verification is what guarantees TCC.db rows are bound to
-    # `pl.speedwave.desktop.<svc>` and the recovery commands in
-    # docs/troubleshooting.md actually work. Without this, the codesign default
-    # identifier (`<svc>-cli`) would silently apply.
+    # Sub-identifier binding ensures TCC.db rows match pl.speedwave.desktop.<svc>.
     grep -qF 'verify_identifier()' "$SCRIPT"
 }
 
@@ -309,10 +283,7 @@ for path in glob.glob('$ent_dir/*.plist'):
 
 @test "expected sub-identifier mapping covers all native CLIs" {
     # SSOT-alignment with native/macos/shared/Sources/SharedCLI/Utilities.swift
-    # ::subBundleIdentifier(for:) (and, for audio-capture, that CLI's
-    # Resources/Info.plist) — these exact values must match, otherwise the Swift
-    # gate / embedded plist produces different tccutil hints than the codesign
-    # binding.
+    # ::subBundleIdentifier(for:); these exact values must match.
     grep -qF 'pl.speedwave.desktop.calendar' "$SCRIPT"
     grep -qF 'pl.speedwave.desktop.reminders' "$SCRIPT"
     grep -qF 'pl.speedwave.desktop.mail' "$SCRIPT"
@@ -321,9 +292,7 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "verify_identifier is invoked for each native CLI in sign loop" {
-    # The post-sign loop must call verify_identifier (not just sign_macho +
-    # verify_macho). If a future refactor drops the call, sub-identifier
-    # binding regressions slip through.
+    # The post-sign loop must call verify_identifier, not just sign_macho + verify_macho.
     grep -qE 'verify_identifier "\$path"' "$SCRIPT"
 }
 

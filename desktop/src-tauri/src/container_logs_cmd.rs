@@ -1,51 +1,7 @@
-// Tauri commands for viewing container and compose logs.
+// Tauri commands for the unified `/logs` view (`get_all_logs`).
 
 use crate::logging_cmd::desktop_log_dir;
 use crate::types::check_project;
-
-/// Validate that a container name starts with the Speedwave compose prefix
-/// and contains only safe characters (alphanumeric, underscore, hyphen, dot).
-fn validate_container_name(container: &str) -> Result<(), String> {
-    if !container.starts_with(&format!("{}_", speedwave_runtime::consts::compose_prefix())) {
-        return Err(format!(
-            "Invalid container name: must start with '{}_'",
-            speedwave_runtime::consts::compose_prefix()
-        ));
-    }
-    if !container
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    {
-        return Err("Invalid container name: contains illegal characters".to_string());
-    }
-    Ok(())
-}
-
-/// Parse the project name from a Claude container name.
-/// Expected format: `{compose_prefix()}_{project}_claude`.
-fn parse_claude_project(container: &str) -> Result<String, String> {
-    parse_claude_project_with_prefix(speedwave_runtime::consts::compose_prefix(), container)
-}
-
-/// Parameterised by `compose_prefix` so unit tests avoid the
-/// `consts::compose_prefix()` `OnceLock`, which resolves the process-global
-/// `data_dir()` basename.
-fn parse_claude_project_with_prefix(
-    compose_prefix: &str,
-    container: &str,
-) -> Result<String, String> {
-    let prefix = format!("{compose_prefix}_");
-    let without_prefix = container
-        .strip_prefix(&prefix)
-        .ok_or_else(|| "Not a claude container".to_string())?;
-    let project = without_prefix
-        .strip_suffix("_claude")
-        .ok_or_else(|| "Not a claude container".to_string())?;
-    if project.is_empty() {
-        return Err("Not a claude container".to_string());
-    }
-    Ok(project.to_string())
-}
 
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
@@ -62,9 +18,7 @@ fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, St
     ))
 }
 
-// tauri-plugin-log (KeepSome) names rotated files
-// `speedwave-desktop_YYYY-MM-DD_HH-MM-SS.log`; reading only the bare file
-// shows an empty current segment right after rotation.
+// Reads all `speedwave-desktop*.log` segments (tauri-plugin-log rotates them).
 fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -100,114 +54,16 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     speedwave_runtime::log_sanitizer::sanitize(&combined[start..].join("\n"))
 }
 
-#[tauri::command]
-pub(crate) async fn get_container_logs(
-    container: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    validate_container_name(&container)?;
-    let tail = tail.unwrap_or(200).min(10_000);
-    tokio::task::spawn_blocking(move || {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if !rt.is_available() {
-            return Err("Container runtime is not available. Please ensure the runtime is started before viewing logs.".to_string());
-        }
-        rt.container_logs(&container, tail)
-            .map(|logs| speedwave_runtime::log_sanitizer::sanitize(&logs))
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Result<String, String> {
-    check_project(&project)?;
-    let tail = tail.unwrap_or(200).min(10_000);
-    tokio::task::spawn_blocking(move || {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if !rt.is_available() {
-            return Err("Container runtime is not available. Please ensure the runtime is started before viewing logs.".to_string());
-        }
-        rt.compose_logs(&project, tail)
-            .map(|logs| speedwave_runtime::log_sanitizer::sanitize(&logs))
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        let log_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
-        let tail = tail.unwrap_or(200).min(10_000) as usize;
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Audit/stdout log of the per-project `host_exec` worker (`<data_dir>/host-exec/<project>/log`).
-#[tauri::command]
-pub(crate) async fn get_host_exec_logs(
-    project: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    check_project(&project)?;
-    tokio::task::spawn_blocking(move || {
-        let log_path = host_exec_log_path(&project);
-        let tail = tail.unwrap_or(200).min(10_000) as usize;
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Path to a project's `host_exec` worker log (matches `host_exec_process` /
-/// `host_exec_cmd`'s state-dir layout).
-fn host_exec_log_path(project: &str) -> std::path::PathBuf {
-    speedwave_runtime::host_exec::host_exec_project_dir(
-        speedwave_runtime::consts::data_dir(),
-        project,
-    )
-    .join(speedwave_runtime::consts::HOST_EXEC_LOG_FILE)
-}
-
-#[tauri::command]
-pub(crate) async fn get_claude_session_logs(
-    container: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    validate_container_name(&container)?;
-    let project = parse_claude_project(&container)?;
-    check_project(&project)?;
-
-    let tail = tail.unwrap_or(200).min(10_000) as usize;
-
-    tokio::task::spawn_blocking(move || {
-        let log_path = speedwave_runtime::consts::claude_session_log_path(&project);
-        read_tail_sanitized(&log_path, tail)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 // ---------------------------------------------------------------------------
 // Unified `/logs` view — merge of every log source the app produces
 // ---------------------------------------------------------------------------
 //
-// The frontend's `parseLogLine` recognises lines of the form
-// `<source-token> | <rest>`, where `<source-token>` matches `[\w.-]+`. Compose
-// container logs already arrive in that shape (`<container_name> | <ISO> msg`).
-// Host-side log files (tauri-desktop, mcp-os, claude-session) do not, so we
-// reformat them via `prefix_lines` before concatenating with the compose
-// stream into a single string. This is what `get_all_logs` returns.
+// Frontend `parseLogLine` recognises `<source-token> | <rest>` (`<source-token>`
+// matches `[\w.-]+`). Compose lines already match; host files are reformatted
+// via `prefix_lines` before concatenation. `get_all_logs` returns the result.
 
 /// Returns true when the line already carries a `<source-token> | …` prefix
-/// that the frontend parser will recognise. Used to skip re-prefixing compose
-/// container lines (which `nerdctl compose logs` already prefixes for us).
+/// that the frontend parser will recognise.
 fn has_source_prefix(line: &str) -> bool {
     let bytes = line.as_bytes();
     if bytes.is_empty() {
@@ -232,20 +88,11 @@ fn has_source_prefix(line: &str) -> bool {
     i < bytes.len() && bytes[i] == b'|'
 }
 
-/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`, `[WARN]`, …) into
-/// the unbracketed form Angular's `LEVEL_RE` expects after timestamp
-/// extraction.
-///
-/// Production input:
-///   `2026-05-06T19:58:38.724+0200 [INFO][speedwave_desktop::integrations_cmd] msg`
-/// Output:
-///   `2026-05-06T19:58:38.724+0200 INFO [speedwave_desktop::integrations_cmd] msg`
-///
-/// Returns the line unchanged when it does not match the expected layout
-/// (e.g. multi-line stack traces or external library lines).
+/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`) into the unbracketed
+/// form Angular's `LEVEL_RE` expects. Returns the line unchanged when it does
+/// not match the expected layout.
 fn rewrite_desktop_bracketed_level(line: &str) -> String {
-    // ISO timestamp ends at the first space (timestamp contains digits, `-`,
-    // `:`, `.`, `+`, optionally `Z` — never spaces).
+    // ISO timestamp ends at the first space (it contains no spaces).
     let Some(space_idx) = line.find(' ') else {
         return line.to_string();
     };
@@ -263,27 +110,17 @@ fn rewrite_desktop_bracketed_level(line: &str) -> String {
     ) {
         return line.to_string();
     }
-    // `line[..space_idx]` = ISO timestamp (without trailing space)
-    // After the closing `]` comes the rest, which usually starts with `[target]`.
-    // The frontend `LEVEL_RE = /^(LEVEL)\s+(.*)$/i` requires a space after the
-    // level word — without it the line falls back to default `info` and we lose
-    // the WARN/ERROR signal in the level chip.
+    // Frontend `LEVEL_RE` requires a space after the level word.
     let before = &line[..space_idx];
     let after = &after_ts[close_idx + 1..];
     format!("{before} {level} {after}")
 }
 
-/// Reformats the raw output of one log source so that every non-empty line
-/// matches the frontend's `<source> | <rest>` parsing contract.
-///
-/// - Empty lines are dropped (they would break `parseLogLine` and add no value).
-/// - Lines that already carry a `<word> | …` prefix (compose container logs)
-///   have the compose container prefix stripped so the dropdown shows
-///   `mcp_hub` not `speedwave_my_project_mcp_hub` — only when `project` is
-///   supplied (i.e. compose source); host-side sources pass through as-is.
-/// - Other lines (host-side log files) get the `<source> | ` prefix.
-/// - Desktop-log lines additionally have their bracketed level rewritten
-///   so the Angular level chip works (`[INFO]` → `INFO`).
+/// Reformats one log source so every non-empty line matches the frontend's
+/// `<source> | <rest>` contract. Empty lines are dropped; already-prefixed
+/// compose lines have their project prefix stripped (only when `project` is
+/// supplied); other lines get the `<source> | ` prefix. Desktop-log lines also
+/// have their bracketed level rewritten (`[INFO]` → `INFO`).
 pub(crate) fn prefix_lines(source: &str, raw: &str, project: Option<&str>) -> String {
     let mut out = String::with_capacity(raw.len() + raw.lines().count() * (source.len() + 4));
     for line in raw.split('\n') {
@@ -325,89 +162,111 @@ pub(crate) struct LogSources {
     pub compose: String,
     pub desktop: String,
     pub mcp_os: String,
-    pub host_exec: String,
     pub claude: String,
+    /// Lima VM serial log (macOS only; empty elsewhere).
+    pub lima: String,
 }
 
-/// Composes the per-source log buffers into a single newline-separated string,
-/// block-by-block in a deterministic source order. Chronological interleaving
-/// is the frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`) —
-/// every line carries one ISO timestamp, so the renderer parses and merges
-/// them by instant; here we just concatenate.
+/// Concatenates the per-source log buffers into a single newline-separated
+/// string in a deterministic source order. Chronological interleaving is the
+/// frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`).
 pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let compose = prefix_lines("compose", &sources.compose, Some(project));
     let desktop = prefix_lines("desktop", &sources.desktop, None);
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
-    let host_exec = prefix_lines("host-exec", &sources.host_exec, None);
     let claude = prefix_lines("claude", &sources.claude, None);
+    let lima = prefix_lines("lima", &sources.lima, None);
 
-    // Apply the sanitizer once to the merged buffer (idempotent — sources are
-    // already individually sanitized, this is a defence-in-depth pass).
-    speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{host_exec}{claude}"
-    ))
+    // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
+    speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}{lima}"))
 }
 
-/// Reads every host-side log file, fetches the compose stream, and returns a
-/// merged buffer that the frontend's existing `parseLogLine` understands.
-///
-/// Sources merged (in this fixed order, per-source-block):
-///   1. compose   — `nerdctl compose logs --timestamps --tail <N>`
-///   2. desktop   — tauri-plugin-log file (Rust + Angular `LoggerService` +
-///                  Swift CLI stderr forwarded by `check_os_permission`)
-///   3. mcp-os    — `~/.speedwave/mcp-os.log`
-///   4. host-exec — `~/.speedwave/host-exec/<project>/log` (if host_exec enabled)
-///   5. claude    — `~/.speedwave/logs/<project>/claude-session.log` (if exists)
-///
-/// Each source uses the full `tail` budget independently (default 200, cap
-/// 10 000). With 5 sources × 10 000 the upper bound is 50 000 lines — trivial
-/// for the renderer, especially since the frontend further filters by source
-/// in the dropdown.
-///
-/// Backwards-compatible with `get_compose_logs`: that command still exists for
-/// callers that want compose-only output (e.g. diagnostics export). New
-/// frontend code should prefer this command.
+/// Compose-logs fetch timeout; a busy container engine must not blank the
+/// file-based sources.
+const COMPOSE_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Single-flight marker: a compose-logs fetch survives its timeout as a
+/// detached task; polls must not stack more nerdctl processes behind it.
+static COMPOSE_LOGS_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Synthetic `compose | …` WARN line shown while container logs are unreachable.
+fn compose_busy_marker() -> String {
+    format!(
+        "compose | {} WARN  container logs unavailable while the container engine is busy — retrying on the next refresh\n",
+        speedwave_runtime::log_ts::log_timestamp(),
+    )
+}
+
+/// Fetches compose logs with a timeout and single-flight guard; falls back to
+/// `compose_busy_marker()` instead of blocking the merged view.
+async fn fetch_compose_logs_bounded(project: String, tail: u32) -> String {
+    use std::sync::atomic::Ordering;
+    if COMPOSE_LOGS_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return compose_busy_marker();
+    }
+    struct InFlightGuard;
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            COMPOSE_LOGS_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let handle = tokio::task::spawn_blocking(move || {
+        let _guard = InFlightGuard;
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        // best-effort; missing runtime should not blank the whole view
+        if rt.is_available() {
+            rt.compose_logs(&project, tail).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    });
+    match tokio::time::timeout(COMPOSE_LOGS_TIMEOUT, handle).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            log::warn!("get_all_logs: compose logs task failed: {e}");
+            String::new()
+        }
+        // The detached task clears the in-flight flag when it eventually ends.
+        Err(_) => {
+            log::warn!("get_all_logs: compose logs timed out — container engine busy");
+            compose_busy_marker()
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<String, String> {
     check_project(&project)?;
     let tail_u32 = tail.unwrap_or(200).min(10_000);
     let tail_us = tail_u32 as usize;
 
+    let compose = fetch_compose_logs_bounded(project.clone(), tail_u32).await;
+
     tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-
-        // compose (best-effort; missing runtime should not blank the whole view)
-        let compose = if rt.is_available() {
-            rt.compose_logs(&project, tail_u32).unwrap_or_default()
-        } else {
-            String::new()
-        };
-
         let desktop = match desktop_log_dir() {
             Some(dir) => read_tail_desktop_logs(&dir, tail_us),
             None => String::new(),
         };
 
-        // mcp-os — same path resolution `get_mcp_os_logs` uses
-        let mcp_os_path =
-            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
-        let mcp_os = read_tail_sanitized(&mcp_os_path, tail_us).unwrap_or_default();
-
-        // host-exec — per-project worker log (`get_host_exec_logs`'s path)
-        let host_exec =
-            read_tail_sanitized(&host_exec_log_path(&project), tail_us).unwrap_or_default();
-
-        // claude session log — same path resolution `get_claude_session_logs` uses
-        let claude_path = speedwave_runtime::consts::claude_session_log_path(&project);
-        let claude = read_tail_sanitized(&claude_path, tail_us).unwrap_or_default();
+        // File-source paths resolved from the SSOT registry (platform-gated).
+        let data_dir = speedwave_runtime::consts::data_dir();
+        let read_source = |key: &str| -> String {
+            speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
+                .map(|p| read_tail_sanitized(&p, tail_us).unwrap_or_default())
+                .unwrap_or_default()
+        };
 
         Ok(merge_log_sources(
             LogSources {
                 compose,
                 desktop,
-                mcp_os,
-                host_exec,
-                claude,
+                mcp_os: read_source("mcp-os"),
+                claude: read_source("claude"),
+                lima: read_source("lima"),
             },
             &project,
         ))
@@ -425,33 +284,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
 mod tests {
     use super::*;
 
-    // -- Container name validation --
-
-    #[test]
-    fn validate_container_name_accepts_valid() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_acme_claude")).is_ok());
-        assert!(validate_container_name(&format!("{pfx}_proj.v1_mcp-hub")).is_ok());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_missing_prefix() {
-        assert!(validate_container_name("random_container").is_err());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_shell_characters() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_acme;rm -rf /")).is_err());
-    }
-
-    #[test]
-    fn validate_container_name_rejects_path_traversal() {
-        let pfx = speedwave_runtime::consts::compose_prefix();
-        assert!(validate_container_name(&format!("{pfx}_../etc/passwd")).is_err());
-    }
-
-    // -- Log sanitization tests (get_container_logs / get_compose_logs) --
+    // -- Log sanitization tests (compose / container log content) --
 
     #[test]
     fn container_logs_sanitize_bearer_token() {
@@ -557,78 +390,6 @@ mod tests {
         );
     }
 
-    // -- Claude session logs: project parsing from container name --
-    //
-    // Tests use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX`
-    // literal so they do not depend on the process-global `data_dir()` basename.
-
-    #[test]
-    fn parse_project_from_claude_container() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_myproject_claude",
-        )
-        .unwrap();
-        assert_eq!(project, "myproject");
-    }
-
-    #[test]
-    fn parse_project_from_dotted_container_name() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_proj.v1_claude",
-        )
-        .unwrap();
-        assert_eq!(project, "proj.v1");
-    }
-
-    #[test]
-    fn parse_project_rejects_non_claude_container() {
-        let result = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_myproject_mcp-hub",
-        );
-        assert!(result.is_err(), "non-claude container should be rejected");
-    }
-
-    #[test]
-    fn parse_project_rejects_missing_prefix() {
-        let result = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "other_myproject_claude",
-        );
-        assert!(result.is_err(), "missing prefix should be rejected");
-    }
-
-    #[test]
-    fn parse_project_validates_extracted_project() {
-        // Container with ".." in project name → check_project rejects it
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_.._claude",
-        )
-        .unwrap();
-        let result = crate::types::check_project(&project);
-        assert!(
-            result.is_err(),
-            "path traversal project should be rejected by check_project"
-        );
-    }
-
-    #[test]
-    fn parse_project_dotted_name_passes_check_project() {
-        let project = parse_claude_project_with_prefix(
-            speedwave_runtime::consts::COMPOSE_PREFIX,
-            "speedwave_proj.v1_claude",
-        )
-        .unwrap();
-        let result = crate::types::check_project(&project);
-        assert!(
-            result.is_ok(),
-            "proj.v1 should pass check_project: {result:?}"
-        );
-    }
-
     // -- read_tail_sanitized --
 
     #[test]
@@ -695,7 +456,6 @@ mod tests {
     #[test]
     fn has_source_prefix_rejects_token_with_spaces() {
         // Token chars are `[\w.-]`; any space inside the token portion fails.
-        // (`a b | c` — frontend `COMPOSE_RE` would not match either.)
         assert!(!has_source_prefix("a b | c"));
     }
 
@@ -725,9 +485,7 @@ mod tests {
 
     #[test]
     fn rewrite_desktop_level_handles_colon_offset_timestamp() {
-        // `log_ts::log_timestamp()` emits the RFC-3339 colon form `+02:00`;
-        // the timestamp still has no space, so the first-space split lands
-        // exactly at the start of `[LEVEL]`.
+        // RFC-3339 colon-offset `+02:00` has no space, so the split lands at `[LEVEL]`.
         let line = "2026-05-12T14:34:02.814+02:00 [WARN][speedwave_desktop::x] msg";
         let out = rewrite_desktop_bracketed_level(line);
         assert_eq!(
@@ -823,8 +581,8 @@ mod tests {
                 compose: String::new(),
                 desktop: String::new(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -840,10 +598,8 @@ mod tests {
                 compose: compose_line.clone(),
                 desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
                 mcp_os: "ready\n".to_string(),
-                host_exec:
-                    r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#
-                        .to_string(),
                 claude: "session started\n".to_string(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -854,11 +610,37 @@ mod tests {
         assert!(!merged.contains(&format!("{prefix}_testproj_claude")));
         assert!(merged.contains("desktop | 2026-01-01T00:00:00.000+0000 INFO [x] d"));
         assert!(merged.contains("mcp-os | ready"));
-        assert!(
-            merged.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"docker_ps","status":"exited"}"#),
-            "host-exec line must be prefixed, got: {merged}"
-        );
         assert!(merged.contains("claude | session started"));
+    }
+
+    #[test]
+    fn logs_view_covers_all_displayable_registry_sources() {
+        // A displayable registry source not wired into the merge fails here.
+        use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
+        let merged = merge_log_sources(
+            LogSources {
+                compose: "MARKER_compose\n".to_string(),
+                desktop: "MARKER_desktop\n".to_string(),
+                mcp_os: "MARKER_mcp_os\n".to_string(),
+                claude: "MARKER_claude\n".to_string(),
+                lima: "MARKER_lima\n".to_string(),
+            },
+            "proj",
+        );
+        for s in DIAGNOSTIC_SOURCES {
+            if s.displayable && s.platforms.available_here() {
+                let token = format!("{} | MARKER_{}", s.key, s.key.replace('-', "_"));
+                assert!(
+                    merged.contains(&token),
+                    "displayable registry source '{}' not present in /logs merge \
+                     (expected '{token}') — ZIP would carry more than /logs, \
+                     violating parity. Merged:\n{merged}",
+                    s.key
+                );
+            }
+        }
+        // compose-yml (non-displayable) must never appear in /logs.
+        assert!(!merged.contains("compose-yml |"), "merged: {merged}");
     }
 
     #[test]
@@ -870,8 +652,8 @@ mod tests {
                     "2026-01-01T00:00:00.000+0000 [INFO][x] auth Bearer sk-ant-api03-secret123\n"
                         .to_string(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -890,8 +672,8 @@ mod tests {
                 compose: compose_line,
                 desktop: "desktop_only_line\n".to_string(),
                 mcp_os: String::new(),
-                host_exec: String::new(),
                 claude: String::new(),
+                lima: String::new(),
             },
             "testproj",
         );
@@ -901,40 +683,30 @@ mod tests {
     }
 
     #[test]
-    fn merge_log_sources_host_exec_block_between_mcp_os_and_claude() {
+    fn merge_log_sources_block_order_mcp_os_before_claude() {
         let merged = merge_log_sources(
             LogSources {
                 compose: String::new(),
                 desktop: String::new(),
                 mcp_os: "mcp_os_line\n".to_string(),
-                host_exec: "host_exec_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
+                lima: String::new(),
             },
             "testproj",
         );
         let mcp_idx = merged.find("mcp-os | mcp_os_line").unwrap();
-        let he_idx = merged.find("host-exec | host_exec_line").unwrap();
         let claude_idx = merged.find("claude | claude_line").unwrap();
-        assert!(mcp_idx < he_idx && he_idx < claude_idx, "got: {merged}");
+        assert!(mcp_idx < claude_idx, "got: {merged}");
     }
 
     #[test]
-    fn prefix_lines_does_not_unwrap_brackets_for_host_exec() {
+    fn prefix_lines_does_not_unwrap_brackets_in_json() {
         let raw = r#"{"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#;
-        let out = prefix_lines("host-exec", raw, None);
+        let out = prefix_lines("mcp-os", raw, None);
         assert!(
-            out.contains(r#"host-exec | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
-            "host-exec content must pass through verbatim with only the prefix, got: {out}"
+            out.contains(r#"mcp-os | {"ts":"2026-01-01T00:00:00.000Z","recipe":"r","argv":["echo","[INFO]"]}"#),
+            "JSON content must pass through verbatim with only the prefix, got: {out}"
         );
-    }
-
-    #[test]
-    fn host_exec_log_path_uses_per_project_state_dir() {
-        let p = host_exec_log_path("myproj");
-        let s = p.to_string_lossy();
-        assert!(s.contains("host-exec"), "path: {s}");
-        assert!(s.contains("myproj"), "path: {s}");
-        assert!(s.ends_with("log"), "path: {s}");
     }
 
     // ── read_tail_desktop_logs tests ─────────────────────────────────────────
@@ -1002,5 +774,28 @@ mod tests {
         let out = read_tail_desktop_logs(tmp.path(), 10);
         assert!(!out.contains("sk-ant-api03-secret"), "got: {out}");
         assert!(out.contains("***REDACTED"), "got: {out}");
+    }
+
+    /// The marker must match the `<source> | <ISO> LEVEL msg` shape the
+    /// frontend's `parseLogLine` recognises.
+    #[test]
+    fn compose_busy_marker_has_parseable_shape() {
+        let marker = compose_busy_marker();
+        assert!(marker.starts_with("compose | 2"), "got: {marker}");
+        assert!(marker.contains(" WARN  "), "got: {marker}");
+        assert!(marker.ends_with('\n'), "got: {marker}");
+    }
+
+    #[test]
+    fn fetch_compose_logs_skips_when_another_fetch_is_in_flight() {
+        use std::sync::atomic::Ordering;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        COMPOSE_LOGS_IN_FLIGHT.store(true, Ordering::SeqCst);
+        let out = rt.block_on(fetch_compose_logs_bounded("p".to_string(), 10));
+        COMPOSE_LOGS_IN_FLIGHT.store(false, Ordering::SeqCst);
+        assert!(out.contains("container logs unavailable"), "got: {out}");
     }
 }

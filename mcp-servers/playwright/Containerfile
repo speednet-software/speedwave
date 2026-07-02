@@ -1,9 +1,8 @@
 # Speedwave MCP Playwright Worker — see ADR-039 in docs/adr/
 #
 # Shared browser automation service — wraps Microsoft's official @playwright/mcp
-# package in a Speedwave-hardened container. Consumed by the `figma`,
-# `accessibility-audit`, `visual-regression`, and `site-analyzer` plugins (and
-# directly from Claude).
+# package in a Speedwave-hardened container. Consumed by browser-automation
+# plugins and directly from Claude.
 #
 # Security profile:
 # - No /tokens mount (Playwright has no credentials).
@@ -22,6 +21,13 @@
 #   curl -sI -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
 #     https://mcr.microsoft.com/v2/playwright/manifests/v1.59.1-jammy | grep -i digest
 FROM mcr.microsoft.com/playwright:v1.59.1-jammy@sha256:8a0360d39d1973be506dd59002904a774f6d697d4946c94063b3fd006461c8ff
+
+# tzdata for the TZ env injected by compose — keep aligned with tz.rs (CLAUDE.md
+# SSOT). noninteractive is mandatory: an upgrade re-runs tzdata's debconf
+# prompt, which hangs buildkit forever (no TTY).
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 # @playwright/mcp is Microsoft's official MCP server for Playwright.
 # Version is pinned; bump deliberately as part of a regular dependency-update cadence.
@@ -113,13 +119,15 @@ EXPOSE 3000
 #   crashes on startup if both are set. We go with the user-data-dir path
 #   because restarting the container already wipes /tmp, which gives us the
 #   same "fresh profile on restart" guarantee isolated mode advertises.
-CMD ["/usr/bin/playwright-mcp", \
-     "--host", "0.0.0.0", \
-     "--port", "3000", \
-     "--browser", "chromium", \
-     "--executable-path", "/ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell", \
-     "--user-data-dir", "/tmp/playwright-mcp-userdata", \
-     "--output-dir", "/tmp/playwright-mcp-output", \
-     "--allowed-hosts", "*", \
-     "--headless", \
-     "--no-sandbox"]
+# sh PID1 with a TERM trap — the upstream binary registers no handler and
+# PID1 ignores default dispositions, so compose down would wait the full 10s.
+CMD ["sh", "-c", "trap 'exit 0' TERM INT; /usr/bin/playwright-mcp \
+     --host 0.0.0.0 \
+     --port 3000 \
+     --browser chromium \
+     --executable-path /ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell \
+     --user-data-dir /tmp/playwright-mcp-userdata \
+     --output-dir /tmp/playwright-mcp-output \
+     --allowed-hosts '*' \
+     --headless \
+     --no-sandbox & wait $!"]

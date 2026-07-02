@@ -1,17 +1,13 @@
 /**
- * Tool-handler wrapper for the Atlassian worker: short-circuits to a
- * "not configured" error when the client is absent, and turns any thrown error
- * into a sanitized {@link errorResult} via {@link AtlassianClient.formatError}.
- * Named `withValidation` for consistency with the other workers.
+ * Tool-handler wrapper for the Atlassian worker.
  * @module mcp-atlassian/tools/validation
  */
 
 import {
+  withClientValidation,
   type ToolsCallResult,
   type jsonResult,
   type textResult,
-  errorResult,
-  notConfiguredMessage,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import type { StorageBodyInput } from '../adf.js';
@@ -30,23 +26,14 @@ export function withValidation<T>(
     params: T
   ) => Promise<ReturnType<typeof jsonResult> | ReturnType<typeof textResult>>
 ): (params: T) => Promise<ToolsCallResult> {
-  return async (params: T) => {
-    if (!client) {
-      return errorResult(notConfiguredMessage('Atlassian'));
-    }
-    try {
-      return await handler(client, params);
-    } catch (error) {
-      return errorResult(AtlassianClient.formatError(error));
-    }
-  };
+  return withClientValidation(client, handler, {
+    serviceName: 'Atlassian',
+    formatError: (error) => AtlassianClient.formatError(error),
+  });
 }
 
 /**
- * Map a Confluence body tool input (`{ bodyStorage?, bodyText? }`) to the domain
- * {@link StorageBodyInput} shape (`{ storage?, text? }`). `bodyStorage` (raw
- * storage-representation XHTML) takes precedence; otherwise `bodyText` is used
- * (an absent text body becomes the empty string).
+ * Map a Confluence body tool input to the domain {@link StorageBodyInput} shape.
  * @param p - The tool input fragment.
  * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
  * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).

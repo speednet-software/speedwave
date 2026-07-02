@@ -1,9 +1,5 @@
 /**
- * Jira issues domain — search (enhanced JQL), CRUD, transitions, assignment,
- * and the current account. Wraps {@link AtlassianClient}'s low-level helpers;
- * the enhanced search endpoint (`POST /rest/api/3/search/jql`) is paginated by
- * an opaque `nextPageToken` rather than `startAt` (the old `/search` endpoint
- * is being removed by Atlassian).
+ * Jira issues domain — search (enhanced JQL), CRUD, transitions, assignment, account.
  * @module mcp-atlassian/domains/jira-issues
  */
 
@@ -123,9 +119,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
         nextPageToken?: string | null;
         isLast?: boolean;
       }>('/rest/api/3/search/jql', body, { retryable: true });
-      // Enforce the project allowlist on the result set: arbitrary JQL can match
-      // issues outside the configured projects, so filter rather than trust the
-      // query (same approach as confluence-pages.ts `search`).
+      // Filter the result set by the project allowlist.
       const issues = filterByAllowlist(
         (res.issues ?? []).map(mapIssue),
         (i) => i.project_key,

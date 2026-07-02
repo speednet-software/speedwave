@@ -160,6 +160,14 @@ describe('MessageMetadataComponent', () => {
     expect(cost?.textContent).toContain('$0.000');
   });
 
+  it('hides cost when undefined (unpriced) even with other meta present', () => {
+    setEntry(baseAssistant({ meta: { model: 'opus', cost: undefined } }));
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="meta-cost"]')).toBeNull();
+  });
+
   it('formats cost to exactly 3 decimal places', () => {
     setEntry(baseAssistant({ meta: { cost: 0.12345 } }));
 
@@ -306,8 +314,7 @@ describe('MessageMetadataComponent', () => {
   });
 
   it('keeps a single [1m] suffix when the raw id ends with one', () => {
-    // Claude Code surfaces 1M-context model variants with a `[1m]` suffix —
-    // the chat footer should preserve it on the prettified id.
+    // Preserve a single `[1m]` suffix on the prettified id.
     setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m]' } }));
 
     const el = fixture.nativeElement as HTMLElement;
@@ -317,10 +324,7 @@ describe('MessageMetadataComponent', () => {
   });
 
   it('collapses repeated [1m] suffixes (regression: opus-4-7[1m][1m])', () => {
-    // Workaround: when `ANTHROPIC_DEFAULT_OPUS_MODEL` already carries `[1m]`
-    // and Claude Code re-appends the suffix while resolving the alias, the
-    // model id arrives doubled. The chat footer must dedupe so the user
-    // sees a single `[1m]`.
+    // Dedupe a doubled `[1m][1m]` suffix to a single `[1m]`.
     setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m][1m]' } }));
 
     const el = fixture.nativeElement as HTMLElement;

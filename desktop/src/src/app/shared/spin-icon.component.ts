@@ -1,19 +1,15 @@
 import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 
 /**
- * Seamless Material-style SVG spinner. Two rotations layered with
- * mismatched periods (root SVG: 2s, dash growth: 1.4s) so the seam
- * where the dash pattern wraps never lines up with the same frame
- * twice — eliminating the visible "jump" of a single-rotation
- * dashoffset spinner. Pattern from Glenn McComb's article on pure-CSS
- * SVG spinners. Stroke colour follows `currentColor`, sizing follows
- * the host Tailwind classes.
+ * Seamless Material-style SVG spinner. Stroke colour follows `currentColor`,
+ * sizing follows the host Tailwind classes.
  */
 @Component({
   selector: 'app-spin-icon',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  // Default to a 14px square; the host class can override (e.g. `h-8 w-8`).
-  host: { class: 'inline-block h-3.5 w-3.5' },
+  // `block` (not inline-block) so the SVG box has no baseline gap — inline-block
+  // makes the small spinner rotate on an ellipse in WKWebView. 14px default size.
+  host: { class: 'block h-3.5 w-3.5' },
   template: `
     <svg
       [attr.data-testid]="testId() || null"

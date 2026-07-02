@@ -10,7 +10,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1: build the shared library + the office worker (TypeScript)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:24-alpine AS builder
+FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0 AS builder
 WORKDIR /build
 
 COPY tsconfig.base.json ./
@@ -40,13 +40,13 @@ RUN cd office && npm prune --omit=dev
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime — Debian (LibreOffice is poorly packaged on Alpine)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 WORKDIR /app
 
 # Document toolchain. `--no-install-recommends` keeps the image down; `libreoffice-l10n-*` and
 # `-base`/`-draw`/`-math` are deliberately omitted. tzdata is required — keep aligned with
 # crates/speedwave-runtime/src/tz.rs (see CLAUDE.md SSOT-alignment).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libreoffice-writer libreoffice-calc libreoffice-impress \
       poppler-utils \
       pandoc \

@@ -1,11 +1,6 @@
 /**
- * Context7 REST API client.
- *
- * Talks directly to `https://context7.com/api/v2/*` — same backend the
- * upstream `@upstash/context7-mcp` server proxies to.
- *
- * Anonymous mode (no API key): per-IP rate limit (~200 req/day on
- * `ratelimit-limit` header), see docs/architecture/security.md.
+ * Context7 REST API client for `https://context7.com/api/v2/*`.
+ * Anonymous mode (no API key): per-IP rate limit, see docs/architecture/security.md.
  * @module mcp-context7/client
  */
 
@@ -67,8 +62,6 @@ const RETRY_BASE_DELAY_MS = 1_000;
 
 /**
  * REST client wrapping Context7's search and context endpoints.
- *
- * Stateless aside from the options bag — safe to share across tool calls.
  */
 export class Context7Client {
   private readonly apiKey: string | undefined;
@@ -180,9 +173,7 @@ export class Context7Client {
     let lastError: Context7Error | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // undici v7/v8: redirects opt-in via the `redirect` interceptor —
-        // we never set it, so 3xx surfaces as a status we treat as an error
-        // in mapErrorStatus (defence-in-depth, mirrors ADR-041 host policy).
+        // No `redirect` interceptor set, so 3xx surfaces as an error status.
         const response = await request(url, {
           method: 'GET',
           headers,
@@ -197,12 +188,8 @@ export class Context7Client {
         if (status === 200) {
           return { body, tier };
         }
-
-        const err = mapErrorStatus(status, body, response.headers, tier, !!this.apiKey);
-        if (!err.retryable || attempt === MAX_RETRIES) {
-          throw err;
-        }
-        lastError = err;
+        // Non-200: throw; the catch below makes the single retry decision.
+        throw mapErrorStatus(status, body, response.headers, tier, !!this.apiKey);
       } catch (e) {
         if (e instanceof Context7Error) {
           if (!e.retryable || attempt === MAX_RETRIES) throw e;
@@ -228,8 +215,6 @@ export class Context7Client {
 
 /**
  * Map a Context7 HTTP status to a {@link Context7Error}.
- *
- * Centralised so handlers and tests share the same vocabulary.
  * @param status - HTTP status from Context7
  * @param body - Response body (already read)
  * @param headers - Response headers (used for `ratelimit-reset`)
@@ -381,11 +366,6 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Drain a response body to a string, throwing if it would exceed `maxBytes`.
- *
- * Undici's `.text()` has no byte ceiling — a 500 MB upstream response would
- * be buffered in full, bounded only by the 128 MiB container cap (OOM kill,
- * not a clean error). This iterates chunks with a running byte counter and
- * aborts cleanly before memory pressure becomes a problem.
  * @param body - Undici response body (AsyncIterable of Buffer chunks)
  * @param maxBytes - Upper bound on total bytes
  * @param tier - Quota tier to attach to the error

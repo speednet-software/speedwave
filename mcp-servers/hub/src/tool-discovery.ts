@@ -74,9 +74,12 @@ export async function initializeWorker(
     redirect: 'error',
   });
 
+  // A non-2xx here means the worker rejected a protocol notification — a spec
+  // violation worth an error, not a warning. Include a capped body for triage.
   if (!notifResponse.ok) {
-    console.warn(
-      `${ts()} [tool-discovery] notifications/initialized returned ${notifResponse.status} for ${workerUrl}`
+    const body = (await notifResponse.text().catch(() => '')).slice(0, 512);
+    console.error(
+      `${ts()} [tool-discovery] notifications/initialized returned ${notifResponse.status} for ${workerUrl}${body ? `: ${body}` : ''}`
     );
   }
 
@@ -196,12 +199,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
   const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
   return {
     name: methodName,
-    // Preserve the worker's original tool name (often snake_case for strict
-    // MCP servers like `@playwright/mcp` which expose `browser_navigate`
-    // rather than the camelCase `browserNavigate` used in our JS bridge
-    // API). Without this the hub discovers the tool, rewrites the name to
-    // camelCase, and then fails `tools/call` because the worker has never
-    // heard of `browserNavigate`.
+    // Worker's original tool name (often snake_case); used verbatim for tools/call
     workerToolName: tool.name,
     description: tool.description,
     keywords: tool.keywords ?? [],

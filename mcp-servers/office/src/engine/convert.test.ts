@@ -17,7 +17,7 @@ const {
 } = vi.hoisted(() => ({
   resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
   resolveOutputPath: vi.fn(
-    async (n: string | undefined, base: string) => `/workspace/.speedwave-office/${n ?? base}`
+    async (n: string | undefined, base: string) => `/workspace/.speedwave/office/${n ?? base}`
   ),
   atomicMoveOnto: vi.fn(async () => undefined),
   runOk: vi.fn(async () => ({

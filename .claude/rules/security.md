@@ -1,35 +1,35 @@
 # Security Rules
 
-**Security is a core obsession, not an afterthought.** Every architectural decision must preserve or improve the security model established in Speedwave v1. When in doubt, choose the more secure option.
+**Security is a core obsession, not an afterthought.** Every change must preserve or improve the security model. When in doubt, choose the more secure option.
 
-## Security principles inherited from v1 (non-negotiable)
+## Non-negotiable invariants
 
-- Claude container: no tokens, no container socket, container user UID 1000:1000 (containerd runs inside a VM on both supported platforms — Lima on macOS, WSL2 on Windows; see ADR-059)
-- OWASP container hardening: `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- Token isolation: each MCP worker mounts **only its own** service credentials at `/tokens` read-only — a compromised worker exposes only that service. Exception: SharePoint uses `:rw` for OAuth token refresh (see ADR-009)
-- Hub has zero tokens — compromise of the hub exposes nothing
-- Lima VM / WSL2: kernel-level isolation layer on top of container isolation
-- Resource limits per container (CPU + memory caps)
-- SHA256-verified binary downloads in Containerfile
-- Health endpoints return only `{ "status": "ok" }` — no service metadata leaked
+- Claude container: no tokens, no container socket, runs as UID 1000:1000; containerd runs inside a VM on both platforms (Lima/WSL2).
+- OWASP container hardening on every container: `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs /tmp:noexec,nosuid`, resource limits. **This is not just template convention: `compose::SecurityCheck::run()` re-validates every rendered compose before `up` on every start path (CLI, Desktop, update, rollback)** — the hardening flags, container user, localhost-only port policy, no-tokens-on-claude/hub, and per-worker volume profiles (`VolumeCheckRules`). Adding or changing a template mount without a matching volume profile in `security_check.rs` hard-fails at container start, not in a named unit test. `fs_security.rs` auto-fixes data-dir modes (0o700/0o600) before the check runs; `speedwave check` reports-only.
+- Token isolation: **every token mount is `:ro`, no exception** — a compromised worker exposes only its own service. `office` and `playwright` mount no `/tokens` at all; `office` additionally runs on an egress-less `internal: true` network and enforces a `/workspace/`-only path policy (canonicalize, reject symlinks) — do not add remote-fetch paths to it. The proxy mounts only `tokens/<project>/llm:/tokens:ro`.
+- Workers mount only their own credentials at `/tokens:ro`. `slack` and `sharepoint` additionally mount the project dir `/workspace:rw` for file downloads (the sanctioned workspace-worker profile, enforced per-service by `security_check.rs::check_builtin_workspace_worker_volumes`) — a new file-exchanging worker follows this profile, never a new mount surface.
+- Hub holds zero external credentials (render-time gate rejects token mounts/secret env on it); it carries only Speedwave-internal bridge bearer tokens under `/secrets/…:ro`.
+- OAuth refresh happens in the host-side `oauth` worker — workers never write tokens. **The `oauth` worker (tools `refresh`/`forget`) is never enumerated to Claude and never appears in the hub's tool registry** — its only callers are other workers in the same project, which reach it directly, bypassing the hub; never wire it into `WORKER_*_URL` discovery (that would let a prompt-injected Claude call `forget`/`refresh` against every service's credentials).
+- **Transcription is fully local:** raw audio and live/offline transcript passes never leave the machine — only the final transcript text goes to Claude, and only on an explicit user action. Never add a cloud-STT path, auto-send, or any telemetry carrying audio/transcript content.
+- SHA256-verified binary downloads in every Containerfile; health endpoints return only `{"status":"ok"}` (or 500 `{"status":"error"}`) — no service metadata.
+- **No host code-execution channel for Claude, ever.** A whitelist-gated, opt-in host command runner was fully implemented and then deliberately reverted: any host-exec capability a prompt-injected Claude can drive erodes the isolation guarantee, warnings notwithstanding. Do not reintroduce it in any form (worker, mcp-os tool, bridge handler) without a new ADR reversing that decision.
+- **Speedwave never performs Anthropic OAuth and never parses/captures/stores Anthropic tokens.** Claude Code owns the whole credential lifecycle inside the container; a Speedwave-native flow or stdout token capture is brittle and violates Anthropic's Consumer Terms.
+- Any new host-side WebSocket relay must be a `HostBridge` (`desktop/src-tauri/src/bridges/host_bridge.rs`) — never a hand-rolled listener/lock-file/token stack; the skeleton owns the audited security model (0o600 lock, constant-time token compare, Origin policy, watchdog).
 
-## When implementing any feature, ask:
+## When implementing any feature, ask
 
-- Does this require relaxing any of the above? If yes — find a different approach.
-- Does this add a new attack surface? Document it and mitigate it.
-- Does this require mounting host filesystem into a container? Minimize scope, use `:ro` wherever possible.
-- Does it accept a URL, hostname, or IP from config / repo `.speedwave.json` / user input? It must go through the shared SSRF validator (`url_validation::validate_url` + the appropriate `PrivatePolicy`). See `.claude/rules/local-llm.md` for the full policy and the metadata-endpoint threat model. Repo `.speedwave.json` must never override `provider`/`base_url`-class fields.
-- Does it run on the **host** (Tauri/Desktop) and call out over HTTP? Apply the layered hardening from ADR-041: `redirect::Policy::none()`, request timeout, body-size cap, `Content-Type` allow-list. Do **not** copy these constants — reuse `desktop/src-tauri/src/url_validation.rs` and `http_util.rs`.
+- Does it relax any invariant above? Find a different approach.
+- Does it add attack surface? Document and mitigate it.
+- Does it mount host filesystem into a container? Minimize scope, `:ro` wherever possible; `/workspace:rw` is the only writable cross-boundary surface.
+- Does it accept a URL/hostname/IP from config, repo `.speedwave.json`, or user input? It must go through `url_validation::validate_url` with the appropriate `PrivatePolicy`. Repo `.speedwave.json` must never override `provider`/`base_url`-class fields.
 
-## macOS bundle integrity (delivery requirement)
+## Host-side outbound HTTP (Tauri/Desktop)
 
-- Every bundled Mach-O listed in `desktop/src-tauri/tauri.macos.conf.json` `bundle.resources` must be signed by `scripts/sign-bundled-binaries.sh` — these two lists are an SSOT-alignment pair (CLAUDE.md). Adding a binary to the bundle without adding it to `SIGN_TARGETS` ships an unsigned Mach-O.
-- Bundled binaries that use restricted platform APIs need an entitlements plist in `desktop/src-tauri/entitlements/` (e.g. `virtualization.plist` for `limactl`, `apple-events.plist` / `calendars.plist` for native helpers). Adding a new such binary = adding a new plist, not relaxing an existing one.
+- All outbound HTTP from host code uses hardened `reqwest` clients via the shared helpers (`desktop/src-tauri/src/http_util.rs` + `url_validation.rs`): `redirect::Policy::none()`, bounded timeout, capped body. The LLM discovery probe (`llm_cmd/discovery.rs`) rejects `text/html` responses before parsing (a denylist on that one path, not a general allow-list). Reuse the helpers — never copy the constants.
+- Sole redirect exception: the transcription model downloader follows redirects only to hosts in `consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`; adding a host requires an ADR delta.
+- DNS rebinding on user-originated URLs is an accepted residual risk — never add a codepath that lets an attacker inject URLs into config without explicit user action.
+- TLS: `rustls-tls` with bundled CA roots; switching to system roots requires an ADR.
 
-## Host-side outbound HTTP (Desktop / Tauri)
+## macOS bundle integrity
 
-The `claude` container's network surface is governed by the v1 invariants above. Code running on the **host** (Tauri commands like `discover_llm_models`, Redmine proxy, update checker) is a separate threat surface:
-
-- All outbound HTTP from Tauri commands goes through `reqwest` clients configured per ADR-041 (no redirects, bounded timeout, capped body, `Content-Type` allow-list where the response is parsed).
-- DNS rebinding is an accepted residual risk for user-originated URLs (see ADR-041 §"Negative"). Do not introduce a codepath that lets an attacker inject URLs into config without explicit user action — that would invalidate the accepted-risk decision.
-- TLS uses `rustls-tls` with bundled CA roots. Do not switch to system roots without an ADR.
+Every bundled Mach-O in `tauri.macos.conf.json` `bundle.resources` must be in `sign-bundled-binaries.sh` `SIGN_TARGETS`, and binaries using restricted platform APIs need an entitlements plist in `desktop/src-tauri/entitlements/` (add a new plist; never relax an existing one). Coverage is test-guarded — keep the guards green.

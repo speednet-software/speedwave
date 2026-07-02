@@ -1,85 +1,29 @@
 /**
- * MCP Slack Worker
- *
- * Isolated Slack MCP server with per-service token isolation.
- * Architecture: Domain-tools pattern with separation of concerns.
+ * MCP Slack Worker with per-service token isolation.
  * @module mcp-slack
  */
 
-import {
-  createMCPServer,
-  ts,
-  notConfiguredMessage,
-  retryAsync,
-  makeStandardHealthCheck,
-} from '@speedwave/mcp-shared';
-import { initializeSlackClients } from './client.js';
+import { bootWorker, ts, makeStandardHealthCheck } from '@speedwave/mcp-shared';
+import { initializeSlackClients, type SlackClients } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Configuration
-//═══════════════════════════════════════════════════════════════════════════════
-
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const SERVER_NAME = 'mcp-slack';
-const SERVER_VERSION = '1.0.0';
-const AUTH_TOKEN = process.env.MCP_SLACK_AUTH_TOKEN;
-
-//═══════════════════════════════════════════════════════════════════════════════
-// Main Server
-//═══════════════════════════════════════════════════════════════════════════════
-
-async function main(): Promise<void> {
-  console.log(`${ts()} 🚀 Starting ${SERVER_NAME}...`);
-
-  if (!AUTH_TOKEN) {
-    console.error(
-      `${ts()} FATAL: MCP_SLACK_AUTH_TOKEN is required. ` +
-        `${SERVER_NAME} must not run without authentication.`
-    );
-    process.exit(1);
-  }
-
-  // initializeSlackClients always returns an object — `_tokensStatus` says
-  // whether tokens were loadable. retryAsync still retries on rejection
-  // (loadToken throwing), but in the missing-tokens path we get a valid
-  // object back on the first try.
-  const slackClients = (await retryAsync(initializeSlackClients, {
-    maxRetries: 3,
-    baseDelayMs: 2000,
-    label: 'Slack client init',
-  }))!; // initializeSlackClients now resolves non-null in every branch
-
-  if (slackClients._tokensStatus === 'missing') {
-    console.warn(`${ts()} ⚠️  ${notConfiguredMessage('Slack')}`);
-    console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
-  } else {
-    console.log(`${ts()} ✅ Slack clients initialized`);
-  }
-
-  // Create MCP server with tool definitions from domain-tools
-  const server = createMCPServer({
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-    port: PORT,
-    host: '0.0.0.0', // bind all interfaces — must be reachable from the container network
-    tools: createToolDefinitions(slackClients),
-    auth: { token: AUTH_TOKEN },
-    healthCheck:
-      slackClients._tokensStatus === 'present' && slackClients.statusTracker
-        ? makeStandardHealthCheck(slackClients.statusTracker, 'Slack')
-        : async () => {
-            throw new Error('Slack client not configured');
-          },
-  });
-
-  const actualPort = await server.start();
-  process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
-  console.log(`${ts()} ✅ ${SERVER_NAME} started on port ${actualPort} (auth enforced)`);
-}
-
-// Start server
-main().catch((error) => {
+// `_tokensStatus === 'present'` signals configuration via isConfigured.
+bootWorker<SlackClients>({
+  serverName: 'mcp-slack',
+  version: '1.0.0',
+  displayName: 'Slack',
+  authTokenEnv: 'MCP_SLACK_AUTH_TOKEN',
+  host: '0.0.0.0',
+  initClient: initializeSlackClients,
+  isConfigured: (clients) => clients?._tokensStatus === 'present',
+  makeTools: (clients) => createToolDefinitions(clients!),
+  makeHealthCheck: (clients, configured) =>
+    configured && clients?.statusTracker
+      ? makeStandardHealthCheck(clients.statusTracker, 'Slack')
+      : async () => {
+          throw new Error('Slack client not configured');
+        },
+}).catch((error) => {
   console.error(`${ts()} Fatal error:`, error);
   process.exit(1);
 });

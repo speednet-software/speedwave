@@ -1,20 +1,11 @@
-//! Integration test for `SPEEDWAVE_DATA_DIR` env var → OnceLock wiring.
-//!
-//! OnceLock is immutable after first init, so we cannot test multiple env var
-//! values in a single process.  The Makefile sets `SPEEDWAVE_DATA_DIR=` (empty)
-//! for unit tests, which causes `data_dir()` to fall back to `~/.speedwave/`.
-//!
-//! This integration test binary verifies the custom-env-var scenario by
-//! spawning a subprocess with `SPEEDWAVE_DATA_DIR` set.  The subprocess is
-//! a small Rust program compiled as a test helper.
+//! Integration test for `SPEEDWAVE_DATA_DIR` env var → OnceLock wiring via subprocess re-exec.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::process::Command;
 
 /// Spawns a child process that sets `SPEEDWAVE_DATA_DIR` and verifies
 /// the OnceLock-backed functions return correct derived values.
-///
-/// We use the cargo test binary itself with a marker env var to detect
-/// the child role.
 #[test]
 fn data_dir_respects_env_var_and_derives_names() {
     if std::env::var("__SPEEDWAVE_INTEGRATION_CHILD").is_ok() {

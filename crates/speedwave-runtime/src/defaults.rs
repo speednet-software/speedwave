@@ -1,163 +1,181 @@
+//! Built-in default config values and the Anthropic model catalogue (SSOT).
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const CLAUDE_VERSION: &str = "2.1.154";
+/// Pinned Claude Code version installed inside the container.
+pub const CLAUDE_VERSION: &str = "2.1.191";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
+/// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
+/// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ModelPricing {
+    /// Standard (non-cached) input tokens.
+    pub input: f64,
+    /// Prompt-cache read tokens.
+    pub cached_input: f64,
+    /// Prompt-cache write (creation) tokens.
+    pub cache_write: f64,
+    /// Generated output tokens.
+    pub output: f64,
+}
+
 /// Single source of truth for the Anthropic models surfaced in the
-/// Settings → LLM Provider dropdown.
-///
-/// Sourced from the official catalog at
-/// <https://platform.claude.com/docs/en/about-claude/models/overview>.
-/// Bump this list when Anthropic ships a new family — every consumer
-/// (frontend dropdown, future CLI flags, docs) reads from here.
-///
-/// `latest` flags the actively recommended families (rendered in the
-/// "Latest" optgroup); the rest are legacy entries that still work but
-/// should nudge users toward the current generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Settings → LLM Provider dropdown and the Desktop cost meter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_MODEL`. Pinning the dated form would force a config
-    /// migration on every model snapshot — Anthropic guarantees the alias
-    /// resolves to the current snapshot.
+    /// `ANTHROPIC_MODEL`.
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 4.7", "Sonnet 4.6", …).
     pub family: &'static str,
     /// Context window in tokens (1_000_000 for 1M-context models).
     pub context_tokens: u32,
-    /// Whether this entry belongs to the "Latest" group. `false` for
-    /// still-available legacy snapshots; deprecated/retired models are
-    /// removed from the list outright.
+    /// Whether this entry belongs to the "Latest" group.
     pub latest: bool,
+    /// Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint.
+    pub premium: bool,
+    /// Price of the base model id (e.g. `claude-sonnet-4-6`).
+    pub pricing: ModelPricing,
+    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
+    /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
+    pub pricing_1m: Option<ModelPricing>,
 }
+
+// Published per-MTok rates: platform.claude.com/docs/en/pricing.
+const FABLE_PRICING: ModelPricing = ModelPricing {
+    input: 10.0,
+    cached_input: 1.0,
+    cache_write: 12.5,
+    output: 50.0,
+};
+const OPUS_PRICING: ModelPricing = ModelPricing {
+    input: 5.0,
+    cached_input: 0.5,
+    cache_write: 6.25,
+    output: 25.0,
+};
+const SONNET_PRICING: ModelPricing = ModelPricing {
+    input: 3.0,
+    cached_input: 0.3,
+    cache_write: 3.75,
+    output: 15.0,
+};
+const SONNET_PRICING_1M: ModelPricing = ModelPricing {
+    input: 6.0,
+    cached_input: 0.6,
+    cache_write: 7.5,
+    output: 22.5,
+};
+const HAIKU_PRICING: ModelPricing = ModelPricing {
+    input: 1.0,
+    cached_input: 0.1,
+    cache_write: 1.25,
+    output: 5.0,
+};
 
 /// Curated list of Anthropic models available via Claude Code.
 /// **Order matters** — frontend renders this list as-is.
-///
-/// We surface only the actively-recommended generation. Legacy snapshots
-/// can still be selected by typing the id manually (the frontend "(not in
-/// catalog)" escape hatch handles existing configs that pin a removed
-/// alias), but we don't pre-populate the dropdown with them — encouraging
-/// their use was the opposite of what the `latest` flag intended.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
+    AnthropicModelInfo {
+        id: "claude-fable-5",
+        family: "Fable 5",
+        context_tokens: 1_000_000,
+        latest: true,
+        premium: true,
+        pricing: FABLE_PRICING,
+        pricing_1m: Some(FABLE_PRICING),
+    },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
         family: "Opus 4.8",
         context_tokens: 1_000_000,
         latest: true,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-4-6",
         family: "Sonnet 4.6",
         context_tokens: 1_000_000,
         latest: true,
+        premium: false,
+        pricing: SONNET_PRICING,
+        pricing_1m: Some(SONNET_PRICING_1M),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
         family: "Haiku 4.5",
         context_tokens: 200_000,
         latest: true,
+        premium: false,
+        pricing: HAIKU_PRICING,
+        pricing_1m: None,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
         family: "Opus 4.7",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
         family: "Opus 4.6",
         context_tokens: 1_000_000,
         latest: false,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
 ];
 
-/// The display label of the Opus model that the `(default)` dropdown option
-/// resolves to at runtime — i.e. what `ANTHROPIC_DEFAULT_OPUS_MODEL` points
-/// at when `model` is left blank. Used by the Settings UI to render an
-/// honest hint like *"Default — Opus 4.7 (switchable via /model)"* instead
-/// of the previous vague *"let Claude Code choose"* placeholder.
-///
-/// Reads from `ANTHROPIC_MODELS` (the SSOT) so a future Opus bump (e.g. 4.9)
-/// updates the UI hint without touching this helper. Returns `None` if the
-/// catalog has no `latest = true` Opus entry — frontend falls back to the
-/// generic placeholder in that case.
-///
-/// Identifies the Opus entry by `id.starts_with("claude-opus-")` rather than
-/// `family.starts_with("Opus")` — the API id is a stable contract with
-/// Anthropic, while the display label is mutable (e.g. someone could relabel
-/// "Opus 4.7" to "Claude Opus 4.7" without rebreaking this lookup).
-pub fn default_anthropic_family_label() -> Option<&'static str> {
-    ANTHROPIC_MODELS
-        .iter()
-        .find(|m| m.id.starts_with("claude-opus-") && m.latest)
-        .map(|m| m.family)
-}
-
+/// Default Claude Code CLI flags applied to every session.
 pub const DEFAULT_FLAGS: &[&str] = &[
-    // SECURITY RATIONALE: --dangerously-skip-permissions is safe in this context because:
-    // 1. Claude runs in an isolated container (Lima VM / WSL2) — kernel-level isolation
-    // 2. Container has read-only filesystem except /tmp (noexec,nosuid)
-    // 3. Container runs with cap_drop: ALL, no-new-privileges
-    // 4. Container has zero service tokens
-    // 5. Container network is isolated per-project
-    //
-    // IS_SANDBOX=1 in base_env() signals a sandboxed environment to Claude Code,
-    // pre-empting the root-user check that gates --dangerously-skip-permissions.
-    // On macOS Lima / Windows WSL2 the container runs as UID 1000 so the check
-    // is already satisfied; IS_SANDBOX stays for defense-in-depth.
     "--dangerously-skip-permissions",
     // Tells Claude Code where the MCP hub is (generated by entrypoint.sh)
     "--mcp-config",
     MCP_CONFIG_PATH,
     // Only use servers from --mcp-config, ignore any .mcp.json in workspace
     "--strict-mcp-config",
-    // Force thinking content to be returned as `summarized` (the populated text
-    // form) rather than `omitted` (empty thinking blocks with signature only).
-    // Claude Opus 4.7 changed the API default to `omitted`, and the
-    // `showThinkingSummaries: true` settings.json key is NOT wired to this API
-    // parameter in the harness — see anthropics/claude-code#49268. Without this
-    // flag the chat UI never sees the model's reasoning. Safe across models:
-    // 4.6/Sonnet 4.6 already default to `summarized`, so this flag is a no-op
-    // for them and a fix for 4.7+. Remove once #49268 ships in upstream.
     "--thinking-display",
     "summarized",
+    // Lock-file auto-connect to the IDE bridge (~/.claude/ide/); silent when no lock.
+    // Complements CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the terminal path).
+    "--ide",
 ];
 
+/// Base environment variables injected into every Claude container.
 pub fn base_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "0".into());
     env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
-    // Signal sandboxed environment to Claude Code so --dangerously-skip-permissions
-    // is accepted regardless of effective UID. Both supported platforms run the
-    // container as UID 1000 (the root check would already pass), so this is a
-    // defense-in-depth setting against future changes.
+    // Signal sandboxed env so --dangerously-skip-permissions is accepted regardless of UID.
     env.insert("IS_SANDBOX".into(), "1".into());
-    // Claude Code focus-view mode: alt-screen + differential rendering emits smaller
-    // ANSI updates instead of full-frame redraws on every stream chunk. Mitigates PTY
-    // write-side backpressure in the CLI (ssh → nerdctl exec → claude) that caused
-    // long streaming sessions to freeze. Introduced upstream in Claude Code 2.1.97.
-    // See issue #451. Users can override via claude.env.CLAUDE_CODE_NO_FLICKER in
-    // .speedwave.json if they prefer the legacy renderer.
+    // Claude Code focus-view mode: emits smaller ANSI updates instead of full-frame redraws (issue #451).
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
+    // Non-empty WAYLAND_DISPLAY routes Claude Code copies through the osc52-copy.sh shim (ADR-052).
+    env.insert("WAYLAND_DISPLAY".into(), "speedwave-clipboard".into());
+    // Raise Claude Code's 300s remote-MCP idle abort (CC ≥2.1.187) above the longest
+    // hub→worker op; the CC↔hub HTTP connection is silent until the op finishes.
+    env.insert(
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
+        MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
+    );
     env
 }
 
-/// Generates `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars from the
-/// `ANTHROPIC_MODELS` SSOT. Each alias resolves to the latest entry in its
-/// family, with `[1m]` suffixed when the model supports a 1M-token context
-/// window — that suffix is what unlocks the upgraded window for Max/Team
-/// subscribers, fixing the 200k cap reported in anthropics/claude-code#34083.
-/// Remove the `[1m]` suffix logic (and ideally this whole helper) once that
-/// upstream issue ships a fix and the alias resolves to the upgraded window
-/// natively.
-///
-/// Future model bumps (e.g. Opus 4.9) only require editing `ANTHROPIC_MODELS`
-/// in this file: the env vars track the SSOT automatically. Families with no
-/// `latest: true` entry are skipped (no env var emitted) so a partial catalog
-/// never produces a malformed model id.
+/// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the longest
+/// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
+pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
+
+/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from the
+/// `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable omitted — resolves natively.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
@@ -181,15 +199,13 @@ pub fn anthropic_default_models_env() -> HashMap<String, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn claude_version_is_pinned_semver() {
         // CLAUDE_VERSION must be a concrete semver — never "latest" or "stable".
-        // The official installer (claude.ai/install.sh) downloads the exact version
-        // and verifies its SHA256 against a version-pinned manifest.json from GCS.
-        // Pinning ensures reproducible builds and limits attack surface to a known release.
         assert_ne!(CLAUDE_VERSION, "latest", "must not be 'latest'");
         assert_ne!(CLAUDE_VERSION, "stable", "must not be 'stable'");
         let re = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$").unwrap();
@@ -204,7 +220,7 @@ mod tests {
     fn base_env_does_not_set_model() {
         let env = base_env();
         assert!(
-            env.get("ANTHROPIC_MODEL").is_none(),
+            !env.contains_key("ANTHROPIC_MODEL"),
             "base_env() must not set ANTHROPIC_MODEL — the user's Claude Code model \
              selection must not be overridden. Users who want a specific model can set \
              claude.env.ANTHROPIC_MODEL in .speedwave.json or ~/.speedwave/config.json."
@@ -241,6 +257,17 @@ mod tests {
     }
 
     #[test]
+    fn base_env_sets_wayland_display_for_clipboard_probe() {
+        // Claude Code ≥2.1.161 gates the clipboard-tool probe on this var (ADR-052).
+        let env = base_env();
+        let val = env.get("WAYLAND_DISPLAY").map(|s| s.as_str());
+        assert!(
+            val.is_some_and(|v| !v.is_empty()),
+            "WAYLAND_DISPLAY must be set non-empty so the clipboard probe finds the wl-copy shim"
+        );
+    }
+
+    #[test]
     fn base_env_sets_sandbox_flag() {
         let env = base_env();
         assert_eq!(
@@ -256,9 +283,48 @@ mod tests {
     }
 
     #[test]
+    fn base_env_sets_mcp_tool_idle_timeout() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+                .map(|s| s.as_str()),
+            Some(MCP_TOOL_IDLE_TIMEOUT_MS.to_string().as_str()),
+            "Claude Code ≥2.1.187 aborts a remote-MCP tool call idle for 300s. The hub \
+             holds the CC↔hub connection silent until a worker op finishes, so long ops \
+             (SharePoint download, plugin long-class) would be killed without this override."
+        );
+    }
+
+    #[test]
+    fn mcp_tool_idle_timeout_covers_worker_max() {
+        // SSOT-alignment: idle ceiling must stay >= STALE_CHUNK_TIMEOUT_MS in timeouts.ts.
+        // Env-raised BASE_MS/SHAREPOINT_SYNC_MS are invisible here — raise them manually.
+        let src = include_str!("../../../mcp-servers/shared/src/timeouts.ts");
+        let re = regex::Regex::new(r"STALE_CHUNK_TIMEOUT_MS:\s*([0-9*\s]+?),").unwrap();
+        let expr = re
+            .captures(src)
+            .expect("timeouts.ts must declare STALE_CHUNK_TIMEOUT_MS as a `*`-product literal")
+            .get(1)
+            .unwrap()
+            .as_str();
+        let worker_max: u64 = expr
+            .split('*')
+            .map(|p| {
+                p.trim()
+                    .parse::<u64>()
+                    .expect("STALE_CHUNK factors must be integers")
+            })
+            .product();
+        assert!(
+            MCP_TOOL_IDLE_TIMEOUT_MS >= worker_max,
+            "MCP_TOOL_IDLE_TIMEOUT_MS ({MCP_TOOL_IDLE_TIMEOUT_MS}) must be >= the longest \
+             worker timeout STALE_CHUNK_TIMEOUT_MS ({worker_max}) from timeouts.ts — bump it"
+        );
+    }
+
+    #[test]
     fn mcp_config_path_points_to_claude_dir() {
-        // entrypoint.sh generates mcp-config.json at this exact path.
-        // If this changes, entrypoint.sh and DEFAULT_FLAGS must be updated together.
+        // entrypoint.sh generates mcp-config.json at this path; keep it in sync with DEFAULT_FLAGS.
         assert_eq!(MCP_CONFIG_PATH, "/home/speedwave/.claude/mcp-config.json");
     }
 
@@ -268,12 +334,15 @@ mod tests {
     }
 
     #[test]
+    fn default_flags_include_ide_auto_connect() {
+        // Lock-file auto-connect path; safe default since Claude Code skips it
+        // silently when no ~/.claude/ide/ lock is present (CLI-only).
+        assert!(DEFAULT_FLAGS.contains(&"--ide"));
+    }
+
+    #[test]
     fn default_flags_force_thinking_summarized() {
-        // Workaround for anthropics/claude-code#49268 — `showThinkingSummaries`
-        // settings.json key is not wired to the API `display` parameter, so
-        // Opus 4.7's new `omitted` default wins and the chat UI never sees
-        // thinking content. The hidden `--thinking-display` CLI flag does
-        // pass through; pin it to `summarized` so reasoning stays visible.
+        // Workaround for anthropics/claude-code#49268: pin --thinking-display to `summarized`.
         let pos = DEFAULT_FLAGS
             .iter()
             .position(|f| *f == "--thinking-display")
@@ -287,15 +356,9 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
-        // Workaround for anthropics/claude-code#34083 — without `[1m]` suffix
-        // on the model id, Max/Team subscribers see their 1M-context models
-        // capped at 200k. The function must derive these env vars from the
-        // SSOT so a future model bump (Opus 4.9 etc.) propagates by editing
-        // `ANTHROPIC_MODELS` alone.
+        // Workaround for anthropics/claude-code#34083 (1M models capped at 200k without `[1m]`).
         let env = anthropic_default_models_env();
-        // Cross-check every emitted var against SSOT — independent of which
-        // exact model id is `latest` today, so this test stays green when
-        // someone bumps the catalog.
+        // Cross-check every emitted var against SSOT.
         for (var, value) in &env {
             let alias = var
                 .strip_prefix("ANTHROPIC_DEFAULT_")
@@ -330,9 +393,7 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_covers_every_latest_family() {
-        // Every family that has a `latest: true` entry in SSOT must produce a
-        // matching env var — otherwise the alias falls back to Anthropic's
-        // server default and we lose the [1m] upgrade for that family.
+        // Every family with a `latest: true` entry in SSOT must produce a matching env var.
         let env = anthropic_default_models_env();
         for prefix in ["Opus", "Sonnet", "Haiku"] {
             let has_latest = ANTHROPIC_MODELS
@@ -349,17 +410,39 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_default_models_env_omits_fable_alias() {
+        // Anthropic-branch pins skip Fable (`fable` alias resolves natively).
+        // Non-anthropic remapping injects FABLE separately — see compose/llm.rs.
+        let env = anthropic_default_models_env();
+        assert!(
+            !env.keys().any(|k| k.contains("FABLE")),
+            "anthropic_default_models_env must not emit a FABLE alias"
+        );
+    }
+
+    #[test]
+    fn fable_entry_present_with_million_context() {
+        // Settings dropdown + cost meter need the Fable 5 entry ($10/$50).
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert!(fable.latest, "Fable 5 must be in the Latest group");
+        assert_eq!(fable.context_tokens, 1_000_000);
+        assert_eq!(fable.pricing.input, 10.0);
+        assert_eq!(fable.pricing.output, 50.0);
+    }
+
+    #[test]
     fn default_flags_include_mcp_config() {
         // Claude Code must receive --mcp-config pointing to the generated config file.
-        // Without this, /mcp shows "No MCP servers configured".
         assert!(DEFAULT_FLAGS.contains(&"--mcp-config"));
         assert!(DEFAULT_FLAGS.contains(&MCP_CONFIG_PATH));
     }
 
     #[test]
     fn default_flags_mcp_config_before_strict() {
-        // --mcp-config must come before --strict-mcp-config (Claude Code parses
-        // flags sequentially; strict mode validates the config path exists).
+        // --mcp-config must come before --strict-mcp-config.
         let mcp_pos = DEFAULT_FLAGS.iter().position(|f| *f == "--mcp-config");
         let strict_pos = DEFAULT_FLAGS
             .iter()
@@ -386,9 +469,7 @@ mod tests {
 
     #[test]
     fn anthropic_models_list_is_non_empty_and_starts_with_latest() {
-        // The dropdown depends on at least one entry being available. The
-        // first entry is what the UI surfaces as the topmost option in the
-        // "Latest" group, so it must be flagged `latest = true`.
+        // The first entry is the topmost dropdown option, so it must be `latest = true`.
         assert!(!ANTHROPIC_MODELS.is_empty(), "model list must not be empty");
         assert!(
             ANTHROPIC_MODELS[0].latest,
@@ -398,9 +479,7 @@ mod tests {
 
     #[test]
     fn anthropic_model_ids_are_unique_and_well_formed() {
-        // Duplicate IDs would render as duplicate <option>s; malformed IDs
-        // would silently fail when written into ANTHROPIC_MODEL. Catch both
-        // at compile-test time.
+        // Model ids must be unique and start with `claude-`.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for m in ANTHROPIC_MODELS {
             assert!(seen.insert(m.id), "duplicate model id: {}", m.id);
@@ -414,10 +493,7 @@ mod tests {
                 "family label must not be empty for {}",
                 m.id
             );
-            // The smallest plausible Claude context window is 200k (Haiku).
-            // A "couple hundred" tokens would clearly be wrong; we use a
-            // floor that catches accidental zeros / typos without coupling
-            // the test to current Anthropic context-window economics.
+            // Smallest plausible context window is 200k (Haiku); catch accidental zeros/typos.
             assert!(
                 m.context_tokens >= 1_000,
                 "context_tokens looks too small for {}: {}",
@@ -429,10 +505,7 @@ mod tests {
 
     #[test]
     fn anthropic_models_have_at_least_one_latest_entry() {
-        // The "Latest" optgroup must render something — without a flagged
-        // entry the dropdown opens on a legacy id, defeating the point of
-        // the flag. (The full Latest-before-Legacy ordering invariant is
-        // checked by `anthropic_models_latest_entries_precede_legacy`.)
+        // At least one `latest: true` entry must exist for the "Latest" optgroup.
         assert!(
             ANTHROPIC_MODELS.iter().any(|m| m.latest),
             "at least one Latest entry required so the dropdown opens with a current option"
@@ -440,12 +513,25 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_models_premium_flag_matches_family() {
+        // Premium tiers are Opus + Fable; Sonnet/Haiku are the everyday tier.
+        for m in ANTHROPIC_MODELS {
+            let expected = m.family.starts_with("Opus") || m.family.starts_with("Fable");
+            assert_eq!(
+                m.premium, expected,
+                "{} premium flag must match its family tier",
+                m.id
+            );
+        }
+        assert!(
+            ANTHROPIC_MODELS.iter().any(|m| !m.premium),
+            "at least one non-premium model so the everyday placeholder resolves"
+        );
+    }
+
+    #[test]
     fn anthropic_models_latest_entries_precede_legacy() {
-        // Frontend renders the slice as-is into two optgroups. If a
-        // `latest = false` entry appears before any `latest = true` entry
-        // the optgroup boundary breaks. Guard the structural invariant
-        // explicitly so the comment on `ANTHROPIC_MODELS` remains true
-        // without manual review.
+        // Frontend renders the slice as-is into two optgroups; legacy before latest breaks the boundary.
         let mut seen_legacy = false;
         for m in ANTHROPIC_MODELS {
             if !m.latest {
@@ -461,11 +547,40 @@ mod tests {
     }
 
     #[test]
-    fn default_anthropic_family_label_returns_latest_opus_family() {
-        // Forces the constant in this assertion to be updated alongside the
-        // SSOT when a new Opus snapshot lands (e.g. Opus 4.9). If the test
-        // breaks on a model bump, the helper still works — the assertion
-        // just needs to follow the family label.
-        assert_eq!(default_anthropic_family_label(), Some("Opus 4.8"));
+    fn every_model_has_well_formed_pricing() {
+        // Cache-read must be cheaper than input, cache-write dearer, for every entry and its 1M variant.
+        fn check(label: &str, p: &ModelPricing) {
+            assert!(p.input > 0.0, "{label}: input rate must be positive");
+            assert!(p.output > 0.0, "{label}: output rate must be positive");
+            assert!(
+                p.cached_input < p.input,
+                "{label}: cache-read must be cheaper than input"
+            );
+            assert!(
+                p.cache_write > p.input,
+                "{label}: cache-write must be dearer than input"
+            );
+        }
+        for m in ANTHROPIC_MODELS {
+            check(m.id, &m.pricing);
+            if let Some(p) = &m.pricing_1m {
+                check(m.id, p);
+            }
+        }
+    }
+
+    #[test]
+    fn one_m_pricing_present_iff_million_token_context() {
+        // `pricing_1m` must be present iff the model has a 1M-token context.
+        for m in ANTHROPIC_MODELS {
+            let is_million = m.context_tokens >= 1_000_000;
+            assert_eq!(
+                m.pricing_1m.is_some(),
+                is_million,
+                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {})",
+                m.id,
+                m.context_tokens
+            );
+        }
     }
 }

@@ -1,6 +1,5 @@
 /**
- * Tests for the DSL validation and orchestration in office-build (python invocation +
- * path resolution are mocked, so this exercises the TypeScript-side validation branches).
+ * Tests for the DSL validation and orchestration in office-build.
  * @module mcp-office/engine/office-build.test
  */
 
@@ -9,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { resolveInputFile, resolveOutputPath, runPythonScript } = vi.hoisted(() => ({
   resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
   resolveOutputPath: vi.fn(
-    async (_n: string | undefined, base: string) => `/workspace/.speedwave-office/${base}`
+    async (_n: string | undefined, base: string) => `/workspace/.speedwave/office/${base}`
   ),
   runPythonScript: vi.fn(async () => ({ ok: true })),
 }));

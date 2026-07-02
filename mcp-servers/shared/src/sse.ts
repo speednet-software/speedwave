@@ -64,10 +64,7 @@ export class SSEStream {
   }
 
   /**
-   * Send a raw SSE event.
-   * Defense-in-depth: all fields are sanitized even though current callers
-   * only pass internally-produced values (JSON.stringify for data, integer
-   * counter for id, literal "message" for event).
+   * Send a raw SSE event with sanitized fields.
    * @param event - SSE event structure to send
    */
   private sendEvent(event: SSEEvent): void {

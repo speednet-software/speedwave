@@ -1,4 +1,6 @@
-#![allow(missing_docs)]
+//! Speedwave runtime — SSOT for all Lima/WSL2/nerdctl container orchestration,
+//! compose rendering, resource budgeting, and host-side process management.
+//! The CLI and Desktop both depend on this crate.
 
 pub mod binary;
 pub mod build;
@@ -9,11 +11,10 @@ pub mod compose;
 pub mod config;
 pub mod consts;
 pub mod defaults;
+pub mod diagnostic_sources;
 pub mod engine_path;
 pub mod fs_perms;
 pub mod fs_security;
-pub mod host_exec;
-pub mod host_exec_process;
 pub mod host_mcp_process;
 pub mod http_debug_collator;
 pub mod legacy_token_cleanup;
@@ -21,24 +22,30 @@ pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
 pub mod mcp_os_process;
+pub mod oauth_persist;
 pub mod oauth_process;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
+pub mod pkce;
 pub mod plugin;
 pub mod project;
+pub mod provision;
 pub mod resources;
 pub mod runtime;
 pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
-/// Host-side meeting transcription (audio capture, Whisper, diarization, model
-/// catalogue) — gated behind the `audio-transcription` feature so the CLI
-/// (which never enables it) stays lean. See `docs/adr/ADR-056-*`.
+/// Host-side meeting transcription (audio capture, Whisper, model catalogue) —
+/// gated behind the `audio-transcription` feature so the CLI (which never
+/// enables it) stays lean. See `docs/adr/ADR-056-*`.
 #[cfg(feature = "audio-transcription")]
 pub mod transcription;
 pub mod tz;
 pub mod update;
+pub mod url_validation;
+pub mod usage;
+pub mod usage_cost;
 pub mod validation;
 
 /// Test-only re-exports of internal transaction helpers.

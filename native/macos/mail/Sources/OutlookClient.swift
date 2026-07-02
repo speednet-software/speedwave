@@ -5,14 +5,24 @@ import SharedCLI
 enum OutlookClient {
     static let name = "Microsoft Outlook"
 
-    static func isAvailable() -> Bool {
+    /// Whether the Outlook process is running. Rethrows `.automationPermission`/`.timeout`;
+    /// a genuine script failure maps to `false`.
+    static func isAvailable() throws -> Bool {
         let script = """
         tell application "System Events"
             return exists application process "Microsoft Outlook"
         end tell
         """
-        let result = try? ScriptRunner.run(script, timeout: 5)
-        return result == "true"
+        do {
+            return try ScriptRunner.run(script, timeout: 5) == "true"
+        } catch let err as ScriptError {
+            switch err {
+            case .automationPermission, .timeout:
+                throw err
+            case .scriptFailed:
+                return false
+            }
+        }
     }
 
     static func listMailboxes() throws -> [[String: Any]] {
@@ -43,8 +53,7 @@ enum OutlookClient {
             folderClause = "inbox"
         }
 
-        // Iterate with counter to avoid "Invalid index" error (-1719)
-        // when requesting a range beyond the actual message count.
+        // Counter loop avoids "Invalid index" error (-1719) past message count.
         let script = """
         tell application "Microsoft Outlook"
             set output to ""
@@ -87,22 +96,7 @@ enum OutlookClient {
         """
 
         let output = try ScriptRunner.run(script, timeout: 15)
-        let parts = output.components(separatedBy: "||")
-        guard parts.count >= 6 else {
-            throw ScriptError.scriptFailed("Unexpected email format")
-        }
-
-        return [
-            "id": id,
-            "subject": parts[0].trimmingCharacters(in: .whitespaces),
-            "sender": parts[1].trimmingCharacters(in: .whitespaces),
-            "date": parts[2].trimmingCharacters(in: .whitespaces),
-            "read": parts[3].trimmingCharacters(in: .whitespaces) == "true",
-            "to": parts[4].trimmingCharacters(in: .whitespaces)
-                .components(separatedBy: ",")
-                .filter { !$0.isEmpty },
-            "body": parts[5...].joined(separator: "||").trimmingCharacters(in: .whitespaces),
-        ]
+        return try parseEmailDetail(output, id: id)
     }
 
     static func searchEmails(query: String, limit: Int) throws -> [[String: Any]] {

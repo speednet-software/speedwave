@@ -18,15 +18,7 @@ import {
 } from './test-helpers.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Tests for Code Executor
-//
-// Purpose: Test sandbox execution (security and basic functionality)
-// - Verify security restrictions (forbidden patterns)
-// - Verify basic code execution without tool dependencies
-//
-// Note: These tests focus on code validation and security.
-// Full integration tests with tool availability, audit logging, and PII tokenization
-// are tested separately with proper mocking/fixtures to avoid bridge initialization issues.
+// Tests for Code Executor (sandbox security and basic validation)
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('executor', () => {
@@ -160,8 +152,6 @@ describe('executor', () => {
     it('should enforce timeout on async operations', async () => {
       _setBridgesForTesting(createMockBridges());
 
-      // Note: Synchronous infinite loops cannot be interrupted by Promise.race timeout
-      // This tests async timeout which is the realistic scenario
       const code = `
         await new Promise(resolve => setTimeout(resolve, 5000));
         return { done: true };
@@ -475,9 +465,7 @@ describe('executor', () => {
     });
   });
 
-  // Note: sanitizeParamsForLogging tests removed - functionality moved to PII Tokenizer
-  // Sensitive data protection for Claude is handled by pii-tokenizer.ts (SENSITIVE_FIELD type)
-  // Local Docker logs are not sanitized as they don't leave the container
+  // sanitizeParamsForLogging tests moved to pii-tokenizer.ts
 
   describe('batch helper (through executeCode)', () => {
     beforeEach(() => {
@@ -545,7 +533,7 @@ describe('executor', () => {
 
     beforeEach(() => {
       resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,presale';
+      process.env.ENABLED_SERVICES = 'slack,example-plugin';
     });
 
     afterEach(() => {
@@ -564,10 +552,10 @@ describe('executor', () => {
         string,
         Record<string, Record<string, unknown>>
       >;
-      mutableRegistry['presale'] = {
+      mutableRegistry['example-plugin'] = {
         searchCustomers: {
           name: 'searchCustomers',
-          service: 'presale',
+          service: 'example-plugin',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: [],
@@ -578,31 +566,25 @@ describe('executor', () => {
 
       // Set up mock bridges
       const mockBridges = createMockBridges();
-      mockBridges['presale'] = null;
+      mockBridges['example-plugin'] = null;
       mockBridges['os'] = null;
       _setBridgesForTesting(mockBridges);
 
       // Code that accesses the sandbox to check what's available
-      const code = `typeof presale`;
+      const code = `typeof examplePlugin`;
       const result = await executeCode({ code, timeoutMs: 5000 });
-      // presale is in sandbox but has no bridge, so it's undefined
+      // example-plugin is in sandbox but has no bridge, so it's undefined
       expect(result.success).toBe(true);
       expect(result.data).toBe('undefined');
 
       // Cleanup
-      delete mutableRegistry['presale'];
+      delete mutableRegistry['example-plugin'];
       _setBridgesForTesting(null);
     });
   });
 
   describe('auto-return transformation', () => {
-    // These tests verify that the auto-return transformation correctly prepends
-    // 'return' to expressions without causing syntax errors.
-    // We test using pure JavaScript that doesn't require HTTP bridges.
-
     it('should handle multiline expression with object parameter', async () => {
-      // Simulates: await sharepoint.sync({ local_path: "/path", mode: "pull" });
-      // The multiline object literal should not break the auto-return transformation
       const code = `({
         local_path: "/path",
         mode: "pull"
@@ -893,16 +875,12 @@ describe('executor', () => {
 
   describe('auto-return parse error path (syntax warning)', () => {
     it('warns and continues execution when addAutoReturn returns a parseError', async () => {
-      // Code with a syntax error — addAutoReturn will fail to parse and
-      // return { code, parseError: '...' }, which triggers the syntaxWarning branch.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      // Deliberately malformed code (unclosed brace) — addAutoReturn cannot parse it
-      // but the execution attempt will fail with a runtime error, which is fine.
+      // Malformed code (unclosed brace) — addAutoReturn cannot parse it
       const code = `const x = {`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
-      // Whether success or failure, the warn branch was reached
       const warnMessages = warnSpy.mock.calls.map((args) => String(args[0]));
       const syntaxWarnEmitted = warnMessages.some((m) => m.includes('[executor]'));
       expect(syntaxWarnEmitted).toBe(true);
@@ -1053,8 +1031,7 @@ describe('executor', () => {
     });
 
     it('skips a service in SERVICE_NAMES that is not in ENABLED_SERVICES', async () => {
-      // Service 'os' is in SERVICE_NAMES (via _setServiceNamesForTesting) but NOT in ENABLED_SERVICES.
-      // createToolWrappers must hit the `if (!enabled.has(service)) continue` branch for 'os'.
+      // 'os' is in SERVICE_NAMES but not ENABLED_SERVICES — hits the skip branch
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
       // Add 'os' to SERVICE_NAMES even though it is not enabled
@@ -1108,8 +1085,7 @@ describe('executor', () => {
     });
 
     it('uses "Unknown execution error" when caught value is not an Error', async () => {
-      // Line 569 branch: `error instanceof Error ? error.message : 'Unknown execution error'`
-      // Throw a plain string from the sandbox to exercise the non-Error path.
+      // Throw a plain string to exercise the non-Error catch path
       const code = `throw 'a plain string error';`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -1134,9 +1110,7 @@ describe('executor', () => {
     });
 
     it('falls through to generic error when the identified service is not in sandbox', async () => {
-      // `someService.nonExistent is not a function` — `someService` is not a known service
-      // in the sandbox, so the `if (serviceTools && typeof serviceTools === 'object')` branch
-      // evaluates to false (serviceTools is undefined). Lines 587-592 are the falsy path.
+      // unknown service → serviceTools undefined → falsy branch
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
       _setBridgesForTesting(createMockBridges());
@@ -1167,14 +1141,11 @@ describe('executor', () => {
     });
 
     it('falls through when underscore-split service is not in sandbox', async () => {
-      // Line 608: underscoreMatch found, but sandboxContext[serviceName] is undefined/falsy.
-      // Use a name like `ghost_method` where `ghost` is not a service in the sandbox.
+      // `ghost_method` → `ghost` not in sandbox → underscore handler falls through
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
       _setBridgesForTesting(createMockBridges());
 
-      // `ghost_method` → serviceName='ghost', methodName='method'
-      // sandboxContext['ghost'] is undefined → the `if (serviceTools && ...)` is false
       const code = `ghost_method()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -1222,8 +1193,7 @@ describe('executor', () => {
     });
 
     it('audit log uses empty object fallback when params is undefined', async () => {
-      // Call a tool WITHOUT arguments so params is undefined in the wrapWithAudit callback.
-      // This exercises the `params ?? {}` branches at lines 199 and 204.
+      // No-arg call → params undefined → exercises the `params ?? {}` fallback
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -1281,8 +1251,7 @@ describe('executor', () => {
     });
 
     it('iterates serviceName parts to find the real service when it contains underscores', async () => {
-      // Register a service with an underscore in the name so that the while loop
-      // inside the underscore error handler has to iterate to find the right split.
+      // Service name with underscore forces the split-iteration while loop
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -1299,22 +1268,15 @@ describe('executor', () => {
         },
       };
 
-      // Add my_service to SERVICE_NAMES so createToolWrappers includes it in the sandbox context.
-      // buildServiceBridge needs _registry['my_service'] to exist (set above).
+      // my_service must be in SERVICE_NAMES for createToolWrappers to include it
       _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os', 'my_service']);
 
-      // Set a worker URL so callWorker doesn't throw "Unknown service: my_service".
-      // (The URL doesn't need to be reachable — the code under test never actually calls
-      // my_service.doThing(); it only produces a ReferenceError for my_service_doThing.)
+      // Worker URL so callWorker doesn't throw "Unknown service: my_service"
       process.env.WORKER_MY_SERVICE_URL = 'http://mcp-my-service:9999';
       process.env.ENABLED_SERVICES = 'slack,my_service';
       resetServiceCaches();
 
-      // This triggers the `XXX_YYY is not defined` handler.
-      // The greedy regex first captures `my` as serviceName and `service_doThing` as methodName.
-      // The while loop iterates: serviceName+='_service', methodName='doThing' — now found in
-      // sandboxContext because my_service is in SERVICE_NAMES and enabled.
-      // Because `doThing` is a camelCase match in `my_service`, it hits the camelMethod branch.
+      // Triggers the `XXX_YYY is not defined` handler; while loop resolves my_service.doThing
       const code = `my_service_doThing()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 

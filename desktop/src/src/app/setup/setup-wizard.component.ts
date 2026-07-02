@@ -26,7 +26,7 @@ import { LogoComponent } from '../shared/logo.component';
 const TOTAL_STEPS = 6;
 
 /** Estimated seconds remaining per step index when active. */
-const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
+const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 1, 5];
 
 /** Guides the user through initial environment setup and project creation. */
 @Component({
@@ -150,7 +150,7 @@ export class SetupWizardComponent {
     {
       id: 'start_containers',
       title: 'start containers',
-      description: 'Launch project containers',
+      description: 'Deferred until a provider is chosen',
       status: 'pending',
     },
     {
@@ -165,9 +165,7 @@ export class SetupWizardComponent {
   get steps(): SetupStep[] {
     return this.stepsSig();
   }
-  /**
-   * Replaces the step list — kept as a setter for tests that mutate it directly.
-   */
+  /** Replaces the step list. */
   set steps(next: SetupStep[]) {
     this.stepsSig.set(next);
   }
@@ -248,10 +246,7 @@ export class SetupWizardComponent {
   }
 
   /**
-   * Resumes the setup pipeline after `<app-create-project-modal>` has
-   * successfully created the project on the backend. The modal owns the
-   * `create_project` invocation + inline error handling; this handler only
-   * marks step 3 as done and continues with the remaining auto-steps.
+   * Marks step 3 done and continues auto-steps after the project is created.
    * @param payload - Name and directory of the freshly created project.
    */
   async onProjectCreated(payload: CreatedProject): Promise<void> {
@@ -344,9 +339,10 @@ export class SetupWizardComponent {
           await this.tauri.invoke('build_images');
           this.setStep(2, 'done');
           break;
-        case 4: // Start Containers
-          await this.tauri.invoke('start_containers', { project: this.projectName() });
-          this.setStep(4, 'done');
+        case 4: // Start Containers — deferred: a fresh project has no
+          // provider yet, so this would only bail. Settings starts it later.
+          await this.tauri.invoke('defer_container_start', { project: this.projectName() });
+          this.setStep(4, 'done', 'Deferred until a provider is chosen');
           break;
         case 5: // Finalize
           this.setStep(5, 'active', 'Linking CLI...');
@@ -372,7 +368,7 @@ export class SetupWizardComponent {
       case 2:
         return 'Building container images for enabled integrations (this may take a few minutes)...';
       case 4:
-        return 'Starting containers...';
+        return 'Deferring container start...';
       case 5:
         return 'Finalizing setup...';
       default:

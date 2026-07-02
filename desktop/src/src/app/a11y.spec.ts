@@ -9,8 +9,6 @@
  * the app ships, so contrast regressions cannot land silently. `auto` mode is
  * covered by the ThemeService unit tests; here we only assert the deterministic
  * effective modes.
- *
- * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
@@ -44,12 +42,7 @@ const EFFECTIVE_MODES: readonly EffectiveMode[] = THEME_MODES.filter(
   (m): m is EffectiveMode => m !== 'auto'
 );
 
-/**
- * Stubs `window.matchMedia` so ThemeService can construct in jsdom even though
- * jsdom does not implement the media query API. We don't rely on the listener
- * for axe assertions — accents and `.dark` are set directly via
- * activateTheme/activateMode.
- */
+/** Stubs `window.matchMedia` so ThemeService can construct in jsdom. */
 function stubMatchMedia(): void {
   if (typeof window.matchMedia === 'function') return;
   Object.defineProperty(window, 'matchMedia', {
@@ -86,11 +79,7 @@ interface ViewUnderTest {
   readonly prepare?: (fixture: ComponentFixture<unknown>) => void;
 }
 
-/**
- * Configurable mock responses for routed views. Anything a route-level
- * component requests during `ngOnInit` must resolve here so jsdom can
- * render the baseline layout that axe-core inspects.
- */
+/** Configurable mock responses for routed views during jsdom render. */
 function buildMockTauri(): MockTauriService {
   const mock = new MockTauriService();
   mock.invokeHandler = async (cmd: string) => {
@@ -135,12 +124,12 @@ function buildMockTauri(): MockTauriService {
 }
 
 /**
- * Sets `data-theme` to the given accent variant; no-op for the default `crimson`.
+ * Sets `data-theme` to the given accent variant; no-op for the default `ember`.
  * @param id - Accent theme to activate via the `data-theme` attribute.
  */
 function activateTheme(id: ThemeId): void {
   const html = document.documentElement;
-  if (id === 'crimson') {
+  if (id === 'ember') {
     html.removeAttribute('data-theme');
   } else {
     html.setAttribute('data-theme', id);
@@ -149,9 +138,6 @@ function activateTheme(id: ThemeId): void {
 
 /**
  * Renders a component in a detached fixture for axe inspection.
- *
- * Runs the full change-detection loop so dynamic content (e.g. conditional
- * error banners) is reflected in the DOM axe scans.
  * @param view - The view under test.
  * @param mockTauri - The mock TauriService used for invoke/listen calls.
  */
@@ -238,9 +224,7 @@ const VIEWS: readonly ViewUnderTest[] = [
 ];
 
 /**
- * Classifies axe serious violations worth blocking on. Discards advisory
- * rules (e.g. landmark-one-main in a detached fragment) since fragment-only
- * rendering cannot satisfy document-level rules.
+ * Classifies axe serious violations, discarding fragment-only advisory rules.
  * @param results - The full axe-core scan results.
  */
 function seriousViolations(results: AxeResults): AxeResults['violations'] {
@@ -267,7 +251,7 @@ describe('A11y sweep — axe-core on every reachable view', () => {
 
   afterEach(() => {
     TestBed.resetTestingModule();
-    activateTheme('crimson');
+    activateTheme('ember');
     activateMode('dark');
   });
 

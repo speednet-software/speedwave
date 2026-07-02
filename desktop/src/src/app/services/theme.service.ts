@@ -1,16 +1,17 @@
 import { inject, Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
 
 export type { EffectiveMode } from './native-theme-adapter';
 
 /** Identifiers for every accent theme exposed in Settings → Appearance. */
-export type ThemeId = 'crimson' | 'mint' | 'amber' | 'iris' | 'cyan' | 'sand';
+export type ThemeId = 'ember' | 'crimson' | 'mint' | 'iris' | 'cyan' | 'sand';
 
-/** Display order for the Appearance accent picker. */
+/** Display order for the Appearance accent picker. Ember is first and default. */
 export const THEME_IDS: readonly ThemeId[] = [
+  'ember',
   'crimson',
   'mint',
-  'amber',
   'iris',
   'cyan',
   'sand',
@@ -57,12 +58,12 @@ function readStoredChoice<T extends string>(key: string, allowlist: readonly T[]
 }
 
 /**
- * Applies a theme to <html> and persists it. Crimson is the default → no attr written.
+ * Applies a theme to <html> and persists it. Ember is the default → no attr written.
  * @param id Accent theme to activate and persist.
  */
 function writeTheme(id: ThemeId): void {
   const html = document.documentElement;
-  if (id === 'crimson') {
+  if (id === 'ember') {
     html.removeAttribute('data-theme');
   } else {
     html.setAttribute('data-theme', id);
@@ -77,7 +78,7 @@ function getDarkMQ(): MediaQueryList | null {
       ? window.matchMedia('(prefers-color-scheme: dark)')
       : null;
   } catch (err) {
-    console.warn('ThemeService: matchMedia unavailable', err);
+    pluginLogWarn(`ThemeService: matchMedia unavailable: ${String(err)}`).catch(() => {});
     return null;
   }
 }
@@ -120,7 +121,7 @@ export class ThemeService implements OnDestroy {
   private readonly native = inject(NativeThemeAdapter);
 
   private readonly themeSignal = signal<ThemeId>(
-    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'crimson')
+    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'ember')
   );
   private readonly modeSignal = signal<ThemeMode>(
     readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')
@@ -151,10 +152,7 @@ export class ThemeService implements OnDestroy {
           signal: this.abortController.signal,
         });
       } else if (typeof this.mediaQuery.addListener === 'function') {
-        // Legacy WebView fallback — addListener is deprecated but still required
-        // on older WebKit builds shipped in some Tauri targets. Cleaned up by
-        // the matching removeListener in ngOnDestroy (the AbortController only
-        // unregisters the addEventListener path).
+        // Legacy WebView fallback; cleaned up in ngOnDestroy
         this.mediaQuery.addListener(this.mediaListener);
       }
     }
@@ -163,8 +161,7 @@ export class ThemeService implements OnDestroy {
   /** Removes the matchMedia listener when the root service is torn down. */
   ngOnDestroy(): void {
     this.abortController.abort();
-    // Legacy fallback teardown — only needed when addEventListener was unavailable
-    // (otherwise the AbortController above already removed the listener).
+    // Legacy fallback teardown (only when addEventListener unavailable)
     if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
       try {
         this.mediaQuery.removeListener?.(this.mediaListener);
@@ -196,10 +193,8 @@ export class ThemeService implements OnDestroy {
   }
 
   /**
-   * Resolves the effective mode, applies the DOM class, and syncs native chrome.
-   * Does NOT persist — the OS-driven `auto` listener calls this on every system
-   * theme change, and re-writing the unchanged `'auto'` value would be storage
-   * noise. Persistence lives in {@link setMode} (explicit user intent only).
+   * Resolves effective mode, applies DOM class, syncs native chrome.
+   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
    * @param mode Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {

@@ -39,7 +39,7 @@ Stat-only cache keys (mtime + len) were rejected: `utimensat` makes those trivia
 
 ### Trusted-path loaders
 
-The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPlugin { manifest, dir }>` — fail-closed, with `dir.file_name() == manifest.slug` enforced. Callers (`apply_plugins`, image builders, Claude wiring) use `vp.dir`; they never reconstruct a path via `plugins_base.join(manifest.slug)`. Without the dir/slug enforcement an attacker dropping `evil/plugin.json` whose `slug: "good"` would silently re-route every caller to a different on-disk tree.
+The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPlugin>` — fail-closed, with `dir.file_name() == manifest.slug` enforced. `VerifiedPlugin`'s fields are private; the only constructor is the crate-internal `new`, called after the full verification, so a "verified" pair cannot be fabricated by literal construction. Callers (`apply_plugins`, image builders, Claude wiring) read `vp.dir()`/`vp.manifest()`; they never reconstruct a path via `plugins_base.join(manifest.slug)`. Without the dir/slug enforcement an attacker dropping `evil/plugin.json` whose `slug: "good"` would silently re-route every caller to a different on-disk tree.
 
 `list_for_ui` is the tolerant counterpart. It returns one `PluginListEntry` per directory with a `verification_status` discriminator (`Verified` / `MissingSignature` / `InvalidSignature` / `DirSlugMismatch` / `ManifestInvalid`) and a `verification_error` string. The Desktop UI uses this so users can see _what_ is broken; the green pill becomes red with a short label and a tooltip.
 
@@ -53,7 +53,7 @@ The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPl
 
 ### Mutable state outside the signed tree
 
-Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under `~/.speedwave/plugins/<slug>/`. The only state today is `image_pending` (signal that the next launch should retry an image build). Reads tolerate the legacy in-tree marker during a migration window so plugins installed before this ADR keep building; new writes always go to `plugin-state/`.
+Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under `~/.speedwave/plugins/<slug>/`. State today: `image_pending` (signal that the next launch should retry an image build) and the host-bridge `bridge-token` (persisted auth token that off-Desktop compose renders read back — [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)). Reads tolerate the legacy in-tree marker during a migration window so plugins installed before this ADR keep building; new writes always go to `plugin-state/`.
 
 ### Atomic install
 
@@ -107,7 +107,7 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ### Neutral
 
-- The `validate_manifest` ruleset got stricter, and the `mem_limit` cap was raised from the planned 8 192 MiB to 16 384 MiB during implementation. The in-tree `presale` plugin requests 12 GiB for ML-heavy presale generation; an 8 GiB cap would have rejected it without giving operators a way to opt in. 16 GiB is the smallest cap that admits the existing legitimate plugin while still rejecting the manifestly-bad values the cap is there to catch (`mem_limit: 999g`, etc.). The cap does not weaken the threat model — the host VM (Lima default 4 GiB on macOS, configurable) still imposes the real ceiling at runtime; the manifest cap exists to surface absurd values at install time, not to be the resource-management primitive. Future plugins that need more than 16 GiB must either prove the case in a follow-up ADR or be a built-in service.
+- The `validate_manifest` ruleset got stricter, and the `mem_limit` cap was raised from the planned 8 192 MiB to 16 384 MiB during implementation. A legitimate memory-heavy plugin requests more than 8 GiB, so an 8 GiB cap would have rejected it without giving operators a way to opt in. 16 GiB is the smallest cap that admits such a plugin while still rejecting the manifestly-bad values the cap is there to catch (`mem_limit: 999g`, etc.). The cap does not weaken the threat model — the host VM (Lima default 4 GiB on macOS, configurable) still imposes the real ceiling at runtime; the manifest cap exists to surface absurd values at install time, not to be the resource-management primitive. Future plugins that need more than 16 GiB must either prove the case in a follow-up ADR or be a built-in service.
 
 ## Alternatives considered
 

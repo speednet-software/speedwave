@@ -74,20 +74,14 @@ final class CalendarTests: XCTestCase {
     // MARK: - EventStoreGate — file-scope struct reachable via @testable import
 
     func testCalendarEventStoreGateConformsToPermissionGate() {
-        // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
-        // Calling authorizationStatus() on a real EKEventStore is a pure read.
+        // Compile-time + smoke: EventStoreGate produces RawAuthorizationStatus.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
-        // The protocol now returns RawAuthorizationStatus (not EKAuthorizationStatus);
-        // every concrete enum value is acceptable here — we just want compile-time
-        // confirmation that the gate produces the new raw type. The value depends on
-        // the test machine's TCC state and may differ between dev runs.
         let _: RawAuthorizationStatus = gate.authorizationStatus()
     }
 
     func testCalendarEventStoreGateProducesRawStatus() {
-        // Sanity: at runtime, the gate's raw status is one of the documented cases.
-        // Catches drift if mapEventKitStatusToRaw is changed without updating the gate.
+        // At runtime, the gate's raw status is one of the documented cases.
         let store = EKEventStore()
         let gate = EventStoreGate(store: store)
         let raw = gate.authorizationStatus()

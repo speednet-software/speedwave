@@ -17,12 +17,8 @@ export interface SetupStep {
 }
 
 /**
- * Presentational component that renders a list of progress steps with status
- * circles, pills, an optional progress bar, an error banner with retry/back
- * controls, and an optional footer.
- *
- * Used by both the first-run setup wizard and the plugin install overlay.
- * The caller owns the step list and drives status transitions.
+ * Presentational multi-step progress: status circles, pills, progress bar,
+ * error banner with retry/back, optional footer. Caller owns the step list.
  */
 @Component({
   selector: 'app-progress-steps',
@@ -49,7 +45,7 @@ export interface SetupStep {
                 <span aria-hidden="true">✓</span>
               }
               @case ('active') {
-                <app-spin-icon />
+                <app-spin-icon class="h-4 w-4" />
               }
               @case ('error') {
                 <span aria-hidden="true">!</span>
@@ -168,8 +164,8 @@ export class ProgressStepsComponent {
   });
 
   /**
-   * Status circle — border colour.
-   * @param step Step whose status drives the colour.
+   * Status circle — border colour for the step's status.
+   * @param step - Step whose status drives the colour.
    */
   protected circleBorder(step: SetupStep): string {
     if (step.status === 'done') return 'rgba(52, 211, 153, 0.3)';
@@ -179,8 +175,8 @@ export class ProgressStepsComponent {
   }
 
   /**
-   * Status circle — background fill.
-   * @param step Step whose status drives the fill colour.
+   * Status circle — background fill for the step's status.
+   * @param step - Step whose status drives the fill.
    */
   protected circleBg(step: SetupStep): string {
     if (step.status === 'done') return 'rgba(52, 211, 153, 0.1)';
@@ -190,8 +186,8 @@ export class ProgressStepsComponent {
   }
 
   /**
-   * Status circle — text/icon colour.
-   * @param step Step whose status drives the foreground colour.
+   * Status circle — text/icon colour for the step's status.
+   * @param step - Step whose status drives the colour.
    */
   protected circleColor(step: SetupStep): string {
     if (step.status === 'done') return 'var(--green)';

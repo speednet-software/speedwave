@@ -7,6 +7,12 @@ services:
     image: ${IMAGE_CLAUDE}
     pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
+    # Start the proxy first: Claude routes /v1/messages through it (ADR-073).
+    # service_started (not _healthy) — the proxy has no healthcheck; Claude only
+    # POSTs on the first user prompt, by which time the scratch binary is up.
+    depends_on:
+      proxy:
+        condition: service_started
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:
@@ -16,26 +22,20 @@ services:
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     tmpfs:
-      - /tmp:noexec,nosuid,size=512m
+      - /tmp:noexec,nosuid,size=${CLAUDE_TMPFS}
     volumes:
       - ${CLAUDE_HOME}:/home/speedwave:rw
       - ${PROJECT_DIR}:/workspace
       - ${RESOURCES_DIR}:/speedwave/resources:ro
       - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
+      # Proxy usage JSONL (read-only): statusline reads cumulative tokens/cost (ADR-073).
+      - ${PROXY_USAGE_DIR}:/usage:ro
     environment:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
-      # Connect to the Speedwave IDE Bridge on start so the user does not have to
-      # run /ide and pick "Speedwave" by hand. The bridge lock file is always
-      # mounted at ~/.claude/ide; this var forces the attempt even though the
-      # container TTY is not a recognised IDE integrated terminal (the documented
-      # "auto-detection fails" case). Value is the string `true` (not 1) per the
-      # Claude Code env-vars reference.
+      # Auto-connect IDE bridge; value is literal `true` per Claude Code env-vars.
       - CLAUDE_CODE_AUTO_CONNECT_IDE=true
-      # `auto` = use the model's own default effort (high on Opus 4.8). A valid
-      # value per Claude Code env-vars docs (low|medium|high|xhigh|max|auto).
-      - CLAUDE_CODE_EFFORT_LEVEL=auto
       - ANTHROPIC_LOG=debug
     working_dir: /workspace
     networks:
@@ -43,8 +43,40 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
+
+  # Speedwave proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
+  proxy:
+    image: ${IMAGE_PROXY}
+    pull_policy: never
+    restart: unless-stopped
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_proxy
+    environment:
+      # Not read by the proxy — forces container recreation on config-up
+      # when the rendered config or a provider key changed.
+      - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
+    read_only: true
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY}"
+    tmpfs:
+      - /tmp:noexec,nosuid,size=${PROXY_TMPFS}
+    volumes:
+      - ${PROXY_CONFIG_DIR}:/config:ro
+      - ${TOKENS_DIR}/llm:/tokens:ro
+      - ${PROXY_USAGE_DIR}:/usage:rw
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '${PROXY_CPUS}'
+          memory: ${PROXY_MEM}
 
   mcp-hub:
     image: ${IMAGE_MCP_HUB}
@@ -57,7 +89,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
     environment:
       - PORT=${PORT_HUB}
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
@@ -76,8 +108,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 512m
+          cpus: '${MCP_HUB_CPUS}'
+          memory: ${MCP_HUB_MEM}
 
   mcp-slack:
     image: ${IMAGE_MCP_SLACK}
@@ -90,9 +122,12 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_SLACK_TMPFS}
     volumes:
       - ${TOKENS_DIR}/slack:/tokens:ro
+      # Slack file downloads land in /workspace/slack-files so the office
+      # worker and Claude can read them (ADR-071; same rationale as sharepoint).
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:
@@ -100,8 +135,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_SLACK_CPUS}'
+          memory: ${MCP_SLACK_MEM}
 
   mcp-sharepoint:
     image: ${IMAGE_MCP_SHAREPOINT}
@@ -114,12 +149,9 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_SHAREPOINT_TMPFS}
     volumes:
-      # :ro per ADR-060 — OAuth token refresh moved to the host-side `oauth`
-      # worker. The SharePoint container only reads access_token / site_id /
-      # base_path; refresh writes happen on the host (oauth worker) which
-      # updates /tokens/access_token visible through this read-only mount.
+      # :ro per ADR-060 (OAuth refresh on host-side oauth worker); token writes flow through here.
       - ${TOKENS_DIR}/sharepoint:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
@@ -129,8 +161,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_SHAREPOINT_CPUS}'
+          memory: ${MCP_SHAREPOINT_MEM}
 
   mcp-redmine:
     image: ${IMAGE_MCP_REDMINE}
@@ -143,7 +175,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_REDMINE_TMPFS}
     volumes:
       - ${TOKENS_DIR}/redmine:/tokens:ro
     environment:
@@ -153,8 +185,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_REDMINE_CPUS}'
+          memory: ${MCP_REDMINE_MEM}
 
   mcp-gitlab:
     image: ${IMAGE_MCP_GITLAB}
@@ -167,7 +199,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_GITLAB_TMPFS}
     volumes:
       - ${TOKENS_DIR}/gitlab:/tokens:ro
     environment:
@@ -177,8 +209,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_GITLAB_CPUS}'
+          memory: ${MCP_GITLAB_MEM}
 
   mcp-github:
     image: ${IMAGE_MCP_GITHUB}
@@ -191,7 +223,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_GITHUB_TMPFS}
     volumes:
       - ${TOKENS_DIR}/github:/tokens:ro
     environment:
@@ -201,12 +233,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          # 256m (not the 128m other API workers use): Octokit composed with the
-          # throttling + retry plugins has a heavier resident footprint than
-          # @gitbeaker, and `octokit.paginate` buffers full result sets in memory
-          # — a `listIssues({state:'all'})` on a busy repo OOM-kills a 128m cap.
-          memory: 256m
+          cpus: '${MCP_GITHUB_CPUS}'
+          # Memory cap (and the 256m-vs-128m rationale) is the SSOT — see the
+          # github descriptor in crates/speedwave-runtime/src/consts.rs.
+          memory: ${MCP_GITHUB_MEM}
 
   mcp-atlassian:
     image: ${IMAGE_MCP_ATLASSIAN}
@@ -219,7 +249,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
     environment:
@@ -229,12 +259,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_ATLASSIAN_CPUS}'
+          memory: ${MCP_ATLASSIAN_MEM}
 
-  # Office documents worker — a pure file processor: no service credentials, no /tokens mount,
-  # and NO network egress (attached only to the internal ${NETWORK_NAME}_office network — see ADR-055).
-  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave-office/.
+  # Office worker — pure file processor: no /tokens, no egress (internal ${NETWORK_NAME}_office, ADR-055).
+  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave/office/.
   mcp-office:
     image: ${IMAGE_MCP_OFFICE}
     pull_policy: never
@@ -248,7 +277,7 @@ services:
     # /tmp holds the LibreOffice per-call profile, matplotlib config, and conversion scratch space.
     # LibreOffice headless on a non-trivial .pptx can use a few hundred MB of temp space + RAM.
     tmpfs:
-      - /tmp:noexec,nosuid,size=512m
+      - /tmp:noexec,nosuid,size=${MCP_OFFICE_TMPFS}
     volumes:
       # No /tokens mount — this worker has no credentials. /workspace is its only window onto the host.
       - ${PROJECT_DIR}:/workspace:rw
@@ -266,8 +295,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1g
+          cpus: '${MCP_OFFICE_CPUS}'
+          memory: ${MCP_OFFICE_MEM}
 
   mcp-playwright:
     image: ${IMAGE_MCP_PLAYWRIGHT}
@@ -281,36 +310,28 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Host gateway alias so Claude and plugins can navigate Playwright to
-    # local dev servers (e.g. `http://host.docker.internal:4200` for Angular).
-    # See ADR-062. The IP routing to the VM gateway already exists for every
-    # container in the project network; this extra_hosts entry only adds the
-    # canonical DNS name so callers don't need to know per-platform gateway IPs.
+    # Host gateway alias for dev servers (e.g. Angular on localhost:4200); see ADR-062.
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
     # Chromium uses /tmp for page caches and screenshot compositing.
-    # tmpfs lives in RAM — keep it lean. Heavy screenshots return inline
-    # as base64, not via /tmp.
     tmpfs:
-      - /tmp:noexec,nosuid,size=1g
+      - /tmp:noexec,nosuid,size=${MCP_PLAYWRIGHT_TMPFS}
     # Chromium IPC shared-memory requirement; the 64 MiB default causes ENOMEM
     # at page load time.
-    shm_size: 2g
+    shm_size: ${MCP_PLAYWRIGHT_SHM}
     # No /tokens mount — Playwright accesses only public URLs and has no credentials.
     # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
     environment:
       - PORT=${PORT_WORKER}
-      # MCP-level request/response logging (uses the `debug` npm package;
-      # output goes to stderr, visible in Desktop UI → System Health logs).
-      # Covers tools/call, tool responses, and errors. Set to `pw:*` for full verbosity.
+      # MCP request/response logging (debug npm package); set to `pw:*` for full verbosity.
       - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 2048m
+          cpus: '${MCP_PLAYWRIGHT_CPUS}'
+          memory: ${MCP_PLAYWRIGHT_MEM}
 
   mcp-context7:
     image: ${IMAGE_MCP_CONTEXT7}
@@ -323,7 +344,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:noexec,nosuid,size=64m
+      - /tmp:noexec,nosuid,size=${MCP_CONTEXT7_TMPFS}
     volumes:
       # Optional /tokens/api_key — anonymous mode (per-IP rate limit) if absent.
       # See docs/architecture/security.md for the third-party data-flow note.
@@ -335,8 +356,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 128m
+          cpus: '${MCP_CONTEXT7_CPUS}'
+          memory: ${MCP_CONTEXT7_MEM}
 
 networks:
   ${NETWORK_NAME}:

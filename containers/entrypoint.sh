@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Trap TERM from the very top — a stop during the startup phase (hub wait,
+# runtime Claude install) must exit promptly, not eat the 10s SIGKILL timeout.
+trap 'exit 0' TERM INT
+
 # Disable auto-updater unconditionally — Speedwave pins Claude Code versions
 export DISABLE_AUTOUPDATER=1
 
@@ -19,12 +23,15 @@ SPEEDWAVE_RESOURCES="${SPEEDWAVE_RESOURCES:-/speedwave/resources}"
 if ! command -v claude &> /dev/null; then
     echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
     /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
+else
+    # Surface image/env version skew; not auto-repaired (needs image rebuild).
+    installed_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    if [ -n "$installed_version" ] && [ "$installed_version" != "$CLAUDE_VERSION" ]; then
+        echo "WARNING: image has Claude Code ${installed_version} but the pinned version is ${CLAUDE_VERSION} — run 'speedwave update' to rebuild the image" >&2
+    fi
 fi
 
-# Ensure ~/.local/bin is in PATH for interactive shells (nerdctl exec runs bash).
-# Claude Code checks if ~/.local/bin/claude is in PATH and warns if not.
-# The real binary is baked into /usr/local/bin in the image layer (fast ext4).
-# The symlink at ~/.local/bin/claude points to it on the VirtioFS volume.
+# Symlink ~/.local/bin/claude → /usr/local/bin/claude so exec shells find it on PATH.
 if [ -x /usr/local/bin/claude ]; then
     mkdir -p "${HOME}/.local/bin"
     ln -sf /usr/local/bin/claude "${HOME}/.local/bin/claude"
@@ -38,10 +45,8 @@ fi
 # Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Symlink claude-resources per-entry into real dirs. Core entries always-on;
-# integrations/<svc>/ gated by ENABLED_SERVICES. Links the script owns are
-# tracked in ~/.claude/.speedwave-managed-links so toggle-off cleans them up.
-# See ADR-022 for the design rationale.
+# Symlink claude-resources per-entry; integrations/<svc>/ gated by ENABLED_SERVICES.
+# Owned links tracked in ~/.claude/.speedwave-managed-links. See ADR-022.
 
 # Reverse migration: an older run may have left whole-directory symlinks.
 for resource_type in skills commands agents hooks; do
@@ -126,9 +131,8 @@ for resource_type in skills commands agents hooks; do
         echo "${link}" >> "${new_state}"
     done
 
-    # Integration-bound entries — only symlinked when their config_key is in ENABLED_SERVICES.
-    # `os` itself never has its own integration skill: only its sub-services (reminders,
-    # calendar, mail, notes), so we filter it out here and handle the sub-services below.
+    # Integration-bound entries — symlinked when config_key in ENABLED_SERVICES.
+    # `os` is filtered here; its sub-services are handled below.
     integrations_dir="${src_dir}/integrations"
     if [ -d "${integrations_dir}" ] && [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
         for svc in "${ENABLED_SVCS[@]}"; do
@@ -153,14 +157,47 @@ for resource_type in skills commands agents hooks; do
     fi
 done
 
-# Symlink individual resource files from read-only mount.
-# These auto-update when Speedwave ships new versions — no stale copies.
+# Symlink read-only resource files (auto-update on new Speedwave versions).
 # Teams override via project-level .claude/ (ADR-022 scope precedence).
-for resource_file in statusline.sh settings.json CLAUDE.md; do
+for resource_file in statusline.sh CLAUDE.md; do
     if [ -f "${SPEEDWAVE_RESOURCES}/${resource_file}" ]; then
         ln -sf "${SPEEDWAVE_RESOURCES}/${resource_file}" "${HOME}/.claude/${resource_file}"
     fi
 done
+
+# settings.json must be a WRITABLE copy, not a symlink (Claude Code writes it).
+# Replace a stale symlink, then key-merge template keys absent from the on-disk file.
+if [ -L "${HOME}/.claude/settings.json" ]; then
+    rm -f "${HOME}/.claude/settings.json"
+fi
+if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
+    _tmpl="${SPEEDWAVE_RESOURCES}/settings.json"
+    _dest="${HOME}/.claude/settings.json"
+    if [ ! -e "${_dest}" ]; then
+        cp "${_tmpl}" "${_dest}"
+    else
+        # Merge template keys; drop a stale /model that disagrees with the
+        # injected ANTHROPIC_MODEL, or (on the account-default path, env unset)
+        # a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
+        node -e "
+const fs = require('fs');
+const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
+const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
+const merged = Object.assign({}, tmpl, cur);
+const envModel = process.env.ANTHROPIC_MODEL;
+const foreign = typeof merged.model === 'string' && merged.model.includes('/');
+const stale = envModel ? merged.model && merged.model !== envModel : foreign;
+if (stale) {
+  console.error('entrypoint: dropping stale settings.json model ' + merged.model);
+  delete merged.model;
+}
+const tmp = '${_dest}' + '.tmp';
+fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n');
+fs.renameSync(tmp, '${_dest}');
+" || echo 'entrypoint: settings.json merge skipped' >&2
+    fi
+    unset _tmpl _dest
+fi
 
 # output-styles: symlink individual file (not directory) to preserve user's custom styles
 if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
@@ -193,9 +230,8 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     done
 fi
 
-# Atomically replace the state file. Sorted+deduplicated so successive idempotent runs
-# produce byte-identical state files. On sort failure keep the previous state_file untouched
-# (the EXIT trap cleans up new_state).
+# Atomically replace the state file (sorted+deduplicated).
+# On sort failure the previous state_file is kept untouched.
 if sort -u "${new_state}" -o "${new_state}"; then
     mv "${new_state}" "${state_file}"
 else
@@ -219,36 +255,54 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
-# Pre-create .claude.json to skip the onboarding flow — but ONLY when the user
-# is already logged in (credentials present AND non-empty/JSON-shaped). Skipping
-# onboarding also suppresses Claude Code's automatic login prompt on a fresh
-# `claude` start, so doing it unconditionally forced the user to type `/login` by
-# hand. When credentials are absent — or a truncated/corrupt file — we leave
-# .claude.json uncreated so `claude` opens the OAuth flow itself. When present
-# and well-formed, we pre-create it so a logged-in user is not re-onboarded every
-# session (the original bug — see https://github.com/tfvchow/field-notes-public/issues/10).
+# Pre-seed .claude.json: pre-accept the /workspace trust dialog.
+# Set onboarding only when logged in, else leave it for the OAuth flow.
 creds_valid() {
     local f="${HOME}/.claude/.credentials.json"
     # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
     [ -s "$f" ] && [ "$(tr -d '[:space:]' < "$f" | tail -c 1)" = "}" ]
 }
-if creds_valid && [ ! -f "${HOME}/.claude.json" ]; then
+# Fresh file: write the always-on /workspace trust+onboarding skeleton (no creds
+# needed — both are per-workspace, independent of login).
+if [ ! -f "${HOME}/.claude.json" ]; then
     cat > "${HOME}/.claude.json" << 'EOF'
 {
-  "hasCompletedOnboarding": true,
-  "installMethod": "native"
+  "projects": {
+    "/workspace": {
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true
+    }
+  }
 }
 EOF
 fi
+# Merge runs only when logged in: it owns the login-gated top-level fields and
+# re-asserts the /workspace booleans (also seeded by the fresh skeleton above).
+if creds_valid; then
+    node -e "
+const fs = require('fs');
+const p = '${HOME}/.claude.json';
+let j;
+try { j = JSON.parse(fs.readFileSync(p, 'utf8')); }
+catch { console.error('entrypoint: .claude.json unparseable — onboarding merge skipped'); process.exit(0); }
+let changed = false;
+if (j.hasCompletedOnboarding !== true) { j.hasCompletedOnboarding = true; changed = true; }
+if (j.installMethod == null) { j.installMethod = 'native'; changed = true; }
+j.projects = j.projects || {};
+const ws = j.projects['/workspace'] || {};
+if (ws.hasTrustDialogAccepted !== true) { ws.hasTrustDialogAccepted = true; changed = true; }
+if (ws.hasCompletedProjectOnboarding !== true) { ws.hasCompletedProjectOnboarding = true; changed = true; }
+j.projects['/workspace'] = ws;
+if (changed) {
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
+  fs.renameSync(tmp, p);
+}
+" || echo 'entrypoint: .claude.json onboarding merge skipped' >&2
+fi
 
 
-# Wait for MCP hub to accept connections before Claude starts. Without this,
-# the first claude session hits `ConnectionRefused` on http://mcp-hub:4000
-# during compose-up race (claude container ready before hub), and runs with
-# zero tools — listFiles, search_tools, sharepoint.* all unavailable until
-# user opens a fresh chat. Hub typically responds within a second; bail
-# after ~30s so a broken hub doesn't lock the container forever.
-# Set `SPEEDWAVE_SKIP_HUB_WAIT=1` in tests or single-container runs.
+# Wait for MCP hub to accept connections before Claude starts; bail after ~30s.
 if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
     wait_for_hub() {
         local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=30
@@ -272,5 +326,7 @@ touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 if [ $# -gt 0 ]; then
     exec "$@"
 else
-    exec sleep infinity
+    # PID1 must trap TERM and kill the background sleep on exit.
+    trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
+    while :; do sleep 86400 & wait $!; done
 fi

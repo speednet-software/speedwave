@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
@@ -35,8 +35,7 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
-  // Stub the root BetaService; default "on" so the transcription section
-  // renders as before. The beta-off case flips it.
+  // Stub the root BetaService; default "on".
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -104,15 +103,6 @@ describe('SettingsComponent', () => {
     expect(llmEl).not.toBeNull();
   });
 
-  it('renders AuthSectionComponent', async () => {
-    component.ngOnInit();
-    await fixture.whenStable();
-    fixture.changeDetectorRef.markForCheck();
-    fixture.detectChanges();
-    const authEl = fixture.nativeElement.querySelector('app-auth-section');
-    expect(authEl).not.toBeNull();
-  });
-
   it('renders AdvancedSectionComponent', () => {
     fixture.detectChanges();
     const advancedEl = fixture.nativeElement.querySelector('app-advanced-section');
@@ -129,6 +119,67 @@ describe('SettingsComponent', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
+  });
+
+  it('smooth-scrolls a section into view for a matching URL fragment', () => {
+    fixture.detectChanges();
+    const section = fixture.nativeElement.querySelector('#section-transcription') as Element;
+    expect(section).not.toBeNull();
+    // jsdom doesn't implement scrollIntoView — stub it so we can assert the call.
+    const spy = vi.fn();
+    (section as unknown as { scrollIntoView: () => void }).scrollIntoView = spy;
+    (component as unknown as { scrollToFragment(id: string): void }).scrollToFragment(
+      'section-transcription'
+    );
+    expect(spy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+  });
+
+  it('ignores a null/empty fragment without scrolling', () => {
+    fixture.detectChanges();
+    const scroll = (component as unknown as { scrollToFragment(id: string | null): void })
+      .scrollToFragment;
+    // Should not throw and should be a no-op for null.
+    expect(() => scroll.call(component, null)).not.toThrow();
+  });
+
+  it('schedules a retry when the target section is missing, then clears it on destroy', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.detectChanges();
+      const inner = component as unknown as {
+        scrollToFragment(id: string | null): void;
+        scrollTimer: ReturnType<typeof setTimeout> | null;
+      };
+      // A fragment with no matching section → a retry timer is armed.
+      inner.scrollToFragment('section-does-not-exist');
+      expect(inner.scrollTimer).not.toBeNull();
+      // Destroy must cancel the pending retry so it can't fire post-destroy.
+      component.ngOnDestroy();
+      expect(inner.scrollTimer).toBeNull();
+      // Advancing time triggers nothing (no throw on the detached host).
+      expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears a prior retry timer when scrollToFragment is re-entered', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.detectChanges();
+      const inner = component as unknown as {
+        scrollToFragment(id: string | null): void;
+        scrollTimer: ReturnType<typeof setTimeout> | null;
+      };
+      inner.scrollToFragment('missing-one');
+      const first = inner.scrollTimer;
+      expect(first).not.toBeNull();
+      // Re-entry (e.g. a new fragment) cancels the previous timer.
+      inner.scrollToFragment('missing-two');
+      expect(inner.scrollTimer).not.toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reloads project info on project_switch_succeeded event', async () => {
@@ -149,16 +200,19 @@ describe('SettingsComponent', () => {
             active_project: 'other-project',
           };
         case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: false };
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
         default:
           return undefined;
       }
     };
 
     mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-    // dispatchEvent kicks off an async loadProjectInfo() via the onProjectReady
-    // callback; whenStable alone resolves before that nested promise settles,
-    // so we yield a macrotask first to let the chained await fall through.
+    // Yield a macrotask so the nested loadProjectInfo() promise settles before whenStable.
     await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     expect(component.activeProject).toBe('other-project');
@@ -265,13 +319,13 @@ describe('SettingsComponent', () => {
 
     it('does not toggle theme when the same card is clicked twice (no-op)', () => {
       const theme = TestBed.inject(ThemeService);
-      theme.setTheme('amber');
+      theme.setTheme('ember');
       fixture.detectChanges();
-      const amberBtn = fixture.nativeElement.querySelector(
-        'button[data-theme-btn="amber"]'
+      const emberBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="ember"]'
       ) as HTMLButtonElement;
-      amberBtn.click();
-      expect(theme.theme()).toBe('amber');
+      emberBtn.click();
+      expect(theme.theme()).toBe('ember');
     });
 
     it('renders one MODE button per ThemeMode', () => {

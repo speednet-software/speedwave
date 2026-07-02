@@ -7,33 +7,22 @@ use std::path::PathBuf;
 // Setup state — persisted to ~/.speedwave/setup_state.json for resume support
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct SetupState {
     pub runtime_ready: bool,
     pub vm_ready: bool,
     pub project_created: Option<String>,
     pub tokens_configured: Vec<String>,
     pub images_built: bool,
+    /// True once step 4 is done — containers actually started, or
+    /// legitimately deferred pending an LLM provider choice.
     pub containers_started: bool,
     pub cli_linked: bool,
 }
 
 impl SetupState {
-    /// Derives the current wizard step from the boolean flags.
-    ///
-    /// Returns the number of completed sequential steps (0 = nothing done).
-    /// The wizard steps execute in this order:
-    ///   1. runtime_ready  (Check Runtime)
-    ///   2. vm_ready       (Initialize VM)
-    ///   3. images_built   (Build Images)
-    ///   4. project_created (Create Project)
-    ///   5. containers_started (Start Containers)
-    ///   6. cli_linked     (Finalize / CLI symlink)
-    ///
-    /// Previously this was a stored field (`current_step: u8`) that could
-    /// diverge from the boolean flags. Now it is derived, so it is always
-    /// consistent. Old serialized JSON that includes `"current_step"` is
-    /// silently ignored on deserialization (serde default behavior).
+    /// Derives the wizard step from the boolean flags: count of completed
+    /// sequential steps (0 = nothing done, 6 = all done).
     #[cfg(test)]
     pub fn current_step(&self) -> u8 {
         if !self.runtime_ready {
@@ -62,10 +51,28 @@ impl SetupState {
     }
 
     pub fn load() -> Self {
-        Self::state_path()
-            .ok()
-            .and_then(|p| Self::load_from(&p).ok())
-            .unwrap_or_default()
+        let Ok(path) = Self::state_path() else {
+            return Self::default();
+        };
+        match Self::load_from(&path) {
+            Ok(state) => state,
+            Err(e) => {
+                // Missing file is the normal first-run case; warn on anything else.
+                if !Self::is_missing_state_file(&e) {
+                    log::warn!(
+                        "SetupState::load: {} unreadable/corrupt, restarting onboarding from scratch: {e}",
+                        path.display()
+                    );
+                }
+                Self::default()
+            }
+        }
+    }
+
+    /// `true` only when the load error is a missing file (silent first-run case).
+    fn is_missing_state_file(e: &anyhow::Error) -> bool {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     }
 
     /// Loads setup state from a specific file path.
@@ -92,10 +99,8 @@ impl SetupState {
         Ok(())
     }
 
-    /// Pure-logic check: returns `true` when all required setup steps have been completed.
-    ///
-    /// `cli_linked` is intentionally excluded — CLI symlink creation is optional
-    /// (the Desktop app works without it) and may fail on restricted systems.
+    /// `true` when all required setup steps completed. `cli_linked` is
+    /// excluded — CLI symlink creation is optional.
     pub fn is_complete(&self) -> bool {
         self.runtime_ready
             && self.vm_ready
@@ -117,16 +122,11 @@ pub enum RuntimeStatus {
 
 pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     let rt = runtime::detect_runtime();
-    // ensure_ready() verifies the full stack: binary exists, correct version,
-    // AND containerd is running. is_available() only checks the binary, which
-    // causes the wizard to skip init_vm even when containerd is not started.
+    // ensure_ready() verifies the full stack (binary + version + containerd running).
     if rt.ensure_ready().is_ok() {
         let mut state = SetupState::load();
         state.runtime_ready = true;
-        // When the runtime is already Ready, the VM is also ready — ensure_ready()
-        // verifies the full stack (binary + containerd running). Without this,
-        // the wizard skips init_vm (which normally sets vm_ready) and
-        // is_complete() returns false because vm_ready stays false.
+        // A Ready runtime implies the VM is ready (the wizard skips init_vm).
         state.vm_ready = true;
         state.save()?;
         Ok(RuntimeStatus::Ready)
@@ -135,212 +135,32 @@ pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     }
 }
 
-pub fn install_runtime() -> anyhow::Result<()> {
-    let rt = runtime::detect_runtime();
-    rt.ensure_ready()?;
-
-    let mut state = SetupState::load();
-    state.runtime_ready = true;
-    state.save()?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Step 3: Initialize VM (macOS only — Lima)
 // ---------------------------------------------------------------------------
 
-/// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
-///
-/// Uses adaptive scaling from [`speedwave_runtime::resources`]:
-/// VM = host_ram / 2, clamped 4–32 GiB (never more than 50% of host RAM).
-///
-/// Older installs with lower values are auto-migrated by
-/// [`ensure_lima_vm_config`].
-#[cfg(any(target_os = "macos", test))]
-fn desired_lima_vm_memory() -> String {
-    let gib = speedwave_runtime::resources::desired_vm_memory_gib(
-        speedwave_runtime::resources::host_total_memory_gib(),
-    );
-    format!("{gib}GiB")
-}
-
-/// Default Lima VM configuration for Speedwave.
-/// Uses Apple Virtualization Framework (vz) with containerd + nerdctl.
-/// Memory is adaptive based on host RAM — see [`desired_lima_vm_memory`].
-#[cfg(any(target_os = "macos", test))]
-fn lima_config() -> String {
-    format!(
-        r#"# Speedwave Lima VM — auto-generated by setup wizard
-vmType: vz
-vmOpts:
-  vz:
-    rosetta:
-      enabled: true
-      binfmt: true
-images:
-  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
-    arch: "x86_64"
-  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
-    arch: "aarch64"
-cpus: 4
-memory: "{}"
-disk: "50GiB"
-mountType: virtiofs
-networks:
-  - vzNAT: true
-mounts:
-  - location: "~"
-    writable: true
-containerd:
-  system: true
-  user: false
-provision:
-  - mode: boot
-    script: |
-      #!/bin/sh
-      # Make eth0 (vzNAT) the preferred default route, not lima0 (usernet).
-      #
-      # Why: Apple VZ NAT on eth0 inherits the macOS host routing table
-      # transparently — both public Internet and every VPN tunnel the host
-      # is connected to (IPSec, WireGuard, Tailscale). Lima's built-in
-      # usernet (lima0) runs a user-mode TCP stack on the host and only
-      # reaches services that need no host VPN; it silently times out on
-      # corporate VPNs and on Tailscale subnet routes.
-      #
-      # Lima's stock netplan ships lima0 metric=100 (preferred) and
-      # eth0 metric=200. We drop in a higher-numbered netplan file that
-      # overrides metrics and disables DHCP-installed default routes on
-      # lima0 — no edits to the lima-managed file, no hard-coded IPs.
-      #
-      # `mode: boot` maps to cloud-init's `bootcmd` — re-runs on every VM
-      # start. Idempotent: the heredoc just rewrites the same file. This
-      # guarantees existing VMs upgrading via `lima_vm_config_needs_update`
-      # pick the fix up on their next restart without needing cloud-init
-      # state reset.
-      set -eu
-      mkdir -p /etc/netplan
-      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'
-      network:
-        version: 2
-        ethernets:
-          eth0:
-            dhcp4-overrides:
-              route-metric: 100
-          lima0:
-            dhcp4-overrides:
-              route-metric: 300
-              use-routes: false
-      YAML
-      chmod 600 /etc/netplan/99-speedwave-prefer-vznat.yaml
-      netplan apply
-"#,
-        desired_lima_vm_memory()
-    )
-}
+// VM provisioning primitives live in the runtime SSOT `speedwave_runtime::provision`.
 
 /// Returns a `Command` for `limactl` with bundled-binary resolution and
-/// isolated `LIMA_HOME`. Delegates to [`speedwave_runtime::binary::command`]
-/// which resolves the binary path and ensures LIMA_HOME is set.
+/// isolated `LIMA_HOME`, via [`speedwave_runtime::binary::command`].
 #[cfg(target_os = "macos")]
 fn limactl_command() -> std::process::Command {
     speedwave_runtime::binary::command("limactl")
 }
 
-/// Escapes a path for safe interpolation inside PowerShell single-quoted strings.
-/// PowerShell single-quoted strings only require doubling of single quotes.
-#[cfg(target_os = "windows")]
-fn ps_escape(path: &std::path::Path) -> String {
-    path.display().to_string().replace('\'', "''")
-}
-
-/// Selects the rootfs URL and SHA256 hash for the current host architecture.
-#[cfg(target_os = "windows")]
-fn wsl_rootfs_for_arch() -> anyhow::Result<(&'static str, &'static str)> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok((
-            consts::WSL_ROOTFS_URL_AMD64,
-            consts::WSL_ROOTFS_SHA256_AMD64,
-        )),
-        "aarch64" => Ok((
-            consts::WSL_ROOTFS_URL_ARM64,
-            consts::WSL_ROOTFS_SHA256_ARM64,
-        )),
-        arch => anyhow::bail!("Unsupported architecture for WSL2 rootfs: {}", arch),
-    }
-}
-
-/// Selects the nerdctl-full SHA256 hash for the current host architecture.
-#[cfg(target_os = "windows")]
-fn nerdctl_sha256_for_arch() -> anyhow::Result<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok(consts::NERDCTL_FULL_SHA256_AMD64),
-        "aarch64" => Ok(consts::NERDCTL_FULL_SHA256_ARM64),
-        arch => anyhow::bail!("Unsupported architecture for nerdctl-full: {}", arch),
-    }
-}
-
-/// Returns the path to a bundled resource file, if it exists.
-/// Checks `SPEEDWAVE_RESOURCES_DIR` env var first (development/testing),
-/// then the standard Tauri resource directory (production).
-#[cfg(target_os = "windows")]
-fn find_bundled_resource(relative_path: &str) -> Option<PathBuf> {
-    // Check SPEEDWAVE_RESOURCES_DIR env var (development/testing)
-    if let Ok(resources_dir) = std::env::var("SPEEDWAVE_RESOURCES_DIR") {
-        let path = PathBuf::from(&resources_dir).join(relative_path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // Check next to the current executable (Tauri production layout)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let path = exe_dir.join(relative_path);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-/// Verifies SHA256 of a file using PowerShell. Returns `true` if the hash matches.
-#[cfg(target_os = "windows")]
-fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool {
-    let escaped = ps_escape(file_path);
-    let cmd = format!(
-        "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
-        escaped
-    );
-    let output = speedwave_runtime::binary::system_command("powershell")
-        .args(["-NoProfile", "-Command", &cmd])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let actual = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            actual == expected_sha256
-        }
-        _ => false,
-    }
-}
-
-/// Decode output from `wsl.exe` which may be UTF-16LE (with or without BOM) or UTF-8.
-///
-/// Windows `wsl.exe --list` often outputs UTF-16LE text. Using `String::from_utf8_lossy()`
-/// on such output corrupts the data (inserts replacement characters and null bytes), causing
-/// string comparisons like distro name matching to silently fail.
-#[cfg(any(target_os = "windows", test))]
+/// Decodes `wsl.exe` output which may be UTF-16LE (with or without BOM) or UTF-8.
+#[cfg(test)]
 use runtime::decode_wsl_output;
 
 pub fn init_vm() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        init_vm_macos()?;
+        speedwave_runtime::provision::init_vm_macos()?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        init_vm_windows()?;
+        speedwave_runtime::provision::init_vm_windows()?;
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -356,891 +176,20 @@ pub fn init_vm() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn init_vm_macos() -> anyhow::Result<()> {
-    // Ensure lima.yaml exists
-    let data_dir = consts::data_dir();
-    std::fs::create_dir_all(data_dir)?;
-    let lima_config_path = data_dir.join("lima.yaml");
-    if !lima_config_path.exists() {
-        std::fs::write(&lima_config_path, lima_config())?;
-    }
-
-    // Check if Lima VM exists
-    let list_output = limactl_command()
-        .args(["list", "--format", "{{.Name}}"])
-        .output()?;
-    let list_str = String::from_utf8_lossy(&list_output.stdout);
-
-    if !list_str
-        .lines()
-        .any(|line| line.trim() == consts::lima_vm_name())
-    {
-        // VM does not exist — create it
-        let output = limactl_command()
-            .args([
-                "create",
-                &format!("--name={}", consts::lima_vm_name()),
-                "--tty=false",
-            ])
-            .arg(&lima_config_path)
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("limactl create failed: {}", stderr.trim());
-        }
-    }
-
-    // Start VM if not running
-    let info_output = limactl_command()
-        .args(["list", "--format", "{{.Status}}", consts::lima_vm_name()])
-        .output()?;
-    let status_str = String::from_utf8_lossy(&info_output.stdout);
-
-    if !status_str.trim().eq_ignore_ascii_case("running") {
-        let output = limactl_command()
-            .args(["start", consts::lima_vm_name()])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("limactl start failed: {}", stderr.trim());
-        }
-    }
-
-    // Wait for containerd to be ready inside VM (up to 30s)
-    let mut ready = false;
-    for _ in 0..15 {
-        let verify = limactl_command()
-            .args([
-                "shell",
-                consts::lima_vm_name(),
-                "--",
-                "sudo",
-                "nerdctl",
-                "info",
-            ])
-            .output()?;
-        if verify.status.success() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    if !ready {
-        anyhow::bail!(
-            "containerd did not become ready inside VM after 30s. \
-             Try running: limactl shell {} -- sudo nerdctl info",
-            consts::lima_vm_name()
-        );
-    }
-
-    Ok(())
-}
-
+/// Ensures `%USERPROFILE%\.wslconfig` declares VPN-compatible `[wsl2]` keys.
+/// Re-exported from the runtime SSOT — called at startup from `main.rs`.
 #[cfg(target_os = "windows")]
-fn init_vm_windows() -> anyhow::Result<()> {
-    // OS prerequisite check (SSOT: os_prereqs module)
-    let violations = speedwave_runtime::os_prereqs::check_os_prereqs();
-    if !violations.is_empty() {
-        // WSL not available — attempt auto-install (always bails: restart or failure)
-        attempt_wsl_install()?;
-    }
+pub use speedwave_runtime::provision::ensure_wslconfig_vpn_compat;
 
-    // Ensure %USERPROFILE%\.wslconfig enables WSL2 mirrored networking before
-    // any distro starts — this is what lets containers see the host's
-    // VPN tunnel. Logs but does not fail setup on error: an older Windows
-    // build without mirrored-mode support still gets a working (if
-    // VPN-incompatible) install.
-    if let Err(e) = ensure_wslconfig_vpn_compat() {
-        log::warn!("ensure_wslconfig_vpn_compat failed (non-fatal): {e}");
-    }
-
-    let list = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["--list", "--quiet"])
-        .output()?;
-    // Decode WSL output — wsl.exe often outputs UTF-16LE on Windows
-    let list_str = decode_wsl_output(&list.stdout);
-    let distro_exists = list_str
-        .lines()
-        .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name());
-
-    if !distro_exists {
-        import_wsl_distro()?;
-    } else {
-        verify_wsl_distro_origin()?;
-    }
-
-    install_nerdctl_full()?;
-
-    Ok(())
-}
-
-/// Writes (or updates) `%USERPROFILE%\.wslconfig` so the `[wsl2]` section
-/// declares `networkingMode=mirrored`, `dnsTunneling=true`, `autoProxy=true`.
-/// These three keys together let WSL2 distros (including Speedwave's
-/// `Speedwave` distro and its containers) reach services on the host's
-/// corporate VPN without manual configuration.
-///
-/// Preserves all other user keys and sections — only the three load-bearing
-/// keys in `[wsl2]` are added or rewritten. Missing file → fresh skeleton.
-///
-/// Requires Windows 11 22H2+. Older builds silently ignore the unknown keys
-/// (legacy NAT mode stays active and VPN-protected services remain
-/// unreachable from inside WSL2 until the user upgrades).
+/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` to apply the
+/// change. Re-exported from the runtime SSOT — used by `main.rs`.
 #[cfg(target_os = "windows")]
-pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine %USERPROFILE% for .wslconfig"))?;
-    let path = home.join(".wslconfig");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = merge_wslconfig_vpn_keys(&existing);
-    if updated != existing {
-        speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, &updated)?;
-        log::info!(
-            "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
-            path.display()
-        );
-        // .wslconfig is read only on WSL2 boot. An existing WSL2 session
-        // won't pick up the new keys until the user runs `wsl --shutdown`
-        // (which restarts ALL WSL distros, not just Speedwave's). We log
-        // a hint rather than triggering the shutdown automatically — it
-        // would surprise users running unrelated WSL workloads.
-        log::warn!(
-            ".wslconfig changed — run `wsl --shutdown` from PowerShell to \
-             activate mirrored-mode networking (required to reach \
-             services on a corporate VPN from inside Speedwave's WSL distro)"
-        );
-    }
-    Ok(())
-}
+pub use speedwave_runtime::provision::TerminateOnChange;
 
-/// Pure transform: takes existing `.wslconfig` content (may be empty) and
-/// returns a version with the three VPN-compat keys inserted/updated under
-/// `[wsl2]`. All other sections and keys are preserved verbatim. Idempotent.
-#[cfg(any(target_os = "windows", test))]
-fn merge_wslconfig_vpn_keys(input: &str) -> String {
-    const VPN_KEYS: &[(&str, &str)] = &[
-        ("networkingMode", "mirrored"),
-        ("dnsTunneling", "true"),
-        ("autoProxy", "true"),
-    ];
-
-    // Match the dominant line ending of the input — `.wslconfig` written by
-    // Notepad on Windows is CRLF; emitting bare LF for new keys would yield
-    // a mixed-ending file (tolerated by WSL but cosmetically ugly).
-    let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
-
-    let mut out = String::with_capacity(input.len() + 128);
-    let mut current_section: Option<String> = None;
-    let mut wsl2_seen = false;
-    let mut wsl2_key_present: std::collections::HashSet<String> = Default::default();
-    let mut pending_inject: Vec<String> = Vec::new();
-
-    let push_missing_keys = |present: &std::collections::HashSet<String>,
-                             pending: &mut Vec<String>| {
-        for (k, v) in VPN_KEYS {
-            if !present.contains(&k.to_ascii_lowercase()) {
-                pending.push(format!("{k}={v}{nl}"));
-            }
-        }
-    };
-
-    for line in input.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if let Some(stripped) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            if current_section.as_deref() == Some("wsl2") {
-                push_missing_keys(&wsl2_key_present, &mut pending_inject);
-                for inj in pending_inject.drain(..) {
-                    out.push_str(&inj);
-                }
-            }
-            current_section = Some(stripped.trim().to_ascii_lowercase());
-            if current_section.as_deref() == Some("wsl2") {
-                wsl2_seen = true;
-            }
-            out.push_str(line);
-            continue;
-        }
-        if current_section.as_deref() == Some("wsl2") {
-            if let Some(eq) = trimmed.find('=') {
-                let key = trimmed[..eq].trim().to_ascii_lowercase();
-                if let Some((_, desired_val)) =
-                    VPN_KEYS.iter().find(|(k, _)| k.eq_ignore_ascii_case(&key))
-                {
-                    let original_key = trimmed[..eq].trim_end();
-                    out.push_str(&format!("{original_key}={desired_val}{nl}"));
-                    wsl2_key_present.insert(key);
-                    continue;
-                }
-                wsl2_key_present.insert(key);
-            }
-        }
-        out.push_str(line);
-    }
-
-    if current_section.as_deref() == Some("wsl2") {
-        push_missing_keys(&wsl2_key_present, &mut pending_inject);
-        if !out.ends_with('\n') && !pending_inject.is_empty() {
-            out.push_str(nl);
-        }
-        for inj in pending_inject {
-            out.push_str(&inj);
-        }
-    } else if !wsl2_seen {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push_str(nl);
-        }
-        if !out.is_empty() {
-            out.push_str(nl);
-        }
-        out.push_str(&format!("[wsl2]{nl}"));
-        for (k, v) in VPN_KEYS {
-            out.push_str(&format!("{k}={v}{nl}"));
-        }
-    }
-
-    out
-}
-
-/// Verifies that an existing WSL2 distro named [`consts::wsl_distro_name`] was
-/// created by Speedwave, not pre-registered by an attacker.
-///
-/// WSL stores the virtual disk at the install directory passed to `wsl --import`.
-/// Speedwave always imports into `~/.speedwave/wsl/Speedwave/`, so a legitimate
-/// distro will have `ext4.vhdx` at that path. If the file is missing the distro
-/// was registered from somewhere else — bail with a clear security error.
+/// Sets `/etc/wsl.conf` automount for the Speedwave distro (ADR-052).
+/// Re-exported from the runtime SSOT — used by `main.rs`.
 #[cfg(target_os = "windows")]
-fn verify_wsl_distro_origin() -> anyhow::Result<()> {
-    verify_wsl_distro_origin_in(consts::data_dir())
-}
-
-/// Data-dir-explicit variant of [`verify_wsl_distro_origin`].
-#[cfg(any(target_os = "windows", test))]
-fn verify_wsl_distro_origin_in(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    let expected_vhdx = expected_wsl_vhdx_path_in(data_dir);
-    if !expected_vhdx.exists() {
-        anyhow::bail!(
-            "Security error: a WSL2 distribution named '{}' already exists but was \
-             NOT created by Speedwave (expected disk image at {} is missing). \
-             This may indicate a malicious distro was pre-registered. \
-             Please run 'wsl --unregister {}' to remove it, then retry Speedwave setup.",
-            consts::wsl_distro_name(),
-            expected_vhdx.display(),
-            consts::wsl_distro_name(),
-        );
-    }
-    Ok(())
-}
-
-/// Data-dir-explicit variant returning the expected WSL2 virtual-disk path:
-/// `<data_dir>/wsl/<distro>/ext4.vhdx`.
-#[cfg(any(target_os = "windows", test))]
-fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
-    data_dir
-        .join("wsl")
-        .join(consts::wsl_distro_name())
-        .join("ext4.vhdx")
-}
-
-/// Attempts to install WSL2 via elevated PowerShell. Always bails: either
-/// with a restart prompt (success) or an installation failure message.
-/// Detection is handled by `os_prereqs::check_os_prereqs()` — this function
-/// only performs the install action.
-#[cfg(target_os = "windows")]
-fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = speedwave_runtime::binary::system_command("powershell")
-        .args([
-            "-Command",
-            "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-        ])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!(
-            "WSL2 installation failed or was cancelled.\n\
-             {}",
-            speedwave_runtime::consts::WSL_NOT_AVAILABLE_MSG
-        );
-    }
-    anyhow::bail!(
-        "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
-    );
-}
-
-/// Downloads the Ubuntu rootfs (with SHA256 verification) and imports it as a
-/// dedicated WSL2 distribution. Checks for a bundled rootfs first (offline
-/// install), then falls back to cached download, then fresh download.
-#[cfg(target_os = "windows")]
-fn import_wsl_distro() -> anyhow::Result<()> {
-    let data_dir = consts::data_dir();
-    let wsl_dir = data_dir.join("wsl");
-    let rootfs_path = wsl_dir.join("ubuntu-rootfs.tar.gz");
-    std::fs::create_dir_all(&wsl_dir)?;
-
-    let (rootfs_url, expected_sha256) = wsl_rootfs_for_arch()?;
-
-    // Try bundled rootfs first (offline install from NSIS bundle)
-    let mut have_valid_rootfs = false;
-
-    if let Some(bundled) = find_bundled_resource("wsl/ubuntu-rootfs.tar.gz") {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Copy bundled rootfs to the cache location for wsl --import
-            std::fs::copy(&bundled, &rootfs_path)?;
-            have_valid_rootfs = true;
-        }
-    }
-
-    // Check cached download
-    if !have_valid_rootfs && rootfs_path.exists() {
-        if verify_sha256_ps(&rootfs_path, expected_sha256) {
-            have_valid_rootfs = true;
-        } else {
-            let _ = std::fs::remove_file(&rootfs_path);
-        }
-    }
-
-    // Fall back to download
-    if !have_valid_rootfs {
-        let escaped_rootfs = ps_escape(&rootfs_path);
-        let download_and_verify = format!(
-            "$ProgressPreference = 'SilentlyContinue'; \
-             Invoke-WebRequest -Uri '{}' -OutFile '{}'; \
-             $hash = (Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower(); \
-             if ($hash -ne '{}') {{ \
-                 Remove-Item '{}' -Force; \
-                 Write-Error \"SHA256 mismatch: expected {}, got $hash\"; \
-                 exit 1 \
-             }}",
-            rootfs_url,
-            escaped_rootfs,
-            escaped_rootfs,
-            expected_sha256,
-            escaped_rootfs,
-            expected_sha256
-        );
-        let download = speedwave_runtime::binary::system_command("powershell")
-            .args(["-NoProfile", "-Command", &download_and_verify])
-            .status()?;
-        if !download.success() {
-            anyhow::bail!(
-                "Failed to download or verify Ubuntu rootfs for WSL2 \
-                 (expected SHA256: {})",
-                expected_sha256
-            );
-        }
-    }
-
-    let install_dir = wsl_dir.join(consts::wsl_distro_name());
-    std::fs::create_dir_all(&install_dir)?;
-    let status = speedwave_runtime::binary::system_command("wsl.exe")
-        .args([
-            "--import",
-            consts::wsl_distro_name(),
-            &install_dir.to_string_lossy(),
-            &rootfs_path.to_string_lossy(),
-        ])
-        .status()?;
-    if !status.success() {
-        // Check if the distro was already registered (import failed because it exists)
-        let recheck = speedwave_runtime::binary::system_command("wsl.exe")
-            .args(["--list", "--quiet"])
-            .output()?;
-        let recheck_str = decode_wsl_output(&recheck.stdout);
-        if recheck_str
-            .lines()
-            .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name())
-        {
-            // Distro exists but we didn't create it — verify it's ours before
-            // trusting it. An attacker could pre-register a malicious distro
-            // with the same name to hijack the container runtime.
-            verify_wsl_distro_origin()?;
-            log::warn!(
-                "WSL2 import failed but distro '{}' already exists and is verified — continuing",
-                consts::wsl_distro_name()
-            );
-        } else {
-            anyhow::bail!("Failed to import Speedwave WSL2 distribution");
-        }
-    }
-
-    // Import path: safe to terminate (no containers yet); Err retried by IfIdle on next launch (ADR-052).
-    use anyhow::Context as _;
-    ensure_wsl_distro_metadata(TerminateOnChange::Yes)
-        .context("configuring the imported WSL distro's automount failed")?;
-
-    Ok(())
-}
-
-/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` to apply the change.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TerminateOnChange {
-    /// Import path: no container runs yet, so terminating is always safe.
-    Yes,
-    /// Startup/post-update: terminate only when idle, else uid-1000 EACCES (ADR-052).
-    IfIdle,
-}
-
-/// Pure terminate policy (testable without Windows); `has_running` only for `IfIdle`.
-#[cfg(any(target_os = "windows", test))]
-fn terminate_decision(terminate: TerminateOnChange, has_running: bool) -> bool {
-    match terminate {
-        TerminateOnChange::Yes => true,
-        TerminateOnChange::IfIdle => !has_running,
-    }
-}
-
-/// Sets `/etc/wsl.conf` automount (`Yes` at import, `IfIdle` at startup; `Err` if the write didn't land — ADR-052).
-#[cfg(target_os = "windows")]
-pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Result<()> {
-    let distro = consts::wsl_distro_name();
-    let opts = consts::wsl_automount_options();
-    let (uid, _gid) = consts::container_uid_gid();
-
-    let existing = read_wsl_conf(distro).unwrap_or_default();
-    let updated = merge_wsl_conf_automount(&existing, &opts);
-
-    if updated == existing {
-        log::debug!("ensure_wsl_distro_metadata: automount options already current in {distro}");
-        return Ok(());
-    }
-
-    write_wsl_conf(distro, &updated)?;
-
-    // Verify the change landed; a read-only wsl.conf silently fails otherwise.
-    let verify = read_wsl_conf(distro).unwrap_or_default();
-    if !wsl_conf_automount_has_uid(&verify, uid) {
-        anyhow::bail!(
-            "wrote /etc/wsl.conf for {distro} but uid={uid} is NOT present on re-read; \
-             the uid-1000 container will hit EACCES on the drvfs mount and fail to start \
-             (login/onboarding broken). Check that /etc/wsl.conf is writable as root"
-        );
-    }
-
-    // Probe lazily (only IfIdle, only now that a real change exists) then decide.
-    let has_running =
-        matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
-    if terminate_decision(terminate, has_running) {
-        let terminated = speedwave_runtime::binary::system_command("wsl.exe")
-            .args(["--terminate", distro])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if terminated {
-            log::info!(
-                "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
-            );
-        } else {
-            log::warn!(
-                "ensure_wsl_distro_metadata: wrote metadata automount for {distro} but `wsl --terminate` failed; applies on next WSL restart"
-            );
-        }
-    } else {
-        log::info!(
-            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
-        );
-    }
-    Ok(())
-}
-
-/// Reads `/etc/wsl.conf` as root; `Ok("")` if absent, `Err` only on spawn failure.
-#[cfg(target_os = "windows")]
-fn read_wsl_conf(distro: &str) -> anyhow::Result<String> {
-    let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-        .output()?;
-    // `cat` on a missing file exits non-zero — treat that as empty, not an error.
-    Ok(if out.status.success() {
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    } else {
-        String::new()
-    })
-}
-
-/// Writes `content` to `/etc/wsl.conf` via `tee` (stdin), as root in the distro.
-#[cfg(target_os = "windows")]
-fn write_wsl_conf(distro: &str, content: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to open stdin for tee /etc/wsl.conf"))?
-        .write_all(content.as_bytes())?;
-    let status = child.wait()?;
-    if !status.success() {
-        anyhow::bail!("`tee /etc/wsl.conf` exited with {status} in {distro}");
-    }
-    Ok(())
-}
-
-/// `true` if any container runs in the distro (containerd-down ⇒ idle; spawn failure ⇒ fail-safe busy).
-#[cfg(target_os = "windows")]
-fn wsl_distro_has_running_containers(distro: &str) -> bool {
-    // Session is already `-u root`, so no `sudo` (not always in root's PATH).
-    let out = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--", "nerdctl", "ps", "-q"])
-        .output();
-    match out {
-        Ok(o) => running_containers_from_probe(
-            o.status.success(),
-            &String::from_utf8_lossy(&o.stdout),
-            &String::from_utf8_lossy(&o.stderr),
-        ),
-        Err(e) => {
-            log::warn!(
-                "wsl_distro_has_running_containers: spawn failed for {distro}; assuming busy: {e}"
-            );
-            true
-        }
-    }
-}
-
-/// Interprets a `nerdctl ps -q` probe: running, idle, or (on containerd-down stderr) idle; else fail-safe busy.
-#[cfg(any(target_os = "windows", test))]
-fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) -> bool {
-    if success {
-        return !stdout.trim().is_empty();
-    }
-    let lower = stderr.to_ascii_lowercase();
-    let daemon_down = lower.contains("connection refused")
-        || lower.contains("cannot connect")
-        || lower.contains("failed to connect")
-        || lower.contains("no such file or directory") // containerd.sock absent
-        || lower.contains("is the containerd daemon running");
-    if daemon_down {
-        false // daemon not up ⇒ nothing running ⇒ idle
-    } else {
-        log::warn!(
-            "wsl_distro_has_running_containers: nerdctl ps failed (assuming busy): {stderr}"
-        );
-        true
-    }
-}
-
-/// `true` if `[automount].options` contains `uid={uid}` as a full token (anchored, not substring).
-#[cfg(any(target_os = "windows", test))]
-fn wsl_conf_automount_has_uid(content: &str, uid: u32) -> bool {
-    automount_options_line(content).is_some_and(|opts| options_has_uid(opts, uid))
-}
-
-/// Value of the `options =` key in the first `[automount]` section (comments ignored); `None` if absent.
-#[cfg(any(target_os = "windows", test))]
-fn automount_options_line(content: &str) -> Option<&str> {
-    let mut in_automount = false;
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(sec) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            in_automount = sec.trim().eq_ignore_ascii_case("automount");
-            continue;
-        }
-        if in_automount {
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim().eq_ignore_ascii_case("options") {
-                    return Some(v.trim().trim_matches('"'));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// `true` if a comma-separated options string contains `uid={uid}` as a whole token.
-#[cfg(any(target_os = "windows", test))]
-fn options_has_uid(options: &str, uid: u32) -> bool {
-    let needle = format!("uid={uid}");
-    options.split(',').any(|tok| tok.trim() == needle)
-}
-
-/// Sets `[automount].options` to `opts`, replacing only that key; all other keys/sections preserved. CRLF-aware, idempotent.
-#[cfg(any(target_os = "windows", test))]
-fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
-    let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut out = String::with_capacity(input.len() + 64);
-    // `Some(true)` = first [automount] (keep its keys); `Some(false)` = a
-    // duplicate [automount] (drop its whole body); `None` = some other section.
-    let mut in_automount: Option<bool> = None;
-    let mut automount_seen = false;
-    let mut options_written = false;
-
-    for line in input.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if let Some(sec) = trimmed
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .map(|s| s.trim().to_ascii_lowercase())
-        {
-            if sec == "automount" {
-                if automount_seen {
-                    in_automount = Some(false); // duplicate — drop header + body
-                    continue;
-                }
-                automount_seen = true;
-                in_automount = Some(true);
-                out.push_str(line);
-                // Emit our options line right after the first header.
-                let line_nl = if line.ends_with('\n') { nl } else { "" };
-                out.push_str(&format!("options = \"{opts}\"{line_nl}"));
-                options_written = true;
-                continue;
-            }
-            in_automount = None;
-            out.push_str(line);
-            continue;
-        }
-        match in_automount {
-            // First [automount] body: drop only the old options line, keep the rest.
-            Some(true) => {
-                let is_options = trimmed
-                    .split_once('=')
-                    .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("options"));
-                if !is_options {
-                    out.push_str(line);
-                }
-            }
-            // Duplicate [automount] body — drop entirely.
-            Some(false) => {}
-            None => out.push_str(line),
-        }
-    }
-
-    if !options_written {
-        // No [automount] section existed — append a fresh one.
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push_str(nl);
-        }
-        out.push_str(&format!("[automount]{nl}options = \"{opts}\"{nl}"));
-    }
-    out
-}
-
-/// Makes the project's `claude-home` tree owned by the container user so the
-/// uid-1000 entrypoint can write `/home/speedwave` (mkdir/ln under `set -e`).
-///
-/// This is the **load-bearing** half of the Windows mount-ownership fix. The
-/// WSL drvfs `/mnt/c` mount is owned by uid 0 (the imported distro has no
-/// default user, and WSL's prepended default-user uid beats the `uid=` automount
-/// option), so a uid-1000 mkdir under a root-owned parent gets EACCES and the
-/// container exits(1) ("cannot exec in a stopped state"). With `metadata` on,
-/// `chown` writes per-file ownership that drvfs honors for access.
-///
-/// MUST run **after** `compose_up_recreate`: `compose up` auto-creates the
-/// `/home/speedwave/.claude` bind mount-point (for the read-only ide-bridge
-/// mount) as ROOT, so a chown done *before* compose is silently undone by the
-/// start. Chowning after the mount-points exist, then letting
-/// `ensure_exec_healthy`'s recovery recreate re-run the entrypoint against the
-/// now-1000-owned tree, is what actually fixes it. Verified on the live distro.
-///
-/// uid/gid come from the [`consts::container_uid_gid`] SSOT (same value as the
-/// compose `user:` field). Idempotent and cheap. Fail-open: a chown failure
-/// only logs.
-#[cfg(target_os = "windows")]
-pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
-    let distro = consts::wsl_distro_name();
-    let (uid, gid) = consts::container_uid_gid();
-    let host_path = speedwave_runtime::claude_home::claude_home_dir(consts::data_dir(), project);
-    let wsl_path = speedwave_runtime::engine_path::to_engine_path(&host_path)?;
-    let uidgid = format!("{uid}:{gid}");
-    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
-    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
-    // string and drops the `$d` variable, so inlining via argv (the way compose
-    // passes mount paths) is the reliable form. Three small invocations.
-    let run = |args: &[&str]| {
-        speedwave_runtime::binary::system_command("wsl.exe")
-            .args(["-d", distro, "-u", "root", "--"])
-            .args(args)
-            .output()
-    };
-    let steps: [(&str, Vec<&str>); 3] = [
-        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
-        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
-        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
-    ];
-    let mut all_ok = true;
-    for (name, args) in &steps {
-        match run(args) {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                all_ok = false;
-                log::warn!(
-                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) => {
-                all_ok = false;
-                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
-            }
-        }
-    }
-    if all_ok {
-        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
-    } else {
-        log::warn!(
-            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
-        );
-    }
-    Ok(())
-}
-
-/// Installs nerdctl-full (containerd + nerdctl + CNI + BuildKit) inside the
-/// Speedwave WSL2 distribution if not already present. Checks for a bundled
-/// tarball first (offline install), falling back to download if not found.
-#[cfg(target_os = "windows")]
-fn install_nerdctl_full() -> anyhow::Result<()> {
-    let nerdctl_check = speedwave_runtime::binary::system_command("wsl.exe")
-        .args([
-            "-d",
-            consts::wsl_distro_name(),
-            "--",
-            "nerdctl",
-            "--version",
-        ])
-        .output()?;
-    if nerdctl_check.status.success() {
-        return Ok(());
-    }
-
-    // Try bundled nerdctl-full tarball first (offline install from NSIS bundle).
-    // If valid, convert its path to WSL and use `cp` instead of `curl` inside the distro.
-    let expected_sha256 = nerdctl_sha256_for_arch()?;
-    let mut bundled_wsl_path: Option<String> = None;
-
-    if let Some(bundled) = find_bundled_resource("wsl/nerdctl-full.tar.gz") {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Translate the bundled tarball's host path to its WSL path via the
-            // SSOT (engine_path::to_engine_path) — one path-translation mechanism,
-            // not a second `wslpath` round-trip. On translation failure fall
-            // through to the curl download branch rather than abort the install.
-            match speedwave_runtime::engine_path::to_engine_path(&bundled) {
-                Ok(wsl) => bundled_wsl_path = Some(wsl),
-                Err(e) => log::warn!(
-                    "could not translate bundled nerdctl path to WSL ({e}); will download instead"
-                ),
-            }
-        }
-    }
-
-    // Build install script: use bundled file if available, otherwise download
-    let source_commands = if let Some(ref wsl_path) = bundled_wsl_path {
-        let escaped = wsl_path.replace('\'', "'\\''");
-        format!(
-            "mkdir -p /tmp/nerdctl-install\ncp '{}' \"/tmp/nerdctl-install/${{TARBALL}}\"",
-            escaped
-        )
-    } else {
-        "mkdir -p /tmp/nerdctl-install\ncurl -fsSL \"$URL\" -o \"/tmp/nerdctl-install/${TARBALL}\""
-            .to_string()
-    };
-
-    let install_script = format!(
-        r#"set -e
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64) ARCH="amd64"; EXPECTED="{sha256_amd64}" ;;
-  aarch64) ARCH="arm64"; EXPECTED="{sha256_arm64}" ;;
-  *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-esac
-VERSION="{version}"
-TARBALL="nerdctl-full-${{VERSION}}-linux-${{ARCH}}.tar.gz"
-URL="https://github.com/containerd/nerdctl/releases/download/v${{VERSION}}/${{TARBALL}}"
-{source_commands}
-ACTUAL=$(sha256sum "/tmp/nerdctl-install/${{TARBALL}}" | awk '{{print $1}}')
-if [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "SHA256 MISMATCH: expected $EXPECTED, got $ACTUAL"
-  rm -rf /tmp/nerdctl-install
-  exit 1
-fi
-tar -C /usr/local -xzf "/tmp/nerdctl-install/${{TARBALL}}"
-rm -rf /tmp/nerdctl-install
-# Install iptables — required by CNI bridge plugin for container networking.
-# nerdctl-full bundles CNI plugins but iptables is a system dependency.
-if ! command -v iptables >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq iptables >/dev/null
-fi
-# install_service NAME EXEC AFTER REQUIRES CHECK_CMD [CHECK_ARGS...]
-# Installs a systemd service unit file, starts it, and waits up to 30s for readiness.
-install_service() {{
-  local name="$1" exec="$2" after="$3" requires="$4"
-  shift 4
-  local check_cmd="$@"
-  mkdir -p /etc/systemd/system
-  cat > "/etc/systemd/system/${{name}}.service" <<UNIT
-[Unit]
-Description=${{name}} daemon
-${{after:+After=$after}}
-${{requires:+Requires=$requires}}
-[Service]
-ExecStart=$exec
-Restart=always
-[Install]
-WantedBy=multi-user.target
-UNIT
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-    systemctl daemon-reload
-    systemctl enable --now "$name"
-  else
-    $exec &
-  fi
-  for i in $(seq 1 15); do
-    if $check_cmd >/dev/null 2>&1; then return 0; fi
-    sleep 2
-  done
-  echo "$name did not become ready after 30s" >&2
-  exit 1
-}}
-# Configure containerd as a system service so it starts on every WSL session
-install_service containerd /usr/local/bin/containerd network.target "" nerdctl info
-# Start buildkitd — required for `nerdctl build` (image building).
-# On WSL2 we run as root (not rootless), so install as a systemd system service.
-install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containerd-worker=true" containerd.service containerd.service buildctl debug workers
-"#,
-        version = consts::NERDCTL_FULL_VERSION,
-        sha256_amd64 = consts::NERDCTL_FULL_SHA256_AMD64,
-        sha256_arm64 = consts::NERDCTL_FULL_SHA256_ARM64,
-        source_commands = source_commands
-    );
-    // Write the install script inside WSL via stdin to avoid argument
-    // length/escaping issues with wsl.exe -- bash -c "...".
-    // Pipe the script through stdin: echo "$script" | wsl bash -s
-    let install = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    use std::io::Write;
-    let mut child = install;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(install_script.as_bytes())?;
-        // Drop stdin to close the pipe and let bash finish
-    }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        log::error!(
-            "nerdctl-full install failed (exit {}): stdout={}, stderr={}",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        );
-        anyhow::bail!(
-            "Failed to install nerdctl-full inside {} WSL2 distribution: {}",
-            consts::wsl_distro_name(),
-            stderr.trim()
-        );
-    }
-
-    Ok(())
-}
+pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
 
 // ---------------------------------------------------------------------------
 // Step 4: Create project
@@ -1260,13 +209,9 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 // Setup completeness check
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when all required setup steps have been completed AND the
-/// VM / WSL distro still physically exists. `cli_linked` is excluded — CLI
-/// symlink creation is optional. The runtime check catches external removal
-/// (factory reset, manual unregister, data_dir rename) that leaves stale state.
-///
-/// **Cost:** `is_installed()` spawns `limactl list` (macOS) or `wsl.exe --list`
-/// (Windows) per call. Safe for navigation/route guards; do not poll.
+/// `true` when all required setup steps completed AND the VM / WSL distro
+/// still exists (`cli_linked` excluded). Spawns `limactl list` / `wsl.exe
+/// --list` per call — safe for route guards, do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {
@@ -1282,12 +227,15 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    // Build the active project's enabled set (+ claude/mcp-hub always). On a
-    // fresh setup there is no active project, so only claude/mcp-hub are
-    // built — workers come on demand when an integration is first enabled
-    // (ADR-057).
+    // Build the active project's enabled set (+ claude/mcp-hub always).
     let active_integrations = {
-        let user_config = config::load_user_config().unwrap_or_default();
+        let user_config = match config::load_user_config() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("build_images: failed to load config, using defaults: {e}");
+                config::SpeedwaveUserConfig::default()
+            }
+        };
         match user_config.active_project.as_deref() {
             Some(name) => match user_config.find_project(name) {
                 Some(p) => {
@@ -1311,17 +259,15 @@ pub fn build_images() -> anyhow::Result<()> {
         Err(e) => return Err(e),
     }
 
-    // Sync claude-resources to data_dir so they are available for
-    // compose volume mounts and container entrypoints.
+    // Sync claude-resources to data_dir for compose volume mounts.
     let build_root = build::resolve_build_root()?;
     bundle::sync_claude_resources(&build_root)?;
 
-    // Record that the current bundle's images are now built so that
-    // reconcile_bundle_update (on next startup) sees bundle_changed=false
-    // and skips the unnecessary rebuild.
+    // Persist the built bundle id + per-image map so next reconcile skips the rebuild (ADR-072).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
+    bundle_state.applied_image_hashes = manifest.image_hashes;
     bundle_state.phase = bundle::BundleReconcilePhase::Done;
     bundle_state.pending_running_projects.clear();
     bundle_state.last_error = None;
@@ -1339,24 +285,25 @@ pub fn build_images() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
+    // No provider is a valid state ("choose a provider" screen) — every
+    // caller must skip starting rather than let render_compose bail.
+    if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
+        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        return defer_container_start_gated(project, true);
+    }
+
     let rt = runtime::detect_runtime();
 
     log::info!("ensuring runtime is ready");
     rt.ensure_ready()?;
     log::info!("runtime ready, rendering compose");
 
-    // Re-render compose.yml before every start. Dynamic config (mcp-os token,
-    // auth keys, addons) may have changed since create_project() first rendered it.
-    // Without this, WORKER_OS_URL is missing if mcp-os started after project creation.
+    // Re-render compose.yml before every start: dynamic config may have changed.
     let user_config = config::load_user_config()?;
     let project_dir = &user_config.require_project(project)?.dir;
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
-    // Bridge info is sourced from the globally-shared plugin-bridges map
-    // via crate::reconcile::current_bridges_info(). When no host-bridged
-    // plugins are running yet (e.g. during early setup), the registration
-    // list is empty and the corresponding env vars stay absent in compose.yml.
     let yaml = compose::render_compose(
         project,
         project_dir,
@@ -1383,33 +330,16 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 
     rt.transaction(project, |rt| -> anyhow::Result<()> {
         compose::save_compose(project, &yaml)?;
-        log::info!("starting containers via compose_up_recreate");
+        log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        rt.compose_up_recreate(project)?;
+        // Idempotent up, not force-recreate (ADR-072).
+        rt.compose_up(project)?;
         Ok(())
     })?;
     log::info!("containers started, verifying health");
 
-    // Windows: `compose up` auto-creates the `/home/speedwave/.claude` bind
-    // mount-point (for the read-only ide-bridge mount) as ROOT, even after we
-    // chowned claude-home — so the uid-1000 entrypoint's `mkdir .claude/skills`
-    // hits EACCES and the container exits(1). Chown the tree AFTER compose
-    // created the mount-points, then ensure_exec_healthy's recovery recreate
-    // re-runs the entrypoint against the now-1000-owned tree. Verified on the
-    // live distro. Fail-open. (ADR-052 mount ownership.)
-    #[cfg(target_os = "windows")]
-    if let Err(e) = ensure_claude_home_owner(project) {
-        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
-    }
-
-    // Verify containers are actually functional before marking as started.
-    // Only probes the claude container — MCP workers are health-checked
-    // separately via get_health.
-    let claude_container = format!(
-        "{}_{}_claude",
-        speedwave_runtime::consts::compose_prefix(),
-        project
-    );
+    // Verify functional before marking started: probes the claude container only.
+    let claude_container = crate::chat::claude_container_name(project);
     runtime::ensure_exec_healthy(&rt, project, &claude_container)?;
 
     let mut state = SetupState::load();
@@ -1419,14 +349,32 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Marks step 4 done without starting containers, for a project with no LLM
+/// provider yet. Refuses if a provider IS configured (must start for real).
+pub fn defer_container_start(project: &str) -> anyhow::Result<()> {
+    let unconfigured =
+        crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)?;
+    defer_container_start_gated(project, unconfigured)
+}
+
+/// Testable core of [`defer_container_start`] — takes the unconfigured check
+/// as a plain bool so tests don't need real disk-backed config/state.
+fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow::Result<()> {
+    if !llm_unconfigured {
+        anyhow::bail!("project '{project}' has a configured LLM provider — call start_containers");
+    }
+    let mut state = SetupState::load();
+    state.containers_started = true;
+    state.save()?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Check Claude auth status inside the container
 // ---------------------------------------------------------------------------
 
-/// Pure lookup for the project's LLM provider name from the user config.
-/// Returns `None` when the project is missing or `claude.llm.provider` is
-/// unset. Separated out so the local-provider branch in `check_claude_auth`
-/// can be covered without mocking the container runtime.
+/// Looks up the project's LLM provider name. `None` when the project is
+/// missing or `claude.llm.provider` is unset.
 pub(crate) fn lookup_project_provider<'a>(
     user_config: &'a speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -1438,6 +386,41 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
+/// True when the project's sessions need the in-container Anthropic OAuth
+/// check: v2 (ADR-073) only for `AnthropicOauth`. An UNCONFIGURED project (no
+/// llm config, or a dangling active selection) does NOT force OAuth (R7/f1,f4)
+/// — the user is routed to provider configuration instead of an auth wall.
+pub(crate) fn project_needs_anthropic_auth(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+) -> bool {
+    use speedwave_runtime::config::LlmProviderKind;
+    let llm = user_config
+        .find_project(project)
+        .and_then(|p| p.claude.as_ref())
+        .and_then(|c| c.llm.as_ref());
+    if let Some(llm) = llm {
+        if !llm.providers.is_empty() {
+            return match llm.active_provider().map(|e| e.kind) {
+                Some(LlmProviderKind::AnthropicOauth) => true,
+                Some(_) => false,
+                // Dangling active (points at no entry) → unconfigured, not OAuth.
+                None => false,
+            };
+        }
+        // v2-shaped but no providers configured → unconfigured.
+        if llm.schema_version.is_some() {
+            return false;
+        }
+    }
+    // Legacy v1 shape: an explicit non-local provider needs OAuth; an
+    // unset provider (fresh project) does not.
+    match lookup_project_provider(user_config, project) {
+        Some(provider) => !speedwave_runtime::config::is_local_provider(Some(provider)),
+        None => false,
+    }
+}
+
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
         log::warn!(
@@ -1445,13 +428,12 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         );
         speedwave_runtime::config::SpeedwaveUserConfig::default()
     });
-    let provider = lookup_project_provider(&user_config, project);
-    if speedwave_runtime::config::is_local_provider(provider) {
-        log::info!("check_claude_auth: local provider — skipping Anthropic OAuth check");
+    if !project_needs_anthropic_auth(&user_config, project) {
+        log::info!("check_claude_auth: non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
-    let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
+    let container_name = crate::chat::claude_container_name(project);
     log::info!("check_claude_auth: container={container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
     log::info!("check_claude_auth: container healthy, checking auth");
@@ -1466,195 +448,10 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 // Lima VM config migration — upgrade memory from older installs
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the Lima config memory differs from the desired value.
-///
-/// Compares the `memory: "XGiB"` line against the desired value from
-/// [`desired_lima_vm_memory`]. Returns `false` if current memory equals desired
-/// (no-op) or if the value is unparseable (safety). Supports both upgrades and
-/// downgrades so that a reduced VM formula is applied on next startup.
-#[cfg(any(target_os = "macos", test))]
-fn lima_vm_config_needs_update(config_content: &str) -> bool {
-    let desired_str = desired_lima_vm_memory();
-    let desired = match desired_str
-        .strip_suffix("GiB")
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        Some(v) => v,
-        None => return false,
-    };
-    lima_vm_config_needs_update_with(config_content, desired)
-}
-
-/// Testable variant: compares config content against an explicit desired GiB.
-#[cfg(any(target_os = "macos", test))]
-fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> bool {
-    // Trigger migration when the VPN-aware netplan drop-in is absent —
-    // existing pre-update installs (including ones with the old `ip route del`
-    // provision) need the new netplan-based fix injected on next boot.
-    // See `lima_config()` doc and lima-vm/lima#2984.
-    if !config_content.contains("99-speedwave-prefer-vznat.yaml") {
-        return true;
-    }
-    for line in config_content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("memory:") {
-            let value = rest.trim().trim_matches('"');
-            return match value
-                .strip_suffix("GiB")
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                Some(current) => current != desired_gib,
-                None => false, // unparseable — don't touch
-            };
-        }
-    }
-    false // no memory line found
-}
-
-/// Migrates the Lima VM memory allocation on existing installs.
-///
-/// Reads the source template at `{data_dir()}/lima.yaml` and, if the memory
-/// value differs from [`desired_lima_vm_memory`], updates both the source template and the
-/// Lima instance config. Stops and restarts the VM if it was running.
-///
-/// No-op when:
-/// - Source template doesn't exist (fresh install — `init_vm_macos` creates it)
-/// - Memory already equals the desired value
+/// Migrates the Lima VM config when it drifts from the SSOT (memory, cpus, or
+/// the VPN netplan drop-in). Re-exported from [`speedwave_runtime::provision`].
 #[cfg(target_os = "macos")]
-pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
-    use speedwave_runtime::binary;
-    let data_dir = consts::data_dir();
-    let source_template = data_dir.join("lima.yaml");
-
-    // Fresh install — init_vm_macos will create it with correct config
-    if !source_template.exists() {
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(&source_template)?;
-    if !lima_vm_config_needs_update(&content) {
-        return Ok(());
-    }
-
-    let desired_mem = desired_lima_vm_memory();
-
-    // Extract current memory for informative logging.
-    let current_mem: Option<String> = content.lines().find_map(|line| {
-        let trimmed = line.trim();
-        trimmed
-            .strip_prefix("memory:")
-            .map(|rest| rest.trim().trim_matches('"').to_string())
-    });
-
-    if let Some(ref current) = current_mem {
-        log::info!(
-            "Lima VM config migration: {current} → {desired_mem} (formula: host_ram/2, clamped 4–32 GiB)"
-        );
-    } else {
-        log::info!("Lima VM config migration: updating memory to {desired_mem}");
-    }
-
-    // Check if VM exists
-    let list_output = limactl_command()
-        .args(["list", "--format", "{{.Name}}"])
-        .output()?;
-    let list_str = String::from_utf8_lossy(&list_output.stdout);
-    let vm_exists = list_str
-        .lines()
-        .any(|line| line.trim() == consts::lima_vm_name());
-
-    // Stop VM if running
-    if vm_exists {
-        let status_output = limactl_command()
-            .args(["list", "--format", "{{.Status}}", consts::lima_vm_name()])
-            .output()?;
-        let status_str = String::from_utf8_lossy(&status_output.stdout);
-        if status_str.trim().eq_ignore_ascii_case("running") {
-            log::warn!(
-                "Stopping VM for memory migration — any running Claude sessions will be interrupted"
-            );
-            let timeout = std::time::Duration::from_secs(30);
-            let mut stop_cmd = limactl_command();
-            stop_cmd.args(["stop", consts::lima_vm_name()]);
-            if let Err(e) = binary::run_with_timeout(&mut stop_cmd, timeout) {
-                log::warn!("graceful stop failed ({e}), forcing stop");
-                let mut force_cmd = limactl_command();
-                force_cmd.args(["stop", "--force", consts::lima_vm_name()]);
-                if let Err(e2) = binary::run_with_timeout(&mut force_cmd, timeout) {
-                    log::warn!("forced stop also failed: {e2}, continuing with config update");
-                }
-            }
-        }
-    }
-
-    // Migration rewrite: in-place line-by-line — replaces the memory line
-    // and appends the SSOT provision block. Preserves user customisations
-    // (cpus, mounts, original indentation). Full regeneration from
-    // `lima_config()` would clobber any user-added fields, so we limit
-    // mutations to the two fields we control.
-    let rewrite_config = |text: &str| -> String {
-        let mut new_text: String = text
-            .lines()
-            .map(|line| {
-                if line.trim().starts_with("memory:") {
-                    let indent = &line[..line.len() - line.trim_start().len()];
-                    format!("{indent}memory: \"{desired_mem}\"")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Preserve trailing newline if original had one
-        if text.ends_with('\n') && !new_text.ends_with('\n') {
-            new_text.push('\n');
-        }
-        // Append the provision block if missing — the SSOT `lima_config()`
-        // always emits it, but pre-update files don't have it. We append
-        // verbatim from the SSOT so a future change to the script reaches
-        // existing installs.
-        if !new_text.contains("99-speedwave-prefer-vznat.yaml") {
-            // Extract just the `provision:` section from the SSOT template.
-            // Replaces any prior provision block (including the old
-            // `ip route del` variant) by truncating from `provision:` onward.
-            let ssot = lima_config();
-            if let Some(existing) = new_text.find("\nprovision:") {
-                new_text.truncate(existing + 1);
-            } else if let Some(existing) = new_text.find("provision:") {
-                new_text.truncate(existing);
-            }
-            if let Some(idx) = ssot.find("provision:") {
-                if !new_text.ends_with('\n') {
-                    new_text.push('\n');
-                }
-                new_text.push_str(&ssot[idx..]);
-            }
-        }
-        new_text
-    };
-
-    // Update source template (reuse `content` already read above)
-    std::fs::write(&source_template, rewrite_config(&content))?;
-
-    // Update instance config (may not exist if VM was never created)
-    let instance_config = data_dir
-        .join(consts::LIMA_SUBDIR)
-        .join(consts::lima_vm_name())
-        .join("lima.yaml");
-    if instance_config.exists() {
-        let instance_content = std::fs::read_to_string(&instance_config)?;
-        std::fs::write(&instance_config, rewrite_config(&instance_content))?;
-    }
-
-    // Restart VM if it existed
-    if vm_exists {
-        log::info!("Starting VM after memory migration");
-        init_vm_macos()?;
-    }
-
-    log::info!("Lima VM config migration complete");
-    Ok(())
-}
+pub use speedwave_runtime::provision::ensure_lima_vm_config;
 
 // ---------------------------------------------------------------------------
 // Factory reset — stops containers, destroys VM, wipes setup state
@@ -1663,18 +460,10 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
-    // 1. Stop containers for the wizard's project (if any) — with timeout.
-    //    Only stops the single project from setup_state.json, not all projects
-    //    from config.json. This is intentional: the VM force-delete (step 2)
-    //    destroys all containers regardless, and config.json may already be
-    //    corrupt or missing at this point. Best-effort graceful stop here.
-    //    Even is_available() could theoretically hang, so run the entire
-    //    "check + compose_down" block with a timeout.
+    // 1. Stop only the wizard's project (VM force-delete destroys all containers anyway), with timeout.
     if let Some(ref project) = state.project_created {
         log::info!("stopping containers for project={project}");
         let project_clone = project.clone();
-        // Uses thread+channel (not run_with_timeout) because compose_down goes
-        // through the ContainerRuntime trait, which returns Result — not a Command.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = runtime::detect_runtime();
@@ -1719,12 +508,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 2b. Reset VM/distro across platforms.
-    //     Windows: WslRuntime::reset_vm runs `wsl --terminate` + `--unregister`,
-    //     each bounded by CommandRunner::run_with_timeout (10s + 25s).
-    //     macOS: trait default no-op (Lima VM already destroyed above).
-    //     Run BEFORE wipe_data_dir so the WSL VHDX path is still where WSL
-    //     expects it (~/.speedwave/wsl/Speedwave/ext4.vhdx).
+    // 2b. Reset VM/distro before wipe_data_dir (WSL VHDX still lives under the data dir).
     {
         let rt = runtime::detect_runtime();
         if let Err(e) = rt.reset_vm() {
@@ -1764,12 +548,8 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
 // Step 7: Copy CLI binary to user PATH
 // ---------------------------------------------------------------------------
 
-/// Resolves the CLI binary bundled in Tauri resources.
-///
-/// Layout at runtime:
-/// - macOS:   `.app/Contents/Resources/cli/speedwave`
-/// - Windows: `<exe_dir>/resources/cli/speedwave.exe`
-/// - Dev mode fallback: `<exe_dir>/speedwave` (existing behaviour)
+/// Resolves the CLI binary bundled in Tauri resources, with a dev fallback
+/// next to the exe.
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
@@ -1837,6 +617,21 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     None
 }
 
+/// True when both files exist and are byte-identical (size fast-path first).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 /// Copies the CLI binary from `source` into `target_dir` and sets executable permissions on Unix.
 pub fn copy_cli_binary(
     source: &std::path::Path,
@@ -1883,11 +678,8 @@ enum UserShell {
     Unknown,
 }
 
-/// Detects the user's default shell from the `$SHELL` environment variable.
-///
-/// Falls back to [`UserShell::Zsh`] on macOS when `$SHELL` is unset (common when
-/// the Desktop app is launched from Dock/Finder, where launchd may not propagate
-/// `$SHELL`). macOS has defaulted to zsh since Catalina (10.15).
+/// Detects the user's default shell from `$SHELL`. Falls back to
+/// [`UserShell::Zsh`] on macOS when `$SHELL` is unset.
 #[cfg(unix)]
 fn detect_shell() -> UserShell {
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -1895,9 +687,6 @@ fn detect_shell() -> UserShell {
 }
 
 /// Parses a `$SHELL` value into a [`UserShell`].
-///
-/// Separated from [`detect_shell`] so unit tests can exercise the parsing logic
-/// directly without depending on (or mutating) the `$SHELL` environment variable.
 #[cfg(unix)]
 fn parse_shell_env(shell: &str) -> UserShell {
     if shell.ends_with("/bash") {
@@ -1906,7 +695,6 @@ fn parse_shell_env(shell: &str) -> UserShell {
         UserShell::Zsh
     } else if shell.is_empty() {
         // $SHELL may be unset when launched from macOS Dock/Finder (launchd).
-        // macOS default shell is zsh since Catalina (10.15).
         #[cfg(target_os = "macos")]
         return UserShell::Zsh;
         #[cfg(target_os = "windows")]
@@ -1916,14 +704,9 @@ fn parse_shell_env(shell: &str) -> UserShell {
     }
 }
 
-/// Returns the shell config file path(s) to modify for the given shell.
-///
-/// Selection rules per shell initialization order:
-/// - **bash on macOS**: login shell reads first of `.bash_profile` > `.bash_login` >
-///   `.profile` (then stops). macOS terminals always open login shells, so only the
-///   login file is needed. Creates `.bash_profile` if none of the three exist.
-/// - **zsh**: `.zshrc` is sourced for both login and interactive shells on all platforms.
-/// - **Unknown**: `.profile` — POSIX portable fallback.
+/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of
+/// `.bash_profile`/`.bash_login`/`.profile` (creates `.bash_profile` if none);
+/// unknown → `.profile`.
 #[cfg(unix)]
 fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
     match shell {
@@ -1944,12 +727,8 @@ fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::pa
     }
 }
 
-/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the correct
-/// shell config file(s) for the user's detected shell and platform.
-///
-/// Detects the user's shell via `$SHELL` and writes to the appropriate config file
-/// (e.g., `.bash_profile` for bash on macOS, `.zshrc` for zsh). Creates the target
-/// file if it doesn't exist. Skips files that already contain `.local/bin`.
+/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the
+/// detected shell's config file. Idempotent: skips files already containing it.
 #[cfg(unix)]
 fn ensure_local_bin_on_path(home: &std::path::Path) -> anyhow::Result<()> {
     ensure_local_bin_on_path_for_shell(home, detect_shell())
@@ -1991,14 +770,8 @@ fn ensure_local_bin_on_path_for_shell(
     Ok(())
 }
 
-/// Returns the platform-specific path where the CLI binary is installed.
-///
-/// - Unix: `~/.local/bin/speedwave`
-/// - Windows: `~/.speedwave/bin/speedwave.exe`
-///
-/// Returns the install path of the CLI binary for an explicit `data_dir`.
-/// Only the Windows branch consults `data_dir`; on Unix the path derives from
-/// the home dir. Used only in tests to verify the path matches `link_cli_from`.
+/// CLI install path (Unix: `~/.local/bin/speedwave`, Windows:
+/// `<data_dir>/bin/speedwave.exe`).
 #[cfg(test)]
 fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
@@ -2013,17 +786,10 @@ fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf
     Some(path)
 }
 
-/// Copies the CLI binary into the user's PATH and updates shell configuration.
-///
-/// Called both unconditionally on app startup (to keep the CLI in sync after updates)
-/// and during the setup wizard finalize step. Both calls are idempotent.
-///
-/// Uses [`link_cli_from`] internally for the filesystem operations, then updates
-/// the persisted [`SetupState`] to mark `cli_linked = true`.
+/// Copies the CLI binary into PATH, updates shell config, and marks
+/// `cli_linked` in [`SetupState`]. Idempotent.
 pub fn link_cli() -> anyhow::Result<()> {
-    // Guard: skip if data directory does not exist — factory reset wiped it
-    // or this is a fresh install. The wizard will link the CLI after creating
-    // the data directory. Defense in depth: main.rs also guards the call site.
+    // Guard: skip if the data directory does not exist.
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
@@ -2041,9 +807,6 @@ pub fn link_cli() -> anyhow::Result<()> {
     link_cli_from(&cli_source, &home)?;
 
     // Write resources-dir marker so the external CLI can find build context.
-    // On startup this write is gated behind setup_started (to avoid
-    // recreating ~/.speedwave/ after factory reset). Here in link_cli() the
-    // data dir is guaranteed to exist, so write the marker unconditionally.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
             log::warn!("link_cli: could not write resources-dir marker: {e}");
@@ -2094,24 +857,13 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
     resolve_bundled_windows_script("sweep.ps1")
 }
 
-/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
-/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+/// Absolute system PowerShell path — re-export of the runtime SSOT.
 #[cfg(target_os = "windows")]
-pub(crate) fn system_powershell_path() -> std::path::PathBuf {
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe")
-}
+pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
-/// Defense-in-depth: kill any stale Speedwave / Node / CLI process holding
-/// the binaries we are about to overwrite. Runs at every Tauri Desktop
-/// startup, complementing the install-time sweep in NSIS + WiX. Fails open
-/// (logs warn, returns) so AppLocker / WDAC policy cannot brick startup.
-/// SSOT for the kill predicate is `windows/sweep.ps1`.
+/// Kills stale Speedwave / Node / CLI processes holding binaries about to be
+/// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
+/// predicate is `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
 fn run_pre_link_sweep() {
     let Some(sweep) = resolve_sweep_script() else {
@@ -2125,10 +877,7 @@ fn run_pre_link_sweep() {
     let data_dir = consts::data_dir();
     let powershell = system_powershell_path();
 
-    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe. Full mode is
-    // reserved for install-time hooks (NSIS/MSI) — Tauri Desktop must not
-    // target its own workers or self. system_command applies CREATE_NO_WINDOW
-    // so PowerShell does not flash a console over the Desktop UI.
+    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe (full mode is install-time only).
     let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
@@ -2159,10 +908,7 @@ fn run_pre_link_sweep() {
     }
 }
 
-/// Inner implementation that copies the CLI binary and configures PATH using explicit paths.
-///
-/// Separated from [`link_cli`] for unit testing without depending on `current_exe()` or
-/// the real home directory.
+/// Copies the CLI binary and configures PATH using explicit paths.
 fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -2191,13 +937,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             );
         }
 
-        // Defense-in-depth: kill any stale CLI / worker process holding
-        // ~/.speedwave/bin/speedwave.exe before we try to overwrite it.
-        // Covers MSI users (no NSIS PRE-INSTALL sweep), AppLocker failures,
-        // and post-install processes spawned by containers (ADR-048).
-        run_pre_link_sweep();
-
-        copy_cli_binary(cli_source, &cli_dir)?;
+        // Already-current CLI: skip the sweep AND the copy — the runtime sweep
+        // would kill a user's live `speedwave` session for nothing (ADR-048).
+        let target = cli_dir.join("speedwave.exe");
+        if files_identical(cli_source, &target) {
+            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+        } else {
+            // Kill any stale process holding the exe before overwrite (ADR-048).
+            run_pre_link_sweep();
+            copy_cli_binary(cli_source, &cli_dir)?;
+        }
 
         let script = format!(
             r#"
@@ -2218,7 +967,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::system_command("powershell")
+        let status = speedwave_runtime::binary::powershell_command()
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
@@ -2252,11 +1001,7 @@ mod tests {
                 settings: None,
                 llm: Some(LlmConfig {
                     provider: provider.map(str::to_string),
-                    model: None,
-                    base_url: None,
-                    context_tokens: None,
-                    has_api_key: false,
-                    has_custom_headers: false,
+                    ..Default::default()
                 }),
             }),
             integrations: None,
@@ -2356,6 +1101,134 @@ mod tests {
         assert!(is_local_provider(Some("llamacpp")));
         assert!(!is_local_provider(Some("anthropic")));
         assert!(!is_local_provider(None));
+    }
+
+    /// Builds a project entry carrying a v2 (ADR-073) provider list with one
+    /// active entry of the given kind.
+    fn project_with_v2_kind(
+        name: &str,
+        kind: speedwave_runtime::config::LlmProviderKind,
+    ) -> ProjectUserEntry {
+        use speedwave_runtime::config::{LlmActive, LlmProviderEntry};
+        ProjectUserEntry {
+            name: name.to_string(),
+            dir: String::new(),
+            claude: Some(ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(LlmConfig {
+                    schema_version: Some(speedwave_runtime::config::LLM_SCHEMA_VERSION),
+                    providers: vec![LlmProviderEntry {
+                        id: "p1".to_string(),
+                        kind,
+                        base_url: None,
+                        model: None,
+                        has_api_key: false,
+                        context_tokens: None,
+                        has_custom_headers: false,
+                    }],
+                    active: Some(LlmActive {
+                        provider_id: "p1".to_string(),
+                        model: None,
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            integrations: None,
+            plugin_settings: None,
+        }
+    }
+
+    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth
+    /// check; every other kind (api key, local, openrouter, …) must skip it
+    /// or offline/key-based users get blocked on a claude.ai login.
+    #[test]
+    fn needs_anthropic_auth_by_v2_kind() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        for (kind, expected) in [
+            (K::AnthropicOauth, true),
+            (K::AnthropicApiKey, false),
+            (K::Local, false),
+            (K::OpenRouter, false),
+        ] {
+            let cfg = SpeedwaveUserConfig {
+                projects: vec![project_with_v2_kind("proj", kind)],
+                ..Default::default()
+            };
+            assert_eq!(
+                project_needs_anthropic_auth(&cfg, "proj"),
+                expected,
+                "kind {kind:?}"
+            );
+        }
+    }
+
+    /// Legacy v1: local skips, explicit anthropic checks; an UNSET provider
+    /// (fresh project) and a missing project are unconfigured → no OAuth (R7).
+    #[test]
+    fn needs_anthropic_auth_legacy_fallback() {
+        for (provider, expected) in [
+            (Some("ollama"), false),
+            (Some("local"), false),
+            (Some("anthropic"), true),
+            (None, false),
+        ] {
+            let cfg = SpeedwaveUserConfig {
+                projects: vec![project_with_provider("proj", provider)],
+                ..Default::default()
+            };
+            assert_eq!(
+                project_needs_anthropic_auth(&cfg, "proj"),
+                expected,
+                "legacy provider {provider:?}"
+            );
+        }
+        assert!(!project_needs_anthropic_auth(
+            &SpeedwaveUserConfig::default(),
+            "missing"
+        ));
+    }
+
+    /// R7/f4: a v2 config whose active id points at no entry is unconfigured —
+    /// it must NOT force the Anthropic OAuth wall (user goes to config).
+    #[test]
+    fn needs_anthropic_auth_dangling_active_does_not_force_oauth() {
+        use speedwave_runtime::config::LlmActive;
+        let mut entry = project_with_v2_kind(
+            "proj",
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+        );
+        if let Some(c) = entry.claude.as_mut() {
+            if let Some(l) = c.llm.as_mut() {
+                l.active = Some(LlmActive {
+                    provider_id: "ghost".to_string(),
+                    model: None,
+                });
+            }
+        }
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![entry],
+            ..Default::default()
+        };
+        assert!(!project_needs_anthropic_auth(&cfg, "proj"));
+    }
+
+    /// R7/f1: a fresh project (no claude overrides) must NOT force the Anthropic
+    /// OAuth wall — the user can configure OpenRouter/local first.
+    #[test]
+    fn needs_anthropic_auth_fresh_project_does_not_force_oauth() {
+        let entry = ProjectUserEntry {
+            name: "fresh".to_string(),
+            dir: String::new(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+        };
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![entry],
+            ..Default::default()
+        };
+        assert!(!project_needs_anthropic_auth(&cfg, "fresh"));
     }
 
     /// Validates that a path component does not contain traversal or unsafe characters.
@@ -2512,6 +1385,37 @@ mod tests {
     }
 
     #[test]
+    fn setup_state_is_missing_state_file_true_for_notfound() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nonexistent.json");
+        let err = SetupState::load_from(&path).expect_err("missing file must err");
+        // Missing file is the normal first-run case: classified as missing → no warn.
+        assert!(SetupState::is_missing_state_file(&err));
+    }
+
+    #[test]
+    fn setup_state_is_missing_state_file_false_for_corrupt_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("setup_state.json");
+        std::fs::write(&path, "{ not valid json ]").expect("write corrupt json");
+        let err = SetupState::load_from(&path).expect_err("corrupt json must err");
+        // Corrupt JSON is a serde error, not an io::NotFound → must be warned (not missing).
+        assert!(!SetupState::is_missing_state_file(&err));
+    }
+
+    #[test]
+    fn setup_state_load_from_corrupt_json_errors_then_defaults_logic() {
+        // load_from surfaces the parse error; load() turns it into a default.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("setup_state.json");
+        std::fs::write(&path, "not even json").expect("write garbage");
+        assert!(
+            SetupState::load_from(&path).is_err(),
+            "corrupt state must be an error, not a silent default"
+        );
+    }
+
+    #[test]
     fn setup_state_default_is_all_false() {
         let state = SetupState::default();
         assert_eq!(state.current_step(), 0);
@@ -2624,6 +1528,18 @@ mod tests {
         );
         assert!(state.runtime_ready);
         assert!(!state.vm_ready);
+    }
+
+    // ── defer_container_start_gated ─────────────────────────────────────────
+
+    #[test]
+    fn defer_container_start_gated_refuses_when_provider_configured() {
+        let result = defer_container_start_gated("proj", false);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("configured LLM provider"));
     }
 
     // ── is_setup_complete logic ─────────────────────────────────────────────
@@ -2998,174 +1914,6 @@ mod tests {
         assert!(loaded.runtime_ready);
     }
 
-    // -- ps_escape tests (Windows PowerShell path escaping) --
-
-    #[cfg(target_os = "windows")]
-    mod ps_escape_tests {
-        use super::super::ps_escape;
-        use std::path::Path;
-
-        #[test]
-        fn plain_path_unchanged() {
-            let p = Path::new(r"C:\Users\dev\speedwave");
-            assert_eq!(ps_escape(p), r"C:\Users\dev\speedwave");
-        }
-
-        #[test]
-        fn single_quote_doubled() {
-            let p = Path::new(r"C:\Users\it's a path\file");
-            assert_eq!(ps_escape(p), r"C:\Users\it''s a path\file");
-        }
-
-        #[test]
-        fn multiple_single_quotes_all_doubled() {
-            let p = Path::new(r"C:\a'b'c'd");
-            assert_eq!(ps_escape(p), r"C:\a''b''c''d");
-        }
-
-        #[test]
-        fn path_with_spaces_preserved() {
-            let p = Path::new(r"C:\Program Files\Speedwave 2");
-            assert_eq!(ps_escape(p), r"C:\Program Files\Speedwave 2");
-        }
-
-        #[test]
-        fn empty_path_returns_empty() {
-            let p = Path::new("");
-            assert_eq!(ps_escape(p), "");
-        }
-    }
-
-    // Portable ps_escape tests — run on all platforms using the same logic
-    #[test]
-    fn ps_escape_logic_plain_string() {
-        let result = "simple-path".replace('\'', "''");
-        assert_eq!(result, "simple-path");
-    }
-
-    #[test]
-    fn ps_escape_logic_single_quotes_doubled() {
-        let result = "it's a test".replace('\'', "''");
-        assert_eq!(result, "it''s a test");
-    }
-
-    #[test]
-    fn ps_escape_logic_multiple_quotes() {
-        let result = "a'b'c".replace('\'', "''");
-        assert_eq!(result, "a''b''c");
-    }
-
-    #[test]
-    fn ps_escape_logic_empty_string() {
-        let result = "".replace('\'', "''");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn ps_escape_logic_only_quotes() {
-        let result = "'''".replace('\'', "''");
-        assert_eq!(result, "''''''");
-    }
-
-    #[test]
-    fn ps_escape_logic_spaces_and_special_chars() {
-        let result = "path with spaces & (parens)".replace('\'', "''");
-        assert_eq!(result, "path with spaces & (parens)");
-    }
-
-    // -- wsl_rootfs_for_arch tests --
-
-    #[cfg(target_os = "windows")]
-    mod wsl_rootfs_for_arch_tests {
-        use super::super::wsl_rootfs_for_arch;
-
-        #[test]
-        fn returns_ok_for_current_arch() {
-            // On Windows CI this will be x86_64 or aarch64 — both are valid
-            let result = wsl_rootfs_for_arch();
-            assert!(result.is_ok(), "should succeed on supported arch");
-            let (url, sha) = result.unwrap();
-            assert!(url.starts_with("https://"));
-            assert_eq!(sha.len(), 64, "SHA256 hash must be 64 hex chars");
-        }
-    }
-
-    // Pure policy, no Windows I/O — runs on every host.
-    mod terminate_on_change_tests {
-        use super::super::{running_containers_from_probe, terminate_decision, TerminateOnChange};
-
-        // Guards the "cannot exec in a stopped state" regression: Yes vs IfIdle stay distinct.
-        #[test]
-        fn variants_are_distinct() {
-            assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::Yes);
-            assert_eq!(TerminateOnChange::IfIdle, TerminateOnChange::IfIdle);
-        }
-
-        #[test]
-        fn is_copy_and_debug() {
-            let y = TerminateOnChange::Yes;
-            let copied = y; // Copy: original still usable below
-            assert_eq!(y, copied);
-            assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
-            assert_eq!(format!("{:?}", TerminateOnChange::IfIdle), "IfIdle");
-        }
-
-        // Yes always terminates; IfIdle only when no container runs.
-        #[test]
-        fn yes_always_terminates() {
-            assert!(terminate_decision(TerminateOnChange::Yes, false));
-            assert!(terminate_decision(TerminateOnChange::Yes, true));
-        }
-
-        #[test]
-        fn ifidle_terminates_only_when_no_containers_run() {
-            assert!(
-                terminate_decision(TerminateOnChange::IfIdle, false),
-                "idle distro must terminate so metadata applies before first start"
-            );
-            assert!(
-                !terminate_decision(TerminateOnChange::IfIdle, true),
-                "must NOT terminate while containers run (would kill them)"
-            );
-        }
-
-        #[test]
-        fn probe_empty_stdout_means_no_containers() {
-            assert!(!running_containers_from_probe(true, "", ""));
-            assert!(!running_containers_from_probe(true, "   \n  ", ""));
-        }
-
-        #[test]
-        fn probe_nonempty_stdout_means_running() {
-            assert!(running_containers_from_probe(true, "abc123\n", ""));
-        }
-
-        // containerd down (cold start) ⇒ idle, so IfIdle can terminate and apply.
-        #[test]
-        fn probe_daemon_down_means_idle() {
-            assert!(!running_containers_from_probe(
-                false,
-                "",
-                "failed to connect to containerd: connection refused"
-            ));
-            assert!(!running_containers_from_probe(
-                false,
-                "",
-                "cannot connect to containerd.sock: No such file or directory"
-            ));
-        }
-
-        // A non-daemon-down failure stays fail-safe to busy (never terminate on doubt).
-        #[test]
-        fn probe_other_failure_assumes_busy() {
-            assert!(running_containers_from_probe(
-                false,
-                "",
-                "some unexpected error"
-            ));
-        }
-    }
-
     #[cfg(target_os = "windows")]
     mod wsl_automount_options_tests {
         use speedwave_runtime::consts;
@@ -3187,116 +1935,6 @@ mod tests {
                 opts.contains(&format!("gid={gid}")),
                 "automount gid must equal container gid {gid}"
             );
-        }
-    }
-
-    // Pure transforms — exercised against real wsl.conf bytes, run on every host.
-    mod wsl_conf_tests {
-        use super::super::{
-            automount_options_line, merge_wsl_conf_automount, options_has_uid,
-            wsl_conf_automount_has_uid,
-        };
-
-        const OPTS: &str = "metadata,uid=1000,gid=1000,umask=022";
-
-        #[test]
-        fn merge_adds_section_when_absent() {
-            let out = merge_wsl_conf_automount("[boot]\nsystemd=true\n", OPTS);
-            assert!(out.contains("[automount]"));
-            assert!(out.contains(&format!("options = \"{OPTS}\"")));
-            assert!(wsl_conf_automount_has_uid(&out, 1000));
-        }
-
-        #[test]
-        fn merge_on_empty_input() {
-            let out = merge_wsl_conf_automount("", OPTS);
-            assert_eq!(out, format!("[automount]\noptions = \"{OPTS}\"\n"));
-            assert!(wsl_conf_automount_has_uid(&out, 1000));
-        }
-
-        // [automount] present but with NO options line → insert it, keeping other keys.
-        #[test]
-        fn merge_inserts_options_and_keeps_other_keys() {
-            let out = merge_wsl_conf_automount("[automount]\nenabled = false\nroot = /m/\n", OPTS);
-            assert_eq!(automount_options_line(&out), Some(OPTS));
-            assert!(
-                out.contains("enabled = false"),
-                "other [automount] keys preserved"
-            );
-            assert!(
-                out.contains("root = /m/"),
-                "other [automount] keys preserved"
-            );
-        }
-
-        // Existing wrong options line is replaced, not duplicated.
-        #[test]
-        fn merge_replaces_existing_options() {
-            let out = merge_wsl_conf_automount("[automount]\noptions = \"metadata,uid=0\"\n", OPTS);
-            assert_eq!(out.matches("options =").count(), 1);
-            assert!(wsl_conf_automount_has_uid(&out, 1000));
-        }
-
-        // Interleaved duplicate [automount]: collapse to one, and a key from the
-        // dropped duplicate must NOT be misplaced under the intervening section.
-        #[test]
-        fn merge_dedups_duplicate_sections() {
-            let input = "[automount]\nenabled=true\n[network]\nx=1\n[automount]\nroot=/m/\n";
-            let out = merge_wsl_conf_automount(input, OPTS);
-            assert_eq!(out.matches("[automount]").count(), 1);
-            assert_eq!(out.matches("options =").count(), 1);
-            assert!(out.contains("[network]"), "other sections preserved");
-            // The duplicate's `root=/m/` must not leak under [network].
-            let net = out.find("[network]").unwrap();
-            assert!(
-                !out[net..].contains("root=/m/"),
-                "duplicate-section body must not be reattributed to [network]: {out:?}"
-            );
-        }
-
-        #[test]
-        fn merge_is_idempotent() {
-            let once = merge_wsl_conf_automount("[boot]\nsystemd=true\n", OPTS);
-            let twice = merge_wsl_conf_automount(&once, OPTS);
-            assert_eq!(once, twice);
-        }
-
-        #[test]
-        fn merge_preserves_crlf() {
-            let out = merge_wsl_conf_automount("[boot]\r\nsystemd=true\r\n", OPTS);
-            assert!(out.contains("\r\n"));
-            assert!(!out.contains("\n\n") || out.contains("\r\n"));
-            assert!(wsl_conf_automount_has_uid(&out, 1000));
-        }
-
-        // Anchored verification: uid=1000 must NOT match uid=10000 or a comment.
-        #[test]
-        fn uid_check_is_anchored_not_substring() {
-            assert!(options_has_uid("metadata,uid=1000,gid=1000", 1000));
-            assert!(!options_has_uid("metadata,uid=10000,gid=1000", 1000));
-            assert!(!options_has_uid("metadata,uid=100000", 1000));
-        }
-
-        #[test]
-        fn verify_ignores_commented_uid_and_other_sections() {
-            // uid=1000 only in a comment / a different section → not satisfied.
-            assert!(!wsl_conf_automount_has_uid(
-                "# uid=1000\n[automount]\nx=1\n",
-                1000
-            ));
-            assert!(!wsl_conf_automount_has_uid(
-                "[other]\noptions=\"uid=1000\"\n[automount]\nx=1\n",
-                1000
-            ));
-        }
-
-        #[test]
-        fn options_line_lookup_skips_comments() {
-            assert_eq!(
-                automount_options_line("[automount]\n# options = \"x\"\noptions = \"real\"\n"),
-                Some("real")
-            );
-            assert_eq!(automount_options_line("[boot]\noptions = \"x\"\n"), None);
         }
     }
 
@@ -3857,6 +2495,36 @@ mod tests {
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
 
+    // ── files_identical (sweep-skip predicate) ──────────────────────────
+
+    #[test]
+    fn files_identical_true_for_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        let b = dir.path().join("b.exe");
+        std::fs::write(&a, b"same-bytes").unwrap();
+        std::fs::write(&b, b"same-bytes").unwrap();
+        assert!(files_identical(&a, &b));
+    }
+
+    #[test]
+    fn files_identical_false_on_diff_missing_or_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        std::fs::write(&a, b"one").unwrap();
+        let b = dir.path().join("b.exe");
+        std::fs::write(&b, b"two").unwrap();
+        assert!(!files_identical(&a, &b), "different bytes");
+        assert!(
+            !files_identical(&a, &dir.path().join("missing.exe")),
+            "missing target"
+        );
+        assert!(!files_identical(&a, dir.path()), "dir is not a file");
+        let c = dir.path().join("c.exe");
+        std::fs::write(&c, b"onE").unwrap();
+        assert!(!files_identical(&a, &c), "same length, different bytes");
+    }
+
     // ── link_cli guard tests ────────────────────────────────────────────
 
     #[test]
@@ -4030,82 +2698,6 @@ mod tests {
         assert!(
             found,
             "imported decode_wsl_output should decode UTF-16LE correctly, got: {decoded:?}"
-        );
-    }
-
-    // ── verify_wsl_distro_origin tests ───────────────────────────────────
-    //
-    // Each test uses its own tempdir as the data_dir via the `_in` variant, so
-    // they neither touch the production data dir nor race each other.
-
-    #[test]
-    fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let vhdx_dir = data_dir.path().join("wsl").join(consts::wsl_distro_name());
-        std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
-        std::fs::write(vhdx_dir.join("ext4.vhdx"), b"fake vhdx").expect("write marker");
-
-        let result = verify_wsl_distro_origin_in(data_dir.path());
-
-        assert!(
-            result.is_ok(),
-            "expected Ok when ext4.vhdx exists, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn verify_wsl_distro_origin_fails_when_vhdx_missing() {
-        // Empty tempdir — the vhdx file does not exist.
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let result = verify_wsl_distro_origin_in(data_dir.path());
-        let err_msg = result
-            .expect_err("expected Err when vhdx missing")
-            .to_string();
-        assert!(
-            err_msg.contains("Security error"),
-            "error should mention 'Security error', got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn verify_wsl_distro_origin_rejects_empty_directory() {
-        // Create the wsl distro directory without the ext4.vhdx file.
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let vhdx_dir = data_dir.path().join("wsl").join(consts::wsl_distro_name());
-        std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
-
-        let result = verify_wsl_distro_origin_in(data_dir.path());
-
-        let err_msg = result
-            .expect_err("expected Err when vhdx missing in empty dir")
-            .to_string();
-        assert!(
-            err_msg.contains("Security error"),
-            "error should mention 'Security error', got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn expected_wsl_vhdx_path_structure() {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let path = expected_wsl_vhdx_path_in(data_dir.path());
-        let path_str = path.to_string_lossy();
-        let data_dir_str = data_dir.path().to_string_lossy().to_string();
-        assert!(
-            path_str.contains(&data_dir_str),
-            "path should contain data dir ({data_dir_str}): {path_str}"
-        );
-        assert!(
-            path_str.contains("wsl"),
-            "path should contain 'wsl': {path_str}"
-        );
-        assert!(
-            path_str.contains(consts::wsl_distro_name()),
-            "path should contain distro name: {path_str}"
-        );
-        assert!(
-            path_str.ends_with("ext4.vhdx"),
-            "path should end with ext4.vhdx: {path_str}"
         );
     }
 
@@ -4328,23 +2920,32 @@ networks:
              so that reconcile_bundle_update sees bundle_changed=false on next startup"
         );
         assert!(
+            body.contains("applied_image_hashes = manifest.image_hashes"),
+            "build_images() must persist the per-image hash map (ADR-072) — without it the \
+             first reconcile after setup would treat every image as replaced"
+        );
+        assert!(
             body.contains("bundle::load_current_bundle_manifest"),
             "build_images() must load the current manifest to get bundle_id for BundleState"
         );
     }
 
     /// Structural test: verifies that `start_containers()` calls
-    /// `ensure_exec_healthy` between `compose_up_recreate` and `SetupState`
-    /// save. Without this, `containers_started = true` could be persisted
-    /// while containers are broken or missing.
+    /// `ensure_exec_healthy` between the idempotent `compose_up` and the
+    /// `SetupState` save. Without this, `containers_started = true` could be
+    /// persisted while containers are broken or missing.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
         let body = extract_fn_body(source, "pub fn start_containers(");
 
-        let recreate_pos = body
-            .find("compose_up_recreate")
-            .expect("start_containers must call compose_up_recreate");
+        assert!(
+            !body.contains("compose_up_recreate"),
+            "start must use idempotent compose_up (ADR-072), not force-recreate"
+        );
+        let up_pos = body
+            .find("rt.compose_up(project)")
+            .expect("start_containers must call compose_up");
         let probe_pos = body
             .find("ensure_exec_healthy")
             .expect("start_containers must call ensure_exec_healthy");
@@ -4353,8 +2954,8 @@ networks:
             .expect("start_containers must set containers_started = true");
 
         assert!(
-            recreate_pos < probe_pos,
-            "ensure_exec_healthy must come AFTER compose_up_recreate"
+            up_pos < probe_pos,
+            "ensure_exec_healthy must come AFTER compose_up"
         );
         assert!(
             probe_pos < state_pos,
@@ -4362,261 +2963,41 @@ networks:
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Lima VM config migration tests
-    // -----------------------------------------------------------------------
-
+    /// No-provider check must precede rt.ensure_ready() (else render_compose bails).
     #[test]
-    fn lima_vm_config_detects_old_8gib() {
-        let config = "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
-    }
-
-    /// Test helper — appends the VPN-aware provision sentinel so fixtures
-    /// model a fully-migrated config; tests focused on memory comparison
-    /// would otherwise also trigger the provision-absent migration branch.
-    fn with_provision_sentinel(base: &str) -> String {
-        format!(
-            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n"
-        )
-    }
-
-    #[test]
-    fn lima_vm_config_current_no_update() {
-        let config =
-            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 12));
-    }
-
-    #[test]
-    fn lima_vm_config_higher_memory_triggers_downgrade() {
-        // After the VM formula was reduced, existing VMs with more RAM than
-        // desired must be migrated down to reclaim host memory.
-        let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
-    }
-
-    #[test]
-    fn lima_vm_config_lower_memory_triggers_update() {
-        let config = "vmType: vz\ncpus: 4\nmemory: \"4GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 12));
-    }
-
-    /// Generated lima.yaml must include a provision script that demotes lima0
-    /// (usernet) below eth0 (vzNAT) so traffic flows through vzNAT where the
-    /// macOS host's VPN routing applies. Without this, corporate-VPN-protected
-    /// services are unreachable from inside the VM. See lima-vm/lima#2984.
-    #[test]
-    fn lima_config_includes_vpn_aware_provision_script() {
-        let yaml = super::lima_config();
+    fn start_containers_checks_no_provider_before_ensure_ready() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub fn start_containers(");
+        let check_pos = body
+            .find("project_llm_is_unconfigured(project)")
+            .expect("start_containers must pre-check for a missing provider");
+        let ready_pos = body
+            .find("rt.ensure_ready()")
+            .expect("start_containers must call ensure_ready");
         assert!(
-            yaml.contains("provision:"),
-            "lima.yaml must declare a provision section"
+            check_pos < ready_pos,
+            "no-provider check must precede ensure_ready/render_compose"
         );
-        // `mode: boot` maps to cloud-init's bootcmd — re-runs on every VM
-        // start. `mode: system` would only run on first boot, which would
-        // skip the fix for users upgrading an existing VM.
+    }
+
+    /// Structural test: `build_images` must warn (not silently default) when
+    /// `load_user_config` fails, mirroring `main.rs::get_health`.
+    #[test]
+    fn build_images_warns_on_config_load_failure() {
+        let source = include_str!("setup_wizard.rs");
+        let snippet = "log::warn!(\"build_images: failed to load config";
         assert!(
-            yaml.contains("mode: boot"),
-            "provision must use `mode: boot` so the fix re-applies on \
-             every VM restart, including post-upgrade existing VMs"
+            source.contains(snippet),
+            "build_images must log::warn before defaulting on config load error, \
+             not swallow it silently"
         );
-        // The drop-in netplan file declaratively overrides DHCP route metrics
-        // — eth0 to 100 (preferred), lima0 to 300 with `use-routes: false`.
+        // And it must NOT silently swallow the config error. Build the forbidden
+        // literal at runtime so this assertion does not match its own source.
+        let forbidden = format!("config::load_user_config().{}", "unwrap_or_default()");
         assert!(
-            yaml.contains("99-speedwave-prefer-vznat.yaml"),
-            "provision must drop in a higher-priority netplan file that \
-             demotes lima0 and promotes eth0 (vzNAT) as default egress"
+            !source.contains(&forbidden),
+            "config parse errors must not be silently defaulted"
         );
-        assert!(
-            yaml.contains("use-routes: false"),
-            "lima0 must have `use-routes: false` so DHCP cannot re-install \
-             a default route through it after renew"
-        );
-        assert!(
-            yaml.contains("route-metric: 100"),
-            "eth0 must be promoted to route-metric 100 (preferred)"
-        );
-        // Sanity: provision must `netplan apply` so changes take effect
-        // without requiring a reboot.
-        assert!(
-            yaml.contains("netplan apply"),
-            "provision must apply the new netplan config immediately"
-        );
-    }
-
-    /// Negative guard: must not contain the obsolete `lima0`-only routing
-    /// that breaks VPN. The fix above is the only sanctioned config.
-    #[test]
-    fn lima_config_does_not_silently_drop_provision_section() {
-        let yaml = super::lima_config();
-        // Both vzNAT and the provision script are load-bearing; removing
-        // either re-introduces the VPN-incompatibility regression.
-        assert!(yaml.contains("vzNAT: true"));
-        assert!(yaml.contains("provision:"));
-    }
-
-    #[test]
-    fn lima_vm_config_unparseable_memory_no_update() {
-        let config =
-            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"plenty\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 12));
-    }
-
-    #[test]
-    fn lima_vm_config_adaptive_upgrade_needed() {
-        // 32 GiB host → desired 16 GiB → old 12 GiB config needs upgrade
-        let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 16));
-    }
-
-    #[test]
-    fn lima_vm_config_downgrade_from_12_to_8() {
-        // 16 GiB host: old formula gave 12 GiB VM, new formula gives 8 GiB.
-        // The migration must trigger to reclaim 4 GiB for the host.
-        let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
-        assert!(lima_vm_config_needs_update_with(config, 8));
-    }
-
-    #[test]
-    fn lima_vm_config_no_op_when_current_equals_desired() {
-        // Already at the desired value — migration must not trigger (idempotent).
-        let config =
-            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
-        assert!(!lima_vm_config_needs_update_with(&config, 8));
-    }
-
-    /// Regression guard for the VPN routing fix — installs pre-dating the
-    /// provision-script must trigger migration even if memory matches.
-    #[test]
-    fn lima_vm_config_without_provision_script_triggers_migration() {
-        let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
-        assert!(
-            lima_vm_config_needs_update_with(config, 12),
-            "configs missing the VPN-aware provision script must be migrated"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Windows .wslconfig VPN-compat merger tests
-    // -----------------------------------------------------------------------
-
-    /// Empty/missing .wslconfig → produces a fresh `[wsl2]` section with all
-    /// three VPN-compat keys.
-    #[test]
-    fn merge_wslconfig_empty_input_produces_full_section() {
-        let out = super::merge_wslconfig_vpn_keys("");
-        assert!(out.contains("[wsl2]"));
-        assert!(out.contains("networkingMode=mirrored"));
-        assert!(out.contains("dnsTunneling=true"));
-        assert!(out.contains("autoProxy=true"));
-    }
-
-    /// Existing file with unrelated `[experimental]` section — must be
-    /// preserved verbatim, and `[wsl2]` appended at the end.
-    #[test]
-    fn merge_wslconfig_preserves_other_sections() {
-        let input = "[experimental]\nfoo=bar\n";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        assert!(out.contains("[experimental]"));
-        assert!(out.contains("foo=bar"));
-        assert!(out.contains("[wsl2]"));
-        assert!(out.contains("networkingMode=mirrored"));
-    }
-
-    /// Existing `[wsl2]` with `memory=8GB` — keeps memory, inserts all three
-    /// VPN keys at the end of the section before the next section starts.
-    #[test]
-    fn merge_wslconfig_preserves_user_keys_in_wsl2_section() {
-        let input = "[wsl2]\nmemory=8GB\nprocessors=4\n\n[experimental]\nbar=baz\n";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        assert!(out.contains("memory=8GB"), "user keys must be preserved");
-        assert!(out.contains("processors=4"));
-        assert!(out.contains("networkingMode=mirrored"));
-        assert!(out.contains("[experimental]"));
-        assert!(out.contains("bar=baz"));
-    }
-
-    /// `networkingMode=NAT` already present → must be **rewritten** to
-    /// `mirrored`. We deliberately overwrite because a stale NAT setting
-    /// re-introduces the VPN-incompatibility regression.
-    #[test]
-    fn merge_wslconfig_overwrites_stale_networking_mode() {
-        let input = "[wsl2]\nnetworkingMode=NAT\nmemory=8GB\n";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        assert!(
-            out.contains("networkingMode=mirrored"),
-            "stale NAT must be replaced: {out}"
-        );
-        assert!(
-            !out.contains("networkingMode=NAT"),
-            "old value must not linger: {out}"
-        );
-        assert!(out.contains("memory=8GB"));
-    }
-
-    /// Calling the merger twice on its own output must be a no-op (idempotent).
-    #[test]
-    fn merge_wslconfig_idempotent() {
-        let first = super::merge_wslconfig_vpn_keys("[wsl2]\nmemory=8GB\n");
-        let second = super::merge_wslconfig_vpn_keys(&first);
-        assert_eq!(first, second, "merger must be idempotent");
-    }
-
-    /// Case-insensitive key match — user wrote `NetworkingMode=NAT` with
-    /// different casing. The merger must still rewrite it, not duplicate.
-    #[test]
-    fn merge_wslconfig_case_insensitive_key_match() {
-        let input = "[wsl2]\nNetworkingMode=NAT\n";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        let mirrored_count = out.matches("=mirrored").count();
-        assert_eq!(mirrored_count, 1, "must rewrite, not duplicate: {out}");
-    }
-
-    /// `.wslconfig` on Windows is typically CRLF — the merger must produce
-    /// valid output regardless of input line endings and must NOT mix LF and
-    /// CRLF in the result (cosmetic but reviewers care).
-    #[test]
-    fn merge_wslconfig_handles_crlf_line_endings() {
-        let input = "[wsl2]\r\nmemory=8GB\r\nnetworkingMode=NAT\r\n";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        assert!(out.contains("networkingMode=mirrored"));
-        assert!(!out.contains("networkingMode=NAT"));
-        assert!(out.contains("memory=8GB"));
-        assert_eq!(out.matches("[wsl2]").count(), 1, "no duplicate sections");
-        // Every newline in the output must be preceded by CR (no bare LF mixed in).
-        let lone_lf = out
-            .as_bytes()
-            .windows(2)
-            .filter(|w| w[1] == b'\n' && w[0] != b'\r')
-            .count();
-        let starts_with_lf = out.as_bytes().first() == Some(&b'\n');
-        assert_eq!(
-            lone_lf + if starts_with_lf { 1 } else { 0 },
-            0,
-            "CRLF input must not produce mixed line endings, got: {out:?}"
-        );
-    }
-
-    /// Pure-LF input must not get CRLF injected for the new VPN keys.
-    #[test]
-    fn merge_wslconfig_preserves_lf_input_as_lf() {
-        let out = super::merge_wslconfig_vpn_keys("[wsl2]\nmemory=8GB\nnetworkingMode=NAT\n");
-        assert!(out.contains("networkingMode=mirrored"));
-        // No CR characters anywhere.
-        assert!(!out.contains('\r'), "LF input must stay LF: {out:?}");
-    }
-
-    /// Input ending without a trailing newline must still produce well-formed
-    /// output (no concatenation of the appended `[wsl2]` to a preceding key).
-    #[test]
-    fn merge_wslconfig_handles_input_without_trailing_newline() {
-        let input = "[experimental]\nfoo=bar";
-        let out = super::merge_wslconfig_vpn_keys(input);
-        assert!(out.contains("foo=bar"));
-        assert!(out.contains("[wsl2]"));
-        // The boundary between `foo=bar` and `[wsl2]` must be a newline.
-        assert!(!out.contains("foo=bar[wsl2]"));
     }
 
     /// Structural test: `ensure_wslconfig_vpn_compat` must be invoked from
@@ -4629,18 +3010,6 @@ networks:
             source.contains("ensure_wslconfig_vpn_compat"),
             "main.rs must call setup_wizard::ensure_wslconfig_vpn_compat() \
              at startup so upgrading WSL2 users get the VPN-compat .wslconfig"
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn lima_config_function_has_correct_memory() {
-        let config = lima_config();
-        let desired = desired_lima_vm_memory();
-        assert!(
-            config.contains(&format!("memory: \"{}\"", desired)),
-            "lima_config() must use desired_lima_vm_memory() ({desired}), \
-             but the memory line doesn't match. Config:\n{config}"
         );
     }
 
@@ -4662,27 +3031,34 @@ networks:
         );
     }
 
-    /// ensure_lima_vm_config must NOT reset SetupState flags.
-    ///
-    /// VM memory migration does not invalidate container images or running
-    /// containers — the VM restart preserves all containerd state.
-    /// Reconcile handles image rebuilds independently via BundleState.
-    /// Resetting SetupState here causes existing users to see the Setup
-    /// screen after an app update (regression from 0.4.0).
+    /// Structural test: the post-setup migration block (VM stop/start, possible
+    /// long tooling download) must not run on the Tauri main thread.
     #[test]
-    fn ensure_lima_vm_config_does_not_reset_setup_state() {
-        let source = include_str!("setup_wizard.rs");
-        let body = extract_fn_body(source, "pub fn ensure_lima_vm_config()");
-
+    fn post_setup_migrations_run_off_the_main_thread() {
+        let source = include_str!("main.rs");
+        let anchor = source
+            .find("Post-setup migrations")
+            .expect("post-setup migration block must exist in main.rs");
+        let window = &source[anchor..];
+        let spawn = window
+            .find("std::thread::spawn")
+            .expect("migration block must spawn a worker thread");
+        let barrier = window
+            .find("catch_unwind")
+            .expect("pre-reconcile migrations must run under a panic barrier");
+        let lima = window
+            .find("ensure_lima_vm_config()")
+            .expect("lima migration inside the block");
+        let reconcile = window
+            .find("reconcile_bundle_update(&app_handle)")
+            .expect("reconcile must follow the migrations");
         assert!(
-            !body.contains("images_built = false"),
-            "ensure_lima_vm_config must NOT reset images_built — \
-             VM memory migration does not invalidate images"
+            spawn < barrier && barrier < lima,
+            "VM migrations must run inside the spawned thread under catch_unwind"
         );
         assert!(
-            !body.contains("containers_started = false"),
-            "ensure_lima_vm_config must NOT reset containers_started — \
-             VM memory migration does not invalidate containers"
+            lima < reconcile,
+            "reconcile (the only step that flips IMAGES_READY) must run after migrations"
         );
     }
 

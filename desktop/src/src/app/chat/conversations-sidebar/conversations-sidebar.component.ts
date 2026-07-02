@@ -5,8 +5,10 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  Injector,
   TemplateRef,
   ViewContainerRef,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -20,12 +22,9 @@ import type { ConversationSummary } from '../../models/chat';
 import { IconComponent } from '../../shared/icon.component';
 
 /**
- * Buckets a conversation summary into a relative-day group.
- *
- * Mirrors the mockup's `today / yesterday / older` headers (lines 443/462/475).
- * Falls back to `older` when a timestamp can't be parsed so we never drop a row.
+ * Buckets a conversation into today/yesterday/older by relative day.
  * @param ts ISO timestamp of the conversation's last activity.
- * @param now Reference epoch in ms; defaults to `Date.now()` for testability.
+ * @param now Reference epoch in ms; defaults to `Date.now()`.
  */
 function bucketForTimestamp(ts: string | null | undefined, now: number = Date.now()): string {
   if (!ts) return 'older';
@@ -38,11 +37,7 @@ function bucketForTimestamp(ts: string | null | undefined, now: number = Date.no
   return 'older';
 }
 
-/**
- * One conversation row prepared for rendering — preview/timestamp passed
- * through the cleanup helpers once when the buckets are computed, so the
- * template never re-runs the regexes per CD tick.
- */
+/** One conversation row prepared for rendering with cleaned preview/timestamp. */
 interface ConversationRow {
   readonly conv: ConversationSummary;
   readonly preview: string;
@@ -64,19 +59,8 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
 ];
 
 /**
- * Left overlay drawer listing past conversations for the active project.
- *
- * Layout matches the terminal-minimal mockup (lines 280–301 + 427–483):
- * - Rendered into a CDK Overlay anchored to the left edge of the viewport.
- *   The component itself has no inline DOM — its template is a single
- *   `<ng-template>` portalled into the overlay when `open` flips to `true`.
- * - Header: mono "conversations" + accent pill count + close icon.
- * - Search input bar (UI-only filter for now — narrows the buckets below).
- * - Body: conversations grouped by today / yesterday / older with mono
- *   uppercase section labels and an accent left-border on the active row.
- *
- * Outputs match the legacy contract so chat.component continues to drive
- * view / resume actions without change.
+ * Left CDK-overlay drawer of past conversations: portalled `<ng-template>`,
+ * search-filtered buckets (today/yesterday/older); outputs match legacy contract.
  */
 @Component({
   selector: 'app-conversations-sidebar',
@@ -150,6 +134,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                       ? 'border-[var(--accent)] bg-[var(--bg-2)]'
                       : 'border-transparent hover-bg'
                   "
+                  [attr.data-active]="active ? 'true' : null"
                   data-testid="conversations-sidebar-row"
                 >
                   @if (pendingDelete) {
@@ -247,10 +232,8 @@ export class ConversationsSidebarComponent {
   private overlayRef: OverlayRef | null = null;
 
   /**
-   * Buckets the filtered list into today / yesterday / older. Preview /
-   * timestamp formatting happens once here (not in the template) so a row
-   * with 100+ conversations doesn't re-run the regex / date math on every
-   * change-detection tick.
+   * Buckets the filtered list (today/yesterday/older); preview+timestamp are
+   * formatted once here, not per change-detection tick.
    */
   protected readonly groups = computed<readonly ConversationGroup[]>(() => {
     const q = this.query().trim().toLowerCase();
@@ -275,19 +258,30 @@ export class ConversationsSidebarComponent {
     });
   });
 
-  /**
-   * Sync the `open` input with the CDK overlay lifecycle. Opening builds a
-   * left-anchored full-height panel with a dark backdrop and dispatches close
-   * on backdrop click or Escape. Closing detaches the portal (no DOM remains).
-   */
+  private readonly injector = inject(Injector);
+
+  /** Sync the `open` input with the CDK overlay lifecycle (open/close panel). */
   constructor() {
     effect(() => {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
-    // Defensive: dispose the overlay if the host is torn down while open
-    // (e.g., a route swap with the drawer left open).
+    // Scroll active row into view on open, active-session change, or rows arriving.
+    effect(() => {
+      this.open();
+      this.currentSessionId();
+      this.groups();
+      this.scheduleActiveRowScroll();
+    });
+    // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
+  }
+
+  /** After the next render, scroll the active row into view within the overlay. */
+  private scheduleActiveRowScroll(): void {
+    const root = this.overlayRef?.overlayElement;
+    if (!root) return;
+    afterNextRender(() => scrollActiveRowIntoView(root), { injector: this.injector });
   }
 
   /**
@@ -343,15 +337,24 @@ export class ConversationsSidebarComponent {
   }
 }
 
+/**
+ * Scrolls the active row to the top within `root`; no-op if none active.
+ * Exported for unit testing.
+ * @param root - Element containing the rendered rows.
+ */
+export function scrollActiveRowIntoView(root: ParentNode): void {
+  const active = root.querySelector<HTMLElement>('[data-active="true"]');
+  active?.scrollIntoView({ block: 'start' });
+}
+
 const PREVIEW_TAG_RE =
   /<\/?(command-(?:name|message|args|stdout|stderr)|local-command-[^>]+|user-prompt-submit-hook[^>]*)>/gi;
 const PREVIEW_OTHER_TAG_RE = /<[^>]+>/g;
 const PREVIEW_PLAN_PREFIX_RE = /^\[Plan mode\][^\n]*\n+/i;
 
 /**
- * Cleans up a backend preview so the drawer never shows internal markers
- * like `<command-message>` or `<local-command-caveat>` blocks. Falls back
- * to "untitled" when nothing usable remains.
+ * Strips internal markers (`<command-message>` etc.) from a backend preview;
+ * falls back to "untitled" when nothing usable remains.
  * @param raw - Raw preview text from `list_conversations`.
  */
 function cleanConversationPreview(raw: string): string {
@@ -366,9 +369,8 @@ function cleanConversationPreview(raw: string): string {
 }
 
 /**
- * Formats a backend timestamp as a short relative label (`2m`, `1h`, `3d`).
- * Returns the raw value unchanged when it isn't parseable as a date so the
- * backend can keep delivering pre-formatted strings without breaking the UI.
+ * Formats a timestamp as a short relative label (`2m`, `1h`, `3d`); returns
+ * unparseable input unchanged so pre-formatted strings pass through.
  * @param value - ISO timestamp string (or pre-formatted display label).
  */
 function formatRelativeTime(value: string | null | undefined): string {

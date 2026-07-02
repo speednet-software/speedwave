@@ -1,9 +1,6 @@
 //! Per-project Claude Code home directory (`<data_dir>/claude-home/<project>/`).
-//!
-//! This is the bind-mount target Claude Code writes its credentials, sessions,
-//! and onboarding state into. Speedwave never reads the credentials — but it
-//! does need to *locate* the directory (compose mount) and *clear* it
-//! (`speedwave logout`). Both live here so the path layout has one definition.
+//! Bind-mount target for Claude Code credentials/sessions/onboarding state;
+//! Speedwave only locates (compose mount) and clears it (`speedwave logout`).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,11 +13,18 @@ pub fn claude_home_dir(data_dir: &Path, project: &str) -> PathBuf {
         .join(project)
 }
 
+/// True when `.claude/.credentials.json` exists — a real "logged in to Claude
+/// Code" signal, independent of which provider is active.
+pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
+    claude_home_dir(data_dir, project)
+        .join(".claude")
+        .join(".credentials.json")
+        .exists()
+}
+
 /// Removes Claude Code's credential files (`.claude/.credentials.json` and
 /// `.claude.json`) from the project's claude-home directory. Returns the count
-/// of files actually removed. A missing file is not an error (idempotent
-/// logout); any other I/O error on either file is reported, but both files are
-/// always attempted so a lock on one does not leave the other behind.
+/// removed; missing files are not an error (idempotent), both are attempted.
 pub fn remove_claude_credentials(data_dir: &Path, project: &str) -> io::Result<usize> {
     let home = claude_home_dir(data_dir, project);
     let targets = [
@@ -86,9 +90,41 @@ mod tests {
     }
 
     #[test]
+    fn has_oauth_credentials_true_when_file_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = claude_home_dir(tmp.path(), "p");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
+        assert!(has_anthropic_oauth_credentials(tmp.path(), "p"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_false_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Home exists but no credentials file.
+        std::fs::create_dir_all(claude_home_dir(tmp.path(), "p").join(".claude")).unwrap();
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "p"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_false_when_home_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "nope"));
+    }
+
+    #[test]
+    fn has_oauth_credentials_is_scoped_to_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = claude_home_dir(tmp.path(), "proj-a");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
+        // A different project sees no credentials.
+        assert!(!has_anthropic_oauth_credentials(tmp.path(), "proj-b"));
+    }
+
+    #[test]
     fn remove_is_scoped_to_project_dir() {
-        // A project name that's a plain component cannot reach outside its dir;
-        // this just documents that the path is built under claude-home/<project>.
+        // A plain project component cannot reach outside claude-home/<project>.
         let tmp = tempfile::tempdir().unwrap();
         let home = claude_home_dir(tmp.path(), "proj-a");
         std::fs::create_dir_all(home.join(".claude")).unwrap();

@@ -7,7 +7,12 @@ import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -16,9 +21,11 @@ describe('ChatComponent', () => {
   let chatState: ChatStateService;
   let projectState: ProjectStateService;
   let uiState: UiStateService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -47,7 +54,10 @@ describe('ChatComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [ChatComponent, RouterModule.forRoot([])],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatComponent);
@@ -61,12 +71,83 @@ describe('ChatComponent', () => {
     chatState.isStreaming = false;
   });
 
+  // ── resumeConversation: transcript-loading flag ────────────────────────────
+
+  describe('resumeConversation loading flag', () => {
+    it('sets loadingTranscript true during fetch and false after it resolves', async () => {
+      projectState.activeProject.set('test');
+
+      let releaseGetConversation: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          await new Promise<void>((resolve) => {
+            releaseGetConversation = resolve;
+          });
+          return { session_id: 's1', messages: [] };
+        }
+        return undefined;
+      };
+
+      const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
+      await Promise.resolve();
+      // Mid-flight: loader is showing.
+      expect(chatState.loadingTranscriptFromState()).toBe(true);
+
+      releaseGetConversation!();
+      await resumePromise;
+      // Settled: loader is hidden.
+      expect(chatState.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('clears loadingTranscript even when get_conversation fails', async () => {
+      projectState.activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') throw new Error('boom');
+        return undefined;
+      };
+
+      await component.resumeConversation('11111111-1111-1111-1111-111111111111');
+
+      expect(chatState.loadingTranscriptFromState()).toBe(false);
+    });
+
+    it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
+      projectState.activeProject.set('test');
+      // Wrap the real disposer so we can assert when the start-in-progress flag
+      // is released (the disposer replaces the old endStartingSession method).
+      const dispose = vi.fn();
+      const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
+
+      let releaseGetConversation: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          await new Promise<void>((resolve) => {
+            releaseGetConversation = resolve;
+          });
+          return { session_id: 's1', messages: [] };
+        }
+        return undefined;
+      };
+
+      const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
+      await Promise.resolve();
+      // Mid-flight: the start-in-progress flag is set, not yet cleared.
+      expect(begin).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
+
+      releaseGetConversation!();
+      await resumePromise;
+      // Settled: disposer released so later sends can start a session normally.
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // ── Composition — shell sub-components ─────────────────────────────────────
 
   describe('shell composition', () => {
     it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
-      projectState.activeProject = 'test';
-      projectState.status = 'ready';
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
       await component.ngOnInit();
       fixture.detectChanges();
 
@@ -74,9 +155,37 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeTruthy();
     });
 
-    // Read-only transcript overlay was removed — sidebar row click resumes
-    // directly. The `viewingTranscript` / `viewConversation` / `closeTranscript`
-    // surface no longer exists, so the related behaviour tests were dropped.
+    it('renders the choose-a-provider surface when status is no_provider', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('no_provider');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const view = fixture.nativeElement.querySelector('[data-testid="chat-view-no-provider"]');
+      expect(view).toBeTruthy();
+      expect(view.textContent).toContain('No LLM provider selected');
+      const link = view.querySelector('a');
+      expect(link).toBeTruthy();
+      expect(link.getAttribute('href')).toBe('/settings');
+      // Header (with project pill) stays available so the user can switch away;
+      // the composer is still gone since there is no conversation.
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
+    });
+
+    it('keeps the project pill reachable when status is auth_required', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('auth_required');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const view = fixture.nativeElement.querySelector('[data-testid="chat-view-blocked"]');
+      expect(view).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
+    });
   });
 
   // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
@@ -193,8 +302,7 @@ describe('ChatComponent', () => {
 
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      // ComposerComponent contract: emits already-trimmed text, so an empty
-      // payload here represents a whitespace-only or empty composer state.
+      // ComposerComponent emits already-trimmed text; empty payload = empty composer state.
       await component.sendMessage({ payload: '', displayText: '' });
 
       expect(chatState.messages).toHaveLength(0);
@@ -248,7 +356,7 @@ describe('ChatComponent', () => {
   // ── composer integration ─────────────────────────────────────────────────
   describe('composer integration', () => {
     it('mounts app-composer when a live session is active', async () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
@@ -293,7 +401,7 @@ describe('ChatComponent', () => {
       const mockConversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
       ];
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return mockConversations;
         return undefined;
@@ -306,7 +414,7 @@ describe('ChatComponent', () => {
     });
 
     it('handles missing active project by setting empty conversations', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
 
       await component.loadConversations();
 
@@ -314,8 +422,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets historyError on backend failure', async () => {
-      projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') throw new Error('network error');
         return undefined;
@@ -325,12 +432,13 @@ describe('ChatComponent', () => {
 
       expect(component.historyError).toContain('Failed to load conversations');
       expect(component.conversations).toEqual([]);
-      expect(errorSpy).toHaveBeenCalledWith('loadConversations failed:', expect.any(Error));
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('loadConversations failed: Error: network error')
+      );
     });
 
     it('sets historyLoading while loading', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       let capturedLoading = false;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') {
@@ -347,11 +455,30 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── resume decider lifecycle (ngOnInit / ngOnDestroy) ──────────────────────
+
+  describe('resume decider lifecycle', () => {
+    it('ngOnInit registers a resume decider function on the service', async () => {
+      const setSpy = vi.spyOn(chatState, 'setResumeDecider');
+      await component.ngOnInit();
+      // A mounted component opts into the overflow prompt via a callback.
+      const last = setSpy.mock.calls[setSpy.mock.calls.length - 1]?.[0];
+      expect(typeof last).toBe('function');
+    });
+
+    it('ngOnDestroy clears the resume decider so the service auto-resumes while unmounted', async () => {
+      await component.ngOnInit();
+      const setSpy = vi.spyOn(chatState, 'setResumeDecider');
+      component.ngOnDestroy();
+      expect(setSpy).toHaveBeenCalledWith(null);
+    });
+  });
+
   // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
     it('calls resume_conversation and closes the sidebar', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       uiState.toggleSidebar();
       const invokeCalls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -366,7 +493,7 @@ describe('ChatComponent', () => {
     });
 
     it('shows error message when resume fails', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation') throw new Error('container not running');
         return undefined;
@@ -382,9 +509,22 @@ describe('ChatComponent', () => {
       );
     });
 
+    it('does not leave the failed session marked active', async () => {
+      projectState.activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'resume_conversation') throw new Error('container not running');
+        return undefined;
+      };
+
+      await component.resumeConversation('11111111-1111-1111-1111-111111111111');
+
+      // Optimistic accent cleared on failure → drawer doesn't show it as active.
+      expect(component.currentViewSessionId).toBeNull();
+    });
+
     it('routes auth error in resumeConversation to retryAuth', async () => {
       const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation')
@@ -402,7 +542,7 @@ describe('ChatComponent', () => {
 
   describe('deleteConversation', () => {
     it('calls delete_conversation and removes the row locally', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       component.conversations = [
         { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
         { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
@@ -423,18 +563,17 @@ describe('ChatComponent', () => {
     });
 
     it('does nothing when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.deleteConversation('s1');
       expect(invokeSpy).not.toHaveBeenCalled();
     });
 
     it('sets historyError when backend fails and keeps the row', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       component.conversations = [
         { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
       ];
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'delete_conversation') throw new Error('io error');
         return undefined;
@@ -444,11 +583,13 @@ describe('ChatComponent', () => {
 
       expect(component.historyError).toContain('Failed to delete conversation');
       expect(component.conversations.length).toBe(1);
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('deleteConversation failed: Error: io error')
+      );
     });
 
     it('resets live chat when deleting the active session', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       chatState._setState({
         messages: [],
         currentBlocks: [],
@@ -468,6 +609,34 @@ describe('ChatComponent', () => {
       await component.deleteConversation('s1');
 
       expect(resetSpy).toHaveBeenCalled();
+      expect(component.conversations).toEqual([]);
+    });
+
+    it('clears the durable restart-resume id when deleting that session even if it is not the viewed one', async () => {
+      projectState.activeProject.set('test');
+      // Durable id points at an older session; the live view shows a different one.
+      chatState.seedSessionId('s-old');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's-live',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      expect(chatState.lastKnownSessionId).toBe('s-old');
+      component.conversations = [
+        { session_id: 's-old', timestamp: null, preview: 'a', message_count: 1 },
+      ];
+      const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
+      mockTauri.invokeHandler = async () => undefined;
+
+      await component.deleteConversation('s-old');
+
+      // The durable id is cleared so a later restart cannot resume a deleted session…
+      expect(chatState.lastKnownSessionId).toBeNull();
+      // …while the viewed session keeps running (no live-chat reset).
+      expect(resetSpy).not.toHaveBeenCalled();
       expect(component.conversations).toEqual([]);
     });
   });
@@ -498,7 +667,7 @@ describe('ChatComponent', () => {
 
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         return undefined;
@@ -514,7 +683,7 @@ describe('ChatComponent', () => {
 
   describe('toggleMemory', () => {
     it('toggles showMemory boolean', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return 'memory content';
         return undefined;
@@ -530,8 +699,7 @@ describe('ChatComponent', () => {
 
   describe('loadProjectMemory', () => {
     it('logs error on failure', async () => {
-      projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -540,12 +708,13 @@ describe('ChatComponent', () => {
       await component.loadProjectMemory();
 
       expect(component.projectMemory).toBe('');
-      expect(errorSpy).toHaveBeenCalledWith('loadProjectMemory failed:', expect.any(Error));
-      errorSpy.mockRestore();
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('loadProjectMemory failed: Error: disk failure')
+      );
     });
 
     it('sets projectMemory on success', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return '# Project Memory\nSome content';
         return undefined;
@@ -557,7 +726,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets empty string on backend failure without throwing', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('file not found');
         return undefined;
@@ -569,7 +738,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets empty string when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
 
       await component.loadProjectMemory();
 
@@ -577,8 +746,7 @@ describe('ChatComponent', () => {
     });
 
     it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
-      projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
         return undefined;
@@ -588,12 +756,10 @@ describe('ChatComponent', () => {
 
       expect(component.memoryError).toContain('Failed to load memory');
       expect(component.memoryError).toContain('disk failure');
-      errorSpy.mockRestore();
     });
 
     it('clears memoryError on a subsequent successful load', async () => {
-      projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      projectState.activeProject.set('test');
       let shouldFail = true;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') {
@@ -611,11 +777,10 @@ describe('ChatComponent', () => {
 
       expect(component.memoryError).toBe('');
       expect(component.projectMemory).toBe('# recovered');
-      errorSpy.mockRestore();
     });
 
     it('does not set memoryError when no active project', async () => {
-      projectState.activeProject = null;
+      projectState.activeProject.set(null);
       component.memoryError = 'stale';
 
       await component.loadProjectMemory();
@@ -712,7 +877,7 @@ describe('ChatComponent', () => {
 
   describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
-      projectState.activeProject = 'test';
+      projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         if (cmd === 'list_projects')
@@ -740,7 +905,7 @@ describe('ChatComponent', () => {
       const newConversations = [
         { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
       ];
-      projectState.activeProject = 'other-project';
+      projectState.activeProject.set('other-project');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return newConversations;
         return undefined;
@@ -815,12 +980,12 @@ describe('ChatComponent', () => {
       const router = TestBed.inject(Router);
       const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
 
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       await component.ngOnInit();
       fixture.detectChanges();
 
       // Simulate auth expiry via notifyChange
-      projectState.status = 'auth_required';
+      projectState.status.set('auth_required');
       projectState['notifyChange']();
 
       expect(navigateSpy).toHaveBeenCalledWith(['/settings']);
@@ -830,9 +995,8 @@ describe('ChatComponent', () => {
 
   describe('Stop button and ESC handler', () => {
     it('shows Stop button when streaming, hides it when idle', () => {
-      // After Unit 9 (composer extraction), the Send button lives inside
-      // <app-composer>; chat.component owns only the Stop button alongside.
-      projectState.status = 'ready';
+      // Send button lives in <app-composer>; chat.component owns only the Stop button.
+      projectState.status.set('ready');
       chatState.isStreaming = false;
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeNull();
@@ -846,9 +1010,11 @@ describe('ChatComponent', () => {
     });
 
     it('clicking Stop calls stopConversation', () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
+      // isStreamingFromState() refreshes only after notifyChange rebuilds the tree.
+      chatState['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
@@ -885,12 +1051,14 @@ describe('ChatComponent', () => {
           },
         ],
       });
+      // currentBlocksFromState() sees the block only after notifyChange rebuilds the tree.
+      chatState['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
     });
 
     it('Stop button still stops when an unanswered ask_user block is active', () => {
-      projectState.status = 'ready';
+      projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
       chatState._setState({
@@ -918,6 +1086,59 @@ describe('ChatComponent', () => {
       chatState.isStreaming = true;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── context-overflow dialog ─────────────────────────────────────────────────
+
+  describe('context-overflow dialog', () => {
+    it('promptResumeOrFresh opens the dialog and resolves "resume" on confirm', async () => {
+      const choice = component.promptResumeOrFresh();
+      expect(component.contextOverflowOpen()).toBe(true);
+      component.onContextOverflowResume();
+      expect(component.contextOverflowOpen()).toBe(false);
+      await expect(choice).resolves.toBe('resume');
+    });
+
+    it('promptResumeOrFresh resolves "fresh" when the user starts fresh', async () => {
+      const choice = component.promptResumeOrFresh();
+      component.onContextOverflowFresh();
+      expect(component.contextOverflowOpen()).toBe(false);
+      await expect(choice).resolves.toBe('fresh');
+    });
+
+    it('renders the confirm dialog HTML while open and hides it when closed', async () => {
+      // The overlay renders into a CDK Dialog container on document.body, not
+      // into fixture.nativeElement — query the document.
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      component.promptResumeOrFresh();
+      fixture.detectChanges();
+      expect(document.querySelector('[data-testid="context-overflow-overlay"]')).toBeTruthy();
+
+      component.onContextOverflowFresh();
+      fixture.detectChanges();
+      expect(document.querySelector('[data-testid="context-overflow-overlay"]')).toBeNull();
+    });
+
+    it('ngOnDestroy resolves a pending dialog as "fresh" (no leak)', async () => {
+      const choice = component.promptResumeOrFresh();
+      component.ngOnDestroy();
+      await expect(choice).resolves.toBe('fresh');
+    });
+
+    it('a second promptResumeOrFresh resolves the pending prior dialog as "fresh"', async () => {
+      const first = component.promptResumeOrFresh();
+      const second = component.promptResumeOrFresh();
+
+      // Re-entrancy: the superseded prompt settles (fresh) instead of leaking.
+      await expect(first).resolves.toBe('fresh');
+      expect(component.contextOverflowOpen()).toBe(true);
+
+      // Only the latest prompt is still user-controlled.
+      component.onContextOverflowResume();
+      await expect(second).resolves.toBe('resume');
+      expect(component.contextOverflowOpen()).toBe(false);
     });
   });
 

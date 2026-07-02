@@ -1,6 +1,6 @@
-//! Startup sanitation of v1 SharePoint secrets (refresh_token / client_id /
-//! tenant_id) left over in the worker-mounted token dir. ADR-060 moved them
-//! off-mount; this module deletes the stragglers. Best-effort, idempotent.
+//! Startup sanitation of legacy secret-bearing state: v1 SharePoint secrets
+//! left in the worker-mounted token dir (ADR-060) and the retired host_exec
+//! worker's state tree (ADR-054, reverted). Best-effort, idempotent.
 
 use std::path::Path;
 
@@ -10,18 +10,21 @@ use crate::consts;
 /// worker-mounted token dir post-ADR-060. SSOT for what this module touches.
 const LEGACY_SHAREPOINT_FILES: &[&str] = &["refresh_token", "client_id", "tenant_id"];
 
-/// Run cleanup once at startup. Best-effort: per-project failures are logged
-/// and do not abort the rest. Returns the number of projects where at least
-/// one legacy file was removed this run.
+/// Data-dir subdir where the retired `host_exec` worker (ADR-054, reverted)
+/// kept per-project state (0600 auth-token, config.json, logs). Legacy-only.
+pub(crate) const LEGACY_HOST_EXEC_SUBDIR: &str = "host-exec";
+
+/// Run cleanup once at startup: sweep the retired host_exec state tree, then
+/// sanitise legacy SharePoint token files. Best-effort — failures are logged.
+/// Returns the number of projects where a legacy SharePoint file was removed.
 pub fn run_legacy_token_cleanup_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
 
-/// Inner entry point parameterised by the data dir. Production goes through
-/// `run_legacy_token_cleanup_at_startup`; tests pass an explicit tmp dir to
-/// avoid the `consts::data_dir()` `OnceLock` cache shared across the
-/// `cargo test` binary.
+/// Inner entry point parameterised by the data dir. Tests pass an explicit
+/// tmp dir to bypass the cached `consts::data_dir()`.
 fn run_with_data_dir(data_dir: &Path) -> usize {
+    remove_legacy_host_exec_tree(data_dir);
     let tokens_root = data_dir.join("tokens");
     if !tokens_root.exists() {
         return 0;
@@ -92,6 +95,30 @@ fn cleanup_sharepoint_for_project(project: &str, project_dir: &Path) -> bool {
     any_removed
 }
 
+/// Delete the whole legacy `host-exec/` tree. Nothing reads it since the
+/// host_exec worker was removed, but it still holds secret-bearing files
+/// (auth-token, config.json). Returns `true` when the tree was removed.
+fn remove_legacy_host_exec_tree(data_dir: &Path) -> bool {
+    let root = data_dir.join(LEGACY_HOST_EXEC_SUBDIR);
+    match std::fs::remove_dir_all(&root) {
+        Ok(()) => {
+            log::info!(
+                "legacy_token_cleanup: removed retired host_exec state at {}",
+                root.display()
+            );
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            log::warn!(
+                "legacy_token_cleanup: failed to remove retired host_exec state at {}: {e}",
+                root.display()
+            );
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -132,8 +159,7 @@ mod tests {
 
     #[test]
     fn does_not_create_oauth_json_during_cleanup() {
-        // Cleanup ≠ migration: the host-only `oauth/<project>/sharepoint.json`
-        // must NOT be created. The user must re-authorize manually.
+        // Cleanup must not create the host-only `oauth/<project>/sharepoint.json`.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-a").join("sharepoint");
@@ -169,8 +195,7 @@ mod tests {
 
     #[test]
     fn handles_partial_legacy_state() {
-        // Only refresh_token exists — other two missing. Cleanup removes what
-        // is present and reports the project as cleaned.
+        // Only refresh_token exists — other two missing.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-c").join("sharepoint");
@@ -216,10 +241,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn does_not_crash_on_read_only_sharepoint_dir() {
-        // Sanitation must be best-effort: a read-only sp_dir prevents
-        // `remove_file` from succeeding, but cleanup must keep going (log + skip)
-        // rather than panic. The chmod is reverted before the test ends so the
-        // tempdir cleanup that runs on drop can remove the tree.
+        // A read-only sp_dir must not panic cleanup; perms restored before drop.
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
@@ -229,10 +251,7 @@ mod tests {
 
         std::fs::set_permissions(&sp_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        // Must not panic. Return value is best-effort; we accept either 0
-        // (remove_file failed, no file actually removed) or 1 (the FS allowed
-        // the unlink despite ro dir mode bits on some platforms — root /
-        // certain CI sandboxes).
+        // Must not panic; return value is best-effort (0 or 1 both accepted).
         let _ = run_with_data_dir(data_dir);
 
         // Restore writable perms so tempdir cleanup can recurse.
@@ -264,8 +283,7 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_files_in_sharepoint_dir() {
-        // A future field added to credential_files (e.g. base_path) must not
-        // be touched by this cleanup — only the SSOT-listed legacy files.
+        // Only the SSOT-listed legacy files are touched; other files survive.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-e").join("sharepoint");
@@ -279,5 +297,118 @@ mod tests {
         assert!(!sp_dir.join("refresh_token").exists());
         assert!(sp_dir.join("base_path").exists());
         assert!(sp_dir.join("future_field").exists());
+    }
+
+    // -- retired host_exec state sweep --
+
+    #[test]
+    fn removes_orphaned_host_exec_tree() {
+        let tmp = make_tmp_data_dir();
+        let data_dir = tmp.path();
+        let he = data_dir.join(LEGACY_HOST_EXEC_SUBDIR);
+        for project in ["proj-a", "proj-b"] {
+            let d = he.join(project);
+            std::fs::create_dir_all(&d).unwrap();
+            write(&d.join("auth-token"), "tok");
+            write(&d.join("config.json"), "{}");
+            write(&d.join("log"), "line");
+        }
+        // Unrelated sibling state must survive.
+        let sp_dir = data_dir.join("tokens").join("proj-a").join("sharepoint");
+        std::fs::create_dir_all(&sp_dir).unwrap();
+        write(&sp_dir.join("access_token"), "at");
+
+        run_with_data_dir(data_dir);
+
+        assert!(!he.exists(), "whole host-exec tree must be removed");
+        assert!(sp_dir.join("access_token").exists(), "unrelated state kept");
+    }
+
+    #[test]
+    fn host_exec_sweep_is_no_op_when_dir_absent() {
+        let tmp = make_tmp_data_dir();
+        assert!(!remove_legacy_host_exec_tree(tmp.path()));
+        let n = run_with_data_dir(tmp.path());
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn removes_empty_host_exec_dir() {
+        let tmp = make_tmp_data_dir();
+        let he = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR);
+        std::fs::create_dir_all(&he).unwrap();
+        assert!(remove_legacy_host_exec_tree(tmp.path()));
+        assert!(!he.exists());
+    }
+
+    #[test]
+    fn removes_host_exec_tree_with_nested_unexpected_content() {
+        let tmp = make_tmp_data_dir();
+        let he = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR);
+        std::fs::create_dir_all(he.join("proj").join("deep").join("er")).unwrap();
+        write(&he.join("stray-file"), "x");
+        write(
+            &he.join("proj").join("deep").join("er").join("blob.bin"),
+            "b",
+        );
+
+        run_with_data_dir(tmp.path());
+
+        assert!(!he.exists());
+    }
+
+    #[test]
+    fn host_exec_sweep_runs_even_without_tokens_root() {
+        // Guard: the sweep must not sit behind the tokens/ early return.
+        let tmp = make_tmp_data_dir();
+        let he = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR);
+        std::fs::create_dir_all(he.join("proj")).unwrap();
+        write(&he.join("proj").join("auth-token"), "tok");
+
+        let n = run_with_data_dir(tmp.path());
+
+        assert_eq!(n, 0, "no SharePoint project sanitised");
+        assert!(!he.exists(), "host-exec removed even with no tokens/ root");
+    }
+
+    #[test]
+    fn host_exec_sweep_is_idempotent() {
+        let tmp = make_tmp_data_dir();
+        let he = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR);
+        std::fs::create_dir_all(he.join("proj")).unwrap();
+        write(&he.join("proj").join("auth-token"), "tok");
+
+        assert!(remove_legacy_host_exec_tree(tmp.path()));
+        // Second run: already gone — no-op, no panic, nothing recreated.
+        assert!(!remove_legacy_host_exec_tree(tmp.path()));
+        assert!(!he.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_exec_sweep_survives_permission_denied() {
+        // remove_dir_all cannot unlink inside a r-x dir: the sweep must report
+        // failure via its return value (logged as warn), never panic. As root
+        // the unlink succeeds anyway, so both outcomes are asserted coherently.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = make_tmp_data_dir();
+        let protected = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR).join("protected");
+        std::fs::create_dir_all(&protected).unwrap();
+        write(&protected.join("auth-token"), "tok");
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let removed = remove_legacy_host_exec_tree(tmp.path());
+
+        if removed {
+            assert!(!tmp.path().join(LEGACY_HOST_EXEC_SUBDIR).exists());
+        } else {
+            assert!(
+                protected.join("auth-token").exists(),
+                "failed sweep must leave the protected file for the next run"
+            );
+        }
+
+        // Restore writable perms so tempdir cleanup can recurse.
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

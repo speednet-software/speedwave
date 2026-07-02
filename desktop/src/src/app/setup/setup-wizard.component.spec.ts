@@ -25,6 +25,7 @@ describe('SetupWizardComponent', () => {
         case 'init_vm':
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
         case 'create_project':
           return undefined;
@@ -87,6 +88,18 @@ describe('SetupWizardComponent', () => {
     expect(component.projectName()).toBe('test-proj');
     expect(component.projectDir()).toBe('/tmp/test');
     expect(component.steps[3].status).toBe('done');
+  });
+
+  it('defers start_containers — a fresh project has no LLM provider yet', async () => {
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+    await component.startSetup();
+    await component.onProjectCreated({ name: 'test-proj', dir: '/tmp/test' });
+
+    expect(invokeSpy).not.toHaveBeenCalledWith('start_containers', expect.anything());
+    expect(invokeSpy).toHaveBeenCalledWith('defer_container_start', { project: 'test-proj' });
+    expect(component.steps[4].status).toBe('done');
+    expect(component.steps[4].detail).toBe('Deferred until a provider is chosen');
   });
 
   it('should navigate with replaceUrl on completion', async () => {
@@ -168,6 +181,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -199,6 +213,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -227,6 +242,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:
@@ -255,6 +271,7 @@ describe('SetupWizardComponent', () => {
           };
         case 'build_images':
         case 'start_containers':
+        case 'defer_container_start':
         case 'link_cli':
           return undefined;
         default:

@@ -39,7 +39,7 @@ describe('LogsViewComponent', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'test';
+    projectState.activeProject.set('test');
 
     fixture = TestBed.createComponent(LogsViewComponent);
     component = fixture.componentInstance;
@@ -70,9 +70,7 @@ describe('LogsViewComponent', () => {
     const times = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="logs-time"]')
     ) as HTMLElement[];
-    // formatTime() prefixes bracketed `HH:MM:SS` stamps with today's date so
-    // the time column always carries a day. The raw bracketed value is kept
-    // in the `title` attribute for hover.
+    // formatTime() prefixes bracketed `HH:MM:SS` with today's date; raw value kept in `title`.
     expect(times[0].textContent?.trim()).toMatch(/^\d{4}-\d{2}-\d{2} 14:34:02$/);
     expect(times[0].getAttribute('title')).toBe('14:34:02.814');
 
@@ -99,11 +97,7 @@ describe('LogsViewComponent', () => {
   });
 
   it("prefixes today's date when the log line only carries HH:MM:SS", async () => {
-    // Reproduces the user-reported regression where the time column showed
-    // `11:32:56` with no day. Application-level logs inside the container
-    // emit `[HH:MM:SS]` and that often reaches the parser before any
-    // compose-level ISO stamp does. The fallback dates them with the host's
-    // current day so two entries from different days cannot collide.
+    // `[HH:MM:SS]`-only lines are dated with the host's current day.
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? 'mcp_hub | [11:32:56] INFO  hello' : undefined;
     vi.spyOn(component as unknown as { todayIso(): string }, 'todayIso').mockReturnValue(
@@ -119,10 +113,7 @@ describe('LogsViewComponent', () => {
   });
 
   it('renders an ISO timestamp in the host local timezone, raw value in title', async () => {
-    // `nerdctl compose logs --timestamps` is UTC `Z`; Speedwave loggers carry
-    // an offset. Either way the column shows local time (`YYYY-MM-DD HH:MM:SS`)
-    // — so a UTC `Z` stamp and a `+02:00` stamp for the same instant render
-    // identically. `[title]` keeps the raw value (micros + offset).
+    // Column shows local time; UTC `Z` and `+02:00` for the same instant render identically.
     const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO  hello` : undefined;
@@ -130,8 +121,7 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    // Expected = the same instant, formatted with the test process's local
-    // getters — `formatTime` must agree with a plain `new Date(...)`.
+    // `formatTime` must agree with a plain `new Date(...)`.
     const d = new Date(raw);
     const p2 = (n: number) => String(n).padStart(2, '0');
     const expected =
@@ -253,11 +243,9 @@ describe('LogsViewComponent', () => {
   });
 
   it('shows "No active project" error when activeProject is null and the lifecycle has settled', async () => {
-    projectState.activeProject = null;
-    // Mark the lifecycle as settled (any non-loading status works) so the
-    // banner is allowed to surface — during boot the view stays in a quiet
-    // loading state instead.
-    projectState.status = 'error';
+    projectState.activeProject.set(null);
+    // Mark the lifecycle as settled (any non-loading status) so the banner can surface.
+    projectState.status.set('error');
 
     await component.ngOnInit();
     fixture.detectChanges();
@@ -267,8 +255,8 @@ describe('LogsViewComponent', () => {
   });
 
   it('stays in loading state without an error when project lifecycle is still booting', async () => {
-    projectState.activeProject = null;
-    projectState.status = 'loading';
+    projectState.activeProject.set(null);
+    projectState.status.set('loading');
 
     await component.ngOnInit();
     fixture.detectChanges();
@@ -279,24 +267,20 @@ describe('LogsViewComponent', () => {
   });
 
   it('refetches logs once the project lifecycle settles after mount', async () => {
-    // Simulate the boot race: component mounts before the shell has had a
-    // chance to load `activeProject`. The view should pick up the project as
-    // soon as `onProjectSettled` fires and stop showing the loading state.
-    projectState.activeProject = null;
-    projectState.status = 'loading';
+    // Boot race: component mounts before `activeProject` loads; picks it up on `onProjectSettled`.
+    projectState.activeProject.set(null);
+    projectState.status.set('loading');
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.lines()).toHaveLength(0);
 
-    projectState.activeProject = 'test';
-    projectState.status = 'ready';
-    // The mock service exposes a notify hook through onProjectSettled
-    // listeners — emulate a settled event by calling all registered callbacks.
+    projectState.activeProject.set('test');
+    projectState.status.set('ready');
+    // Emulate a settled event by calling all registered onProjectSettled callbacks.
     (projectState as unknown as { settledListeners: Array<() => void> }).settledListeners.forEach(
       (cb) => cb()
     );
-    // The settled callback fires `void this.refresh()` — let the queued
-    // microtask resolve before asserting on the new state.
+    // The settled callback fires `void this.refresh()`; let the microtask resolve.
     await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     fixture.detectChanges();
@@ -492,22 +476,9 @@ describe('parseLogLine', () => {
   });
 
   it('strips STDERR: drain marker too', () => {
-    const line = parseLogLine('host-exec | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
+    const line = parseLogLine('mcp-os | 2026-05-12T14:34:02.814+02:00 STDERR: something broke');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
     expect(line.message).toBe('something broke');
-  });
-
-  it('extracts the drain timestamp from a host-exec audit JSON line, keeping the JSON as message', () => {
-    // The audit JSON's `ts` field stays UTC `Z` (a JSON value, not a log-line
-    // prefix); only the drain prefix carries the local offset.
-    const line = parseLogLine(
-      'host-exec | 2026-05-12T14:34:02.814+02:00 {"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
-    );
-    expect(line.source).toBe('host-exec');
-    expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
-    expect(line.message).toBe(
-      '{"ts":"2026-05-12T12:34:02.814Z","recipe":"docker_ps","status":"exited"}'
-    );
   });
 
   it('preserves the semantic SESSION: prefix on a claude-session line', () => {
@@ -686,7 +657,7 @@ describe('LogsViewComponent — status bar layout', () => {
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject = 'demo';
+    projectState.activeProject.set('demo');
 
     fixture = TestBed.createComponent(LogsViewComponent);
     component = fixture.componentInstance;
@@ -721,6 +692,20 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="health-containers"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="health-bridge"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="health-mcpos"]')).not.toBeNull();
+  });
+
+  it('shows a neutral checking placeholder until the first health snapshot lands', async () => {
+    // No snapshot yet: get_health yields nothing, so the strip must not claim "degraded".
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_all_logs') return '';
+      return undefined;
+    };
+    await component.ngOnInit();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="health-checking"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-overall"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-mcpos"]')).toBeNull();
   });
 
   it('computed signals reflect the current health snapshot', async () => {
@@ -1024,12 +1009,7 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('schedules a scroll-to-bottom write after each successful fetch', async () => {
-    // Reproduces the user-visible bug where opening /logs landed on top of
-    // the stream. The component delegates the actual scroll to
-    // `afterNextRender({ write })` so the browser commits DOM first; that
-    // hook does not flush in the jsdom test runtime. We assert the contract
-    // instead — `scrollToBottom` is invoked after `lines.set(...)` so the
-    // render hook has work to do once Angular commits.
+    // `scrollToBottom` is invoked after `lines.set(...)`.
     const scrollSpy = vi.spyOn(
       component as unknown as { scrollToBottom(): void },
       'scrollToBottom'
@@ -1043,12 +1023,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   // -- Unified logs view (get_all_logs) --
-  //
-  // The component now invokes `get_all_logs` instead of `get_compose_logs`
-  // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
-  // mcp-os.log, host-exec/<project>/log, claude-session.log) in addition to
-  // compose containers. These tests pin the new behaviour so a future refactor
-  // cannot silently revert to compose-only output.
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -1146,13 +1120,12 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(setSpy).not.toHaveBeenCalled();
   });
 
-  it('exposes desktop, mcp-os, host-exec and claude as separate sources in the dropdown', async () => {
+  it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
     // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
     // The existing `parseLogLine` extracts that source token and the
     // `sources()` signal exposes distinct values. This test pins the
     // contract: a merged backend response with all token types must produce
-    // matching entries in the dropdown — including `host-exec` (per-project
-    // worker audit/stdout log, ADR-054).
+    // matching entries in the dropdown.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
@@ -1161,8 +1134,6 @@ describe('LogsViewComponent — status bar layout', () => {
         'mcp_hub | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
         'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
         'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
-        // audit JSON `ts` field stays UTC `Z`; the drain prefix is local offset.
-        'host-exec | 2026-05-12T14:34:04.000+02:00 {"ts":"2026-05-12T12:34:04.000Z","recipe":"docker_ps","status":"exited"}',
         'claude | 2026-05-12T14:34:05.000+02:00 SESSION: started',
       ].join('\n');
     };
@@ -1172,23 +1143,13 @@ describe('LogsViewComponent — status bar layout', () => {
     // Order is: 'all' first, then sorted distinct sources.
     expect(sources).toContain('desktop');
     expect(sources).toContain('mcp-os');
-    expect(sources).toContain('host-exec');
     expect(sources).toContain('claude');
     expect(sources).toContain('mcp_hub'); // compose container, prefix-stripped
     expect(sources[0]).toBe('all');
   });
 
   it('renders desktop bracketed level as INFO/WARN level chip after Rust reformatting', async () => {
-    // Rust `prefix_lines` rewrites `[INFO]` → `INFO` so Angular `LEVEL_RE`
-    // (which expects unbracketed) hits and the line shows up in the level
-    // chip. Without that rewrite the line would default to `info` for every
-    // bracketed-level line — covering up real WARN/ERROR signals.
-    // The mock simulates what Rust `prefix_lines("desktop", …)` produces —
-    // the bracketed `[WARN]` from tauri-plugin-log is rewritten to `WARN ` (with
-    // trailing space, required by Angular `LEVEL_RE = /^LEVEL\s+/`) before
-    // the `desktop | ` prefix is added. The timestamp is now the colon-offset
-    // RFC-3339 form `log_ts::log_timestamp()` emits. If the Rust rewrite ever
-    // drops the trailing space, this test fails — which is the regression we want.
+    // Mock simulates Rust `prefix_lines("desktop", …)`: `[WARN]` rewritten to `WARN ` (trailing space required by `LEVEL_RE = /^LEVEL\s+/`).
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return 'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail';

@@ -10,6 +10,42 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(AppleMailClient.isAvailable())
     }
 
+    // MARK: - detectClients structure + permission/absence distinction
+
+    func testDetectClientsHasMailAndOutlookEntries() {
+        let result = detectClients()
+        let clients = result["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 2, "must list Apple Mail + Outlook")
+        XCTAssertEqual(clients.first?["name"] as? String, AppleMailClient.name)
+        XCTAssertEqual(clients.first?["available"] as? Bool, true)
+        let outlook = clients.last
+        XCTAssertEqual(outlook?["name"] as? String, OutlookClient.name)
+        XCTAssertNotNil(outlook?["available"], "Outlook entry must always carry an availability flag")
+        // An `error` must pair with available=false.
+        if let err = outlook?["error"] as? String {
+            XCTAssertEqual(outlook?["available"] as? Bool, false,
+                           "an Outlook error must pair with available=false")
+            XCTAssertFalse(err.isEmpty)
+        }
+    }
+
+    func testOutlookAvailabilityRethrowsPermissionAndTimeoutErrors() {
+        let permission = ScriptError.automationPermission("not allowed")
+        let timeout = ScriptError.timeout(5, nil)
+        let scriptFailed = ScriptError.scriptFailed("syntax error")
+
+        func classify(_ e: ScriptError) -> Bool {
+            // true = rethrown (ambiguous, surface to user); false = treated as not-available
+            switch e {
+            case .automationPermission, .timeout: return true
+            case .scriptFailed: return false
+            }
+        }
+        XCTAssertTrue(classify(permission), "permission denial must be surfaced, not swallowed")
+        XCTAssertTrue(classify(timeout), "timeout must be surfaced, not swallowed")
+        XCTAssertFalse(classify(scriptFailed), "a generic failure means Outlook is simply not available")
+    }
+
     // MARK: - Error Messages
 
     func testMailErrorMissingField() {
@@ -74,9 +110,7 @@ final class MailTests: XCTestCase {
     // MARK: - Permission Check Script
 
     func testPermissionCheckScriptAccessesData() {
-        // "to name" does NOT require Automation permission — it returns the app
-        // name without triggering a TCC prompt. The script must access actual
-        // data (e.g. accounts, mailboxes) to force macOS to check permission.
+        // "to name" does NOT require Automation permission.
         XCTAssertFalse(
             permissionCheckScript.hasSuffix("to name"),
             "permissionCheckScript must not use 'to name' — it does not require Automation permission"
@@ -88,8 +122,7 @@ final class MailTests: XCTestCase {
     }
 
     func testPermissionCheckScriptDeniedIncludesGuidance() {
-        // When permission is denied, the error message should guide the user
-        // to System Settings > Automation (not Calendars/Reminders).
+        // Denied error must guide to System Settings > Automation.
         let detail = "Mail access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
         XCTAssertTrue(detail.contains("Automation"))
     }
@@ -128,12 +161,6 @@ final class MailTests: XCTestCase {
     }
 
     // MARK: - AppleEventsGate end-to-end through performCheckPermission
-    //
-    // Each test injects a FakeMailGate (custom RawAuthorizationStatus) into
-    // performCheckPermission to exercise the full pipeline (status check →
-    // optional request → optional verifyDataAccess) without spawning osascript
-    // or hitting real TCC. This is the same pattern as SharedCLITests.MockGate
-    // but parameterised for Mail's entity (.mail) and bundle (com.apple.mail).
 
     final class FakeMailGate: PermissionGate {
         var initialStatus: RawAuthorizationStatus = .notDetermined
@@ -162,8 +189,7 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionDeniedReturnsAppleEventsTccutil() {
-        // Initial status .denied → must include `tccutil reset AppleEvents pl.speedwave.desktop.mail`,
-        // NOT `tccutil reset Mail …` (Mail uses kTCCServiceAppleEvents).
+        // Mail uses kTCCServiceAppleEvents, so denied must reset AppleEvents, not Mail.
         let gate = FakeMailGate()
         gate.initialStatus = .denied
         let result = performCheckPermission(gate: gate, entity: .mail)
@@ -177,8 +203,7 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
-        // post-status must also be .targetNotRunning — orchestrator no longer
-        // short-circuits on initial .targetNotRunning (gate may auto-launch).
+        // post-status must also be .targetNotRunning (no short-circuit on initial).
         let gate = FakeMailGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
@@ -193,8 +218,7 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionSilentRejectWhenNotDeterminedTwice() {
-        // Initial .notDetermined → request fires but post-status remains .notDetermined →
-        // mapped to .silentReject (signing/entitlement/Info.plist issue).
+        // .notDetermined unchanged after request maps to .silentReject.
         let gate = FakeMailGate()
         gate.initialStatus = .notDetermined
         gate.postRequestStatus = .notDetermined
@@ -208,9 +232,7 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionGrantedButDataAccessFails() {
-        // TCC reports .granted but the AppleScript probe fails → result downgrades to
-        // silentReject with the data-access error attached. This preserves the v1
-        // invariant that Mail/Notes permission checks accessed real data.
+        // .granted but data-access probe fails downgrades to silentReject.
         let gate = FakeMailGate()
         gate.initialStatus = .granted
         gate.dataAccessError = "AppleScript error: cannot read mailboxes"

@@ -1,27 +1,21 @@
-// Container lifecycle and setup wizard Tauri commands.
-//
-// Extracted from main.rs — thin #[tauri::command] wrappers that delegate to
-// `setup_wizard` and `speedwave_runtime` functions, converting errors to
-// `Result<T, String>` for Tauri's serialization boundary.
+// Container lifecycle and setup wizard Tauri commands — thin
+// #[tauri::command] wrappers over setup_wizard / speedwave_runtime.
 
 use speedwave_runtime::config;
 
-use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
+use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse, LlmConfigUpdate};
 
-/// Maximum bytes accepted for the local-LLM `api_key` token file. 64 KiB is
-/// generous for OAuth/JWT bearers; anything larger is almost certainly a paste
-/// error or hostile input.
+/// Max bytes for the local-LLM `api_key` token file; larger is almost
+/// certainly a paste error or hostile input.
 const MAX_API_KEY_BYTES: usize = 64 * 1024;
-/// Maximum bytes accepted for the `custom_headers` blob (multi-line
-/// `Name: Value`). 16 KiB covers realistic header counts without enabling
-/// arbitrary blob storage.
+/// Max bytes for the `custom_headers` blob (multi-line `Name: Value`) —
+/// realistic header counts without enabling arbitrary blob storage.
 const MAX_CUSTOM_HEADERS_BYTES: usize = 16 * 1024;
 
-/// Disallowed header names (case-insensitive). These either collide with
-/// Speedwave-managed semantics (`Authorization` comes from `api_key`) or are
-/// hop-by-hop/transport headers that shouldn't be set by the caller.
+/// Disallowed header names (case-insensitive): Speedwave-managed
+/// (`Authorization` ← `api_key`) or hop-by-hop/transport headers.
 const FORBIDDEN_HEADER_NAMES: &[&str] = &[
     "authorization",
     "cookie",
@@ -30,10 +24,8 @@ const FORBIDDEN_HEADER_NAMES: &[&str] = &[
     "transfer-encoding",
 ];
 
-/// Validates and normalises an `api_key` before persisting. An empty result
-/// after `Bearer ` strip is an explicit error so the user gets an actionable
-/// message — passing `""` to clear the key is a separate code path
-/// (`save_compose` deletes the file when the resolver yields `Delete`).
+/// Validates and normalises an `api_key`. Empty after `Bearer ` strip is an
+/// explicit error; clearing the key is a separate `Delete` path.
 pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if value.len() > MAX_API_KEY_BYTES {
         return Err(format!("api_key exceeds {} byte limit", MAX_API_KEY_BYTES));
@@ -45,10 +37,7 @@ pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    // A bare `Bearer` (no token after it) reaches `strip_bearer_prefix` only
-    // when the trailing space survives the trim — but `trimmed` already
-    // removed it. Detect the prefix-only case explicitly so the user sees
-    // the actionable error instead of having the stripper return `Some("Bearer")`.
+    // Reject a bare `Bearer` (no token) with an actionable error.
     if trimmed.eq_ignore_ascii_case("bearer") {
         return Err("api_key must not be empty after stripping the 'Bearer ' prefix".to_string());
     }
@@ -100,10 +89,8 @@ pub(crate) fn validate_custom_headers(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-/// Maximum time to wait for container images to become ready before failing.
-/// The Angular frontend shows a "Rebuilding container images..." overlay while
-/// Tauri commands block on this timeout via `wait_for_images_ready()`.
-/// If this value changes, update the UX expectations in project-state.service.ts.
+/// Max wait for container images to become ready before failing; the
+/// frontend shows a rebuild overlay meanwhile (UX in project-state.service.ts).
 const RECONCILE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Blocks until container images are ready (reconcile complete) or timeout.
@@ -112,13 +99,14 @@ pub(crate) fn ensure_images_ready() -> Result<(), String> {
     crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
 }
 
-// ---------------------------------------------------------------------------
 // Project switch transaction helpers
 // ---------------------------------------------------------------------------
 
 /// Result of the container-switching transaction.
 pub(crate) enum SwitchResult {
-    Succeeded,
+    /// New project is up. `teardown` is the previous project the caller must
+    /// stop via `spawn_background_teardown` (None when nothing to stop).
+    Succeeded { teardown: Option<String> },
     /// Primary error + optional cleanup error. Caller handles config rollback + UI.
     Failed {
         error: String,
@@ -126,29 +114,8 @@ pub(crate) enum SwitchResult {
     },
 }
 
-/// Tears down (partially-started) new project, then restores previous.
-/// Each project takes its own per-project lock — intentional, not a bug:
-/// `new` and `previous` are different projects, no cross-project transaction.
-pub(crate) fn teardown_and_restore(
-    new_project: &str,
-    previous: &str,
-    rt: &speedwave_runtime::runtime::LockedRuntime,
-) -> Result<(), String> {
-    let down_err = rt.compose_down(new_project).err();
-    if let Some(ref e) = down_err {
-        log::warn!("teardown new '{new_project}' failed: {e}");
-    }
-    rt.compose_up(previous).map_err(|e| {
-        let base = format!("restore '{previous}' failed: {e}");
-        match down_err {
-            Some(de) => format!("{base}. Teardown of '{new_project}' also failed: {de}"),
-            None => base,
-        }
-    })
-}
-
 /// Tears down new project without restoring anything.
-/// Used when previous is None — no project to restore.
+/// The previous project is never stopped before the switch succeeds.
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -159,8 +126,130 @@ pub(crate) fn teardown_only(
     })
 }
 
-/// Core sync logic: ensure_ready → stop previous → recreate new.
-/// Does NOT touch config or chat — caller handles those.
+/// In-flight background teardowns by project name.
+static PENDING_TEARDOWNS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::thread::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn pending_teardowns_lock(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::thread::JoinHandle<()>>>
+{
+    match PENDING_TEARDOWNS.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Stops the previous project on a background thread (best-effort).
+/// A failure only leaves idle containers; the next compose op converges them.
+pub(crate) fn spawn_background_teardown(prev: String) {
+    spawn_background_teardown_with(prev, |p| {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        rt.compose_down(p).map_err(|e| e.to_string())
+    });
+}
+
+/// On-disk teardown intents — lets the NEXT launch converge projects whose
+/// background teardown a crash interrupted (never CLI-run projects).
+fn teardown_intents_path() -> std::path::PathBuf {
+    speedwave_runtime::consts::data_dir().join("pending-teardowns")
+}
+
+fn record_teardown_intent(project: &str) {
+    let _guard = pending_teardowns_lock();
+    let path = teardown_intents_path();
+    let mut entries: Vec<String> = std::fs::read_to_string(&path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    if !entries.iter().any(|e| e == project) {
+        entries.push(project.to_string());
+        if let Err(e) = write_intents_atomic(&path, &entries) {
+            log::warn!("could not record teardown intent for '{project}': {e}");
+        }
+    }
+}
+
+/// tmp + rename: this file exists ONLY for crash recovery, so a torn write
+/// (fs::write truncates first on Windows) would defeat its purpose.
+fn write_intents_atomic(path: &std::path::Path, entries: &[String]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, entries.join("\n"))?;
+    std::fs::rename(&tmp, path)
+}
+
+fn clear_teardown_intent(project: &str) {
+    let _guard = pending_teardowns_lock();
+    let path = teardown_intents_path();
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let entries: Vec<&str> = content.lines().filter(|l| *l != project).collect();
+    let entries: Vec<String> = entries.into_iter().map(str::to_string).collect();
+    let result = if entries.is_empty() {
+        std::fs::remove_file(&path)
+    } else {
+        write_intents_atomic(&path, &entries)
+    };
+    if let Err(e) = result {
+        log::warn!("could not clear teardown intent for '{project}': {e}");
+    }
+}
+
+/// Projects whose background teardown a previous process never finished.
+pub(crate) fn crashed_teardown_intents() -> Vec<String> {
+    let path = teardown_intents_path();
+    // write_intents_atomic writes to .tmp then renames; a crash between those
+    // two steps leaves the .tmp behind permanently — clean it up now.
+    let _ = std::fs::remove_file(path.with_extension("tmp"));
+    std::fs::read_to_string(&path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn spawn_background_teardown_with(
+    prev: String,
+    down: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+) {
+    record_teardown_intent(&prev);
+    let project = prev.clone();
+    let handle = std::thread::spawn(move || {
+        log::info!("background teardown: stopping previous project '{project}'");
+        match down(&project) {
+            Ok(()) => {
+                log::info!("background teardown: '{project}' stopped");
+                clear_teardown_intent(&project);
+            }
+            Err(e) => log::warn!("background teardown: compose_down('{project}') failed: {e}"),
+        }
+    });
+    if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
+        // Replaced entry already finished; join() is a no-op cleanup.
+        let _ = old.join();
+    }
+}
+
+/// Joins every in-flight background teardown — exit path only.
+pub(crate) fn drain_pending_teardowns() {
+    let handles: Vec<(String, std::thread::JoinHandle<()>)> =
+        pending_teardowns_lock().drain().collect();
+    for (project, handle) in handles {
+        log::info!("draining background teardown of '{project}' before exit");
+        let _ = handle.join();
+    }
+}
+
+/// Joins a pending background teardown of `project` before it is started
+/// again — otherwise the teardown could kill the freshly started containers.
+pub(crate) fn wait_for_pending_teardown(project: &str) {
+    let handle = pending_teardowns_lock().remove(project);
+    if let Some(h) = handle {
+        log::info!("waiting for background teardown of '{project}' before starting it");
+        let _ = h.join();
+    }
+}
+
+/// Core sync logic: ensure_ready → start new project FIRST → hand previous
+/// back for background teardown. A failed start leaves previous untouched.
 pub(crate) fn switch_project_core(
     previous: &Option<String>,
     new_project: &str,
@@ -175,50 +264,53 @@ pub(crate) fn switch_project_core(
         };
     }
 
-    // 2. Stop previous (if different)
-    if let Some(prev) = previous {
-        if prev != new_project {
-            if let Err(e) = rt.compose_down(prev) {
-                // Idempotent re-up: if compose_down left the previous project
-                // in a partial state, compose_up ensures it is fully running.
-                // On an already-running project this is a harmless no-op.
-                let restore_err = rt.compose_up(prev).err();
-                return SwitchResult::Failed {
-                    error: format!("compose_down('{prev}') failed: {e}"),
-                    cleanup_error: restore_err.map(|re| {
-                        format!(
-                            "restore '{prev}' also failed: {re}. \
-                             System may be without running containers."
-                        )
-                    }),
-                };
-            }
-        }
-    }
+    // 2. A still-running teardown of the destination must finish first.
+    wait_for_pending_teardown(new_project);
 
-    // 3. Recreate new
+    // 3. Start new first — previous keeps serving until the caller's
+    //    background teardown after a fully successful switch.
     if let Err(e) = recreate_fn(new_project, rt) {
-        let cleanup_error = match previous {
-            Some(prev) if prev != new_project => teardown_and_restore(new_project, prev, rt).err(),
-            _ => teardown_only(new_project, rt),
-        };
         return SwitchResult::Failed {
             error: e,
-            cleanup_error,
+            cleanup_error: teardown_only(new_project, rt),
         };
     }
 
-    SwitchResult::Succeeded
+    SwitchResult::Succeeded {
+        teardown: previous
+            .as_ref()
+            .filter(|p| p.as_str() != new_project)
+            .cloned(),
+    }
 }
 
-// ---------------------------------------------------------------------------
 // Compose helpers — resolve config, render, security check, save
 // ---------------------------------------------------------------------------
 
-/// Renders a new compose.yml for a project and saves it after security check.
-/// Caller MUST run `ensure_project_images_built` before invoking — passes
-/// `None` to `render_compose` so the image-build path is not entered under
-/// the compose lock (ADR-066).
+/// True when `project` has no resolvable LLM provider (SSOT:
+/// `LlmConfig::is_unconfigured`) — callers must skip starting containers.
+pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    project_llm_is_unconfigured_in(&user_config, project)
+}
+
+/// Testable variant of [`project_llm_is_unconfigured`] taking an explicit config.
+fn project_llm_is_unconfigured_in(
+    user_config: &config::SpeedwaveUserConfig,
+    project: &str,
+) -> Result<bool, String> {
+    let project_dir = user_config
+        .find_project(project)
+        .map(|p| p.dir.clone())
+        .ok_or_else(|| format!("project '{}' not found", project))?;
+    let project_path = std::path::Path::new(&project_dir);
+    let (resolved, _integrations) =
+        config::resolve_project_config(project_path, user_config, project);
+    Ok(resolved.llm.is_unconfigured())
+}
+
+/// Renders a project's compose.yml and saves it after security check. Caller
+/// MUST pre-build images — passes `None` to render_compose (ADR-066).
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
@@ -317,7 +409,6 @@ pub async fn run_system_check() -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Setup wizard commands
 // ---------------------------------------------------------------------------
 
@@ -339,19 +430,6 @@ pub async fn check_runtime() -> Result<String, String> {
                 Ok("NotInstalled".to_string())
             }
         }
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn install_runtime() -> Result<(), String> {
-    tokio::task::spawn_blocking(|| {
-        log::info!("install_runtime: starting");
-        setup_wizard::install_runtime().map_err(|e| {
-            log::error!("install_runtime: error: {e}");
-            e.to_string()
-        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -396,14 +474,8 @@ pub async fn link_cli() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Adds a new project and boots it (containers + chat).
-///
-/// Same lifecycle as `switch_project`: emits `project_switch_started` /
-/// `project_switch_succeeded` / `project_switch_failed`.  On failure the
-/// project stays registered but inactive (user can retry from the switcher).
-///
-/// Transactional: ensure_ready → stop previous → start new. On failure,
-/// previous project containers are restored.
+/// Adds a project and boots it (containers + chat); same lifecycle as
+/// `switch_project`. On failure it stays registered but inactive (retryable).
 #[tauri::command]
 pub async fn add_project(
     name: String,
@@ -413,9 +485,14 @@ pub async fn add_project(
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
+    let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
+        return Err("A project switch is already in progress".to_string());
+    };
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    use tauri::Manager;
+    let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     // Pre-flight: detect CloudStorage TCC denial before adding project.
     {
@@ -469,9 +546,23 @@ pub async fn add_project(
             };
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
-        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, _rt| {
+        switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
             check_project(proj)?;
+            // Lazy build for the new project (ADR-057) — repo-enabled
+            // integrations need their images before pull_policy:never up.
+            if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(rt, proj) {
+                return Err(format!("Image build failed: {sanitized}"));
+            }
+            // No provider is a valid state ("choose a provider" screen) —
+            // skip starting containers rather than let render_compose bail.
+            if project_llm_is_unconfigured(proj)? {
+                log::info!("add_project: '{proj}' has no LLM provider — skipping container start");
+                return Ok(());
+            }
+            // Eager-start host workers before compose render — live WORKER_*_URLs
+            // prevent the first-message container recreate.
+            crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("add_project: starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("add_project: start_containers failed: {e}");
@@ -482,20 +573,27 @@ pub async fn add_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Failed {
-        error,
-        cleanup_error,
-    } = switch_result
-    {
-        let full_error =
-            crate::rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
-        return Err(full_error);
-    }
+    let pending_teardown = match switch_result {
+        SwitchResult::Failed {
+            error,
+            cleanup_error,
+        } => {
+            let full_error =
+                crate::rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
+            return Err(full_error);
+        }
+        SwitchResult::Succeeded { teardown } => teardown,
+    };
 
     // Rebind chat session
     if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
         // Containers running but chat failed — transient, still emit succeeded
         log::warn!("add_project: rebind_chat failed: {e}");
+    }
+
+    // Previous project is stopped in the background.
+    if let Some(prev) = pending_teardown {
+        spawn_background_teardown(prev);
     }
 
     let _ = app.emit(
@@ -522,15 +620,10 @@ pub(crate) fn remove_project_core(
     remove_fn(name)
 }
 
-/// Tears down a project's containers, host_exec drain, and unregisters it.
+/// Tears down a project's containers and unregisters it.
 /// Runtime layer rejects the active project (sentinel-prefixed error for the UI).
 #[tauri::command]
-pub async fn remove_project(
-    name: String,
-    host_exec: tauri::State<'_, crate::reconcile::SharedHostExec>,
-) -> Result<(), String> {
-    crate::reconcile::teardown_host_exec_for_project(host_exec.inner(), &name);
-
+pub async fn remove_project(name: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let rt = speedwave_runtime::runtime::detect_runtime();
         remove_project_core(&name, &rt, &|n| {
@@ -544,7 +637,6 @@ pub async fn remove_project(
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
 // Container lifecycle commands
 // ---------------------------------------------------------------------------
 
@@ -575,10 +667,15 @@ pub async fn start_containers(
 ) -> Result<(), String> {
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    use tauri::Manager;
+    let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
+        // Eager-start host workers before compose render — live WORKER_*_URLs
+        // prevent the first-message container recreate.
+        crate::ensure_oauth_running(&oauth_arc, &project);
         // Pre-flight: detect CloudStorage TCC denial before attempting container start.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
@@ -596,30 +693,28 @@ pub async fn start_containers(
     .await
     .map_err(|e| e.to_string())??;
 
-    // `start_containers` is the last setup step that flips `is_setup_complete()`
-    // (the wizard order is runtime_ready → vm_ready → images_built →
-    // project_created → containers_started; cli_linked is independent). Rebuild
-    // the tray here so setup-gated items (the ADR-058 beta toggle) appear
-    // immediately after the wizard finishes.
+    // `start_containers` is the last step that flips `is_setup_complete()`;
+    // rebuild the tray so setup-gated items (ADR-058 beta toggle) appear.
     crate::tray::refresh_tray_menu(&app);
     Ok(())
 }
 
+/// Wizard step 4 for a project with no LLM provider yet — marks the step
+/// done without starting containers. See `setup_wizard::defer_container_start`.
 #[tauri::command]
-pub async fn check_claude_auth(project: String) -> Result<bool, String> {
+pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        // check_claude_auth → setup_wizard::check_claude_auth → ensure_exec_healthy
-        // can call compose_up_recreate; block on bundle reconcile first.
-        ensure_images_ready()?;
         check_project(&project)?;
-        log::info!("check_claude_auth: project={project}");
-        setup_wizard::check_claude_auth(&project).map_err(|e| {
-            log::error!("check_claude_auth: error: {e}");
+        setup_wizard::defer_container_start(&project).map_err(|e| {
+            log::error!("defer_container_start: error: {e}");
             e.to_string()
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    crate::tray::refresh_tray_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -628,11 +723,18 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
         check_project(&project)?;
         log::info!("check_containers_running: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
-        // Intentional double check: is_available() returns Ok(false) for a stopped
-        // runtime (clear UX), while compose_ps() would return Err (confusing UX).
-        // This guard gives the frontend a clean "no containers" signal.
+        // Intentional double check: is_available() gives a clean "no
+        // containers" signal where compose_ps() would Err (confusing UX).
         if !rt.is_available() {
             log::warn!("check_containers_running: runtime not available");
+            return Ok(false);
+        }
+        // A deferred-start project (no LLM provider yet) has no compose.yml
+        // at all — compose_ps would Err rather than report "not running".
+        let compose_file =
+            speedwave_runtime::runtime::compose_file_path(&project).map_err(|e| e.to_string())?;
+        if !std::path::Path::new(&compose_file).exists() {
+            log::info!("check_containers_running: no compose.yml yet for '{project}'");
             return Ok(false);
         }
         let containers = rt.compose_ps(&project).map_err(|e| {
@@ -646,12 +748,70 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Recreate containers for a project with freshly generated compose.
-///
-/// Used on project switch to ensure `ENABLED_SERVICES` matches the new
-/// project's integration settings.  Lighter than `restart_integration_containers`
-/// because it skips image rebuilds and snapshot/rollback (images don't change
-/// between projects, and there's no previous "good" compose to roll back to).
+/// Re-render compose and recreate running containers so the hub re-discovers a
+/// host worker. Best-effort (oauth respawn + per-project watchdog).
+pub(crate) fn recreate_project_containers_if_running(project: &str) {
+    // Only the ACTIVE project may be resurrected — else a compose_ps TOCTOU
+    // revives a project the user already switched away from mid-teardown.
+    let active = speedwave_runtime::config::load_user_config()
+        .ok()
+        .and_then(|c| c.active_project);
+    if active.as_deref() != Some(project) {
+        log::debug!(
+            "recreate_project_containers_if_running: '{project}' is not the active project — skipping"
+        );
+        return;
+    }
+    // Bundle reconcile may be rebuilding images. compose_up_recreate against a
+    // missing image tag emits "image not available" to the user. Wait first.
+    if let Err(e) = ensure_images_ready() {
+        log::warn!("recreate_project_containers_if_running: images not ready for '{project}': {e}");
+        return;
+    }
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    if !rt.is_available() {
+        log::debug!("recreate_project_containers_if_running: runtime not available — skipping");
+        return;
+    }
+    let running = match rt.compose_ps(project) {
+        Ok(c) => !c.is_empty(),
+        Err(e) => {
+            log::debug!(
+                "recreate_project_containers_if_running: compose_ps failed ({e}) — skipping"
+            );
+            return;
+        }
+    };
+    if !running {
+        log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
+        return;
+    }
+    // Build OUTSIDE the compose lock (ADR-066).
+    if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
+        log::warn!(
+            "recreate_project_containers_if_running: pre-build failed for '{project}': {sanitized}"
+        );
+        return;
+    }
+    use crate::types::IntoAnyhow;
+    let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
+        render_and_save_compose(project).into_anyhow()?;
+        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
+        rt.compose_up_recreate(project)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            log::info!("recreated containers for '{project}' so the hub re-discovers");
+        }
+        Err(e) => {
+            log::warn!("recreate_project_containers_if_running: failed for '{project}': {e}");
+        }
+    }
+}
+
+/// Recreate a project's containers with freshly generated compose (on switch,
+/// to match `ENABLED_SERVICES`). Skips image rebuild + snapshot/rollback.
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -686,16 +846,6 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         })
         .map_err(|e| e.to_string())?;
 
-        // Windows: `compose up` re-creates the root-owned /home/speedwave/.claude
-        // mount-point, so the uid-1000 entrypoint EACCESes; chown the claude-home
-        // tree after compose, same as start_containers (ADR-052). Fail-open.
-        #[cfg(target_os = "windows")]
-        if let Err(e) = crate::setup_wizard::ensure_claude_home_owner(&project) {
-            log::warn!(
-                "recreate_project_containers: ensure_claude_home_owner failed (non-fatal): {e}"
-            );
-        }
-
         log::info!("recreate_project_containers: done for project={project}");
         Ok(())
     })
@@ -703,7 +853,6 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
 // Settings / reset commands
 // ---------------------------------------------------------------------------
 
@@ -725,9 +874,8 @@ pub async fn factory_reset(
         }
     }
 
-    // 3. Stop mcp-os (kill child, join drain threads → log file handles released)
-    //    Explicit stop + cleanup_files before drop; wipe_data_dir will remove
-    //    everything anyway, but this keeps behaviour consistent with run_exit_cleanup.
+    // 3. Stop mcp-os (kill child, join drain threads, release log handles);
+    //    explicit stop + cleanup_files keeps parity with run_exit_cleanup.
     if let Ok(mut guard) = mcp_os.lock() {
         if let Some(mut proc) = guard.take() {
             if let Err(e) = proc.stop() {
@@ -748,9 +896,8 @@ pub async fn factory_reset(
     .await
     .map_err(|e| e.to_string())?;
 
-    // 5. Always restart:
-    //    Success → clean start, wizard shows (data dir gone).
-    //    Failure → recover subsystems (data dir may partially exist).
+    // 5. Always restart: success → clean wizard start (data dir gone);
+    //    failure → recover subsystems (data dir may partially exist).
     if let Err(ref e) = result {
         log::error!("factory_reset: wipe failed ({e}), restarting to recover");
     }
@@ -760,21 +907,23 @@ pub async fn factory_reset(
 #[tauri::command]
 pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let llm = user_config
+    let mut llm = user_config
         .active_project_entry()
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
+    // `has_api_key` is the key file's existence (SSOT), not the persisted flag —
+    // re-derive it before the frontend reads it.
+    if let Some(active) = user_config.active_project.as_deref() {
+        llm.sync_has_api_key_from_disk_in(speedwave_runtime::consts::data_dir().as_path(), active);
+    }
     let default_base_url = llm
         .provider
         .as_deref()
         .and_then(speedwave_runtime::compose::default_base_url);
 
-    // Non-destructive migration: if a previously-stored base_url no longer
-    // satisfies the current SSRF policy (e.g. someone saved `http://169.254.169.254`
-    // before the policy was introduced), log a warning. The value is still
-    // returned so the UI can show it in the input; the Save path will reject
-    // it on the user's next edit. See ADR-041.
+    // Non-destructive: warn if a stored base_url now fails the SSRF policy,
+    // but still return it for display — the Save path rejects it (ADR-041).
     if let Some(ref url) = llm.base_url {
         let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
         if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
@@ -788,48 +937,22 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     })
 }
 
-/// Returns the backend-authoritative default base URL for a given provider.
-///
-/// Delegates to `speedwave_runtime::compose::default_base_url` so the frontend
-/// never needs to duplicate URL strings. Returns `None` for unknown providers
-/// (e.g. `"anthropic"` has no local server URL).
+/// Backend-authoritative default base URL for a provider (so the frontend
+/// duplicates no URL strings). `None` for unknown providers, e.g. anthropic.
 #[tauri::command]
 pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> {
     Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
-/// Returns the SSOT list of Anthropic models surfaced in
-/// `Settings → LLM Provider`. Backend owns the catalog so the frontend has
-/// no model strings hard-coded — bumping a model means editing a single
-/// const in `defaults.rs`. The struct already derives `Serialize`, so the
-/// `&'static str` fields cross the Tauri IPC boundary directly without a
-/// mirror DTO.
+/// SSOT Anthropic model list for Settings → LLM Provider; bumping a model
+/// edits one const in `defaults.rs` (struct serializes across IPC directly).
 #[tauri::command]
 pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::AnthropicModelInfo] {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
-/// Returns the display label of the Opus model that the dropdown's
-/// `(default)` option resolves to at runtime — used by the Settings UI to
-/// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
-/// instead of the previous vague *"let Claude Code choose"* placeholder.
-///
-/// `None` when the SSOT has no `latest = true` Opus family — frontend then
-/// falls back to the generic placeholder.
-#[tauri::command]
-pub fn get_default_anthropic_model_label() -> Option<&'static str> {
-    speedwave_runtime::defaults::default_anthropic_family_label()
-}
-
-/// Applies LLM config to the active project in-memory. Extracted for
-/// testability and reused by `update_llm_config`.
-///
-/// Cross-field invariants are enforced here, not just in `update_llm_config`:
-/// internal callers that build a `LlmConfig` directly (setup wizard, future
-/// migration paths) must not be able to persist `provider=<local>, model=None`.
-/// The Tauri command performs the same checks earlier so the user gets a
-/// human-readable error before the save attempt; the duplicated guard here is
-/// the safety net.
+/// Applies LLM config to the active project in-memory; enforces the local-
+/// provider-needs-model invariant for callers bypassing `update_llm_config`.
 fn apply_llm_config(
     user_config: &mut config::SpeedwaveUserConfig,
     update: config::LlmConfig,
@@ -837,10 +960,9 @@ fn apply_llm_config(
     if config::is_local_provider(update.provider.as_deref())
         && update.model.as_deref().is_none_or(str::is_empty)
     {
-        return Err(anyhow::anyhow!(
-            "Provider '{}' requires a model name",
+        return Err(anyhow::anyhow!(model_required_error(
             update.provider.as_deref().unwrap_or("")
-        ));
+        )));
     }
     if matches!(update.context_tokens, Some(0)) {
         return Err(anyhow::anyhow!("context_tokens must be greater than 0"));
@@ -870,7 +992,17 @@ fn apply_llm_config(
 /// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
 /// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
-pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
+pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
+    // Canonicalize loopback hosts before validation so the persisted base_url
+    // is the one the proxy container can reach.
+    if config::is_local_provider(update.provider.as_deref()) {
+        if let Some(url) = update.base_url.as_deref() {
+            update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+        }
+    }
+    if let Some(ref mut providers) = update.providers {
+        canonicalize_provider_base_urls(providers);
+    }
     log::info!(
         "update_llm_config: provider={:?} model={:?} context_tokens={:?} \
          api_key_change={} custom_headers_change={}",
@@ -884,9 +1016,8 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         && update.model.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
-            "Provider '{}' requires a model name. \
-             Configure it in Settings → LLM Provider → Model.",
-            update.provider.as_deref().unwrap_or("")
+            "{} — configure it in Settings → LLM Provider → Model.",
+            model_required_error(update.provider.as_deref().unwrap_or(""))
         ));
     }
     if let Some(ref m) = update.model {
@@ -910,6 +1041,15 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         );
     }
 
+    // v2 provider list (ADR-073): validate ids, base URLs and the active
+    // selection before anything is persisted.
+    if let Some(ref providers) = update.providers {
+        validate_provider_entries(providers)?;
+        if let Some(ref active) = update.active {
+            validate_active_selection(providers, active)?;
+        }
+    }
+
     // Validate credentials *before* touching the filesystem.
     let api_key_action =
         resolve_credential_action(update.api_key.as_ref(), validate_api_key, "api_key")?;
@@ -926,10 +1066,8 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
 
-        // Apply credential file mutations now that we hold the lock. This
-        // happens before `save_user_config` so a crash leaves an orphan file
-        // (flag=false → compose ignores it) rather than a flag pointing at a
-        // missing file.
+        // Mutate credential files before `save_user_config` so a crash leaves
+        // an orphan file (flag=false, ignored) not a flag → missing file.
         let mut new_has_api_key = lookup_has_flag(&user_config, &active, |c| c.has_api_key);
         let mut new_has_custom_headers =
             lookup_has_flag(&user_config, &active, |c| c.has_custom_headers);
@@ -948,14 +1086,30 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
             CredentialAction::Write(_) => new_has_custom_headers = true,
         }
 
-        let merged = config::LlmConfig {
+        let mut merged = config::LlmConfig {
             provider: update.provider,
             model: update.model,
             base_url: update.base_url,
             context_tokens: update.context_tokens,
             has_api_key: new_has_api_key,
             has_custom_headers: new_has_custom_headers,
+            ..Default::default()
         };
+        // v2 fields (ADR-073): the UI sends the full provider set; preserve
+        // the stored one when absent so a legacy-shaped save cannot wipe it.
+        let stored = user_config
+            .active_project_entry()
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.clone())
+            .unwrap_or_default();
+        merged.providers = update.providers.clone().unwrap_or(stored.providers);
+        merged.active = update.active.clone().or(stored.active);
+        merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
+        if !merged.providers.is_empty() {
+            merged.schema_version = Some(config::LLM_SCHEMA_VERSION);
+            // Keep the legacy flat fields coherent for the downgrade story.
+            config::sync_llm_legacy_fields(&mut merged);
+        }
         apply_llm_config(&mut user_config, merged)?;
         config::save_user_config(&user_config)?;
         log::info!(
@@ -965,6 +1119,217 @@ pub fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
         Ok(())
     })
     .map_err(|e| e.to_string())
+}
+
+/// Single message for the model-required error (one wording everywhere).
+fn model_required_error(provider_id: &str) -> String {
+    format!("provider '{provider_id}' requires a model name")
+}
+
+/// Validates the active selection against the provider list before save (R5):
+/// it must exist, no flag-collision, and the active-entry model invariant.
+fn validate_active_selection(
+    providers: &[speedwave_runtime::config::LlmProviderEntry],
+    active: &speedwave_runtime::config::LlmActive,
+) -> Result<(), String> {
+    use speedwave_runtime::config::is_foreign_anthropic_model;
+    let Some(active_entry) = providers.iter().find(|p| p.id == active.provider_id) else {
+        return Err(format!(
+            "active provider '{}' is not in the provider list",
+            active.provider_id
+        ));
+    };
+    if let Some(model) = active.model.as_deref() {
+        if model.starts_with('-') {
+            return Err("active model must not start with '-' (CLI flag collision)".to_string());
+        }
+    }
+    if active_entry.kind.is_anthropic() {
+        // Reject if EITHER pointer or entry model is foreign — render derives
+        // from the entry, so checking only `active.model` would miss it.
+        let foreign = [active.model.as_deref(), active_entry.model.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|m| is_foreign_anthropic_model(m));
+        if let Some(m) = foreign {
+            return Err(format!(
+                "model '{m}' is not an Anthropic model — \
+                 pick an Anthropic model or leave it on the account default"
+            ));
+        }
+    } else {
+        // Render uses effective_active_model (entry wins), so the entry must
+        // carry a model — an active.model-only value would be ignored at render.
+        let entry_has = active_entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|m| !m.is_empty());
+        if !entry_has {
+            return Err(model_required_error(&active.provider_id));
+        }
+    }
+    Ok(())
+}
+
+/// Rewrites local entries' loopback base_url to the gateway alias, since only
+/// that alias is reachable from inside the proxy container.
+fn canonicalize_provider_base_urls(providers: &mut [speedwave_runtime::config::LlmProviderEntry]) {
+    use speedwave_runtime::config::LlmProviderKind;
+    for entry in providers {
+        if entry.kind == LlmProviderKind::Local {
+            if let Some(url) = entry.base_url.as_deref() {
+                entry.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
+            }
+        }
+    }
+}
+
+/// Validates a v2 provider list before save (ADR-073): slug ids, no
+/// duplicates, SSRF-clean base URLs where the kind requires one.
+fn validate_provider_entries(
+    providers: &[speedwave_runtime::config::LlmProviderEntry],
+) -> Result<(), String> {
+    use speedwave_runtime::config::LlmProviderKind;
+    let mut seen = std::collections::HashSet::new();
+    for entry in providers {
+        if !speedwave_runtime::plugin::is_valid_slug(&entry.id) {
+            return Err(format!(
+                "provider id '{}' must match ^[a-z][a-z0-9-]{{0,63}}$",
+                entry.id
+            ));
+        }
+        if !seen.insert(entry.id.as_str()) {
+            return Err(format!("duplicate provider id '{}'", entry.id));
+        }
+        let needs_url = matches!(entry.kind, LlmProviderKind::Local);
+        match (&entry.base_url, needs_url) {
+            (Some(url), _) => {
+                let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+                crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+                speedwave_runtime::compose::validate_base_url(&normalized)
+                    .map_err(|e| e.to_string())?;
+            }
+            (None, true) => {
+                return Err(format!("provider '{}' requires a base URL", entry.id));
+            }
+            (None, false) => {}
+        }
+        if let Some(model) = entry.model.as_deref() {
+            if model.starts_with('-') {
+                return Err(format!(
+                    "provider '{}': model must not start with '-' (CLI flag collision)",
+                    entry.id
+                ));
+            }
+            // Provenance: no foreign model under ANY anthropic entry, not just
+            // the active one (the active-only check lives in validate_active_selection).
+            if entry.kind.is_anthropic()
+                && speedwave_runtime::config::is_foreign_anthropic_model(model.trim())
+            {
+                return Err(format!(
+                    "provider '{}': '{model}' is not an Anthropic model",
+                    entry.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes/removes one provider's API key in `tokens/<project>/llm/` — never
+/// config.json; updates the entry's `has_api_key` in the same lock (ADR-073).
+#[tauri::command]
+pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
+    log::info!(
+        "set_llm_provider_key: provider_id={provider_id} action={}",
+        if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+            "write"
+        } else {
+            "delete"
+        }
+    );
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let data_dir = speedwave_runtime::consts::data_dir();
+
+        let has_key = match key.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => {
+                speedwave_runtime::compose::write_llm_provider_key_in(
+                    data_dir.as_path(),
+                    &active,
+                    &provider_id,
+                    value,
+                )?;
+                true
+            }
+            _ => {
+                speedwave_runtime::compose::remove_llm_provider_key_in(
+                    data_dir.as_path(),
+                    &active,
+                    &provider_id,
+                )?;
+                false
+            }
+        };
+
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
+                entry.has_api_key = has_key;
+            } else {
+                // update_llm_config normally rewrites providers wholesale; a
+                // direct caller leaves has_api_key stuck false — surface that.
+                log::warn!(
+                    "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
+                );
+            }
+        }
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
+/// Clears the active LLM provider (logout → no provider). `update_llm_config`
+/// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
+#[tauri::command]
+pub fn clear_active_llm_provider() -> Result<(), String> {
+    log::info!("clear_active_llm_provider");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            llm.active = None;
+        }
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
+/// Re-renders compose and recreates ONLY the proxy service (ADR-073 hot
+/// reload); claude keeps running. Full restart when the claude env changes.
+#[tauri::command]
+pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
+    check_project(&project)?;
+    render_and_save_compose(&project)?;
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    rt.compose_up_service(&project, "proxy")
+        .map_err(|e| e.to_string())
 }
 
 /// Three possible outcomes of a tri-state credential field.
@@ -1027,6 +1392,7 @@ fn apply_credential_action(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            mirror_local_key_to_llm_namespace(project, file, None)?;
             Ok(())
         }
         CredentialAction::Write(value) => {
@@ -1038,12 +1404,43 @@ fn apply_credential_action(
                 path.display(),
                 value.len()
             );
+            mirror_local_key_to_llm_namespace(project, file, Some(value))?;
             Ok(())
         }
     }
 }
 
-// ---------------------------------------------------------------------------
+/// Mirrors the local card's `api_key` into the proxy-read `llm/` namespace
+/// (only `api_key`; non-fatal — failure keeps the proxy on the previous key).
+fn mirror_local_key_to_llm_namespace(
+    project: &str,
+    file: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    if file != "api_key" {
+        return Ok(());
+    }
+    let data_dir = speedwave_runtime::consts::data_dir();
+    let result = match value {
+        Some(v) => speedwave_runtime::compose::write_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+            v,
+        )
+        .map(|_| ()),
+        None => speedwave_runtime::compose::remove_llm_provider_key_in(
+            data_dir.as_path(),
+            project,
+            "local",
+        ),
+    };
+    if let Err(e) = result {
+        log::warn!("update_llm_config: mirroring local api_key to llm namespace failed: {e}");
+    }
+    Ok(())
+}
+
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1076,6 +1473,7 @@ mod tests {
                             context_tokens: None,
                             has_api_key: false,
                             has_custom_headers: false,
+                            ..Default::default()
                         }),
                     }),
                     integrations: None,
@@ -1084,27 +1482,18 @@ mod tests {
             ],
             active_project: Some("alpha".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
 
-    /// Builds a `LlmConfig` for tests. `context_tokens` is always `None` —
-    /// every test in this module covers the boundary either via a real
-    /// provider (where context is discovered, not hand-set) or via the
-    /// model/url validation guards that run before context is consulted.
-    /// Centralising the literal so adding a future `LlmConfig` field
-    /// touches one helper, not 14 inline struct expressions.
-    /// Test helper: returns the legacy `LlmConfig` for callers that exercise
-    /// the lower-level `apply_llm_config` (the in-memory mutator).
+    /// Test helper: builds a `LlmConfig` (`context_tokens` always `None`)
+    /// for the lower-level `apply_llm_config`.
     fn llm(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfig {
         LlmConfig {
             provider: Some(provider.to_string()),
             model: model.map(str::to_string),
             base_url: base_url.map(str::to_string),
-            context_tokens: None,
-            has_api_key: false,
-            has_custom_headers: false,
+            ..Default::default()
         }
     }
 
@@ -1115,9 +1504,7 @@ mod tests {
             provider: Some(provider.to_string()),
             model: model.map(str::to_string),
             base_url: base_url.map(str::to_string),
-            context_tokens: None,
-            api_key: None,
-            custom_headers: None,
+            ..Default::default()
         }
     }
 
@@ -1172,6 +1559,7 @@ mod tests {
                 context_tokens: None,
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         );
         assert!(result.is_ok());
@@ -1195,7 +1583,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1222,7 +1609,6 @@ mod tests {
             }],
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1256,7 +1642,6 @@ mod tests {
             }],
             active_project: Some("proj".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1278,9 +1663,8 @@ mod tests {
 
     #[test]
     fn apply_llm_config_rejects_local_provider_without_model() {
-        // The Tauri command performs the same check earlier — this guard is
-        // the safety net for internal callers (setup wizard, future migration
-        // paths) that build a `LlmConfig` directly.
+        // Safety net for internal callers that build a `LlmConfig` directly
+        // (the Tauri command checks earlier).
         let mut cfg = make_config_with_active_project();
         for provider in config::LOCAL_PROVIDERS {
             let err = apply_llm_config(&mut cfg, llm(provider, None, None)).unwrap_err();
@@ -1303,6 +1687,7 @@ mod tests {
                 context_tokens: Some(0),
                 has_api_key: false,
                 has_custom_headers: false,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -1328,13 +1713,8 @@ mod tests {
 
     #[test]
     fn update_llm_config_rejects_local_provider_without_model() {
-        // Local providers can't start a session without a model —
-        // `compose::apply_llm_config` would reject the compose render.
-        // Catching it at save time prevents the config from persisting a
-        // state that only fails when the user tries to run.
-        //
-        // Enumerate every local provider via the SSOT const so a future
-        // addition (a fourth local backend) is automatically covered.
+        // Local providers need a model; reject at save time. Iterate the SSOT
+        // const so a future local backend is covered automatically.
         assert!(
             !config::LOCAL_PROVIDERS.is_empty(),
             "LOCAL_PROVIDERS must list at least one provider — this test \
@@ -1364,12 +1744,10 @@ mod tests {
 
     #[test]
     fn update_llm_config_accepts_anthropic_without_model() {
-        // Anthropic is not a local provider — the model-required guard must
-        // not fire. The Anthropic path has its own default model handling.
+        // Anthropic isn't local — the model-required guard must not fire.
         let result = update_llm_config(llm_update("anthropic", None, None));
-        // Either succeeds or fails for project-config reasons in the test env
-        // (no active project) — what we require is that the error is NOT the
-        // model-required one.
+        // May fail for project-config reasons; we only require the error is
+        // NOT the model-required one.
         if let Err(err) = result {
             assert!(
                 !err.contains("requires a model name"),
@@ -1381,9 +1759,8 @@ mod tests {
 
     #[test]
     fn update_llm_config_rejects_model_with_flag_prefix() {
-        // Regression: a model name starting with `--` would be rendered as
-        // `--model --dangerously-skip-permissions` in the Claude Code
-        // invocation; argument parsers may treat the value as another flag.
+        // Regression: a `--`-prefixed model name could be parsed as another
+        // CLI flag in the Claude Code invocation.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("--dangerously-skip-permissions"),
@@ -1407,11 +1784,250 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── v2 provider list validation (ADR-073) ────────────────────────────
+
+    fn v2_entry(
+        id: &str,
+        kind: speedwave_runtime::config::LlmProviderKind,
+        base_url: Option<&str>,
+    ) -> speedwave_runtime::config::LlmProviderEntry {
+        speedwave_runtime::config::LlmProviderEntry {
+            id: id.to_string(),
+            kind,
+            base_url: base_url.map(str::to_string),
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
+    }
+
+    #[test]
+    fn canonicalize_provider_base_urls_rewrites_only_local_loopback() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let mut providers = vec![
+            // Local loopback → rewritten to the gateway alias.
+            v2_entry("local", K::Local, Some("http://127.0.0.1:1234")),
+            // Local localhost → rewritten.
+            v2_entry("local2", K::Local, Some("http://localhost:11434")),
+            // Local non-loopback (real LAN box) → untouched.
+            v2_entry("remote", K::Local, Some("http://192.168.5.10:1234")),
+            // Non-local kinds → never touched, even with a base_url present.
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+        ];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(
+            providers[0].base_url.as_deref(),
+            Some(format!("http://{alias}:1234/").as_str())
+        );
+        assert_eq!(
+            providers[1].base_url.as_deref(),
+            Some(format!("http://{alias}:11434/").as_str())
+        );
+        assert_eq!(
+            providers[2].base_url.as_deref(),
+            Some("http://192.168.5.10:1234"),
+            "real LAN server must not be rewritten"
+        );
+        assert_eq!(providers[3].base_url, None);
+        assert_eq!(providers[4].base_url, None);
+    }
+
+    #[test]
+    fn canonicalize_provider_base_urls_is_idempotent() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
+        let canonical = format!("http://{alias}:1234/");
+        let mut providers = vec![v2_entry("local", K::Local, Some(&canonical))];
+        canonicalize_provider_base_urls(&mut providers);
+        assert_eq!(providers[0].base_url.as_deref(), Some(canonical.as_str()));
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_flag_shaped_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut entry = v2_entry("openrouter", K::OpenRouter, None);
+        entry.model = Some("--dangerously-skip".to_string());
+        let err = validate_provider_entries(&[entry]).unwrap_err();
+        assert!(err.contains("must not start with '-'"));
+
+        let mut ok = v2_entry("openrouter", K::OpenRouter, None);
+        ok.model = Some("deepseek/deepseek-v4-flash".to_string());
+        assert!(validate_provider_entries(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_entries_accepts_a_valid_mix() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+            v2_entry("local", K::Local, Some("http://host.docker.internal:9000")),
+        ];
+        assert!(validate_provider_entries(&providers).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_bad_slug_and_duplicates() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let err =
+            validate_provider_entries(&[v2_entry("Bad.Id", K::OpenRouter, None)]).unwrap_err();
+        assert!(err.contains("Bad.Id"), "slug error must name the id: {err}");
+
+        let err = validate_provider_entries(&[
+            v2_entry("dup", K::OpenRouter, None),
+            v2_entry("dup", K::OpenRouter, None),
+        ])
+        .unwrap_err();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_provider_entries_rejects_missing_or_ssrf_url() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Local without a URL.
+        let err = validate_provider_entries(&[v2_entry("local", K::Local, None)]).unwrap_err();
+        assert!(err.contains("requires a base URL"), "got: {err}");
+        // Metadata endpoint must fail the shared SSRF validator.
+        assert!(validate_provider_entries(&[v2_entry(
+            "local",
+            K::Local,
+            Some("http://169.254.169.254")
+        )])
+        .is_err());
+        // Credentials embedded in the URL.
+        assert!(validate_provider_entries(&[v2_entry(
+            "remote",
+            K::Local,
+            Some("http://user:pass@example.com")
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn update_llm_config_rejects_dangling_active_provider() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let result = update_llm_config(LlmConfigUpdate {
+            providers: Some(vec![v2_entry("openrouter", K::OpenRouter, None)]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "ghost".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("ghost") && err.contains("not in the provider list"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
+        // Structural: the command must clear active (not merge-preserve it like
+        // update_llm_config) and persist through the standard lock/save path.
+        let src = include_str!("containers_cmd.rs");
+        let start = src
+            .find("pub fn clear_active_llm_provider(")
+            .expect("clear_active_llm_provider command must exist");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        assert!(body.contains("llm.active = None"), "must clear active");
+        assert!(
+            body.contains("with_config_lock"),
+            "must use the config lock"
+        );
+        assert!(body.contains("save_user_config"), "must persist");
+    }
+
+    #[test]
+    fn update_llm_config_rejects_invalid_v2_entries_before_any_io() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Validation fires before the config lock / fs — even with no active
+        // project the slug error must surface, not a project error.
+        let err = update_llm_config(LlmConfigUpdate {
+            providers: Some(vec![v2_entry("UPPER", K::OpenRouter, None)]),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.contains("UPPER"), "got: {err}");
+    }
+
+    fn active(id: &str, model: Option<&str>) -> speedwave_runtime::config::LlmActive {
+        speedwave_runtime::config::LlmActive {
+            provider_id: id.to_string(),
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn validate_active_selection_rejects_foreign_model_under_anthropic() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("anthropic", K::AnthropicOauth, None)];
+        let err =
+            validate_active_selection(&providers, &active("anthropic", Some("nex-agi/x:free")))
+                .unwrap_err();
+        assert!(err.contains("not an Anthropic model"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_rejects_active_openrouter_without_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
+        let err = validate_active_selection(&providers, &active("openrouter", None)).unwrap_err();
+        assert!(err.contains("requires a model name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_nonanthropic_requires_entry_model_not_active_only() {
+        // CR#6: render uses effective_active_model (entry wins). active.model set
+        // but entry.model empty would be ignored at render → reject at save.
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
+        let err =
+            validate_active_selection(&providers, &active("openrouter", Some("z-ai/glm-5.2")))
+                .unwrap_err();
+        assert!(err.contains("requires a model name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_active_selection_inactive_partial_rows_not_forced() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        // Active anthropic (no model = account default, ok); the INACTIVE OR row
+        // with no model must NOT trip the model-required check.
+        let providers = vec![
+            v2_entry("anthropic", K::AnthropicOauth, None),
+            v2_entry("openrouter", K::OpenRouter, None),
+        ];
+        assert!(validate_active_selection(&providers, &active("anthropic", None)).is_ok());
+    }
+
+    #[test]
+    fn validate_active_selection_accepts_valid_anthropic_and_openrouter() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let providers = vec![v2_entry("anthropic", K::AnthropicOauth, None), {
+            let mut e = v2_entry("openrouter", K::OpenRouter, None);
+            e.model = Some("z-ai/glm-5.2".to_string());
+            e
+        }];
+        assert!(validate_active_selection(
+            &providers,
+            &active("anthropic", Some("claude-opus-4-8"))
+        )
+        .is_ok());
+        assert!(
+            validate_active_selection(&providers, &active("openrouter", Some("z-ai/glm-5.2")))
+                .is_ok()
+        );
+        // Dangling active id.
+        assert!(validate_active_selection(&providers, &active("ghost", None)).is_err());
+    }
+
     #[test]
     fn update_llm_config_rejects_zero_context_tokens() {
-        // Persisted `context_tokens = 0` would divide-by-zero in the chat
-        // footer's used/max calculation. Reject at the boundary so the value
-        // never reaches the frontend.
+        // Persisted `context_tokens = 0` divides-by-zero in the chat footer;
+        // reject at the boundary so it never reaches the frontend.
         let result = update_llm_config(LlmConfigUpdate {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -1419,6 +2035,7 @@ mod tests {
             context_tokens: Some(0),
             api_key: None,
             custom_headers: None,
+            ..Default::default()
         });
         assert!(result.is_err());
         assert!(
@@ -1449,8 +2066,7 @@ mod tests {
     #[test]
     fn update_llm_config_rejects_invalid_base_url() {
         // Non-empty model so the model-required guard doesn't short-circuit
-        // before URL validation runs — this test exercises URL scheme
-        // rejection, not model handling.
+        // before URL validation — this exercises scheme rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("placeholder-model"),
@@ -1468,11 +2084,8 @@ mod tests {
 
     #[test]
     fn update_llm_config_accepts_v1_suffix() {
-        // Regression: a `…/v1` URL (common in Ollama/LiteLLM docs) must be accepted
-        // at save time because compose rendering strips the suffix before validating.
-        // Previously this produced a false "base_url must not contain a path" error.
-        // We only check the URL-validation path here — a config-save error is fine,
-        // what we require is that the error (if any) is NOT the path rejection.
+        // Regression: a `…/v1` URL must be accepted (render strips the suffix
+        // before validating); the error, if any, must NOT be the path rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("llama3.3"),
@@ -1486,17 +2099,11 @@ mod tests {
         }
     }
 
-    // ── Save-path SSRF coverage (ADR-041) ────────────────────────────────
-    //
-    // Before these tests, `update_llm_config` ran only compose::validate_base_url,
-    // which accepts `http://169.254.169.254` and friends. The new
-    // `llm_cmd::validate_llm_base_url` guard closes that hole — these tests
-    // exercise it at the command boundary. Validation fails before the config
-    // file is touched, so no fixture/lock setup is required.
+    // Save-path SSRF coverage (ADR-041): the `validate_llm_base_url` guard
+    // runs at the command boundary, before any config file is touched.
 
-    /// Helper for SSRF URL-validation tests. Passes a placeholder model so the
-    /// model-required guard doesn't short-circuit before the URL is validated
-    /// — these tests exercise URL validation specifically, not model handling.
+    /// Helper for SSRF URL tests; passes a placeholder model so the
+    /// model-required guard doesn't short-circuit before URL validation.
     fn url_rejection_err(url: &str) -> String {
         update_llm_config(llm_update("ollama", Some("placeholder-model"), Some(url))).unwrap_err()
     }
@@ -1622,55 +2229,36 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    // -- project_llm_is_unconfigured_in tests --
+
+    #[test]
+    fn project_llm_is_unconfigured_in_true_for_fresh_project() {
+        // alpha has no claude override at all — the fresh, first-class no-provider state.
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "alpha");
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn project_llm_is_unconfigured_in_false_for_configured_provider() {
+        // beta has an unmigrated legacy `provider: anthropic` — resolve_project_config
+        // runs it through migrate_llm, so it resolves to a usable active provider.
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "beta");
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn project_llm_is_unconfigured_in_errors_for_unknown_project() {
+        let cfg = make_config_with_active_project();
+        let result = project_llm_is_unconfigured_in(&cfg, "ghost");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
     // -- MockRuntime for switch/teardown tests --
 
     use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
-
-    // -- teardown_and_restore tests --
-
-    #[test]
-    fn teardown_and_restore_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new().build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_ok());
-        assert_eq!(handles.down_projects(), vec!["new_proj"]);
-        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
-    }
-
-    #[test]
-    fn teardown_and_restore_up_fails() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_up(&["prev_proj"])
-            .build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("restore 'prev_proj' failed"),
-            "expected restore error, got: {err}"
-        );
-        assert_eq!(handles.down_projects(), vec!["new_proj"]);
-        assert_eq!(handles.up_projects(), vec!["prev_proj"]);
-    }
-
-    #[test]
-    fn teardown_and_restore_both_fail() {
-        let (rt, _handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["new_proj"])
-            .with_fail_on_up(&["prev_proj"])
-            .build();
-        let result = teardown_and_restore("new_proj", "prev_proj", &rt);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("restore 'prev_proj' failed"),
-            "expected restore error, got: {err}"
-        );
-        assert!(
-            err.contains("Teardown of 'new_proj' also failed"),
-            "expected teardown error, got: {err}"
-        );
-    }
 
     // -- teardown_only tests --
 
@@ -1717,15 +2305,54 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        assert_eq!(handles.down_projects(), vec!["prev"]);
+        // Previous is handed back for background teardown, never downed here.
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(handles.down_projects().is_empty());
+    }
+
+    /// Behavioral: the switch closure brings the destination up via idempotent
+    /// `compose_up`, NOT `compose_up_recreate` (the ADR-072 perf decision).
+    #[test]
+    fn switch_core_brings_destination_up_without_recreate() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let prev = Some("prev".to_string());
+        let up_closure =
+            |proj: &str, rt: &speedwave_runtime::runtime::LockedRuntime| -> Result<(), String> {
+                rt.compose_up(proj).map_err(|e| e.to_string())
+            };
+
+        let result = switch_project_core(&prev, "new", &rt, &up_closure);
+
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(
+            handles.down_projects().is_empty(),
+            "previous is torn down in the background, not in core"
+        );
+        assert_eq!(
+            handles.up_projects(),
+            vec!["new"],
+            "destination brought up via compose_up"
+        );
+        assert!(
+            !handles.was_recreated(),
+            "switch must not force-recreate (config-hash handles changes)"
+        );
     }
 
     #[test]
     fn switch_core_happy_path_no_previous() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         assert!(handles.down_projects().is_empty());
     }
 
@@ -1734,8 +2361,11 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("same".to_string());
         let result = switch_project_core(&prev, "same", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        // No down call when prev == new
+        // No teardown when prev == new
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         assert!(handles.down_projects().is_empty());
     }
 
@@ -1754,60 +2384,11 @@ mod tests {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         // No compose calls when ensure_ready fails
         assert!(handles.down_projects().is_empty());
         assert!(handles.up_projects().is_empty());
-    }
-
-    #[test]
-    fn switch_core_down_prev_fails_up_prev_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                // Restore succeeded → no cleanup_error
-                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
-        assert_eq!(handles.down_projects(), vec!["prev"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
-    }
-
-    #[test]
-    fn switch_core_down_prev_fails_up_prev_fails() {
-        let (rt, _handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .with_fail_on_up(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
-                assert!(ce.contains("restore 'prev' also failed"), "got: {ce}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
     }
 
     #[test]
@@ -1821,15 +2402,37 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("recreate failed"), "got: {error}");
-                // teardown_and_restore: down(new) + up(prev) both succeed → no cleanup_error
+                // teardown_only(new) succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        // up(prev) for restore
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // Failed start tears down only the partial new project — previous
+        // was never stopped, so no restore is needed or performed.
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
+    }
+
+    #[test]
+    fn switch_core_recreate_fails_teardown_fails() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_down(&["new"])
+            .build();
+        let prev = Some("prev".to_string());
+        let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
+        match result {
+            SwitchResult::Failed {
+                ref error,
+                ref cleanup_error,
+            } => {
+                assert!(error.contains("recreate failed"), "got: {error}");
+                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
+                assert!(ce.contains("teardown of 'new' failed"), "got: {ce}");
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
+        // Previous untouched even when the cleanup itself fails.
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
@@ -1845,28 +2448,10 @@ mod tests {
                 // teardown_only succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
-    }
-
-    #[test]
-    fn switch_core_recreate_fails_restore_fails() {
-        let (rt, _handles) = MockRuntimeBuilder::new().with_fail_on_up(&["prev"]).build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(error.contains("recreate failed"), "got: {error}");
-                let ce = cleanup_error.as_ref().expect("should have cleanup_error");
-                assert!(ce.contains("restore 'prev' failed"), "got: {ce}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
     }
 
     #[test]
@@ -1880,11 +2465,11 @@ mod tests {
             SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown (noop)
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // down(new) for teardown only — previous untouched
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
@@ -1897,19 +2482,172 @@ mod tests {
             SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         // down(new) for teardown only
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
 
-    // -- add_project flow tests --
-    //
-    // add_project uses switch_project_core with a closure that calls
-    // check_project + start_containers. These tests verify that specific
-    // combination: ensure_ready → stop prev → start_containers(new),
-    // distinct from switch_project which uses compose_down+render+up_recreate.
+    // -- background teardown registry tests --
+
+    // Serialized via `serial(teardown_intents)`: these share the on-disk
+    // intents file; parallel runs race the .tmp create/remove vs assert.
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn background_teardown_runs_down_and_wait_joins_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        spawn_background_teardown_with("bg-test-proj".to_string(), move |p| {
+            assert_eq!(p, "bg-test-proj");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            done_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        // State transition: wait joins the in-flight teardown before returning.
+        wait_for_pending_teardown("bg-test-proj");
+        assert!(done.load(Ordering::SeqCst));
+        assert!(!pending_teardowns_lock().contains_key("bg-test-proj"));
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn background_teardown_failure_does_not_panic_wait() {
+        spawn_background_teardown_with("bg-fail-proj".to_string(), |_p| {
+            Err("compose down failed".to_string())
+        });
+        // Error path: failed teardown is logged, wait still joins cleanly.
+        wait_for_pending_teardown("bg-fail-proj");
+        assert!(!pending_teardowns_lock().contains_key("bg-fail-proj"));
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn teardown_intent_recorded_and_cleared_on_success() {
+        let project = format!("intent-ok-{}", std::process::id());
+        spawn_background_teardown_with(project.clone(), |_p| Ok(()));
+        wait_for_pending_teardown(&project);
+        // Success path: intent must not survive the completed teardown.
+        assert!(!crashed_teardown_intents().contains(&project));
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn teardown_intent_survives_failed_teardown_for_next_launch() {
+        let project = format!("intent-fail-{}", std::process::id());
+        spawn_background_teardown_with(project.clone(), |_p| Err("down failed".to_string()));
+        wait_for_pending_teardown(&project);
+        // Failure path: the intent stays so the next launch converges it.
+        assert!(crashed_teardown_intents().contains(&project));
+        clear_teardown_intent(&project);
+        assert!(!crashed_teardown_intents().contains(&project));
+    }
+
+    #[test]
+    fn wait_for_pending_teardown_is_noop_without_entry() {
+        wait_for_pending_teardown("bg-absent-proj");
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn crashed_teardown_intents_removes_stale_tmp_file() {
+        let path = teardown_intents_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&tmp, "stale").unwrap();
+        assert!(tmp.exists());
+        let _ = crashed_teardown_intents();
+        assert!(!tmp.exists(), "stale .tmp file should be removed");
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn background_teardown_replaces_stale_entry_for_same_project() {
+        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
+        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
+        wait_for_pending_teardown("bg-dup-proj");
+        assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
+    }
+
+    /// Structural: the build script must gate the build-context hash root on
+    /// COMPLETENESS of declared hash inputs — CI stubs create the dirs only.
+    #[test]
+    fn build_script_requires_complete_context_for_hash_root() {
+        let source = include_str!("../build.rs");
+        assert!(
+            source.contains("flat_map(|img| img.hash_inputs.iter())")
+                && source.contains("all(|input| build_context.join(input).exists())"),
+            "partial/stubbed build-context must fall back to the repo root"
+        );
+    }
+
+    /// Structural: add_project's closure must lazy-build project images before
+    /// start_containers — repo-enabled integrations would otherwise fail up.
+    #[test]
+    fn add_project_builds_missing_images_before_start() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist");
+        let body = &source[fn_start..];
+        let build_pos = body
+            .find("ensure_project_images_built")
+            .expect("add_project closure must build project images");
+        let start_pos = body
+            .find("start_containers(proj)")
+            .expect("add_project closure must call start_containers");
+        assert!(
+            build_pos < start_pos,
+            "image build must precede start_containers (ADR-057/066)"
+        );
+    }
+
+    /// Compose file check must precede compose_ps (else nerdctl fatally errors).
+    #[test]
+    fn check_containers_running_checks_compose_file_before_compose_ps() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn check_containers_running(")
+            .expect("check_containers_running must exist");
+        let body = &source[fn_start..];
+        let exists_pos = body
+            .find("compose_file).exists()")
+            .expect("check_containers_running must check the compose file exists");
+        let ps_pos = body
+            .find("rt.compose_ps(&project)")
+            .expect("check_containers_running must call compose_ps");
+        assert!(
+            exists_pos < ps_pos,
+            "compose.yml existence check must precede compose_ps"
+        );
+    }
+
+    /// Structural: add_project's closure must check for a missing LLM provider
+    /// BEFORE calling start_containers — otherwise render_compose bails and
+    /// teardown_only is attempted against a compose.yml that was never written.
+    #[test]
+    fn add_project_checks_no_provider_before_start() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist");
+        let body = &source[fn_start..];
+        let check_pos = body
+            .find("project_llm_is_unconfigured(proj)")
+            .expect("add_project closure must pre-check for a missing provider");
+        let start_pos = body
+            .find("start_containers(proj)")
+            .expect("add_project closure must call start_containers");
+        assert!(
+            check_pos < start_pos,
+            "no-provider check must precede start_containers"
+        );
+    }
+
+    // -- add_project flow tests: switch_project_core with a closure that calls
+    //    check_project + start_containers (previous handed back for teardown) --
 
     /// Simulates the add_project closure: check_project (always ok in tests)
     /// + start_containers (delegates to compose_up to simulate container start).
@@ -1944,7 +2682,7 @@ mod tests {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
         assert!(
             handles.down_projects().is_empty(),
@@ -1958,40 +2696,17 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
-        // ensure_ready → down(prev) → up(new) via start_containers
-        assert_eq!(handles.down_projects(), vec!["prev"]);
+        // ensure_ready → up(new); previous handed back for background teardown
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
     }
 
     #[test]
-    fn add_project_down_prev_fails_restore_ok() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .with_fail_on_down(&["prev"])
-            .build();
-        let prev = Some("prev".to_string());
-        let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        match result {
-            SwitchResult::Failed {
-                ref error,
-                ref cleanup_error,
-            } => {
-                assert!(
-                    error.contains("compose_down('prev') failed"),
-                    "got: {error}"
-                );
-                // up(prev) restore succeeded → no cleanup_error
-                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
-            }
-            SwitchResult::Succeeded => panic!("expected Failed"),
-        }
-        assert_eq!(handles.down_projects(), vec!["prev"]);
-        assert_eq!(handles.up_projects(), vec!["prev"]);
-    }
-
-    #[test]
-    fn add_project_start_containers_fails_restore_prev() {
-        // start_containers fails → teardown_and_restore(new, prev)
+    fn add_project_start_containers_fails_previous_untouched() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate_fail);
@@ -2001,25 +2716,55 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("start_containers failed"), "got: {error}");
-                // teardown(new) + restore(prev) both ok → no cleanup_error
+                // teardown_only(new) ok → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Succeeded => panic!("expected Failed"),
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(prev) for stop + down(new) for teardown
-        assert_eq!(handles.down_projects(), vec!["prev", "new"]);
-        // up(prev) for restore
-        assert_eq!(handles.up_projects(), vec!["prev"]);
+        // down(new) for teardown only; previous keeps running — no restore
+        assert_eq!(handles.down_projects(), vec!["new"]);
+        assert!(handles.up_projects().is_empty());
     }
 
     #[test]
     fn add_project_happy_path_no_previous() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let result = switch_project_core(&None, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Succeeded));
+        match result {
+            SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
         // No previous → no down, only up(new)
         assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
+    }
+
+    /// A closure that skips to `Ok(())` for a no-provider project must
+    /// succeed with no compose_up/compose_down calls at all.
+    #[test]
+    fn add_project_skips_start_when_no_provider_configured() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let cfg = make_config_with_active_project();
+        let prev = Some("prev".to_string());
+        let recreate = |proj: &str, _rt: &speedwave_runtime::runtime::LockedRuntime| {
+            if project_llm_is_unconfigured_in(&cfg, proj).unwrap_or(false) {
+                return Ok(());
+            }
+            panic!("test project must be unconfigured");
+        };
+        let result = switch_project_core(&prev, "alpha", &rt, &recreate);
+        match result {
+            SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
+            SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
+        }
+        assert!(
+            handles.down_projects().is_empty(),
+            "no-provider path must never attempt teardown"
+        );
+        assert!(
+            handles.up_projects().is_empty(),
+            "no-provider path must never attempt compose_up"
+        );
     }
 
     #[test]
@@ -2027,56 +2772,6 @@ mod tests {
         // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
         let result = ensure_images_ready();
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn check_claude_auth_waits_for_image_readiness() {
-        // Race guard: setup_wizard::check_claude_auth -> ensure_exec_healthy ->
-        // compose_up_recreate. Without this gate, polling auth at startup
-        // while reconcile rebuilds images surfaces image-not-available.
-        // The test extracts the body by brace-matching to avoid trailing
-        // tests' source content (this file uses include_str! on itself).
-        let source = include_str!("containers_cmd.rs");
-        let fn_body = extract_fn_body_braced(source, "pub async fn check_claude_auth(");
-
-        let ensure_pos = fn_body
-            .find("ensure_images_ready(")
-            .expect("check_claude_auth must call ensure_images_ready");
-        let inner_call_pos = fn_body
-            .find("setup_wizard::check_claude_auth(")
-            .expect("check_claude_auth must delegate to setup_wizard::check_claude_auth");
-        assert!(
-            ensure_pos < inner_call_pos,
-            "ensure_images_ready must come BEFORE setup_wizard::check_claude_auth"
-        );
-    }
-
-    /// Returns the body of a function by signature: locates the signature,
-    /// then walks brace depth from the next `{` to its matching `}`. Source
-    /// after the function (including tests that quote it) is excluded.
-    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
-        let sig_pos = source
-            .find(fn_signature)
-            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
-        let after = &source[sig_pos..];
-        let open = after
-            .find('{')
-            .expect("opening brace not found after signature");
-        let bytes = after.as_bytes();
-        let mut depth: i32 = 0;
-        for (i, &b) in bytes.iter().enumerate().skip(open) {
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &after[..=i];
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("closing brace not found for {fn_signature}")
     }
 
     #[test]
@@ -2093,10 +2788,8 @@ mod tests {
         );
     }
 
-    /// Structural test: `start_containers()` is the last setup step that flips
-    /// `is_setup_complete()`. It must call `refresh_tray_menu` so the
-    /// setup-gated tray items (the ADR-058 beta toggle) appear immediately
-    /// after the wizard finishes — without a manual refresh.
+    /// Structural: `start_containers()` flips `is_setup_complete()` last, so it
+    /// must `refresh_tray_menu` to surface the ADR-058 beta toggle.
     #[test]
     fn start_containers_refreshes_tray_after_setup_completes() {
         let source = include_str!("containers_cmd.rs");
@@ -2116,11 +2809,8 @@ mod tests {
         );
     }
 
-    /// Structural test: `create_project()` must NOT call `refresh_tray_menu`.
-    /// It runs at step 4 of 5, before `containers_started = true` is
-    /// persisted, so `is_setup_complete()` would still return `false` and the
-    /// tray rebuild would drop the beta toggle anyway (the bug fixed in this
-    /// commit). The refresh belongs in `start_containers()` instead.
+    /// Structural: `create_project()` must NOT `refresh_tray_menu` — it runs
+    /// before `is_setup_complete()`, so the rebuild would drop the beta toggle.
     #[test]
     fn create_project_does_not_refresh_tray_prematurely() {
         let source = include_str!("containers_cmd.rs");
@@ -2141,7 +2831,35 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    /// Structural test: host workers must eager-start before the compose
+    /// render, or the first chat message recreates containers mid-session.
+    #[test]
+    fn start_containers_eager_starts_host_workers_before_compose() {
+        for cmd in [
+            "pub async fn start_containers(",
+            "pub async fn add_project(",
+        ] {
+            let source = include_str!("containers_cmd.rs");
+            let fn_start = source.find(cmd).expect("command function must exist");
+            let fn_body = &source[fn_start..];
+            let next_fn = fn_body[1..]
+                .find("\npub ")
+                .map(|i| i + 1)
+                .unwrap_or(fn_body.len());
+            let fn_body = &fn_body[..next_fn];
+            let oauth = fn_body
+                .find("ensure_oauth_running(")
+                .unwrap_or_else(|| panic!("{cmd} must call ensure_oauth_running"));
+            let compose_start = fn_body
+                .find("setup_wizard::start_containers(")
+                .unwrap_or_else(|| panic!("{cmd} must call setup_wizard::start_containers"));
+            assert!(
+                oauth < compose_start,
+                "{cmd}: host workers must start before setup_wizard::start_containers"
+            );
+        }
+    }
+
     // Local-LLM credential validators
     // ─────────────────────────────────────────────────────────────────────
 
@@ -2270,9 +2988,8 @@ mod tests {
 
     #[test]
     fn validate_custom_headers_accepts_full_rfc7230_token_chars() {
-        // Underscore and dot are valid token chars per RFC 7230 — reqwest's
-        // HeaderName::from_bytes accepts them. The handrolled allow-list
-        // used to reject these and rejected valid headers like X_Trace_Id.
+        // Underscore and dot are valid RFC 7230 token chars (accepted by
+        // HeaderName::from_bytes); the old hand-rolled allow-list rejected them.
         super::validate_custom_headers("X_Trace_Id: abc").unwrap();
         super::validate_custom_headers("X.Trace-Id: abc").unwrap();
         super::validate_custom_headers("X-Custom!Header: abc").unwrap();
@@ -2322,5 +3039,73 @@ mod tests {
             0,
             "runtime project removal must not run after compose_down failure"
         );
+    }
+
+    #[test]
+    fn recreate_guard_checks_active_project_before_anything_else() {
+        // The watchdog can fire for a project the user switched away from;
+        // without this first-line guard it resurrects the torn-down project.
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+        let active_pos = fn_body
+            .find("active_project")
+            .expect("must read active_project from config");
+        let images_pos = fn_body
+            .find("ensure_images_ready")
+            .expect("readiness gate must exist");
+        assert!(
+            active_pos < images_pos,
+            "active-project guard must come before any side-effecting step"
+        );
+    }
+
+    #[test]
+    fn recreate_project_containers_if_running_waits_for_image_readiness() {
+        // Race guard: this helper can fire mid-rebuild (oauth respawn /
+        // watchdog); without the gate nerdctl emits image-not-available.
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(
+            source,
+            "pub(crate) fn recreate_project_containers_if_running(",
+        );
+
+        let ensure_pos = fn_body
+            .find("ensure_images_ready(")
+            .expect("recreate_project_containers_if_running must call ensure_images_ready");
+        let up_pos = fn_body
+            .find("compose_up_recreate(")
+            .expect("compose_up_recreate must exist in recreate_project_containers_if_running");
+        assert!(
+            ensure_pos < up_pos,
+            "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    /// Returns the body of a function by signature: locates the signature,
+    /// then walks brace depth from the next `{` to its matching `}`.
+    fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let sig_pos = source
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let after = &source[sig_pos..];
+        let open = after.find('{').expect("opening brace not found");
+        let bytes = after.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("closing brace not found for {fn_signature}")
     }
 }

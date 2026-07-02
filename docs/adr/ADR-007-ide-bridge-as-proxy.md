@@ -1,87 +1,41 @@
 # ADR-007: IDE Bridge as Proxy
 
+> **Status:** Accepted
+> **Context:** Claude runs inside a VM (Lima on macOS, WSL2 on Windows) and cannot see the host's IDE lock files, yet Claude Code's IDE integration depends on them.
+
 ## Decision
 
-Speedwave.app acts as a proxy between the isolated Claude process (Lima VM / nerdctl / WSL2) and the IDE on the host.
+Speedwave runs an on-host **IDE Bridge** that impersonates an IDE to the isolated Claude process. Claude connects to the bridge over WebSocket (believing it is talking to a real editor); the bridge forwards `openFile` / `getDiagnostics` events to the actual VS Code or JetBrains extension on the host.
 
-## Problem
+## Why
 
-Claude Code integrates with IDEs via WebSocket + lock file:[^19]
+- Claude Code's [IDE integration protocol](https://code.claude.com/docs/en/ide-integrations) is lock-file + WebSocket: an editor writes `~/.claude/ide/<port>.lock`, Claude reads the port from the filename and connects to `ws://<host>:<port>`. The bridge writes that lock file on the host and serves the WebSocket itself.
+- The bridge speaks the same MCP JSON-RPC 2.0 dialect IDE extensions use, so one bridge serves every editor (VS Code, JetBrains, Neovim, Zed) — no per-editor code.
+- Keeping the bridge on the host preserves container isolation: Claude never gains host filesystem access; only the bridge does.
 
-- IDE extension writes `~/.claude/ide/<port>.lock`
-- Claude CLI detects the lock file and connects via `ws://127.0.0.1:<port>`
-- IDE opens edited files automatically
+## How it connects
 
-When Claude runs inside a Lima VM, it has a different network namespace and cannot see the host's lock files. Security requires isolation. These are contradictory requirements.
-
-## Solution
-
-```
-Lima VM / nerdctl container / WSL2
-└── claude → WebSocket → Speedwave.app (believes it is an IDE)
-
-Speedwave.app (host)
-├── writes ~/.speedwave/ide-bridge/<port>.lock (mounted as ~/.claude/ide/ in container)
-├── receives events from Claude (openFile, getDiagnostics)
-└── forwards to real VS Code / JetBrains extension
-
-VS Code → opens file automatically ✓
-```
-
-Speedwave.app is an **active MCP proxy** — it implements the same MCP JSON-RPC 2.0 protocol[^20] used by IDE extensions, but runs on the host with full filesystem access.
-
-The protocol is identical across all editors (VS Code, JetBrains, Neovim[^21], Zed) — one Bridge supports all of them.
-
-## Per-Platform Connectivity
-
-The IDE Bridge listens on `127.0.0.1:<random_port>` on the host (TCP, all platforms). The canonical gateway alias `host.docker.internal` is injected into every container's `/etc/hosts` via Compose `extra_hosts`[^4][^28], mapped to the per-platform gateway IP (Lima vzNAT on macOS, WSL2 NAT on Windows). One alias, one code path; the per-platform divergence is the host IP, not the hostname.
-
-`render_compose()` injects `CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal` into the Claude container environment. Claude Code uses this env var to override the default `127.0.0.1` host when connecting to IDEs.
-
-See ADR-014 for the full platform mechanism details.
-
-## Lock File Format
-
-Written by `IdeBridge::write_lock_file()` at `~/.speedwave/ide-bridge/<port>.lock`:
-
-```json
-{
-  "pid": 1,
-  "workspaceFolders": ["/workspace"],
-  "ideName": "Speedwave",
-  "transport": "ws",
-  "runningInWindows": false,
-  "authToken": "<session-uuid>"
-}
-```
-
-Lock file paths on host:
-
-- macOS / Linux: `~/.speedwave/ide-bridge/<port>.lock`
-- Windows: `%USERPROFILE%\.speedwave\ide-bridge\<port>.lock`
-
-The host directory is mounted read-only into the Claude container as `/home/speedwave/.claude/ide/`[^15], so Claude sees the standard `~/.claude/ide/<port>.lock` path. Claude derives the port from the **filename** (e.g. `12345.lock` → port 12345).
+- The bridge writes its lock file under `<data_dir>/ide-bridge/<port>.lock` on the host; that directory is mounted read-only into the Claude container at `/home/speedwave/.claude/ide`, so Claude sees the standard `~/.claude/ide/<port>.lock` path.
+- The bridge binds a host TCP listener; containers reach it through the canonical gateway alias `host.docker.internal`, injected into each container's `extra_hosts` and mapped to the per-platform gateway IP ([Lima user-mode vzNAT](https://lima-vm.io/docs/config/network/user/) on macOS, WSL2 NAT on Windows). One alias, one code path; only the resolved host IP differs per platform.
+- `render_compose()` injects `CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal` into the Claude container so Claude Code connects to the bridge instead of its default `127.0.0.1`. See ADR-014 for the platform mechanism.
 
 ## Security
 
-- **Lock file permissions:** `chmod 0o600` on lock file, `chmod 0o700` on lock directory; Windows: owner-only ACL via `SetNamedSecurityInfoW`
-- **Auth token:** per-session UUID v4; constant-time XOR comparison to prevent timing attacks. With `127.0.0.1` binding + UUID v4 (122 bits of randomness from OS CSPRNG), brute force is infeasible — no TTL or rate limiting needed.
-- **Origin header rejection:** WebSocket connections with an `Origin` header are rejected (HTTP 403) to prevent CSRF from malicious web pages[^20]
-- **Lock file watchdog:** background thread re-creates lock file every 5s if it disappears (container restart, volume cleanup)
-- **Cleanup:** lock file removed on session end via `Drop` impl (RAII); stale lock files from crashed sessions cleaned up at startup
+- **Bind address:** the host listener binds via `compose::host_bind_address()` — `127.0.0.1` on macOS, the WSL vEthernet adapter IP on Windows (invisible from the LAN). Never a public interface.
+- **Auth token:** a per-session UUID v4 token, compared in constant time. With a loopback/adapter-only bind plus an unguessable per-session token, brute force is infeasible — no TTL or rate limiting needed.
+- **Origin rejection:** WebSocket upgrades carrying an `Origin` header are rejected with HTTP 403, blocking CSRF from a malicious web page — the mitigation for the WebSocket origin-validation class of attack tracked as [CVE-2025-52882](https://nvd.nist.gov/vuln/detail/CVE-2025-52882) (see ADR-014).
+- **Lock file permissions:** lock file `0o600`, directory `0o700`; on Windows an owner-only ACL.
+- **Watchdog:** a background thread re-writes the lock file every 5 s if it disappears (container restart, volume cleanup).
+- **Cleanup:** the lock file is removed on session end via an RAII `Drop` impl; stale lock files from crashed sessions are swept at startup.
 
----
+## Where it lives in code
 
-[^4]: [nerdctl command reference — host.docker.internal](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
+- IDE Bridge (lock-file body `ideName`/`workspaceFolders`/`transport`/`runningInWindows`/`authToken`, display name `Speedwave`, WebSocket proxy, `Drop` cleanup) — `desktop/src-tauri/src/bridges/ide_bridge.rs`
+- Shared bridge mechanics (`host_bind_address` binding, `constant_time_eq`, 5 s watchdog, HTTP 403 origin rejection, atomic lock-file write with `0o600`/`0o700`) — `desktop/src-tauri/src/bridges/host_bridge.rs`
+- Lock-dir mount and IDE host override injection — `crates/speedwave-runtime/src/compose.rs` (`ide_host_override`); template line `${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro` in `containers/compose.template.yml`
+- Gateway alias SSOT — `crates/speedwave-runtime/src/consts.rs::HOST_GATEWAY_ALIAS` (`host.docker.internal`)
 
-[^15]: `compose.template.yml:26` — `${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro`
+## Rejected alternatives
 
-[^19]: [Claude Code IDE integrations — VS Code extension](https://docs.anthropic.com/en/docs/claude-code/ide-integrations)
-
-[^20]: [CVE-2025-52882 — Claude Code WebSocket protocol analysis](https://securitylabs.datadoghq.com/articles/claude-mcp-cve-2025-52882/)
-
-[^21]: [coder/claudecode.nvim - Neovim IDE integration](https://github.com/coder/claudecode.nvim)
-
-[^27]: [Lima Network — user-mode networking (vzNAT, host.lima.internal)](https://lima-vm.io/docs/config/network/user/)
-
-[^28]: [nerdctl command reference — --add-host / host-gateway](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
+- **Run the IDE inside the VM, or punch a host path through to Claude** — would defeat container isolation, the whole point of the v1 security model.
+- **Per-editor adapters** — unnecessary: the IDE protocol is identical across editors, so a single bridge covers all of them.

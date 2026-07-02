@@ -1,23 +1,18 @@
 /**
- * Redmine API Client
- *
- * Isolated Redmine client for mcp-redmine worker.
- * ONLY has access to Redmine API key - no other service tokens.
- *
- * Security:
- * - API key read from /tokens/ (RO mount)
- * - API key NEVER exposed in responses
- * - Blast radius containment: only Redmine exposed if compromised
- *
- * Error Handling Convention:
- * - Factory functions (initializeRedmineClient) return null on config failures (graceful degradation)
- * - Instance methods throw errors on API failures
+ * Isolated Redmine API client for mcp-redmine worker (API key only).
+ * Factory returns null on config failure; instance methods throw on API failure.
  */
 
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
-import path from 'path';
-import { TIMEOUTS, ts, withSetupGuidance, memoizedPromise } from '@speedwave/mcp-shared';
+import {
+  TIMEOUTS,
+  ts,
+  withSetupGuidance,
+  memoizedPromise,
+  loadTokenFile,
+  tokensDir,
+} from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -638,20 +633,7 @@ interface TimeEntryPayload {
 // Token Loading
 //═══════════════════════════════════════════════════════════════════════════════
 
-const TOKENS_DIR = process.env.TOKENS_DIR || '/tokens';
-
 const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
-
-/**
- * Load Redmine API key from tokens directory.
- * @returns Promise resolving to the API key string.
- * @throws {Error} When token file cannot be read.
- */
-async function loadApiKey(): Promise<string> {
-  const tokenPath = path.join(TOKENS_DIR, 'api_key');
-  const token = await fs.readFile(tokenPath, 'utf-8');
-  return token.trim();
-}
 
 /**
  * Load Redmine project configuration from /tokens/config.json.
@@ -659,7 +641,7 @@ async function loadApiKey(): Promise<string> {
  */
 async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
   try {
-    const configData = await fs.readFile(`${TOKENS_DIR}/config.json`, 'utf-8');
+    const configData = await fs.readFile(`${tokensDir()}/config.json`, 'utf-8');
     return JSON.parse(configData);
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -728,10 +710,6 @@ const SAFE_TAGS = new Set([
 
 /**
  * Sanitize Textile markup to remove potentially dangerous content.
- * Phase 1: iteratively strip dangerous tags with their full content.
- * Phase 2: whitelist remaining tags — only safe formatting tags survive.
- * Phase 3: strip event handlers and dangerous URI schemes from safe tags.
- * Runs iteratively until the output stabilizes (handles nested payloads).
  * @param textile - The Textile markup to sanitize.
  * @returns Sanitized Textile markup.
  */
@@ -841,13 +819,7 @@ export class RedmineClient {
     return this.mappings;
   }
 
-  /**
-   * Memoized lookup of the configured project's display name. Bounded to 5 s
-   * via {@link memoizedPromise} so tool calls never hang on a slow Redmine.
-   * On timeout returns `null` and leaves the cache empty (next call retries).
-   * Cached for the lifetime of the client once resolved — names are immutable
-   * in Redmine for a given project_id.
-   */
+  /** Memoized lookup of the configured project's display name (5 s timeout, null on failure). */
   private readonly _getProjectName = memoizedPromise<string | null>({
     fetch: async () => {
       const pid = this.projectConfig?.project_id;
@@ -871,8 +843,7 @@ export class RedmineClient {
   }
 
   /**
-   * Get project configuration. Resolves project_name lazily via the bounded
-   * background fetch so a slow Redmine never delays server startup.
+   * Get project configuration with lazy project_name resolution.
    * @returns Configuration object with project_id, project_name, and URL.
    */
   async getConfig(): Promise<{ project_id?: string; project_name?: string; url: string }> {
@@ -899,9 +870,7 @@ export class RedmineClient {
   }
 
   /**
-   * Resolve the configured project's numeric ID with promise deduplication.
-   * Caches the result — Redmine project numeric IDs are immutable.
-   * On failure, clears the cache so the next call retries.
+   * Resolve and cache the configured project's numeric ID (promise dedup).
    * @param scope - The configured project identifier.
    * @returns The numeric project ID.
    * @throws {ProjectScopeError} When the configured project doesn't exist (404).
@@ -931,7 +900,6 @@ export class RedmineClient {
 
   /**
    * Enforce project_id matches the configured scope.
-   * SSOT for the "reject mismatch, force scope" pattern (6 callers).
    * @param callerProjectId - The caller-provided project_id (may be undefined).
    * @returns The project_id to use (scope if scoped, callerProjectId if unscoped).
    * @throws {ProjectScopeError} When callerProjectId doesn't match scope.
@@ -949,7 +917,6 @@ export class RedmineClient {
 
   /**
    * Validate that an issue belongs to the scoped project before mutation.
-   * SSOT for the "validate issue before mutation" pattern (5+ callers).
    * @param issueId - The issue ID to validate.
    * @returns The issue (for callers that need it).
    * @throws {ProjectScopeError} When the issue belongs to a different project.
@@ -1171,11 +1138,7 @@ export class RedmineClient {
 
     await this.client.put(`/issues/${issueId}.json`, { issue });
 
-    // Return updated issue to allow verification of changes.
-    // Note: Redmine API is synchronous, so the returned data should reflect
-    // the update. However, if verification fails, the caller should check
-    // if the issue status allows the requested change (e.g., closed issues
-    // may silently reject assignment changes).
+    // Return updated issue for verification.
     return this.showIssue(issueId);
   }
 
@@ -1497,9 +1460,7 @@ export class RedmineClient {
     const response = await this.client.get(`/projects/${projectId}.json`, { params });
     const project = response.data.project;
 
-    // Post-fetch scope validation: compare Redmine's canonical identifier against config.
-    // showProject validates via identifier (has full project object),
-    // while showIssue validates via numeric project.id (issues only expose project.id).
+    // Post-fetch scope validation via identifier or numeric id.
     const scope = this.getProjectScope();
     if (scope && project.identifier !== scope && project.id.toString() !== scope) {
       throw new ProjectScopeError(scope, project.identifier);
@@ -1689,23 +1650,16 @@ export class RedmineClient {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * IMPORTANT: Returns null (not throws) when tokens are missing or invalid.
- * This enables "graceful degradation" - server starts even without config:
- * - User can run `speedwave` (no subcommand) without configuring all integrations
- * - Healthcheck reports `configured: false` for unconfigured services
- * - Tools return clear "not configured" error when called
- *
- * DO NOT change this to throw - it breaks container startup for unconfigured services.
+ * Initialize the Redmine client; returns null (never throws) on config errors.
  * @returns Configured RedmineClient instance, or null if API key not found/invalid
  */
 export async function initializeRedmineClient(): Promise<RedmineClient | null> {
   try {
-    const apiKey = await loadApiKey();
+    const apiKey = await loadTokenFile('api_key');
 
     // Validate API key is not empty (0-byte placeholder file)
     if (!apiKey) {
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
+      // Graceful degradation: log and return null.
       console.warn(`${ts()} ${withSetupGuidance('Redmine API key is empty.')}`);
       return null;
     }
@@ -1726,8 +1680,7 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
     }
 
     if (!host) {
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
+      // Graceful degradation: log and return null.
       console.warn(`${ts()} No Redmine URL found (config.json or REDMINE_URL env var)`);
       return null;
     }
@@ -1742,9 +1695,7 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
       projectConfig
     );
 
-    // project_name resolves lazily via client.getProjectName() — fire-and-forget
-    // here so the cache warms in the background, but the HTTP listener never
-    // waits on Redmine. A slow or unreachable Redmine no longer delays startup.
+    // Fire-and-forget project_name resolution to avoid startup delays.
     if (
       projectConfig != null &&
       projectConfig.project_id != null &&
@@ -1756,8 +1707,7 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
 
     return client;
   } catch (error) {
-    // Graceful degradation: log warning, return null, let server start
-    // DO NOT throw here - see JSDoc above for rationale
+    // Graceful degradation: log and return null.
     console.warn(
       `${ts()} Failed to initialize Redmine client: ${error instanceof Error ? error.message : 'Unknown error'}`
     );

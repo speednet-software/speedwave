@@ -1,34 +1,77 @@
-/// Host resource detection and adaptive container memory scaling.
-///
-/// SSOT for all resource allocation decisions. Both CLI (`speedwave-cli`) and
-/// Desktop (`desktop/src-tauri`) import these functions — no duplication.
+//! SSOT for every memory/CPU/tmpfs/shm number Speedwave itself ships: the
+//! Claude + hub container limits here, per-worker limits on
+//! [`consts::McpServiceDescriptor`], plugin defaults/caps in `consts`. The
+//! compose renderer reads these instead of YAML literals; a drift test enforces
+//! `compose.template.yml == this table`. Per-plugin actual limits (signed
+//! external manifest) and the WSL2 VM (user-owned) stay outside by design.
 use std::process::ExitStatus;
 
-/// VM overhead: kernel + containerd + MCP hub + MCP workers ≈ 4 GiB.
-pub const VM_OVERHEAD_GIB: u32 = 4;
+/// Fixed Claude container memory ceiling in GiB. See ADR-068.
+pub const CLAUDE_MEMORY_GIB: u32 = 6;
 
-/// Host overhead on Windows (WSL2 shares host RAM dynamically rather than
-/// reserving a hard partition like Lima): OS + desktop + browser + apps ≈ 6 GiB.
-pub const HOST_OVERHEAD_GIB: u32 = 6;
+/// Resource limits for one container. Sizes in MiB, except `cpus` (fractional
+/// cores); `shm_mib` is `None` unless above the 64 MiB default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContainerResources {
+    /// Hard memory cap, MiB.
+    pub mem_mib: u32,
+    /// CPU cap in fractional cores.
+    pub cpus: f32,
+    /// tmpfs `/tmp` size, MiB.
+    pub tmpfs_mib: u32,
+    /// Shared-memory size, MiB; `None` keeps the 64 MiB default.
+    pub shm_mib: Option<u32>,
+}
+
+/// Claude container: 6 GiB cap, 2 cores, 512 MiB /tmp.
+pub const CLAUDE_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: CLAUDE_MEMORY_GIB * 1024,
+    cpus: 2.0,
+    tmpfs_mib: 512,
+    shm_mib: None,
+};
+
+/// MCP hub: on every MCP request's path, does real CPU work (sandboxed exec,
+/// PII regex, aggregation) → 1 full core. On a minimum-spec 4-vCPU VM,
+/// claude+playwright already claim all 4 (limits are ceilings — overcommit OK).
+pub const HUB_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 512,
+    cpus: 1.0,
+    tmpfs_mib: 64,
+    shm_mib: None,
+};
+
+/// Speedwave proxy (rust forwarder, ADR-073): 128 MiB, 0.5 core, 32 MiB /tmp.
+/// Measured ~3-4 MiB idle / ~37 MiB peak under concurrent 64k streams.
+pub const PROXY_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 128,
+    cpus: 0.5,
+    tmpfs_mib: 32,
+    shm_mib: None,
+};
+
+/// Default envelope for a lightweight API worker (slack, sharepoint, redmine,
+/// gitlab, atlassian, context7). Workers needing more override inline (github
+/// 256m, office, playwright). Shared so the default lives in one place.
+pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 128,
+    cpus: 0.5,
+    tmpfs_mib: 64,
+    shm_mib: None,
+};
 
 // ---------------------------------------------------------------------------
 // Host RAM detection
 // ---------------------------------------------------------------------------
 
-/// Converts raw bytes to GiB using floor division.
-///
-/// Floor is intentionally safer than rounding: a 16 GB MacBook with ~15.7 GiB
-/// usable RAM returns 15, which the adaptive formula (`host/2`) then maps to
-/// 7 GiB VM — avoiding an unexpected jump to 8 GiB.
+/// Converts raw bytes to GiB using floor division (never over-reports host RAM).
 #[cfg(any(target_os = "macos", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
 
-/// Returns total physical RAM in GiB (floor).
-///
-/// Falls back to 16 on detection failure — produces 8 GiB VM via the
-/// adaptive formula (`host/2`).
+/// Returns total physical RAM in GiB (floor); falls back to 16 on detection
+/// failure.
 pub fn host_total_memory_gib() -> u32 {
     host_total_memory_gib_impl().unwrap_or(16)
 }
@@ -54,8 +97,7 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 
 #[cfg(target_os = "windows")]
 fn host_total_memory_gib_impl() -> Option<u32> {
-    // Windows: RAM detection not implemented — falls back to 16 GiB,
-    // which the adaptive formula maps to 8 GiB VM / 4 g Claude container.
+    // Windows: RAM detection not implemented — falls back to 16 GiB.
     None
 }
 
@@ -63,58 +105,46 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 // Scaling formulas (pure functions — testable on any platform)
 // ---------------------------------------------------------------------------
 
-/// Desired Lima VM memory in GiB based on host RAM.
-///
-/// Half of host RAM, clamped 4–32. Never takes more than 50% of host RAM.
-/// Floor 4 GiB ensures 8 GiB hosts can run Speedwave; cap 32 GiB preserves
-/// existing behaviour on large machines (64+ GiB).
+/// Minimum supported host RAM; SSOT for the `check_low_memory` warn threshold
+/// and the always-on fit test. See ADR-068.
+pub const MIN_SUPPORTED_HOST_GIB: u32 = 16;
+
+/// Desired Lima VM memory in GiB: half of host RAM, clamped 4–32. Supported
+/// (≥16 GiB) hosts land on the ADR-068 8 GiB floor via `host/2`; smaller hosts
+/// must never get a VM above half their RAM (8 GiB host keeps a 4 GiB VM).
 pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
     (host_ram_gib / 2).clamp(4, 32)
 }
 
-/// Desired Claude container memory in GiB.
-///
-/// `available_gib` is the Lima VM memory on macOS or host RAM on Windows.
-/// `overhead_gib` reserves space for kernel/containerd/hub/workers (macOS)
-/// or OS/desktop/browser (Windows).
-pub fn desired_claude_memory_gib(available_gib: u32, overhead_gib: u32) -> u32 {
-    available_gib.saturating_sub(overhead_gib).clamp(4, 28)
+/// Host logical CPU count, or 8 on detection failure (→ 4 vCPU via `host/2`).
+/// Uses `available_parallelism` (cross-platform, no `unsafe`) — same primitive
+/// the build pool uses.
+pub fn host_logical_cpus() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(8)
 }
 
-/// SSOT: effective Claude container memory in GiB for the current platform.
-///
-/// - macOS: Lima VM memory minus VM overhead (kernel, containerd, hub, workers).
-/// - Windows: host RAM minus host overhead (OS, desktop, browser, apps); falls
-///   back to 10 g when RAM detection fails (`host_total_memory_gib()` returns
-///   16 on failure → 16 − 6 = 10).
-pub fn effective_claude_memory_gib() -> u32 {
-    #[cfg(target_os = "macos")]
-    {
-        let vm_mem = desired_vm_memory_gib(host_total_memory_gib());
-        desired_claude_memory_gib(vm_mem, VM_OVERHEAD_GIB)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        desired_claude_memory_gib(host_total_memory_gib(), HOST_OVERHEAD_GIB)
-    }
+/// Desired VM vCPU count: half of host cores, clamped 4–8. Floor 4 keeps small
+/// hosts at today's value. macOS/Lima only; WSL2 is user-owned — see ADR-068.
+pub fn desired_vm_cpus(host_cores: u32) -> u32 {
+    (host_cores / 2).clamp(4, 8)
+}
+
+/// Memory the always-on containers (Claude + hub) request: hard limit +
+/// RAM-backed tmpfs. Excludes toggleable workers and plugins. See ADR-068.
+#[cfg(test)]
+fn always_on_memory_mib() -> u32 {
+    let one = |r: &ContainerResources| r.mem_mib + r.tmpfs_mib + r.shm_mib.unwrap_or(0);
+    one(&CLAUDE_RESOURCES) + one(&HUB_RESOURCES)
 }
 
 // ---------------------------------------------------------------------------
 // OOM detection
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the exit status likely indicates an OOM kill.
-///
-/// Process chain: `Rust Command → limactl/wsl → nerdctl exec → Claude`.
-/// When the OOM killer sends SIGKILL to Claude inside the container, nerdctl
-/// translates it to exit code 137 (128 + 9, shell convention) and the host-side
-/// driver (`limactl`/`wsl`) propagates that code, so `ExitStatus::code()`
-/// returns `Some(137)`. On Unix we additionally check `signal() == Some(9)` to
-/// catch host-side raw-signal teardown that bypasses the driver.
-///
-/// Known false-positives: signal 9 can also be sent by `kill -9`, OS
-/// shutdown, or security sandbox enforcement.  The "likely" wording in
-/// [`OOM_MESSAGE`] accounts for this.
+/// Returns `true` if the exit status likely indicates an OOM kill: code 137 or
+/// signal 9. Heuristic only (also from host-side `kill -9`); see ADR-068.
 pub fn is_oom_exit(status: &ExitStatus) -> bool {
     if status.code() == Some(137) {
         return true;
@@ -129,14 +159,17 @@ pub fn is_oom_exit(status: &ExitStatus) -> bool {
     false
 }
 
-/// User-facing OOM message shared between CLI and Desktop (DRY).
+/// User-facing message for exit 137 / SIGKILL, shared between CLI and Desktop.
 pub const OOM_MESSAGE: &str = "\
-    The Claude session was likely killed due to insufficient memory \
-    (exit code 137 / SIGKILL).\n\n\
+    The Claude session was killed (exit code 137 / SIGKILL).\n\n\
+    The most common cause is the container running out of memory, but a \
+    host-side process restart can also produce this code.\n\n\
     Suggestions:\n  \
     - Close memory-intensive applications and retry\n  \
     - Start a shorter conversation to reduce context size\n  \
-    - On macOS: check Activity Monitor for Lima VM memory pressure\n\n\
+    - On macOS: check Activity Monitor for Lima VM memory pressure\n  \
+    - Check the Desktop log for a 'killing a LIVE worker' line just before the \
+    crash — that points to a worker restart, not memory\n\n\
     If this persists, please report at \
     https://github.com/speednet-software/speedwave/issues";
 
@@ -179,10 +212,29 @@ mod tests {
 
     #[test]
     fn vm_memory_small_hosts() {
-        // floor at 4 GiB — (host/2).clamp(4, 32)
+        // Floor never exceeds host/2: an 8 GiB host keeps its v0.13.3 4 GiB VM.
         assert_eq!(desired_vm_memory_gib(8), 4);
-        assert_eq!(desired_vm_memory_gib(6), 4); // floor
-        assert_eq!(desired_vm_memory_gib(0), 4); // floor
+        assert_eq!(desired_vm_memory_gib(6), 4); // absolute floor 4
+        assert_eq!(desired_vm_memory_gib(0), 4); // absolute floor 4
+    }
+
+    #[test]
+    fn vm_memory_host_table() {
+        // Host-size table: 8/16/32/64 GiB hosts.
+        for (host, vm) in [(8u32, 4u32), (16, 8), (32, 16), (64, 32)] {
+            assert_eq!(desired_vm_memory_gib(host), vm, "host {host} GiB");
+        }
+    }
+
+    #[test]
+    fn vm_memory_never_exceeds_half_host() {
+        // A VM sized above host/2 starves macOS (swap-bound 8 GiB Macs).
+        for host in [8u32, 10, 12, 14, 16, 24, 32, 64, 128] {
+            assert!(
+                desired_vm_memory_gib(host) <= (host / 2).max(4),
+                "host {host} GiB: VM must not exceed host/2 (min 4)"
+            );
+        }
     }
 
     #[test]
@@ -199,83 +251,119 @@ mod tests {
         assert_eq!(desired_vm_memory_gib(128), 32); // cap
     }
 
-    // -- desired_claude_memory_gib ------------------------------------------
+    // -- desired_vm_cpus ----------------------------------------------------
 
     #[test]
-    fn claude_memory_with_vm_overhead() {
-        assert_eq!(desired_claude_memory_gib(12, VM_OVERHEAD_GIB), 8);
-        assert_eq!(desired_claude_memory_gib(16, VM_OVERHEAD_GIB), 12);
-        assert_eq!(desired_claude_memory_gib(32, VM_OVERHEAD_GIB), 28);
+    fn vm_cpus_small_hosts_floor_at_4() {
+        // Small hosts keep today's value — no regression, never below 4.
+        assert_eq!(desired_vm_cpus(4), 4); // floor (4/2=2→4)
+        assert_eq!(desired_vm_cpus(8), 4);
+        assert_eq!(desired_vm_cpus(2), 4); // floor
+        assert_eq!(desired_vm_cpus(0), 4); // floor
     }
 
     #[test]
-    fn claude_memory_with_host_overhead() {
-        assert_eq!(desired_claude_memory_gib(16, HOST_OVERHEAD_GIB), 10);
-        assert_eq!(desired_claude_memory_gib(12, HOST_OVERHEAD_GIB), 6);
-        assert_eq!(desired_claude_memory_gib(32, HOST_OVERHEAD_GIB), 26);
+    fn vm_cpus_scales_with_host() {
+        assert_eq!(desired_vm_cpus(10), 5);
+        assert_eq!(desired_vm_cpus(12), 6);
+        assert_eq!(desired_vm_cpus(16), 8); // cap
     }
 
     #[test]
-    fn claude_memory_floor_at_4() {
-        // Floor is 4 GiB — minimum usable for Claude Code workloads in practice
-        assert_eq!(desired_claude_memory_gib(6, 4), 4); // was 6 before this change
-        assert_eq!(desired_claude_memory_gib(4, 6), 4); // was 6 before this change
-        assert_eq!(desired_claude_memory_gib(0, 4), 4); // was 6 before this change
+    fn vm_cpus_caps_at_8() {
+        assert_eq!(desired_vm_cpus(24), 8); // cap
+        assert_eq!(desired_vm_cpus(64), 8); // cap
     }
 
     #[test]
-    fn claude_memory_cap_at_28() {
-        assert_eq!(desired_claude_memory_gib(64, 4), 28);
+    fn vm_cpus_never_exceeds_host() {
+        // host/2 ≤ host always, so VZ never gets more vCPUs than host cores.
+        for cores in [4u32, 6, 8, 12, 16, 32] {
+            assert!(desired_vm_cpus(cores) <= cores);
+        }
     }
 
-    // -- composition (macOS-like: VM overhead = 4) --------------------------
+    // -- claude memory (fixed cap) ------------------------------------------
 
     #[test]
-    fn composition_macos_8gib_host() {
-        let vm = desired_vm_memory_gib(8);
-        assert_eq!(vm, 4);
-        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 4); // floor
-    }
-
-    #[test]
-    fn composition_macos_16gib_host() {
-        let vm = desired_vm_memory_gib(16);
-        assert_eq!(vm, 8);
-        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 4);
+    fn claude_memory_is_fixed_6_everywhere() {
+        // Independent of host size — the whole point of the fixed cap.
+        assert_eq!(CLAUDE_MEMORY_GIB, 6);
+        assert_eq!(CLAUDE_RESOURCES.mem_mib, 6 * 1024);
     }
 
     #[test]
-    fn composition_macos_32gib_host() {
-        let vm = desired_vm_memory_gib(32);
-        assert_eq!(vm, 16);
-        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 12);
+    fn proxy_resources_match_measured_envelope() {
+        // ~3.5x the measured ~37 MiB peak; the forwarder writes nothing to /tmp.
+        assert_eq!(PROXY_RESOURCES.mem_mib, 128);
+        assert_eq!(PROXY_RESOURCES.cpus, 0.5);
+        assert_eq!(PROXY_RESOURCES.tmpfs_mib, 32);
+        assert_eq!(PROXY_RESOURCES.shm_mib, None);
     }
 
     #[test]
-    fn composition_macos_64gib_host() {
-        let vm = desired_vm_memory_gib(64);
-        assert_eq!(vm, 32); // cap
-        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 28);
+    fn builtin_resources_stay_within_plugin_caps() {
+        // Built-in worker limits must stay within the plugin envelope.
+        let cap_mib = crate::consts::PLUGIN_MEM_LIMIT_MAX_MIB as u32;
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            assert!(
+                svc.resources.mem_mib <= cap_mib,
+                "{}: mem {} MiB exceeds plugin cap {cap_mib}",
+                svc.config_key,
+                svc.resources.mem_mib
+            );
+            assert!(
+                svc.resources.cpus <= crate::consts::PLUGIN_CPU_LIMIT_MAX,
+                "{}: cpus {} exceeds plugin cap",
+                svc.config_key,
+                svc.resources.cpus
+            );
+            // tmpfs is RAM-backed, so it must not exceed the worker's mem limit.
+            assert!(
+                svc.resources.tmpfs_mib <= svc.resources.mem_mib,
+                "{}: tmpfs {} MiB exceeds the worker's own mem limit {} MiB",
+                svc.config_key,
+                svc.resources.tmpfs_mib,
+                svc.resources.mem_mib
+            );
+        }
     }
 
-    // -- composition (Windows-like: host RAM minus host overhead = 6) -------
-
     #[test]
-    fn composition_windows_16gib_host() {
-        assert_eq!(desired_claude_memory_gib(16, HOST_OVERHEAD_GIB), 10);
+    fn all_resources_are_positive() {
+        // A zeroed mem/cpus/tmpfs renders invalid compose and fails at create.
+        let check = |r: &ContainerResources, who: &str| {
+            assert!(r.mem_mib > 0, "{who}: mem_mib must be > 0");
+            // NaN slips past a bare `> 0.0` yet renders "NaN" into YAML.
+            assert!(
+                r.cpus.is_finite() && r.cpus > 0.0,
+                "{who}: cpus must be finite and > 0"
+            );
+            assert!(r.tmpfs_mib > 0, "{who}: tmpfs_mib must be > 0");
+            if let Some(shm) = r.shm_mib {
+                assert!(shm > 0, "{who}: shm_mib, when set, must be > 0");
+            }
+        };
+        check(&CLAUDE_RESOURCES, "claude");
+        check(&HUB_RESOURCES, "hub");
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            check(&svc.resources, svc.config_key);
+        }
     }
 
-    #[test]
-    fn composition_windows_32gib_host() {
-        assert_eq!(desired_claude_memory_gib(32, HOST_OVERHEAD_GIB), 26);
-    }
-
-    // -- overhead constants -------------------------------------------------
+    // -- always_on_memory_mib -----------------------------------------------
 
     #[test]
-    fn overhead_constants() {
-        assert_eq!(VM_OVERHEAD_GIB, 4);
-        assert_eq!(HOST_OVERHEAD_GIB, 6);
+    fn always_on_fits_smallest_supported_vm() {
+        // Always-on (claude+hub) must fit the smallest supported VM.
+        let vm_mib = desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB) * 1024;
+        assert!(
+            always_on_memory_mib() < vm_mib,
+            "always-on (claude+hub) = {} MiB must fit the {} GiB VM of the {} GiB minimum host",
+            always_on_memory_mib(),
+            vm_mib / 1024,
+            MIN_SUPPORTED_HOST_GIB
+        );
     }
 
     // -- host_total_memory_gib (integration) --------------------------------
@@ -287,11 +375,10 @@ mod tests {
         assert!(gib < 4096, "host RAM must be < 4096 GiB, got {gib}");
     }
 
-    // -- effective_claude_memory_gib ----------------------------------------
-
     #[test]
-    fn effective_claude_memory_at_least_4() {
-        assert!(effective_claude_memory_gib() >= 4);
+    fn host_logical_cpus_is_sane() {
+        // > 0 so desired_vm_cpus never silently clamps a zero to the floor.
+        assert!(host_logical_cpus() > 0);
     }
 
     // -- format_oom_message -------------------------------------------------
@@ -299,11 +386,26 @@ mod tests {
     #[test]
     fn oom_message_contains_key_info() {
         assert!(OOM_MESSAGE.contains("137"), "must mention exit code 137");
+        assert!(OOM_MESSAGE.contains("memory"), "must mention memory");
+    }
+
+    #[test]
+    fn oom_message_does_not_assert_oom_as_certain() {
+        // 137 also comes from a host-side kill -9, so OOM must not be asserted.
         assert!(
-            OOM_MESSAGE.contains("likely") || OOM_MESSAGE.contains("probably"),
+            !OOM_MESSAGE.contains("killed due to insufficient memory"),
+            "must not assert OOM as the certain cause"
+        );
+        assert!(
+            OOM_MESSAGE.contains("most common cause") || OOM_MESSAGE.contains("can also"),
             "must use non-definitive wording"
         );
-        assert!(OOM_MESSAGE.contains("memory"), "must mention memory");
+        // Pin against the SSOT log marker, not a free literal.
+        assert!(
+            OOM_MESSAGE.contains(crate::host_mcp_process::KILL_STALE_LOG_MARKER),
+            "OOM_MESSAGE grep hint must match the real kill log marker '{}'",
+            crate::host_mcp_process::KILL_STALE_LOG_MARKER
+        );
     }
 
     // -- is_oom_exit --------------------------------------------------------

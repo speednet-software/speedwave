@@ -11,9 +11,45 @@ use speedwave_runtime::config;
 use speedwave_runtime::log_sanitizer;
 use speedwave_runtime::plugin;
 
-/// SharePoint banner trigger. ScopeMismatch and Stale collapse to one UI code.
+/// Re-auth banner trigger (SharePoint, Slack). ScopeMismatch, Stale, and an
+/// expired Slack refresh token all collapse to one UI code.
 fn detect_oauth_action_required(project: &str, service: &str) -> Option<String> {
     detect_oauth_action_required_in(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+/// Required scopes per OAuth-refresh service (lowercase). `None` = service has
+/// no banner logic yet — better no banner than a permanently wrong one.
+fn required_scopes_for(service: &str) -> Option<Vec<String>> {
+    match service {
+        "sharepoint" => Some(sharepoint_required_scopes()),
+        "slack" => Some(
+            speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Slack PKCE refresh tokens expire after 30 days (ADR-071) — past that, the
+/// stored state cannot refresh and only a new sign-in helps.
+const SLACK_REFRESH_TOKEN_MAX_AGE_DAYS: i64 = 30;
+
+/// True when `lastRefreshAt` is older than the Slack refresh-token lifetime.
+/// Malformed JSON / missing field return false — the Stale path covers those.
+fn slack_refresh_token_expired(oauth_json_raw: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let json: serde_json::Value = match serde_json::from_str(oauth_json_raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let Some(last_raw) = json.get("lastRefreshAt").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last_raw) else {
+        return false;
+    };
+    now.signed_duration_since(last) > chrono::Duration::days(SLACK_REFRESH_TOKEN_MAX_AGE_DAYS)
 }
 
 /// Parameterised by `data_dir` so unit tests avoid the `consts::data_dir()`
@@ -23,14 +59,12 @@ fn detect_oauth_action_required_in(
     project: &str,
     service: &str,
 ) -> Option<String> {
-    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id, so a
-    // future OAuth-refresh integration surfaces the banner without a code change.
-    // The scope-coverage check below is still Microsoft-shaped; revisit when a
-    // second provider lands (today only SharePoint sets `uses_oauth_refresh`).
+    // Gate on the descriptor flag (SSOT) rather than a hardcoded service id.
     match speedwave_runtime::consts::find_mcp_service(service) {
         Some(d) if d.uses_oauth_refresh => {}
         _ => return None,
     }
+    let required = required_scopes_for(service)?;
     let oauth_path = plugin::oauth_state_file_in(data_dir, project, service);
     let raw = match std::fs::read_to_string(&oauth_path) {
         Ok(s) => s,
@@ -43,7 +77,9 @@ fn detect_oauth_action_required_in(
             return Some("scope_mismatch".to_string());
         }
     };
-    let required = sharepoint_required_scopes();
+    if service == "slack" && slack_refresh_token_expired(&raw, chrono::Utc::now()) {
+        return Some("scope_mismatch".to_string());
+    }
     match detect_scope_mismatch_or_stale(&raw, &required) {
         ReauthorizeReason::Ok => None,
         ReauthorizeReason::ScopeMismatch | ReauthorizeReason::Stale => {
@@ -87,11 +123,7 @@ fn detect_scope_mismatch_or_stale(oauth_json_raw: &str, required: &[String]) -> 
         .iter()
         .filter_map(|s| s.as_str().map(|s| s.to_lowercase()))
         .collect();
-    // `offline_access` is an OIDC control scope: Microsoft never echoes it in the
-    // token-response `scope` field, so it never lands in grantedScopes. Same rule
-    // as `mcp-servers/oauth/src/providers/microsoft.ts` `refreshMicrosoftToken`
-    // (the `s.toLowerCase() === 'offline_access'` skip) — keep both in sync;
-    // refreshToken is the real proof offline access was granted.
+    // Microsoft never echoes `offline_access` in granted scopes, so skip it.
     let covers = required
         .iter()
         .filter(|r| r.as_str() != OFFLINE_ACCESS_SCOPE)
@@ -112,6 +144,38 @@ fn sharepoint_required_scopes() -> Vec<String> {
         .split_whitespace()
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+/// "Connected to <team> · <user>" for services persisting workspace identity
+/// in providerData (Slack). Best-effort: any read/parse failure yields `None`.
+fn oauth_identity_for(project: &str, service: &str) -> Option<String> {
+    oauth_identity_for_in(speedwave_runtime::consts::data_dir(), project, service)
+}
+
+/// `data_dir`-parameterised variant for tests (cf. `detect_oauth_action_required_in`).
+fn oauth_identity_for_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+) -> Option<String> {
+    if service != "slack" {
+        return None;
+    }
+    let raw =
+        std::fs::read_to_string(plugin::oauth_state_file_in(data_dir, project, service)).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pd = json.get("providerData")?;
+    let team = pd.get("teamName").and_then(|v| v.as_str());
+    // Prefer the human-readable name persisted at sign-in; fall back to the ID.
+    let user = pd
+        .get("authedUserName")
+        .and_then(|v| v.as_str())
+        .or_else(|| pd.get("authedUserId").and_then(|v| v.as_str()));
+    match (team, user) {
+        (Some(t), Some(u)) => Some(format!("{t} · {u}")),
+        (Some(t), None) => Some(t.to_string()),
+        _ => None,
+    }
 }
 
 /// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
@@ -335,14 +399,10 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             (values, None)
         };
 
-        // Computed regardless of `configured`: a stale/malformed providerData
-        // makes the service read as unconfigured, yet the user must still be
-        // led to re-authorise. `detect_oauth_action_required` returns None for a
-        // fresh (absent) file, so a never-configured service shows no banner.
+        // Computed regardless of `configured` so a stale state still re-authorises.
         let oauth_action_required = detect_oauth_action_required(&project, svc);
 
-        // Optional-only services (e.g. context7): badge from descriptor only when
-        // no key is set — once configured, drop the badge to mirror configured state.
+        // Optional-only services: badge from descriptor only when no key is set.
         let all_optional =
             !svc_desc.auth_fields.is_empty() && svc_desc.auth_fields.iter().all(|f| f.optional);
         let badge = if all_optional
@@ -365,6 +425,8 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             mappings,
             badge,
             oauth_action_required,
+            oauth_identity: oauth_identity_for(&project, svc),
+            oauth_provider_label: svc_desc.oauth_provider_label.map(str::to_string),
         });
     }
 
@@ -515,9 +577,8 @@ pub fn set_integration_enabled(
 // ---------------------------------------------------------------------------
 
 /// Resolves the absolute path to a native macOS CLI binary.
-/// `resources_dir` is `Some(<BUNDLE_RESOURCES_ENV dir>)` in production (set by
-/// main.rs); `None` selects the dev fallback `CARGO_MANIFEST_DIR ->
-/// ../../native/macos/<pkg>/.build/release/<binary>`. Tests pass a tempdir.
+/// `resources_dir` `Some` selects the bundle dir; `None` selects the dev fallback
+/// `CARGO_MANIFEST_DIR -> ../../native/macos/<pkg>/.build/release/<binary>`.
 // SYNC: binary paths must match mcp-servers/os/src/platform-runner.ts::resolveDarwinPaths()
 fn resolve_native_cli_binary_in(
     service: &str,
@@ -544,13 +605,9 @@ fn resolve_native_cli_binary_in(
         .join(binary_name))
 }
 
-/// Parses the JSON output from a `check_permission` CLI command.
-///
-/// Expected format: `{"granted": true, "status": "granted"}` or
-/// `{"granted": false, "status": "denied", "error": "..."}`.
-/// The `status` field is parsed but not consumed — `error` is the single source
-/// of user-facing text. Returns `Ok(())` if `granted` is boolean `true`.
-/// Returns `Err(message)` if `granted` is `false`, missing, or non-boolean.
+/// Parses `check_permission` JSON `{"granted": bool, "status": str, "error": str}`.
+/// `Ok(())` if `granted` is boolean `true`; `Err(error)` if false, missing, or
+/// non-boolean.
 fn parse_permission_output(stdout: &str) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("Failed to parse permission check output: {e}"))?;
@@ -564,29 +621,18 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Per the Swift contract, granted=false ALWAYS carries a non-empty error string.
-    // The status field is parsed but not consumed — error is the single source of
-    // user-facing text. If the contract is violated (synthetic JSON, future bug),
-    // fall through to a generic message.
+    // Fall through to a generic message if the error string is absent.
     let raw_error = parsed
         .get("error")
         .and_then(|v| v.as_str())
         .unwrap_or("Permission denied");
 
-    // Sanitize before returning to the webview. Defense-in-depth: error strings come
-    // from the Swift side which uses static literals + EventKit localizedDescription,
-    // but localizedDescription could in principle contain user paths in future macOS.
+    // Sanitize before returning to the webview.
     Err(speedwave_runtime::log_sanitizer::sanitize(raw_error))
 }
 
 /// Checks macOS TCC/Automation permission for the given OS service.
-///
-/// Spawns the native CLI binary with `check_permission` and parses the JSON
-/// output. Uses a spawn + try_wait polling loop with timeout (same pattern as
-/// `speedwave_runtime::binary::run_with_timeout` but with stdout/stderr capture).
-///
-/// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
-/// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
+/// Spawns the native CLI with `check_permission` and parses the JSON output.
 fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), String> {
     check_os_permission_with_timeout(
         service,
@@ -596,9 +642,8 @@ fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), Stri
 }
 
 /// Inner implementation with configurable timeout for testability.
-/// `launch_if_needed=true` (toggle click) lets the CLI auto-launch the target
-/// app if not running. `false` (startup validate) keeps the check passive so
-/// Speedwave never opens Mail/Notes uninvited at app boot.
+/// `launch_if_needed=true` auto-launches the target app; `false` keeps the check
+/// passive.
 fn check_os_permission_with_timeout(
     service: &str,
     launch_if_needed: bool,
@@ -706,9 +751,7 @@ fn check_os_permission_with_timeout_in(
         stderr.len()
     );
 
-    // Always surface Swift CLI stderr to the log — it carries the per-CLI trace
-    // (AppleEvents OSStatus values, EventKit gate transitions) that's invaluable
-    // when diagnosing TCC silent rejects from a user-supplied logs ZIP.
+    // Surface Swift CLI stderr to the log line by line.
     if !stderr.trim().is_empty() {
         for line in stderr.lines() {
             log::info!("check_os_permission: {service}-cli stderr: {line}");
@@ -803,7 +846,7 @@ pub struct OsIntegrationValidation {
 
 /// Reconcile enabled OS integrations with live macOS TCC state — auto-disable
 /// any whose permission no longer holds. No-op on non-macOS. Migration path
-/// for the embedded-Info.plist identifier change is in ADR-053.
+/// for the embedded-Info.plist identifier change is in ADR-049.
 #[tauri::command]
 pub fn validate_os_integrations_on_startup(
     project: String,
@@ -823,10 +866,7 @@ pub fn validate_os_integrations_on_startup(
         .map(|s| s.config_key)
         .collect();
 
-    // Phase 1: short config_lock — snapshot enabled state per service.
-    // Holding the lock through ~400ms parallel CLI runs would block any
-    // concurrent toggle/restart from the UI; snapshot-then-unlock keeps the
-    // lock window in microseconds.
+    // Phase 1: short config_lock — snapshot enabled state per service, unlock.
     let prev_state: std::collections::HashMap<&'static str, bool> = config::with_config_lock(|| {
         let user_config = config::load_user_config()?;
         let entry = user_config
@@ -864,9 +904,7 @@ pub fn validate_os_integrations_on_startup(
         }
     }
 
-    // Phase 2: parallel CLI checks — each spawn-and-wait is ~200-400ms; 4
-    // sequential = ~1.4s. Parallel = bounded by the slowest CLI (~400ms).
-    // No config lock held here.
+    // Phase 2: parallel CLI checks, no config lock held.
     let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
         .into_iter()
         .map(|svc| {
@@ -903,9 +941,7 @@ pub fn validate_os_integrations_on_startup(
         }
     }
 
-    // Phase 3: short config_lock — apply mutations only when there's something
-    // to write. Skipping the lock entirely on the no-op path keeps the happy
-    // case zero-contention.
+    // Phase 3: short config_lock — apply mutations only when there's something to write.
     if !to_disable.is_empty() {
         config::with_config_lock(|| {
             let mut user_config = config::load_user_config()?;
@@ -959,20 +995,12 @@ pub fn save_integration_credentials(
         .join(&service);
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
-    // Redmine stores some fields in `config.json` rather than as individual
-    // files; route through its dedicated handler. The Redmine pattern is the
-    // only built-in service that uses `WorkerMountedConfig`, so a per-service
-    // dispatch is simpler than weaving config.json semantics into the generic
-    // routing below.
+    // Redmine stores some fields in `config.json`; route through its handler.
     if service == "redmine" {
         return save_redmine_credentials(&svc_dir, &credentials, allowed);
     }
 
-    // Generic routing driven by `FieldStorage` (plan §PR3:290-299). Each UI
-    // field lands in the storage tier its descriptor declares — `OAuthState`
-    // fields are merged into `oauth/<project>/<service>.json`, everything
-    // else lands in the worker-mounted tokens dir. Adding a new OAuth-using
-    // service means flipping `storage` on its descriptor; no edit here.
+    // Generic routing: each UI field lands in the storage tier its descriptor declares.
     save_with_field_storage(&project, &service, &svc_dir, &credentials)
 }
 
@@ -1118,6 +1146,7 @@ fn fresh_oauth_skeleton(provider: &str) -> serde_json::Value {
 fn provider_id_for_service(service: &str) -> Option<&'static str> {
     match service {
         "sharepoint" => Some(crate::oauth_providers::MICROSOFT_PROVIDER_ID),
+        "slack" => Some(crate::oauth_providers::SLACK_PROVIDER_ID),
         _ => None,
     }
 }
@@ -1188,8 +1217,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         }
     }
 
-    // ADR-060: also remove the host-only oauth.json. Top-level (refreshToken,
-    // scopes, timing) + nested providerData are managed by the oauth worker.
+    // ADR-060: also remove the host-only oauth.json.
     let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
     if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
         let oauth_path = speedwave_runtime::plugin::oauth_state_file(&project, &service);
@@ -1198,8 +1226,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         }
     }
 
-    // Optional-only services (e.g. context7) keep working in anonymous mode after
-    // credential removal — skip auto-disable so the toggle stays as the user left it.
+    // Optional-only services keep working anonymously, so skip auto-disable.
     let all_optional = svc_desc
         .map(|d| !d.auth_fields.is_empty() && d.auth_fields.iter().all(|f| f.optional))
         .unwrap_or(false);
@@ -1243,7 +1270,7 @@ pub fn ensure_project_images_built(
     let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
-    speedwave_runtime::build::build_missing_images(rt, &enabled, &manifest.bundle_id)
+    speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest)
         .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
 
     // Plugin images must also be built outside the compose lock (ADR-066).
@@ -1285,7 +1312,7 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
         }
     };
     if let Err(e) =
-        speedwave_runtime::build::prune_orphan_current_bundle_images(rt, &manifest.bundle_id, &keep)
+        speedwave_runtime::build::prune_orphan_current_bundle_images_locked(rt, &manifest, &keep)
     {
         log::warn!("prune_unused_worker_images failed: {e}");
     }
@@ -1303,7 +1330,15 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
             enabled: Some(false),
         };
         if !integrations.set_service(service, cfg) {
-            return Err(anyhow::anyhow!("unknown service: {service}"));
+            // Not a built-in key — plugins toggle through their own map.
+            let is_installed_plugin = speedwave_runtime::plugin::list_installed_plugins()
+                .unwrap_or_default()
+                .iter()
+                .any(|m| m.service_id.as_deref() == Some(service) || m.slug == service);
+            if !is_installed_plugin {
+                return Err(anyhow::anyhow!("unknown service: {service}"));
+            }
+            integrations.set_plugin_enabled(service, false);
         }
         config::save_user_config(&user_config)
     });
@@ -1316,7 +1351,9 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
 pub async fn restart_integration_containers(
     project: String,
     just_enabled: Option<String>,
+    oauth: tauri::State<'_, crate::reconcile::SharedOauth>,
 ) -> Result<(), String> {
+    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         crate::containers_cmd::ensure_images_ready()?;
         check_project(&project)?;
@@ -1334,8 +1371,7 @@ pub async fn restart_integration_containers(
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Build OUTSIDE the compose lock (ADR-066). On failure, undo the
-        // just-enabled config toggle but leave running containers intact.
+        // Build OUTSIDE the compose lock (ADR-066).
         if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
             log::error!("restart_integration_containers: image build failed: {sanitized}");
             if let Some(svc) = just_enabled.as_deref() {
@@ -1347,38 +1383,37 @@ pub async fn restart_integration_containers(
         }
 
         rt.transaction(&project, |rt| -> anyhow::Result<()> {
-            // Hard-fail only on real IO errors (disk full, permission denied);
-            // save_snapshot returns Ok(()) when compose.yml doesn't exist yet.
+            // Hard-fail only on real IO errors.
             speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
                 anyhow::anyhow!(
                     "Cannot safely restart: failed to write rollback snapshot ({e})"
                 )
             })?;
 
-            rt.compose_down(&project).map_err(|e| {
-                log::error!("restart_integration_containers: compose_down error: {e}");
-                anyhow::anyhow!("{e}")
-            })?;
+            // Respawn the oauth worker before compose render (ADR-069). Best-effort.
+            crate::ensure_oauth_running(&oauth_arc, &project);
 
             use crate::types::IntoAnyhow;
             crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
 
-            // Both validate and up_recreate are post-compose_down; either failing
-            // leaves containers stopped, so both require rollback.
-            let recreate_result = speedwave_runtime::runtime::compose_validate_with_retry(
-                rt, &project,
-            )
-            .and_then(|()| rt.compose_up_recreate(&project));
+            // Idempotent up with NO prior down (ADR-072): recreates only claude + hub.
+            let up_result =
+                speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)
+                    .and_then(|()| rt.compose_up(&project));
 
-            if let Err(e) = recreate_result {
+            if let Err(e) = up_result {
                 log::error!(
-                    "restart_integration_containers: recreate failed: {e}, attempting rollback"
+                    "restart_integration_containers: up failed: {e}, attempting rollback"
                 );
+                // Roll the config toggle back alongside the containers.
+                if let Some(svc) = just_enabled.as_deref() {
+                    rollback_integration_to_disabled(&project, svc);
+                }
                 // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
                     log::error!("restart_integration_containers: rollback also failed: {rb_err}");
                     anyhow::bail!(
-                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers are stopped. Run speedwave to restart manually."
+                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
                     );
                 }
                 anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
@@ -1405,11 +1440,9 @@ pub async fn restart_integration_containers(
 mod tests {
     use super::*;
 
-    /// Drift guard: the camelCase JSON keys the Desktop save-path derives from the
-    /// `OAuthStateProviderData` descriptors (via `snake_to_oauth_json_key`, which
-    /// delegates to the runtime SSOT) must equal the runtime `IDENTITY_KEYS` the
-    /// migration nests under `providerData`. Catches a descriptor/mapping change
-    /// that would desync the two write paths.
+    /// Drift guard: the camelCase keys derived from `OAuthStateProviderData`
+    /// descriptors must equal the runtime `IDENTITY_KEYS` nested under
+    /// `providerData`.
     #[test]
     fn provider_data_descriptor_keys_match_runtime_identity_keys() {
         let mut got: Vec<&str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
@@ -1532,8 +1565,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_returns_ok_when_granted_matches_with_different_case() {
-        // grantedScopes come back in mixed case from Microsoft (e.g.
-        // `Sites.Manage.All`). The helper normalises both sides.
+        // Microsoft returns mixed-case scopes; the helper normalises both sides.
         let raw = well_formed_state(&["Sites.Manage.All", "User.Read"]);
         let required = vec!["sites.manage.all".to_string(), "user.read".to_string()];
         assert_eq!(
@@ -1542,9 +1574,7 @@ mod tests {
         );
     }
 
-    // Microsoft echoes the fully-qualified resource scopes (e.g.
-    // `https://graph.microsoft.com/sites.manage.all`) in grantedScopes, never
-    // `offline_access`. These mirror the live `documents` / `speedwave` files.
+    // Fully-qualified Graph resource scopes Microsoft echoes; never offline_access.
     const GRAPH_RESOURCE_SCOPES: &[&str] = &[
         "https://graph.microsoft.com/sites.manage.all",
         "https://graph.microsoft.com/files.readwrite.all",
@@ -1553,8 +1583,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_ok_when_all_resource_scopes_granted_but_offline_access_absent() {
-        // The `documents` live case: every resource scope present, only
-        // `offline_access` "missing" — Microsoft never echoes it. Must be Ok.
+        // Every resource scope present, only offline_access absent: must be Ok.
         let raw = well_formed_state(GRAPH_RESOURCE_SCOPES);
         let required = sharepoint_required_scopes(); // includes offline_access
         assert!(required.iter().any(|r| r == OFFLINE_ACCESS_SCOPE));
@@ -1566,8 +1595,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_still_trips_when_a_real_resource_scope_is_missing() {
-        // Excluding offline_access must NOT mask a genuinely missing resource
-        // scope (here: sites.manage.all absent).
+        // Excluding offline_access must not mask a missing resource scope.
         let raw = well_formed_state(&[
             "https://graph.microsoft.com/files.readwrite.all",
             "https://graph.microsoft.com/user.read",
@@ -1581,8 +1609,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_ok_when_offline_access_also_present() {
-        // A freshly re-authed file that happens to carry offline_access in
-        // grantedScopes must still be Ok (the `speedwave` live case).
+        // A file that carries offline_access in grantedScopes must still be Ok.
         let mut granted: Vec<&str> = GRAPH_RESOURCE_SCOPES.to_vec();
         granted.push("offline_access");
         let raw = well_formed_state(&granted);
@@ -1595,8 +1622,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_stale_guard_unaffected_by_offline_access_filter() {
-        // The Stale guards (missing providerData / grantedScopes) take priority
-        // over the coverage check — filtering offline_access must not change that.
+        // Stale guards take priority over the coverage check.
         let raw = r#"{"provider":"microsoft","providerData":{"clientId":"c"}}"#;
         let required = sharepoint_required_scopes();
         assert_eq!(
@@ -1629,8 +1655,7 @@ mod tests {
 
     #[test]
     fn detect_scope_mismatch_returns_stale_when_provider_data_missing() {
-        // Pre-OAuthProvider-refactor files lack `providerData` — UI banner
-        // must surface re-consent to migrate the user forward.
+        // Files lacking `providerData` are Stale so the UI surfaces re-consent.
         let raw = r#"{"provider":"microsoft","grantedScopes":["sites.manage.all","user.read","files.readwrite.all","offline_access"]}"#;
         let required = vec!["sites.manage.all".to_string()];
         assert_eq!(
@@ -1669,12 +1694,184 @@ mod tests {
     }
 
     #[test]
-    fn detect_oauth_action_required_only_acts_on_sharepoint() {
-        // For non-sharepoint services we never even read the oauth.json — the
-        // fact that consts::data_dir() may be unrelated/empty must not matter.
-        assert!(detect_oauth_action_required("any-project", "slack").is_none());
+    fn detect_oauth_action_required_only_acts_on_oauth_refresh_services() {
+        // Non-OAuth-refresh services never read the oauth.json.
         assert!(detect_oauth_action_required("any-project", "redmine").is_none());
         assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
+        assert!(detect_oauth_action_required("any-project", "github").is_none());
+    }
+
+    /// Writes a slack oauth.json for detect tests; scopes/lastRefreshAt knobs.
+    fn write_slack_state_for_detect(
+        data_dir: &std::path::Path,
+        granted: &[&str],
+        last_refresh_at: &str,
+    ) {
+        let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": { "clientId": "1.2" },
+                "grantedScopes": granted,
+                "refreshToken": "xoxe-1-rt",
+                "lastRefreshAt": last_refresh_at,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Every currently-required slack scope, as Slack echoes them (SSOT-derived).
+    fn all_slack_scopes() -> Vec<&'static str> {
+        speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES.to_vec()
+    }
+
+    /// The pre-DM grant (8 scopes, shipped before im/mpim support). Deliberately
+    /// hardcoded — NOT SSOT-derived — so the upgrade-path test below can fail.
+    const LEGACY_PRE_DM_SLACK_SCOPES: &[&str] = &[
+        "chat:write",
+        "channels:read",
+        "groups:read",
+        "channels:history",
+        "groups:history",
+        "users:read",
+        "users:read.email",
+        "files:read",
+    ];
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_file_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_scopes_cover_and_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_on_scope_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &["chat:write"], &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_grant_predates_dm_scopes() {
+        // A pre-DM grant must trip the re-auth banner after the scope set widened.
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), LEGACY_PRE_DM_SLACK_SCOPES, &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_on_stale_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"provider":"slack"}"#).unwrap();
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_refresh_token_aged_out() {
+        // 31 days idle exceeds the 30-day PKCE refresh-token lifetime: banner.
+        let tmp = tempfile::tempdir().unwrap();
+        let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &old);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn slack_refresh_token_expired_handles_malformed_inputs() {
+        let now = chrono::Utc::now();
+        assert!(!slack_refresh_token_expired("not json", now));
+        assert!(!slack_refresh_token_expired(r#"{"provider":"slack"}"#, now));
+        assert!(!slack_refresh_token_expired(
+            r#"{"lastRefreshAt":"not-a-date"}"#,
+            now
+        ));
+    }
+
+    #[test]
+    fn oauth_identity_built_from_provider_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {"clientId": "1.2", "teamName": "Speednet", "authedUserId": "U1"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Pre-name grants (no authedUserName) fall back to the ID.
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet · U1")
+        );
+        // When a display name was persisted at sign-in, it wins over the ID.
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {
+                    "clientId": "1.2",
+                    "teamName": "Speednet",
+                    "authedUserId": "U1",
+                    "authedUserName": "Jan Kowalski"
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet · Jan Kowalski")
+        );
+        // Team only — no user id.
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "providerData": {"clientId": "1.2", "teamName": "Speednet"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_identity_for_in(tmp.path(), "p", "slack").as_deref(),
+            Some("Speednet")
+        );
+    }
+
+    #[test]
+    fn oauth_identity_none_for_other_services_and_missing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(oauth_identity_for_in(tmp.path(), "p", "sharepoint").is_none());
+        assert!(oauth_identity_for_in(tmp.path(), "p", "slack").is_none());
     }
 
     #[test]
@@ -1686,9 +1883,7 @@ mod tests {
 
     #[test]
     fn detect_oauth_action_required_some_when_present_but_stale() {
-        // Present file with malformed providerData (the bug state): the service
-        // reads as unconfigured, but the banner MUST still fire so the user can
-        // re-authorise. Stale collapses to "scope_mismatch".
+        // Malformed providerData must still fire the banner (Stale → scope_mismatch).
         let tmp = tempfile::tempdir().unwrap();
         let path = speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "p", "sharepoint");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1766,20 +1961,11 @@ mod tests {
     }
 
     // -- validate_os_integrations_on_startup --
-    //
-    // The full happy/error/state-transition path requires a temporary
-    // ~/.speedwave/ data dir and a mocked native CLI that returns scripted
-    // status JSON. That harness already exists for set_os_integration_enabled
-    // tests at the integration level (run via `make test-desktop`). The unit
-    // tests here cover the boundary behaviour reachable without spawning
-    // child processes.
 
     #[cfg(target_os = "windows")]
     #[test]
     fn validate_os_integrations_returns_empty_on_windows() {
-        // OS integrations are macOS-only — the validator must short-circuit
-        // with Ok([]) on Windows hosts so the Angular ngOnInit hook can call
-        // it unconditionally.
+        // macOS-only: the validator short-circuits with Ok([]) on Windows.
         let result = validate_os_integrations_on_startup("test".into());
         assert!(result.is_ok(), "expected Ok on non-macOS, got {result:?}");
         assert_eq!(
@@ -1791,11 +1977,7 @@ mod tests {
 
     #[test]
     fn os_integration_validation_serializes_to_camel_case_for_frontend() {
-        // The Tauri command return type is consumed by Angular as
-        // OsIntegrationValidation in models/integration.ts — the field names
-        // must serialize to snake_case (Rust default). If a future PR adds
-        // serde rename rules, this test catches the drift before frontend
-        // breaks at runtime.
+        // Drift guard: the fields must serialize to snake_case for Angular.
         let v = OsIntegrationValidation {
             service: "calendar".to_string(),
             previous_enabled: true,
@@ -1811,9 +1993,7 @@ mod tests {
 
     #[test]
     fn os_integrations_config_get_service_covers_every_toggleable_service() {
-        // SSOT alignment: get_service must accept every config_key in
-        // TOGGLEABLE_OS_SERVICES. A new entry without a matching arm would
-        // make the validator silently skip the service.
+        // SSOT alignment: get_service must accept every config_key in TOGGLEABLE_OS_SERVICES.
         use speedwave_runtime::config::{IntegrationConfig, OsIntegrationsConfig};
         let mut cfg = OsIntegrationsConfig::default();
         for svc in speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES {
@@ -1986,7 +2166,7 @@ mod tests {
     // -- restart_integration_containers structural tests --
 
     #[test]
-    fn restart_rebuilds_images_before_compose_down() {
+    fn restart_rebuilds_images_before_compose_up() {
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
@@ -1996,22 +2176,70 @@ mod tests {
         let build_pos = fn_body.find("ensure_project_images_built").expect(
             "ensure_project_images_built call must exist in restart_integration_containers",
         );
-        let down_pos = fn_body
-            .find("compose_down")
-            .expect("compose_down call must exist in restart_integration_containers");
-
+        let render_pos = fn_body
+            .find("render_and_save_compose")
+            .expect("render_and_save_compose call must exist");
         assert!(
-            build_pos < down_pos,
-            "ensure_project_images_built (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
-            build_pos,
-            down_pos
+            build_pos < render_pos,
+            "ensure_project_images_built (offset {build_pos}) must appear before render (offset {render_pos}) — builds stay outside the compose lock (ADR-066)"
+        );
+    }
+
+    #[test]
+    fn restart_reconciles_oauth_worker_before_compose_render() {
+        // The oauth worker must respawn before compose render.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let oauth_pos = fn_body
+            .find("ensure_oauth_running")
+            .expect("restart must reconcile the oauth worker (ensure_oauth_running)");
+        let render_pos = fn_body
+            .find("render_and_save_compose")
+            .expect("render_and_save_compose call must exist");
+        assert!(
+            oauth_pos < render_pos,
+            "ensure_oauth_running (offset {oauth_pos}) must run before render_and_save_compose (offset {render_pos})"
+        );
+    }
+
+    #[test]
+    fn restart_rolls_back_just_enabled_on_up_failure_too() {
+        // Both failure arms must converge config with containers.
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers must exist");
+        let body = &source[fn_start..];
+        let up_err = body
+            .find("up failed: {e}, attempting rollback")
+            .expect("up-failure arm must exist");
+        let window = &body[up_err..up_err + 600];
+        assert!(
+            window.contains("rollback_integration_to_disabled"),
+            "up-failure arm must roll the just-enabled toggle back"
+        );
+    }
+
+    #[test]
+    fn rollback_helper_handles_plugin_keys() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn rollback_integration_to_disabled(")
+            .expect("rollback helper must exist");
+        let body = &source[fn_start..fn_start + 1600];
+        assert!(
+            body.contains("set_plugin_enabled"),
+            "plugin enable failure must be rollback-able (set_service has no plugin arm)"
         );
     }
 
     #[test]
     fn restart_rolls_back_just_enabled_on_build_failure() {
-        // Structural: the build-failure branch must call the rollback helper
-        // with the `just_enabled` arg so the toggled-on row reverts in the UI.
+        // Structural: the build-failure branch must call the rollback helper.
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
@@ -2029,24 +2257,34 @@ mod tests {
     }
 
     #[test]
-    fn restart_uses_compose_up_recreate() {
+    fn restart_uses_idempotent_up_without_down() {
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
             .expect("restart_integration_containers function must exist");
-        let fn_body = &source[fn_start..];
+        let fn_end = source[fn_start..]
+            .find("\n    // -- restart_integration_containers structural tests --")
+            .map(|e| fn_start + e)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
 
         assert!(
-            fn_body.contains("compose_up_recreate"),
-            "restart_integration_containers must use compose_up_recreate, not compose_up"
+            !fn_body.contains("compose_up_recreate"),
+            "toggle must use idempotent compose_up (ADR-072 convergence), not force-recreate"
+        );
+        assert!(
+            !fn_body.contains("compose_down"),
+            "toggle must not down the project — config-hash convergence touches only changed containers"
+        );
+        assert!(
+            fn_body.contains("rt.compose_up(&project)"),
+            "toggle must call idempotent compose_up"
         );
     }
 
     #[test]
     fn restart_integration_containers_waits_for_image_readiness() {
-        // Race guard: bundle reconcile may be rebuilding images while a user
-        // toggles an integration; without this gate, compose_up_recreate would
-        // surface "image not available" through nerdctl to the user.
+        // Race guard: a bundle rebuild may collide with a toggle.
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
             .find("fn restart_integration_containers(")
@@ -2057,11 +2295,11 @@ mod tests {
             .find("ensure_images_ready")
             .expect("restart_integration_containers must call ensure_images_ready");
         let up_pos = fn_body
-            .find("compose_up_recreate")
-            .expect("compose_up_recreate must exist in restart_integration_containers");
+            .find("rt.compose_up(&project)")
+            .expect("compose_up must exist in restart_integration_containers");
         assert!(
             ensure_pos < up_pos,
-            "ensure_images_ready must come BEFORE compose_up_recreate"
+            "ensure_images_ready must come BEFORE compose_up"
         );
     }
 
@@ -2084,8 +2322,7 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_false_when_only_secrets_exist() {
-        // SharePoint: access_token + refresh_token exist (file-based secrets),
-        // but client_id/tenant_id/site_id are missing → false
+        // Only file-based secrets present; non-secret fields missing → false.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
@@ -2099,10 +2336,7 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_true_when_all_fields_present() {
-        // SharePoint after base_path removal: access_token + site_id are
-        // worker-mounted; refresh_token / client_id / tenant_id live in
-        // oauth.json. is_service_configured_with_home checks the worker-mounted
-        // dir (we feed minimum), and the OAuthState fields via the JSON.
+        // access_token + site_id are worker-mounted; OAuthState fields live in oauth.json.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
         std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
@@ -2159,8 +2393,7 @@ mod tests {
 
     #[test]
     fn is_service_configured_checks_stored_in_config_json_for_redmine() {
-        // Redmine: api_key (file) + host_url (config.json, required) +
-        // project_id (config.json, optional)
+        // Redmine: api_key (file), host_url (config.json, required), project_id (optional).
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
 
@@ -2201,32 +2434,70 @@ mod tests {
         );
     }
 
+    /// Writes a minimal slack oauth.json with the given refreshToken.
+    fn write_slack_oauth_state(home: &std::path::Path, project: &str, refresh_token: &str) {
+        let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+        let path = speedwave_runtime::plugin::oauth_state_file_in(&data_dir, project, "slack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": "slack",
+                "grantType": "refresh_token",
+                "providerData": {"clientId": "1.2"},
+                "grantedScopes": [],
+                "refreshToken": refresh_token,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn is_service_configured_returns_false_for_empty_files() {
-        // Slack: bot_token + user_token exist but are empty → false
+        // Slack (ADR-071): both a mounted access_token and an off-mount refreshToken required.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
-        std::fs::write(svc_dir.join("bot_token"), "").unwrap();
-        std::fs::write(svc_dir.join("user_token"), "").unwrap();
 
+        // Empty access_token + valid state → false.
+        std::fs::write(svc_dir.join("access_token"), "").unwrap();
+        write_slack_oauth_state(tmp.path(), "proj", "xoxe-1-rt");
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be false when token files are empty (0 bytes)"
+            "should be false when access_token is empty (0 bytes)"
         );
 
-        // Write non-empty content → true
-        std::fs::write(svc_dir.join("bot_token"), "xoxb-123").unwrap();
-        std::fs::write(svc_dir.join("user_token"), "xoxp-456").unwrap();
+        // Non-empty access_token + valid state → true.
+        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be true when token files are non-empty"
+            "should be true when access_token and refreshToken are present"
+        );
+
+        // Empty refreshToken in state → false despite a mounted access_token.
+        write_slack_oauth_state(tmp.path(), "proj", "");
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "slack"),
+            "should be false when the oauth state has no refreshToken"
         );
     }
 
     #[test]
+    fn is_service_configured_slack_false_without_oauth_state() {
+        // access_token alone (no oauth/<p>/slack.json at all) → false.
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
+        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
+        assert!(!is_service_configured_with_home(
+            tmp.path(),
+            "proj",
+            "slack"
+        ));
+    }
+
+    #[test]
     fn is_service_configured_returns_false_for_empty_config_json_values() {
-        // Redmine: host_url is a required (non-optional) config.json field.
-        // An empty host_url blocks configuration even if optional fields are present.
+        // host_url is required; an empty value blocks configuration.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
         std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
@@ -2248,8 +2519,7 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_true_for_credential_less_service() {
-        // Services like Playwright have no auth_fields; they scrape public URLs.
-        // They must be treated as always-configured so the UI toggle is enabled.
+        // Credential-less services must be treated as always-configured.
         let tmp = tempfile::tempdir().unwrap();
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "playwright"),
@@ -2326,10 +2596,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_denied_with_status_and_error() {
-        // Calendar uses sub-identifier `pl.speedwave.desktop.calendar` per
-        // SharedCLI/Utilities.swift::subBundleIdentifier — the `tccutil reset`
-        // command in the error string must use the sub-identifier so that
-        // recovery actually clears the right TCC.db row.
+        // The tccutil command in the error string must use the calendar sub-identifier.
         let result = parse_permission_output(
             r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop.calendar"}"#,
         );
@@ -2354,10 +2621,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_mail_uses_apple_events_service() {
-        // Mail/Notes use kTCCServiceAppleEvents — `tccutil reset Mail` is wrong
-        // (no such TCC service exists). The Swift composeErrorMessage produces
-        // `tccutil reset AppleEvents pl.speedwave.desktop.mail` and the parser
-        // must surface this string verbatim.
+        // Mail/Notes use kTCCServiceAppleEvents, not `tccutil reset Mail`.
         let result = parse_permission_output(
             r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.mail"}"#,
         );
@@ -2386,10 +2650,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_target_not_running_omits_tccutil() {
-        // .targetNotRunning (Mail/Notes app not running) is NOT a TCC issue —
-        // the error string must NOT recommend tccutil because resetting
-        // permission would not help. The Swift composeErrorMessage produces
-        // a "open Mail.app and try again" message instead.
+        // .targetNotRunning is not a TCC issue, so the error must not recommend tccutil.
         let result = parse_permission_output(
             r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running. Open Mail.app and try again — this is not a permission problem."}"#,
         );
@@ -2404,8 +2665,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_status_field_does_not_affect_message() {
-        // The status field must not affect the returned Err message — only the error field matters.
-        // Example: status="completely_made_up" with error="real error" → Err("real error")
+        // The status field must not affect the Err message; only error matters.
         let result = parse_permission_output(
             r#"{"granted": false, "status": "completely_made_up", "error": "real error"}"#,
         );
@@ -2416,7 +2676,6 @@ mod tests {
     #[test]
     fn parse_permission_output_sanitizes_error() {
         // Error strings must be sanitized before reaching the webview.
-        // Synthesize an error containing a Bearer token pattern.
         let input =
             r#"{"granted": false, "error": "failed with Bearer eyJhbGciOiJIUzI1NiJ9.test.sig"}"#;
         let result = parse_permission_output(input);
@@ -2464,8 +2723,7 @@ mod tests {
 
     #[test]
     fn resolve_native_cli_binary_covers_all_os_services() {
-        // Cross-language consistency with platform-runner.ts must be verified
-        // manually when changing binary names
+        // Cross-language consistency with platform-runner.ts is verified manually.
         let os_services: std::collections::HashSet<&str> =
             speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES
                 .iter()
@@ -2587,8 +2845,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn check_os_permission_timeout_kills_child() {
-        // Intentionally slow test (~5s) — spawns a script that sleeps 60s,
-        // but we set a 2s timeout so it gets killed quickly.
+        // Slow test: a 60s-sleep script is killed by a 2s timeout.
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("reminders-cli");
         std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
@@ -2664,9 +2921,7 @@ mod tests {
 
     #[test]
     fn credential_files_allowlist_covers_legacy_project_name_file() {
-        // project_name was removed from auth_fields (UI no longer shows it),
-        // but credential_files still includes it so delete_integration_credentials
-        // can clean up legacy installations that have a project_name file on disk.
+        // project_name is gone from auth_fields but kept in credential_files for legacy cleanup.
         let svc = speedwave_runtime::consts::find_mcp_service("redmine").unwrap();
 
         assert!(
@@ -2678,8 +2933,7 @@ mod tests {
             "project_name must not appear in auth_fields (removed from UI)"
         );
 
-        // Simulate legacy cleanup: create a temp dir with a project_name file,
-        // then iterate credential_files to delete — mirrors delete_integration_credentials logic.
+        // Simulate legacy cleanup: create a project_name file, then delete via credential_files.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = tmp.path();
         std::fs::write(svc_dir.join("project_name"), "Legacy Project").unwrap();
@@ -2837,10 +3091,7 @@ mod tests {
 
     #[test]
     fn merge_oauth_state_json_merges_into_existing_provider_data() {
-        // Existing file already has a populated providerData node (typical
-        // read-modify-write: user updates one field via UI, the others stay).
-        // The merge must add the new field, preserve the old one, and keep
-        // top-level fields intact.
+        // Merge must add the new field and preserve the old and top-level fields.
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
@@ -2932,8 +3183,7 @@ mod tests {
 
     #[test]
     fn merge_oauth_state_json_repairs_missing_provider_data_node() {
-        // Existing file lacks `providerData` (e.g. corrupted at that node).
-        // The merge must repair it rather than silently drop client_id/tenant_id.
+        // Merge must repair a missing providerData node rather than drop identity.
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
@@ -2958,9 +3208,7 @@ mod tests {
 
     #[test]
     fn merge_oauth_state_json_lifts_legacy_top_level_identity() {
-        // Legacy file with clientId/tenantId at top level (pre-providerData).
-        // A re-save must lift them under providerData AND remove the top-level
-        // copies — not leave them orphaned next to an empty providerData.
+        // A re-save must lift top-level clientId/tenantId under providerData and remove the copies.
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 

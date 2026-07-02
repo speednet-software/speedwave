@@ -1,11 +1,5 @@
 /**
- * State-tree types mirroring `crates/speedwave-runtime/src/stream/state_tree.rs`.
- *
- * The Rust side serialises these via serde with `rename_all = "snake_case"`
- * for tagged enums and default field names otherwise. Keeping the TS shapes
- * verbatim means JSON Patches produced in Rust apply to these objects on
- * the wire without a translation step.
- * @see docs/adr/ADR-042-json-patch-stream-protocol.md
+ * State-tree types mirroring `crates/speedwave-runtime/src/stream/state_tree.rs` (ADR-042).
  */
 
 /** Conversation role. */
@@ -36,7 +30,7 @@ export interface SessionTotalsState {
   cache_read_tokens: number;
   /** Cumulative cache-write tokens. */
   cache_write_tokens: number;
-  /** Cumulative cost in USD. */
+  /** Cumulative cost in USD. Mirrors Rust `SessionTotals.cost` (f64). */
   cost: number;
   /** Number of completed turns in this session. */
   turn_count: number;
@@ -63,18 +57,13 @@ export interface EntryMetaState {
 import type { AskUserQuestionItem } from './chat';
 
 /**
- * One question inside an `ask_user` block — mirrors
- * `speedwave_runtime::stream::AskUserQuestionItem`. Same shape as
- * {@link AskUserQuestionItem}; this alias exposes a `Readonly` view for
- * persistence-layer consumers, but the underlying type lives in
- * `models/chat.ts` (single source of truth).
+ * One question inside an `ask_user` block; mirrors Rust `AskUserQuestionItem` (SSOT in `models/chat.ts`).
  */
 export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
 
 /**
- * One block inside a conversation entry. Tagged enum: serde serializes as
- * `{"kind":"text","content":"..."}` — preserving that shape lets a JSON
- * Patch replace a block in-place without a re-typing dance.
+ * One block inside a conversation entry. Tagged union mirroring the Rust
+ * `MessageBlock` serde shape (`{"kind":"text","content":"..."}`).
  */
 export type MessageBlockState =
   | { kind: 'text'; content: string }
@@ -99,7 +88,7 @@ export type MessageBlockState =
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {
-  /** Stable monotonic index allocated by `EntryIndexProvider` (ADR-044). */
+  /** Stable monotonic index, never reused within a session (ADR-044). */
   index: number;
   /** Who authored this entry. */
   role: EntryRole;
@@ -149,14 +138,3 @@ export const DEFAULT_STATE_TREE: ConversationStateTree = {
   model: null,
   is_streaming: false,
 };
-
-/**
- * Wire-shape of one event emitted by `MsgStore.history_plus_stream()`.
- * Tagged-enum representation matches `LogMsg` in
- * `crates/speedwave-runtime/src/stream/msg_store.rs`.
- */
-export type LogMsgEnvelope =
-  | { type: 'json_patch'; data: unknown }
-  | { type: 'resync'; data: ConversationStateTree }
-  | { type: 'session_started'; data: { session_id: string } }
-  | { type: 'session_ended'; data?: never };

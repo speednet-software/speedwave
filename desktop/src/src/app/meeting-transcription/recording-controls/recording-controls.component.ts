@@ -10,13 +10,29 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type {
-  AudioSource,
-  AudioSourceInfo,
-  Backend,
-  CaptureCapabilities,
-  Language,
-} from '../../models/transcript';
+import type { AudioSource, AudioSourceInfo, Backend, Language } from '../../models/transcript';
+
+/** A named input device for the microphone dropdown. */
+interface MicChoice {
+  uid: string;
+  name: string;
+}
+
+/**
+ * A source's mic device id, or null if it isn't a named-mic source.
+ * @param s - the audio source.
+ */
+function micDeviceId(s: AudioSource): string | null {
+  return s.kind === 'microphone' && s.device ? s.device : null;
+}
+
+/**
+ * Strips the `Microphone: ` prefix from a source label for the dropdown.
+ * @param label - the source's display label.
+ */
+function micName(label: string): string {
+  return label.replace(/^Microphone:\s*/, '');
+}
 
 /**
  * Joins compiled backends into a short "Acceleration: …" string.
@@ -24,16 +40,14 @@ import type {
  */
 function accelLabel(backends: Backend[]): string {
   if (backends.includes('metal')) return 'Acceleration: Metal';
-  if (backends.includes('cuda')) return 'Acceleration: CUDA';
-  if (backends.includes('vulkan')) return 'Acceleration: Vulkan';
   return 'Acceleration: CPU only';
 }
 
 /**
  * Recording controls: language toggle (PL/EN — never auto-detected), audio
- * source picker (per-app entries only when the host backend supports it), an
- * acceleration badge, and Start/Stop. Emits `started`/`stopped` so the parent
- * can subscribe to / detach from the session's live stream.
+ * source picker (Whole meeting / System / Microphone), an acceleration badge,
+ * and Start/Stop. Emits `started`/`stopped` so the parent can subscribe to /
+ * detach from the session's live stream.
  */
 @Component({
   selector: 'app-recording-controls',
@@ -78,33 +92,27 @@ function accelLabel(backends: Backend[]): string {
           </select>
         </label>
 
-        <label
-          class="flex items-center gap-1"
-          title="Hint for the speaker diarizer. 0 = auto-estimate (less accurate)."
-        >
-          <span class="text-[var(--ink-mute)]">Speakers</span>
-          <input
-            type="number"
-            min="0"
-            max="20"
-            class="w-12 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
-            data-testid="speakers-input"
-            [disabled]="recording()"
-            [value]="expectedSpeakers()"
-            (change)="onSpeakers(+$any($event.target).value)"
-          />
-        </label>
+        @if (micSelectable() && mics().length > 0) {
+          <label class="flex items-center gap-1">
+            <span class="text-[var(--ink-mute)]">Microphone</span>
+            <select
+              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
+              data-testid="mic-select"
+              [disabled]="recording()"
+              (change)="onMic($any($event.target).value)"
+            >
+              <option value="" [selected]="micDevice() === null">System default</option>
+              @for (m of mics(); track m.uid) {
+                <option [value]="m.uid" [selected]="m.uid === micDevice()">{{ m.name }}</option>
+              }
+            </select>
+          </label>
+        }
 
         <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
           {{ accel() }}
         </span>
       </div>
-
-      @if (capabilities() && !capabilities()!.supports_per_process) {
-        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="per-app-note">
-          {{ capabilities()!.note ?? 'Per-app capture isn’t available on this host.' }}
-        </p>
-      }
 
       @if (mixedSourceSelected()) {
         <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
@@ -115,8 +123,8 @@ function accelLabel(backends: Backend[]): string {
 
       @if (modelsKnown() && !hasModel()) {
         <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
-          No speech-to-text model is downloaded yet. Download one in the Models panel (the smallest,
-          'small', is about 488 MB) — downloads use the network.
+          No speech-to-text model is downloaded yet. Download it in Settings → Meeting transcription
+          — the download uses the network.
         </p>
       }
 
@@ -160,10 +168,6 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Hint for the diarizer: 0 = auto, 1-20 = exact count. */
-  readonly expectedSpeakers = signal<number>(0);
-  /** Host capture capabilities (drives the per-app note). */
-  readonly capabilities = signal<CaptureCapabilities | null>(null);
   /** Compiled whisper.cpp backends for this build. */
   readonly backends = signal<Backend[]>([]);
   /** Derived acceleration label. */
@@ -182,17 +186,29 @@ export class RecordingControlsComponent implements OnInit {
   readonly mixedSourceSelected = computed(
     () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
   );
+  /** Chosen mic device id (UID on macOS, name on Windows); null = system default. */
+  readonly micDevice = signal<string | null>(null);
+  /** Named input devices, derived from the source list. */
+  readonly mics = computed<MicChoice[]>(() =>
+    this.sources()
+      .filter((s) => micDeviceId(s.source) !== null)
+      .map((s) => ({ uid: micDeviceId(s.source) as string, name: micName(s.label) }))
+  );
+  /** Whether the chosen source uses a mic (mixed or mic-only) — shows the picker. */
+  readonly micSelectable = computed(() => {
+    const k = this.sources()[this.sourceIndex()]?.source.kind;
+    return k === 'mixed' || k === 'microphone';
+  });
   /** The active session id (set on start, cleared on stop). */
   private activeSessionId: string | null = null;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
 
-  /** Loads capabilities + source list + model availability on first paint. */
+  /** Loads backends + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
-      this.capabilities.set(caps.capabilities);
       this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
@@ -243,30 +259,36 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Updates the expected-speakers hint. 0 = auto-estimate; clamped to 0-20.
-   * @param n - speaker count entered by the user.
+   * Updates the chosen mic device.
+   * @param uid - device id, or '' for the system default.
    */
-  onSpeakers(n: number): void {
-    if (!Number.isFinite(n)) return;
-    this.expectedSpeakers.set(Math.max(0, Math.min(20, Math.floor(n))));
+  onMic(uid: string): void {
+    this.micDevice.set(uid === '' ? null : uid);
+  }
+
+  /**
+   * Overlays the chosen mic onto a mixed/mic source (no-op for others).
+   * @param src - the picked source.
+   */
+  private applyMic(src: AudioSource): AudioSource {
+    const mic = this.micDevice();
+    if (src.kind === 'mixed') return { ...src, mic };
+    if (src.kind === 'microphone') return { ...src, device: mic };
+    return src;
   }
 
   /** Starts recording the chosen source in the chosen language. */
   async start(): Promise<void> {
-    const src: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
-    if (!src) {
+    const picked: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
+    if (!picked) {
       this.error.set('no audio source selected');
       return;
     }
+    const src = this.applyMic(picked);
     this.busy.set(true);
     this.error.set('');
     try {
-      const speakers = this.expectedSpeakers();
-      const ack = await this.transcription.startRecording(
-        src,
-        this.language(),
-        speakers > 0 ? speakers : null
-      );
+      const ack = await this.transcription.startRecording(src, this.language());
       this.activeSessionId = ack.session_id;
       this.recording.set(true);
       this.started.emit(ack.session_id);

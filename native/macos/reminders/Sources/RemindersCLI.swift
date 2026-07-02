@@ -23,67 +23,33 @@ struct EventStoreGate: PermissionGate {
 /// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder
 @main
 struct RemindersCLI {
+    static let commandList =
+        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder"
+
     static func main() {
-        let args = CommandLine.arguments
-        guard args.count >= 2 else {
-            exitWithError("Usage: reminders-cli <command> [json-args]\nCommands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
-        }
-
-        let command = args[1]
-
-        // check_permission: verify macOS TCC access without performing any operation.
-        // Returns JSON {"granted": true/false, "status": "..."} on stdout, always exits 0.
-        // Pattern: see also calendar/Sources/CalendarCLI.swift check_permission
-        if command == "check_permission" {
-            let store = EKEventStore()
-            let gate = EventStoreGate(store: store)
-            print(performCheckPermission(gate: gate, entity: .reminders))
-            return
-        }
-
-        let jsonArgs = args.count >= 3 ? args[2] : "{}"
-
-        guard let argsData = jsonArgs.data(using: .utf8),
-              let params = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
-        else {
-            exitWithError("Invalid JSON arguments: \(jsonArgs)")
-        }
-
+        // Shared store; check_permission uses its own gate.
         let store = EKEventStore()
-        let (accessGranted, accessError) = requestReminderAccess(store: store)
-
-        guard accessGranted else {
-            let msg = accessError?.localizedDescription ?? "Unknown error"
-            exitWithError("Reminders access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Reminders")
-        }
-
-        do {
-            let result: Any
-            switch command {
-            case "list_lists":
-                result = try listLists(store: store)
-            case "list_reminders":
-                result = try listReminders(store: store, params: params)
-            case "get_reminder":
-                result = try getReminder(store: store, params: params)
-            case "create_reminder":
-                result = try createReminder(store: store, params: params)
-            case "complete_reminder":
-                result = try completeReminder(store: store, params: params)
-            default:
-                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
-            }
-
-            let data = try JSONSerialization.data(
-                withJSONObject: result,
-                options: [.prettyPrinted, .sortedKeys]
-            )
-            if let json = String(data: data, encoding: .utf8) {
-                print(json)
-            }
-        } catch {
-            exitWithError(error.localizedDescription)
-        }
+        runCLI(
+            cliName: "reminders-cli",
+            commandList: commandList,
+            entity: .reminders,
+            checkPermissionGate: { _ in EventStoreGate(store: EKEventStore()) },
+            accessGuard: {
+                let (granted, error) = requestReminderAccess(store: store)
+                guard granted else {
+                    let msg = error?.localizedDescription ?? "Unknown error"
+                    return "Reminders access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Reminders"
+                }
+                return nil
+            },
+            commands: [
+                "list_lists": { _ in try listLists(store: store) },
+                "list_reminders": { try listReminders(store: store, params: $0) },
+                "get_reminder": { try getReminder(store: store, params: $0) },
+                "create_reminder": { try createReminder(store: store, params: $0) },
+                "complete_reminder": { try completeReminder(store: store, params: $0) },
+            ]
+        )
     }
 }
 
@@ -91,7 +57,6 @@ struct RemindersCLI {
 
 /// Requests Reminders access from EventKit. Uses the macOS 14+ full-access API
 /// when available, falling back to the legacy requestAccess(to:) API.
-/// The optional timeout (default: unbounded) is a safety net for check_permission.
 func requestReminderAccess(store: EKEventStore, timeout: TimeInterval? = nil) -> (granted: Bool, error: Error?) {
     let semaphore = DispatchSemaphore(value: 0)
     var accessGranted = false
@@ -309,7 +274,14 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
 // MARK: - Tag Helpers
 
 /// Tags are stored in the notes field using `[#tag]` format, e.g. `[#work] [#urgent]\nActual notes`.
-private let tagRegex = try! NSRegularExpression(pattern: #"\[#([^\]]+)\]"#)
+/// Pattern is a compile-time constant; a failure here is a programmer error, not runtime input.
+private let tagRegex: NSRegularExpression = {
+    let pattern = #"\[#([^\]]+)\]"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        fatalError("tagRegex pattern failed to compile (compile-time constant): \(pattern)")
+    }
+    return regex
+}()
 
 /// Extract tag names from notes content.
 func extractTags(from notes: String) -> [String] {

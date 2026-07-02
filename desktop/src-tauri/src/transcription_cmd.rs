@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DiarizeOptions, Diarizer,
-    DriverConfig, FinalizeConfig, Language, ModelStatusEntry, ModelStore, SherpaDiarizer,
-    SpeakerId, StopSignal, TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession,
-    TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
+    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DriverConfig, FinalizeConfig,
+    Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
+    TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -29,7 +28,7 @@ pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
 /// double-spawning on repeated `subscribe_transcript` calls.
 pub type ForwardersHandle = Arc<Mutex<HashSet<Uuid>>>;
 
-/// Per-session event name. Mirror of `subscribe_cmd::patch_event_name`.
+/// Per-session Tauri event name for transcript streams.
 pub fn transcript_event_name(id: Uuid) -> String {
     format!("transcript_event::{id}")
 }
@@ -44,17 +43,6 @@ fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("invalid transcript id: {e}"))
 }
 
-/// Caps a user-supplied speaker name length (matches `TranscriptSession::relabel_speaker`).
-const MAX_SPEAKER_NAME_LEN: usize = 64;
-/// Defensive upper bound on the diarizer's `num_clusters` hint. Real meetings
-/// rarely exceed a dozen distinct speakers; we cap well above that so a UI
-/// glitch or a malicious caller can't pass a giant value straight to sherpa.
-const MAX_EXPECTED_SPEAKERS: u32 = 50;
-
-fn cap_name(name: &str) -> String {
-    name.trim().chars().take(MAX_SPEAKER_NAME_LEN).collect()
-}
-
 /// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics
 /// (which key off the `session_id` name) don't flag every diagnostic. The
 /// first 8 hex chars are enough to correlate.
@@ -64,73 +52,7 @@ fn short_id(id: Uuid) -> String {
     s
 }
 
-/// Sanitises the `expected_speakers` hint: `Some(0)` collapses to `None`
-/// (auto-estimate), anything above the cap is rejected.
-fn validate_expected_speakers(n: Option<u32>) -> Result<Option<u32>, String> {
-    match n {
-        None | Some(0) => Ok(None),
-        Some(v) if v <= MAX_EXPECTED_SPEAKERS => Ok(Some(v)),
-        Some(v) => Err(format!(
-            "expected_speakers={v} exceeds the {MAX_EXPECTED_SPEAKERS} cap"
-        )),
-    }
-}
-
-// ---- 1) feature-toggle commands (top-level user config, ADR-056 §13) ------
-
-// Synchronous file I/O for the four toggle commands is wrapped in
-// `spawn_blocking` so it never stalls the Tokio runtime thread.
-
-#[tauri::command]
-pub async fn transcription_enabled() -> Result<bool, String> {
-    tokio::task::spawn_blocking(|| {
-        speedwave_runtime::config::load_user_config().map(|c| c.transcription_enabled())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_transcription_enabled(enabled: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
-        let mut tr = cfg.transcription.unwrap_or_default();
-        tr.enabled = Some(enabled);
-        cfg.transcription = Some(tr);
-        speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-}
-
-/// Returns the full meeting-transcription preferences block (defaults if unset).
-#[tauri::command]
-pub async fn get_transcription_config(
-) -> Result<speedwave_runtime::config::TranscriptionConfig, String> {
-    tokio::task::spawn_blocking(|| {
-        speedwave_runtime::config::load_user_config().map(|c| c.transcription.unwrap_or_default())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-    .map_err(|e| e.to_string())
-}
-
-/// Persists the meeting-transcription preferences block (whole replace).
-#[tauri::command]
-pub async fn set_transcription_config(
-    config: speedwave_runtime::config::TranscriptionConfig,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut cfg = speedwave_runtime::config::load_user_config().map_err(|e| e.to_string())?;
-        cfg.transcription = Some(config);
-        speedwave_runtime::config::save_user_config(&cfg).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("config task panicked: {e}"))?
-}
-
-// ---- 2) capability + source listing ---------------------------------------
+// ---- 1) capability + source listing ---------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitiesAck {
@@ -176,9 +98,6 @@ pub struct StartAck {
 pub struct StartParams {
     pub source: serde_json::Value,
     pub language: String,
-    pub live_model_override: Option<String>,
-    /// Diarizer hint: `None` = auto-estimate.
-    pub expected_speakers: Option<u32>,
 }
 
 #[tauri::command]
@@ -190,13 +109,7 @@ pub async fn start_transcription(
     forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
-    let StartParams {
-        source,
-        language,
-        live_model_override,
-        expected_speakers,
-    } = params;
-    let expected_speakers = validate_expected_speakers(expected_speakers)?;
+    let StartParams { source, language } = params;
     // Force-language is enum-validated at the Rust boundary.
     let lang = match language.as_str() {
         "pl" => Language::Pl,
@@ -211,18 +124,15 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: override wins, else recommendation, else any downloaded.
-    // Never download implicitly — error with a hint if nothing is present.
+    // Pick live model: the one model this build downloads if present, else any
+    // downloaded. Never download implicitly — error with a hint if none present.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
-    let recommended = transcription::recommended_live_model(&transcription::compiled_backends())
-        .key
-        .to_string();
-    let override_key = live_model_override.clone();
+    let recommended = transcription::best_model_for_this_build().key.to_string();
     let live_key: String = {
         let m = models_arc.clone();
         let rec = recommended.clone();
-        tokio::task::spawn_blocking(move || pick_live_model(&m, override_key.as_deref(), &rec))
+        tokio::task::spawn_blocking(move || pick_live_model(&m, &rec))
             .await
             .map_err(|e| format!("model pick task panicked: {e}"))??
     };
@@ -243,40 +153,6 @@ pub async fn start_transcription(
             .map_err(|e| e.to_string())?
     };
 
-    // Optional diarizer: best-effort — if the diarization models are present,
-    // load them; otherwise run without speaker labels.
-    let diarize_opts = DiarizeOptions {
-        num_speakers: expected_speakers.map(|n| n as usize),
-        ..DiarizeOptions::default()
-    };
-    let diarizer: Option<Box<dyn Diarizer>> = {
-        let m = models_arc.clone();
-        match tokio::task::spawn_blocking(move || {
-            if !m.diarization_is_present() {
-                return Ok::<Option<Box<dyn Diarizer>>, String>(None);
-            }
-            let paths = m
-                .ensure_diarization_models(&mut |_| {})
-                .map_err(|e| e.to_string())?;
-            let d = SherpaDiarizer::load(
-                &paths.segmentation_onnx,
-                &paths.embedding_onnx,
-                &diarize_opts,
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(Some(Box::new(d) as Box<dyn Diarizer>))
-        })
-        .await
-        .map_err(|e| format!("diarizer load task panicked: {e}"))?
-        {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("diarizer unavailable — running without speaker labels: {e}");
-                None
-            }
-        }
-    };
-
     // Create the session, then start capture.
     // The audio.wav path lives under `<root>/<id>/`, so we need the id before
     // creating the session — pick it now so the path is correct from the first
@@ -291,12 +167,10 @@ pub async fn start_transcription(
         AudioSourceInfo {
             source: audio_source.clone(),
             label,
-            app_id: None,
         },
         audio_wav.clone(),
     );
     session.models_used.live = Some(live_key.clone());
-    session.expected_speakers = expected_speakers;
     store
         .create(session)
         .map_err(|e| format!("store create: {e}"))?;
@@ -332,9 +206,7 @@ pub async fn start_transcription(
         store: store_arc.clone(),
         audio: stream,
         transcriber: Box::new(transcriber),
-        diarizer,
         transcribe_opts: TranscribeOptions::for_language(lang),
-        diarize_opts,
         stop,
     });
     // The driver loop blocks on `next_chunk` — run it on a blocking task.
@@ -439,40 +311,12 @@ pub async fn stop_transcription(
                 return;
             }
         };
-        // Optional re-diarization over the whole recording (best-effort).
-        let diarize_opts = DiarizeOptions {
-            num_speakers: store_arc
-                .get(id)
-                .ok()
-                .and_then(|s| s.expected_speakers)
-                .map(|n| n as usize),
-            ..DiarizeOptions::default()
-        };
-        let diarizer: Option<Box<dyn Diarizer>> = if models_arc.diarization_is_present() {
-            match models_arc
-                .ensure_diarization_models(&mut |_| {})
-                .ok()
-                .and_then(|p| {
-                    SherpaDiarizer::load(&p.segmentation_onnx, &p.embedding_onnx, &diarize_opts)
-                        .ok()
-                }) {
-                Some(d) => Some(Box::new(d)),
-                None => None,
-            }
-        } else {
-            None
-        };
-        // Live turns aren't tracked across the driver boundary in v1; offline
-        // diarizer's clusters win.
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
             audio_path: audio_wav,
             transcriber,
-            diarizer,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
-            diarize_opts,
-            live_turns: Vec::new(),
         };
         if let Err(e) = speedwave_runtime::transcription::run_finalize(cfg) {
             log::warn!("offline finalize for {} failed: {e}", short_id(id));
@@ -482,37 +326,25 @@ pub async fn stop_transcription(
 }
 
 /// Validates a requested `AudioSource` against the host's `CaptureCapabilities`.
-/// Per-process needs `supports_per_process` (including when it's the system side
-/// of a `Mixed`); a `Mixed` source needs a microphone.
+/// `SystemWide`/`Mixed` need system audio; `Microphone`/`Mixed` need a mic.
 fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
 ) -> Result<(), String> {
+    // Guard system audio at the boundary so a direct API call (the UI already
+    // hides unsupported sources) gets a clean error, not a deep backend one.
+    if matches!(src, AudioSource::SystemWide | AudioSource::Mixed { .. })
+        && !caps.supports_system_audio
+    {
+        return Err("this host does not support system audio capture".to_string());
+    }
     // Exhaustive (no `_` arm) so a new `AudioSource` variant forces a conscious
     // validation decision here.
-    let (needs_per_process, needs_microphone): (bool, bool) = match src {
-        AudioSource::SystemWide => (false, false),
-        AudioSource::Process { .. } => (true, false),
-        AudioSource::Microphone { .. } => (false, true),
-        AudioSource::Mixed { system, mic: _ } => {
-            // The system side of a mix must itself be capturable — System or a
-            // process, not a microphone or another mix. Reject the bad shape
-            // here so the error comes from the boundary, not a deep backend.
-            match system.as_ref() {
-                AudioSource::SystemWide => {}
-                AudioSource::Process { .. } => {}
-                other => {
-                    return Err(format!(
-                        "the system side of a mixed source must be System or a process, not {other:?}"
-                    ));
-                }
-            }
-            (matches!(**system, AudioSource::Process { .. }), true)
-        }
+    let needs_microphone: bool = match src {
+        AudioSource::SystemWide => false,
+        AudioSource::Microphone { .. } => true,
+        AudioSource::Mixed { .. } => true,
     };
-    if needs_per_process && !caps.supports_per_process {
-        return Err("per-app capture isn't supported on this host — use System audio".to_string());
-    }
     if needs_microphone && !caps.supports_microphone {
         return Err(if matches!(src, AudioSource::Mixed { .. }) {
             "this host has no microphone — pick System audio instead of the mixed source"
@@ -538,11 +370,8 @@ fn source_label(
     fn generic(src: &AudioSource) -> String {
         match src {
             AudioSource::SystemWide => "System (everything)".to_string(),
-            AudioSource::Process { .. } => "App audio".to_string(),
             AudioSource::Microphone { .. } => "Microphone".to_string(),
-            // A Mixed not in the picker (e.g. an explicit process + mic via the
-            // API): "<system> + microphone".
-            AudioSource::Mixed { system, .. } => format!("{} + microphone", generic(system)),
+            AudioSource::Mixed { .. } => "System (everything) + microphone".to_string(),
         }
     }
     generic(src)
@@ -553,12 +382,13 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: `large-v3` if downloaded, otherwise
-/// the first downloaded Whisper model in the catalogue (the live model is
-/// guaranteed present at this point). `None` if somehow nothing is downloaded.
+/// Picks the model for the offline pass: this build's model if downloaded, else
+/// the first downloaded Whisper model (the live one is guaranteed present here).
+/// `None` if somehow nothing is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
-    if models.whisper_is_present_by_key("large-v3") {
-        return Some("large-v3".to_string());
+    let best = transcription::best_model_for_this_build().key;
+    if models.whisper_is_present_by_key(best) {
+        return Some(best.to_string());
     }
     models
         .whisper_status()
@@ -573,19 +403,7 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
 /// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
 ///    multi-GB file — the UI prompts for that).
 /// 4. If nothing is downloaded: an error with a download hint.
-fn pick_live_model(
-    models: &ModelStore,
-    override_key: Option<&str>,
-    recommended: &str,
-) -> Result<String, String> {
-    if let Some(k) = override_key {
-        if models.whisper_is_present_by_key(k) {
-            return Ok(k.to_string());
-        }
-        return Err(format!(
-            "Whisper model '{k}' isn't downloaded — download it first"
-        ));
-    }
+fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
     }
@@ -679,7 +497,7 @@ async fn forward_events(
     }
 }
 
-// ---- 4) list / get / delete / discard / relabel / markdown ----------------
+// ---- 4) list / get / delete / markdown ------------------------------------
 
 #[tauri::command]
 pub async fn list_transcripts(
@@ -707,33 +525,6 @@ pub async fn delete_transcript(
 }
 
 #[tauri::command]
-pub async fn discard_transcript_audio(
-    session_id: String,
-    store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<(), String> {
-    let id = parse_transcript_id(&session_id)?;
-    // Routed through the store so the in-memory cache, disk, and broadcast
-    // stream stay in sync (subscribers see an `AudioDiscarded` event).
-    store.discard_audio(id).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn relabel_speaker(
-    session_id: String,
-    speaker_id: u32,
-    name: String,
-    store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<(), String> {
-    let id = parse_transcript_id(&session_id)?;
-    let capped = cap_name(&name);
-    store
-        .relabel_speaker(id, SpeakerId(speaker_id), &capped)
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn get_transcript_markdown(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
@@ -749,10 +540,52 @@ pub async fn get_transcript_markdown(
 pub struct ModelsAck {
     /// Status of each Whisper model in the catalogue.
     pub whisper: Vec<ModelStatusEntry>,
-    /// Status of each diarization model.
-    pub diarization: Vec<ModelStatusEntry>,
     /// Total bytes the downloaded models occupy on disk.
     pub total_bytes_used: u64,
+}
+
+/// The single model Speedwave recommends for this hardware (the only one the UI
+/// offers): `large-v3` on GPU builds, `large-v3-turbo` on CPU-only.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedModelAck {
+    /// Catalogue key to download.
+    pub key: String,
+    /// Human-readable model name.
+    pub display_name: String,
+    /// Download/on-disk size in bytes.
+    pub size_bytes: u64,
+    /// `true` if already downloaded.
+    pub downloaded: bool,
+    /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
+    pub accel_label: String,
+}
+
+/// Short acceleration label from the compiled backends (a GPU backend wins).
+fn accel_label() -> String {
+    let backends = transcription::compiled_backends();
+    match backends.iter().find(|b| b.is_gpu()) {
+        Some(gpu) => format!("{} (GPU)", gpu.label()),
+        None => "CPU".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn recommended_transcription_model(
+    models: tauri::State<'_, ModelStoreHandle>,
+) -> Result<RecommendedModelAck, String> {
+    let best = transcription::best_model_for_this_build();
+    let status = models
+        .whisper_status()
+        .into_iter()
+        .find(|m| m.key == best.key)
+        .ok_or_else(|| format!("recommended model '{}' missing from catalogue", best.key))?;
+    Ok(RecommendedModelAck {
+        key: best.key.to_string(),
+        display_name: best.display_name.to_string(),
+        size_bytes: status.size_bytes,
+        downloaded: status.downloaded,
+        accel_label: accel_label(),
+    })
 }
 
 #[tauri::command]
@@ -761,7 +594,6 @@ pub async fn list_transcription_models(
 ) -> Result<ModelsAck, String> {
     Ok(ModelsAck {
         whisper: models.whisper_status(),
-        diarization: models.diarization_status(),
         total_bytes_used: models.total_bytes_used(),
     })
 }
@@ -773,24 +605,13 @@ pub async fn download_transcription_model(
     app: AppHandle,
 ) -> Result<(), String> {
     let models = models.inner().clone();
-    // Diarization keys pull both sherpa models; Whisper keys go to ensure_model.
-    let is_diarization = speedwave_runtime::transcription::diarization_model(&model_id).is_some();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        if is_diarization {
-            models
-                .ensure_diarization_models(&mut |p| {
-                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-                })
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        } else {
-            models
-                .ensure_model(&model_id, &mut |p| {
-                    let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-                })
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
+        models
+            .ensure_model(&model_id, &mut |p| {
+                let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("download task panicked: {e}"))??;
@@ -818,7 +639,6 @@ mod tests {
             AudioSourceInfo {
                 source: speedwave_runtime::transcription::AudioSource::SystemWide,
                 label: "Test".to_string(),
-                app_id: None,
             },
             PathBuf::from("/tmp/a.wav"),
         );
@@ -844,30 +664,41 @@ mod tests {
     }
 
     #[test]
-    fn cap_name_trims_and_caps_length() {
-        assert_eq!(cap_name("  Alice  "), "Alice");
-        assert_eq!(cap_name(""), "");
-        let long: String = "x".repeat(200);
-        assert_eq!(cap_name(&long).chars().count(), 64);
-    }
-
-    #[test]
-    fn validate_expected_speakers_collapses_none_zero_and_rejects_overflow() {
-        assert_eq!(validate_expected_speakers(None).unwrap(), None);
-        assert_eq!(validate_expected_speakers(Some(0)).unwrap(), None);
-        assert_eq!(validate_expected_speakers(Some(1)).unwrap(), Some(1));
-        assert_eq!(
-            validate_expected_speakers(Some(MAX_EXPECTED_SPEAKERS)).unwrap(),
-            Some(MAX_EXPECTED_SPEAKERS)
-        );
-        assert!(validate_expected_speakers(Some(MAX_EXPECTED_SPEAKERS + 1)).is_err());
-        assert!(validate_expected_speakers(Some(u32::MAX)).is_err());
-    }
-
-    #[test]
     fn short_id_truncates_to_eight_hex_chars() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(short_id(id), "550e8400");
+    }
+
+    #[test]
+    fn accel_label_matches_the_compiled_backend_tier() {
+        let label = accel_label();
+        let expected = if transcription::has_gpu_backend() {
+            "(GPU)"
+        } else {
+            "CPU"
+        };
+        assert!(
+            label.contains(expected),
+            "label '{label}' should reflect the build's backend"
+        );
+    }
+
+    #[test]
+    fn recommended_model_status_is_present_in_the_catalogue() {
+        // The recommended key must resolve to a whisper_status entry — the same
+        // lookup the command does, minus the Tauri State wrapper.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        let best = transcription::best_model_for_this_build();
+        let found = store
+            .whisper_status()
+            .into_iter()
+            .find(|m| m.key == best.key);
+        assert!(found.is_some(), "best model '{}' missing", best.key);
+        assert!(
+            !found.unwrap().downloaded,
+            "nothing downloaded in a tmp dir"
+        );
     }
 
     /// Driving Tauri commands fully requires a `tauri::State` wrapper that
@@ -882,18 +713,7 @@ mod tests {
         // get / list reflect a freshly created session.
         assert_eq!(store.get(id).unwrap().id, id);
         assert_eq!(store.list().len(), 1);
-        // relabel goes through.
-        store.relabel_speaker(id, SpeakerId(0), "Alice").unwrap();
-        assert_eq!(
-            store
-                .get(id)
-                .unwrap()
-                .speaker_names
-                .get(&SpeakerId(0))
-                .map(String::as_str),
-            Some("Alice")
-        );
-        // Append a segment with that speaker so the markdown body renders.
+        // Append a segment so the markdown body renders.
         store
             .append_segment(
                 id,
@@ -902,17 +722,13 @@ mod tests {
                     end: std::time::Duration::from_secs(1),
                     text: "hi".to_string(),
                     words: vec![],
-                    speaker: Some(SpeakerId(0)),
                 },
             )
             .unwrap();
-        // markdown renders the user-supplied name + footer.
+        // markdown renders the segment text + footer (no speaker labels).
         let md = store.get(id).unwrap().to_markdown();
-        assert!(
-            md.contains("Alice"),
-            "expected Alice in markdown, got:\n{md}"
-        );
-        assert!(md.ends_with("speaker labels are approximate._\n"));
+        assert!(md.contains("hi"), "expected text in markdown, got:\n{md}");
+        assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
         // delete removes it.
         store.delete(id).unwrap();
         assert!(store.list().is_empty());
@@ -938,40 +754,12 @@ mod tests {
     }
 
     #[test]
-    fn download_routing_distinguishes_whisper_from_diarization_keys() {
-        // download_transcription_model decides which ensure_* to call by
-        // whether the key is a diarization-catalogue key. Verify that split
-        // (the bug was: a diarization key went to ensure_model → "no such
-        // model in the catalogue").
-        use speedwave_runtime::transcription::{diarization_model, whisper_model};
-        assert!(diarization_model("pyannote-segmentation-3-0").is_some());
-        assert!(diarization_model("nemo-titanet-small").is_some());
-        assert!(whisper_model("pyannote-segmentation-3-0").is_none());
-        // A Whisper key is NOT a diarization key.
-        assert!(diarization_model("small").is_none());
-        assert!(whisper_model("small").is_some());
-    }
-
-    #[test]
     fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // No model on disk: an override errors naming that model; no override
-        // errors naming the recommended one — both with "download" guidance.
-        let e1 = pick_live_model(&store, Some("small"), "large-v3-turbo").unwrap_err();
-        assert!(e1.contains("'small'") && e1.contains("download"));
-        let e2 = pick_live_model(&store, None, "large-v3-turbo").unwrap_err();
-        assert!(e2.contains("download") && e2.contains("large-v3-turbo"));
-    }
-
-    #[test]
-    fn pick_live_model_uses_a_known_catalogue_key_for_the_override_error() {
-        // Sanity: the message references the requested key verbatim even for an
-        // unknown one (whisper_is_present_by_key returns false → error path).
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::with_root(dir.path());
-        let err = pick_live_model(&store, Some("nonexistent-model"), "small").unwrap_err();
-        assert!(err.contains("nonexistent-model"));
+        // No model on disk: errors naming the recommended one, with guidance.
+        let e = pick_live_model(&store, "large-v3-turbo").unwrap_err();
+        assert!(e.contains("download") && e.contains("large-v3-turbo"));
     }
 
     #[test]
@@ -997,139 +785,51 @@ mod tests {
 
     #[test]
     fn source_label_for_a_mixed_source_falls_back_to_system_plus_microphone() {
-        use speedwave_runtime::transcription::{AudioSource, FileAudioCapture, ProcessSelector};
+        use speedwave_runtime::transcription::{AudioSource, FileAudioCapture};
         let cap = FileAudioCapture::new();
-        // SystemWide + mic → "System (everything) + microphone".
         assert_eq!(
-            source_label(
-                &cap,
-                &AudioSource::Mixed {
-                    system: Box::new(AudioSource::SystemWide),
-                    mic: None,
-                }
-            ),
+            source_label(&cap, &AudioSource::Mixed { mic: None }),
             "System (everything) + microphone"
-        );
-        // A process + mic → "App audio + microphone".
-        assert_eq!(
-            source_label(
-                &cap,
-                &AudioSource::Mixed {
-                    system: Box::new(AudioSource::Process {
-                        selector: ProcessSelector::Pid { pid: 1 }
-                    }),
-                    mic: None,
-                }
-            ),
-            "App audio + microphone"
         );
     }
 
     #[test]
-    fn validate_source_against_caps_gates_per_process_and_mixed() {
-        use speedwave_runtime::transcription::{AudioSource, CaptureCapabilities, ProcessSelector};
-        let no_per_process = CaptureCapabilities {
-            supports_per_process: false,
+    fn validate_source_against_caps_gates_microphone_and_mixed() {
+        use speedwave_runtime::transcription::{AudioSource, CaptureCapabilities};
+        let full = CaptureCapabilities {
             supports_system_audio: true,
             supports_microphone: true,
             note: None,
         };
-        // Plain SystemWide is always fine.
-        assert!(validate_source_against_caps(&AudioSource::SystemWide, &no_per_process).is_ok());
-        // A Process source is rejected when per-process isn't supported…
-        assert!(validate_source_against_caps(
-            &AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1 }
-            },
-            &no_per_process
-        )
-        .is_err());
-        // …and so is a Mixed whose system side is a Process.
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Process {
-                    selector: ProcessSelector::Pid { pid: 1 }
-                }),
-                mic: None,
-            },
-            &no_per_process
-        )
-        .is_err());
-        // A Mixed with a SystemWide system side is fine on this host.
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &no_per_process
-        )
-        .is_ok());
-        // …but not if the host has no microphone.
+        // SystemWide, a bare Microphone, and a Mixed are fine on a full host.
+        assert!(validate_source_against_caps(&AudioSource::SystemWide, &full).is_ok());
+        assert!(
+            validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
+        );
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &full).is_ok());
+        // A Mixed (or bare mic) is rejected on a host with no microphone.
         let no_mic = CaptureCapabilities {
-            supports_per_process: true,
             supports_system_audio: true,
             supports_microphone: false,
             note: None,
         };
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &no_mic
-        )
-        .is_err());
-        // A bare Microphone is rejected on a host with no mic.
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &no_mic).is_err());
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
         );
-        // A structurally-invalid Mixed (mic-as-system, or nested Mixed) is
-        // rejected at the boundary regardless of capabilities.
-        let full = CaptureCapabilities {
-            supports_per_process: true,
-            supports_system_audio: true,
+        // SystemWide and Mixed are rejected on a host with no system audio.
+        let no_sys = CaptureCapabilities {
+            supports_system_audio: false,
             supports_microphone: true,
             note: None,
         };
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Microphone { device: None }),
-                mic: None,
-            },
-            &full
-        )
-        .is_err());
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::Mixed {
-                    system: Box::new(AudioSource::SystemWide),
-                    mic: None,
-                }),
-                mic: None,
-            },
-            &full
-        )
-        .is_err());
-        // A per-process source is fine when the host supports it.
-        assert!(validate_source_against_caps(
-            &AudioSource::Process {
-                selector: ProcessSelector::Pid { pid: 1 }
-            },
-            &full
-        )
-        .is_ok());
-        // A bare Microphone and a SystemWide-backed Mixed are fine.
+        assert!(validate_source_against_caps(&AudioSource::SystemWide, &no_sys).is_err());
+        assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &no_sys).is_err());
+        // A bare Microphone is still fine without system audio.
         assert!(
-            validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
+            validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_sys)
+                .is_ok()
         );
-        assert!(validate_source_against_caps(
-            &AudioSource::Mixed {
-                system: Box::new(AudioSource::SystemWide),
-                mic: None,
-            },
-            &full
-        )
-        .is_ok());
     }
 }

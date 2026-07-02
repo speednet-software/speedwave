@@ -28,10 +28,7 @@ base64 = "0.22"
 rand = "0.8.6"
 semver = "1"
 url = "2"
-json-patch = "4"
 tokio = { version = "1", default-features = false, features = ["sync"] }
-futures-core = "0.3"
-async-stream = "0.3"
 parking_lot = "0.12"
 dashmap = "6"
 shlex = "2.0"
@@ -51,17 +48,10 @@ hound = { version = "3", optional = true }
 # `spawn_blocking`; `stream` for chunked reads while hashing on the fly.
 # `rustls-tls` to match the rest of Speedwave (no system OpenSSL).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
-# Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
-tar = { version = "0.4", optional = true }
-bzip2 = { version = "0.6", optional = true }
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
 whisper-rs = { version = "0.16", optional = true }
-# Speaker diarization. Exact pin: prebuilt static-lib tarball name encodes the
-# version, and Windows CI overrides SHERPA_ONNX_LIB_DIR with the MD-Release
-# variant matching this exact version (see ADR-061, .sherpa-onnx-version SSOT).
-sherpa-onnx = { version = "=1.13.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS, build whisper.cpp with the Metal backend (the Metal shader library
@@ -70,10 +60,13 @@ sherpa-onnx = { version = "=1.13.2", optional = true }
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
-# Windows capture (Phase 4-W): WASAPI loopback via cpal. Windows-only — macOS
-# uses the bundled audio-capture-cli, so cpal is dead weight there. Still gated
-# behind `audio-transcription` so the CLI build stays lean.
-cpal = { version = "0.17", optional = true }
+# Windows system-audio loopback (ADR-056). cpal's loopback support is fragile
+# (RustAudio/cpal#476; PR #339 was lost), so the loopback path uses the
+# `wasapi` crate (WASAPI directly). cpal stays for the *microphone* input.
+# Windows-only — macOS uses the bundled audio-capture-cli. Gated behind
+# `audio-transcription` so the CLI build stays lean.
+cpal = { version = "0.18", optional = true }
+wasapi = { version = "0.23", optional = true }
 # Job Object kill-on-parent-close for host MCP workers
 # (`host_mcp_process::job_object`). `Win32_Security` is required to gate
 # `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
@@ -85,6 +78,10 @@ cpal = { version = "0.17", optional = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # Owner-only DACL in `fs_perms` (SetEntriesInAclW / SetNamedSecurityInfoW
+    # + LocalFree). Authorization gates the ACL APIs; Memory gates LocalFree.
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
     "Win32_System_JobObjects",
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
     # Win32_System_Threading in windows-sys 0.61 (compiler hint:
@@ -92,16 +89,28 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# Durable writes: safe fsync wrappers (macOS F_FULLFSYNC); `unsafe`-free.
+rustix = { version = "1", features = ["fs"] }
+
 [features]
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
-# transcriber + the sherpa-onnx diarizer (+ cpal on Windows for WASAPI loopback).
-audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:whisper-rs", "dep:sherpa-onnx", "windows-capture"]
-# Internal: pulls in cpal. Only meaningful on Windows (the target-specific dep
+# transcriber (+ wasapi/cpal on Windows for capture). Speaker diarization was
+# removed — ADR-075 — so sherpa-onnx and the tar/bzip2 archive deps are gone.
+audio-transcription = ["dep:hound", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
+# Internal: pulls in the Windows capture deps (wasapi for system loopback, cpal
+# for the microphone). Only meaningful on Windows (the target-specific dep
 # block above), but listing it unconditionally keeps `--features` simple.
-windows-capture = ["dep:cpal"]
+windows-capture = ["dep:cpal", "dep:wasapi"]
 # Re-exports `runtime::test_support` with mock builders, so downstream test
 # code can construct `LockedRuntime` without seeing the (pub(crate)) trait.
 test-support = []
+# Enables the mcp-os upgrade-path test that runs against the *real* bundled
+# desktop worker (`desktop/src-tauri/mcp-os/os/dist/index.js`) instead of the
+# stub. Off by default because the worker must be staged first; the
+# `make test-mcp-os-bundle` target builds the bundle, then runs the test under
+# this feature. See ADR-048.
+mcp-os-bundle-e2e = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
@@ -122,6 +131,10 @@ required-features = ["test-support"]
 [[test]]
 name = "compose_lock_cross_process"
 required-features = ["test-support"]
+
+[[test]]
+name = "build_lock_cross_process"
+# No required-features — `build::with_build_lock_in` is plain public API.
 
 [[test]]
 name = "ssot_enforcement"

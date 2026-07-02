@@ -38,9 +38,7 @@ enum AppleMailClient {
             mailboxClause = "inbox"
         }
 
-        // Iterate with counter to avoid out-of-range errors.
-        // Access each message individually — Apple Mail doesn't support
-        // bulk property fetch for dates.
+        // Access each message individually; Apple Mail has no bulk property fetch.
         let script = """
         tell application "Mail"
             set output to ""
@@ -86,22 +84,7 @@ enum AppleMailClient {
         """
 
         let output = try ScriptRunner.run(script, timeout: 15)
-        let parts = output.components(separatedBy: "||")
-        guard parts.count >= 6 else {
-            throw ScriptError.scriptFailed("Unexpected email format")
-        }
-
-        return [
-            "id": id,
-            "subject": parts[0].trimmingCharacters(in: .whitespaces),
-            "sender": parts[1].trimmingCharacters(in: .whitespaces),
-            "date": parts[2].trimmingCharacters(in: .whitespaces),
-            "read": parts[3].trimmingCharacters(in: .whitespaces) == "true",
-            "to": parts[4].trimmingCharacters(in: .whitespaces)
-                .components(separatedBy: ",")
-                .filter { !$0.isEmpty },
-            "body": parts[5...].joined(separator: "||").trimmingCharacters(in: .whitespaces),
-        ]
+        return try parseEmailDetail(output, id: id)
     }
 
     static func searchEmails(query: String, limit: Int) throws -> [[String: Any]] {

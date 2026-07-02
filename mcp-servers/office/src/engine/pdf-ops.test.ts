@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { resolveInputFile, resolveOutputPath, runPythonScript } = vi.hoisted(() => ({
   resolveInputFile: vi.fn(async (p: string) => `/workspace/${p}`),
   resolveOutputPath: vi.fn(
-    async (n: string | undefined, base: string) => `/workspace/.speedwave-office/${n ?? base}`
+    async (n: string | undefined, base: string) => `/workspace/.speedwave/office/${n ?? base}`
   ),
   runPythonScript: vi.fn(async () => ({ ok: true, metadata: { pages: 3 } })),
 }));
@@ -57,7 +57,7 @@ describe('mergePdf', () => {
     expect(r.format).toBe('pdf');
     expect(runPythonScript).toHaveBeenCalledWith('pdf_ops.py', [
       'merge',
-      '/workspace/.speedwave-office/m.pdf',
+      '/workspace/.speedwave/office/m.pdf',
       '/workspace/a.pdf',
       '/workspace/b.pdf',
     ]);
@@ -124,7 +124,7 @@ describe('rotatePdf', () => {
     expect(runPythonScript).toHaveBeenCalledWith('pdf_ops.py', [
       'rotate',
       '/workspace/a.pdf',
-      '/workspace/.speedwave-office/rot.pdf',
+      '/workspace/.speedwave/office/rot.pdf',
       '90',
       '1,3',
     ]);
@@ -145,7 +145,7 @@ describe('watermarkPdf', () => {
       'watermark',
       '/workspace/doc.pdf',
       '/workspace/wm.pdf',
-      '/workspace/.speedwave-office/out.pdf',
+      '/workspace/.speedwave/office/out.pdf',
     ]);
   });
 });
@@ -157,7 +157,7 @@ describe('fillPdfForm', () => {
     expect(runPythonScript).toHaveBeenCalledWith('pdf_ops.py', [
       'fillform',
       '/workspace/form.pdf',
-      '/workspace/.speedwave-office/filled.pdf',
+      '/workspace/.speedwave/office/filled.pdf',
       '1',
       JSON.stringify({ name: 'Ada' }),
     ]);

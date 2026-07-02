@@ -1,20 +1,100 @@
+//! Config schema and the layered merge (defaults → repo → user). See ADR-011.
+
 use crate::defaults;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// LLM config schema version. v2: provider list + active (ADR-073). v3:
+/// provenance quarantine ([`quarantine_foreign_anthropic_models`]).
+pub const LLM_SCHEMA_VERSION: u32 = 3;
+
+/// Canonical id of the built-in Anthropic provider entry; persisted in
+/// on-disk configs, so it must never change.
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+
+/// What class of backend a configured provider entry is (ADR-073).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProviderKind {
+    /// Anthropic via the user's Claude subscription (OAuth managed by Claude
+    /// Code, ADR-052). Inference passes through the proxy's `/anthropic` route.
+    AnthropicOauth,
+    /// Anthropic via a raw API key (key in the llm token namespace).
+    AnthropicApiKey,
+    /// Local or remote Anthropic-Messages server at a custom URL (Ollama, LM
+    /// Studio, llama.cpp, vLLM, …), key optional.
+    Local,
+    /// OpenRouter (key required).
+    OpenRouter,
+}
+
+impl LlmProviderKind {
+    /// True for the two Anthropic kinds (OAuth + raw API key).
+    pub fn is_anthropic(self) -> bool {
+        matches!(self, Self::AnthropicOauth | Self::AnthropicApiKey)
+    }
+}
+
+/// SSOT predicate (ADR-073): a `provider/model`-shaped id is foreign to
+/// Anthropic — shape check, not catalog membership; retired `claude-*` kept.
+pub fn is_foreign_anthropic_model(model: &str) -> bool {
+    // Mirrored in llm-provider.component.ts::isForeignModel (frontend can't call Rust).
+    model.contains('/')
+}
+
+/// One configured LLM provider (ADR-073). Key VALUES never live here —
+/// they sit in `tokens/<project>/llm/<id>_api_key`; only presence flags do.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LlmProviderEntry {
+    /// Stable user-scoped plugin-grade slug (`^[a-z][a-z0-9-]{0,63}$`);
+    /// becomes the token file name segment + proxy `SPW_KEY_<ID>` env name.
+    pub id: String,
+    /// Backend class.
+    pub kind: LlmProviderKind,
+    /// Base URL for the `Local` kind (user-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Model this provider routes (per-provider SSOT). Routing derives from
+    /// here via [`LlmConfig::effective_active_model`]; `active.model` is a pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// True when `tokens/<project>/llm/<id>_api_key` exists. Re-derived from
+    /// disk at resolve (the SSOT), never the persisted echo (`sync_has_api_key_from_disk_in`).
+    #[serde(default)]
+    pub has_api_key: bool,
+    /// Context window of this provider's selected model, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+    /// True when the legacy `local-llm/custom_headers` file applies (Local
+    /// entries migrated from v1 only).
+    #[serde(default)]
+    pub has_custom_headers: bool,
+}
+
+/// The provider+model a project's sessions start with (ADR-073).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LlmActive {
+    /// `LlmProviderEntry::id` of the selected provider.
+    pub provider_id: String,
+    /// Pointer to the active provider's model. Routing derives via
+    /// [`LlmConfig::effective_active_model`], not read raw from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// LLM provider selection and model settings (ADR-073 migration). v1 = legacy
+/// flat fields; v2 = `providers` + `active`; v3 = + foreign-model quarantine.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct LlmConfig {
+    /// Provider id (`anthropic` | `local`; legacy aliases accepted on read).
     pub provider: Option<String>,
+    /// Model id, or `None` for the account-tier default.
     pub model: Option<String>,
+    /// Base URL for a local Anthropic-Messages server (user-only).
     pub base_url: Option<String>,
-    /// Context window of the active model, in tokens.
-    /// For Anthropic this is resolved from the static SSOT
-    /// (`defaults::ANTHROPIC_MODELS`); for local providers it comes from the
-    /// real provider API and is persisted alongside the model id so the
-    /// chat footer can render an honest `used / max` ratio without keeping a
-    /// duplicate hard-coded table on the frontend.
+    /// Context window of the active model, in tokens; persisted per provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u32>,
     /// True when an API key file exists at `tokens/<project>/local-llm/api_key`.
@@ -24,25 +104,335 @@ pub struct LlmConfig {
     /// True when custom headers file exists at `tokens/<project>/local-llm/custom_headers`.
     #[serde(default)]
     pub has_custom_headers: bool,
+    /// LLM schema version; `None` = legacy v1 (see [`LLM_SCHEMA_VERSION`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
+    /// Kill-switch (ADR-073): `false` routes Claude Code direct at the provider
+    /// (pre-proxy). Default `true`. User-only — `merge_llm_repo` ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
+    /// Configured providers (v2). Entries with invalid slugs are dropped on
+    /// resolve with a warning — the id reaches file paths and env names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<LlmProviderEntry>,
+    /// Active provider+model selection (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<LlmActive>,
 }
 
+impl LlmConfig {
+    /// The active provider entry, when both halves of the v2 shape agree.
+    pub fn active_provider(&self) -> Option<&LlmProviderEntry> {
+        let active = self.active.as_ref()?;
+        self.providers.iter().find(|p| p.id == active.provider_id)
+    }
+
+    /// Whether this is a v2-shaped config (vs. fresh/legacy-v1). Used only by
+    /// [`is_logged_out`](Self::is_logged_out) to pick bail wording.
+    fn is_v2_shaped(&self) -> bool {
+        self.schema_version.is_some() || !self.providers.is_empty() || self.active.is_some()
+    }
+
+    /// SSOT for "is LLM configured?" — negate this, never re-derive it.
+    pub fn is_unconfigured(&self) -> bool {
+        self.active_provider().is_none()
+    }
+
+    /// Narrower than [`is_unconfigured`](Self::is_unconfigured): true only for an
+    /// explicit logout (v2-shaped, active cleared) vs. never-configured. Exists
+    /// solely to pick bail wording in `apply_llm_config_in` — not a gate.
+    pub(crate) fn is_logged_out(&self) -> bool {
+        self.is_v2_shaped() && self.active.is_none()
+    }
+
+    /// Selects an Anthropic provider as active, adding an `anthropic` OAuth
+    /// entry if none exists. The active pointer mirrors the entry's own model
+    /// (provenance, ADR-073; foreign shapes cleared). True when state changed.
+    pub fn set_active_to_anthropic(&mut self) -> bool {
+        let (id, model) = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
+            Some(entry) => (entry.id.clone(), entry.model.clone()),
+            None => {
+                self.providers.push(LlmProviderEntry {
+                    id: ANTHROPIC_PROVIDER_ID.to_string(),
+                    kind: LlmProviderKind::AnthropicOauth,
+                    base_url: None,
+                    model: None,
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                });
+                self.schema_version = Some(LLM_SCHEMA_VERSION);
+                (ANTHROPIC_PROVIDER_ID.to_string(), None)
+            }
+        };
+        if self.active.as_ref().map(|a| &a.provider_id) == Some(&id) {
+            return false;
+        }
+        self.active = Some(LlmActive {
+            provider_id: id,
+            model: model.filter(|m| !is_foreign_anthropic_model(m)),
+        });
+        true
+    }
+
+    /// Routing model for the active provider, enforcing provenance (ADR-073):
+    /// the entry's `model` wins over a disagreeing `active.model`.
+    pub fn effective_active_model(&self) -> Option<String> {
+        let entry = self.active_provider()?;
+        let entry_model = entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let active_model = self
+            .active
+            .as_ref()
+            .and_then(|a| a.model.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (active_model, entry_model) {
+            (Some(a), Some(e)) if a == e => Some(a.to_string()),
+            // Disagreement or active-only: trust the provider entry (provenance).
+            (_, Some(e)) => {
+                if active_model.is_some_and(|a| a != e) {
+                    log::debug!(
+                        "llm: active.model disagrees with entry — using entry (provenance)"
+                    );
+                }
+                Some(e.to_string())
+            }
+            // Entry has no model: active-only is unattributable → drop it.
+            (_, None) => None,
+        }
+    }
+
+    /// Sets each provider's `has_api_key` from its key file's existence — the
+    /// authoritative source (ADR-073), so a stale echo never reaches the renderer.
+    pub fn sync_has_api_key_from_disk_in(&mut self, data_dir: &Path, project: &str) {
+        for entry in &mut self.providers {
+            if let Ok(key_path) =
+                crate::compose::llm_provider_key_path_in(data_dir, project, &entry.id)
+            {
+                entry.has_api_key = key_path.exists();
+            }
+        }
+    }
+}
+
+/// Anthropic credential evidence for the v1→v2 lift: which credential the
+/// project demonstrably uses on disk (an API key beats OAuth when both exist).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicEvidence {
+    /// No Anthropic credential on disk.
+    None,
+    /// `secrets/<project>/anthropic_api_key` exists.
+    ApiKey,
+    /// Claude Code OAuth credentials exist in the project's claude-home.
+    Oauth,
+}
+
+impl AnthropicEvidence {
+    /// Detects on-disk evidence for `project` under `data_dir`.
+    pub fn detect_in(data_dir: &Path, project: &str) -> Self {
+        if anthropic_secret_exists_in(data_dir, project) {
+            Self::ApiKey
+        } else if crate::claude_home::has_anthropic_oauth_credentials(data_dir, project) {
+            Self::Oauth
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// Migrates an `LlmConfig` to [`LLM_SCHEMA_VERSION`] (lift v1, drop invalid ids,
+/// quarantine foreign). Idempotent; `true` if changed. `evidence`: see [`AnthropicEvidence`].
+pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
+    let snapshot_before = serde_json::to_string(&*llm).ok();
+    if llm.schema_version.is_none() && llm.providers.is_empty() {
+        let legacy_provider = llm.provider.as_deref();
+        if is_local_provider(legacy_provider) {
+            llm.providers.push(LlmProviderEntry {
+                id: "local".to_string(),
+                kind: LlmProviderKind::Local,
+                // v0.13.3 filled the per-alias default port at render time; an
+                // unset base_url must keep that identity through the lift.
+                base_url: llm
+                    .base_url
+                    .clone()
+                    .or_else(|| legacy_provider.and_then(crate::compose::default_base_url)),
+                model: llm.model.clone(),
+                has_api_key: llm.has_api_key,
+                context_tokens: llm.context_tokens,
+                has_custom_headers: llm.has_custom_headers,
+            });
+            llm.active = Some(LlmActive {
+                provider_id: "local".to_string(),
+                model: llm.model.clone(),
+            });
+        } else if legacy_provider.is_some() || evidence != AnthropicEvidence::None {
+            // v0.13.3 defaulted an unset provider to anthropic, so credentialed
+            // upgraders migrate; truly fresh (no creds) falls through (render refuses).
+            let kind = if evidence == AnthropicEvidence::ApiKey {
+                LlmProviderKind::AnthropicApiKey
+            } else {
+                LlmProviderKind::AnthropicOauth
+            };
+            llm.providers.push(LlmProviderEntry {
+                id: ANTHROPIC_PROVIDER_ID.to_string(),
+                kind,
+                base_url: None,
+                model: llm.model.clone(),
+                has_api_key: evidence == AnthropicEvidence::ApiKey,
+                context_tokens: llm.context_tokens,
+                has_custom_headers: false,
+            });
+            llm.active = Some(LlmActive {
+                provider_id: ANTHROPIC_PROVIDER_ID.to_string(),
+                model: llm.model.clone(),
+            });
+        }
+    }
+    llm.schema_version = Some(LLM_SCHEMA_VERSION);
+
+    // Lift the flat model into active only when it belongs to the active entry;
+    // a foreign one would be cleared by the quarantine step below anyway.
+    let flat = llm.model.as_deref().map(str::trim);
+    let flat_belongs_to_active = llm
+        .active_provider()
+        .map(|e| e.model.as_deref().map(str::trim) == flat)
+        .unwrap_or(false);
+    if flat_belongs_to_active {
+        if let Some(active) = &mut llm.active {
+            if active.model.is_none() && llm.model.is_some() {
+                active.model.clone_from(&llm.model);
+            }
+        }
+    }
+
+    // v3: clear any foreign model left under an Anthropic entry (provenance).
+    quarantine_foreign_anthropic_models(llm);
+
+    // Validate ids — they reach token file paths and env names.
+    let before = llm.providers.len();
+    llm.providers.retain(|p| {
+        let ok = crate::plugin::is_valid_slug(&p.id);
+        if !ok {
+            log::warn!("llm config: dropping provider with invalid id slug");
+        }
+        ok
+    });
+    if llm.providers.len() != before {
+        if let Some(active) = &llm.active {
+            if !llm.providers.iter().any(|p| p.id == active.provider_id) {
+                llm.active = llm.providers.first().map(|p| LlmActive {
+                    provider_id: p.id.clone(),
+                    model: None,
+                });
+            }
+        }
+    }
+
+    sync_llm_legacy_fields(llm);
+
+    // Serialization failure → can't tell, assume unchanged (avoid spurious heal writes).
+    snapshot_before
+        .and_then(|b| serde_json::to_string(&*llm).ok().map(|after| b != after))
+        .unwrap_or(false)
+}
+
+/// v3 self-heal: clear a `provider/model`-shaped (foreign) model stored under
+/// an Anthropic entry, and reconcile `active.model` to it. Idempotent.
+fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
+    for entry in &mut llm.providers {
+        let foreign = entry
+            .model
+            .as_deref()
+            .is_some_and(is_foreign_anthropic_model);
+        if entry.kind.is_anthropic() && foreign {
+            log::warn!(
+                "llm config: quarantining foreign model '{}' under anthropic entry '{}' (account default)",
+                entry.model.as_deref().unwrap_or(""),
+                entry.id
+            );
+            entry.model = None;
+        }
+    }
+    // Reconcile the active pointer to the entry's model (the routing SSOT), so
+    // a disagreeing active.model never persists — not just the cleared case.
+    let routed = llm.effective_active_model();
+    if let Some(active) = &mut llm.active {
+        if active.model != routed {
+            active.model = routed;
+        }
+    }
+}
+
+/// Downgrade story (one release): derive the legacy flat fields from the
+/// active v2 entry so an older Speedwave reading this config keeps working.
+pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
+    let Some(active) = llm.active.clone() else {
+        return;
+    };
+    let Some(entry) = llm.providers.iter().find(|p| p.id == active.provider_id) else {
+        return;
+    };
+    match entry.kind {
+        LlmProviderKind::Local => {
+            llm.provider = Some("local".to_string());
+            llm.base_url.clone_from(&entry.base_url);
+            llm.has_api_key = entry.has_api_key;
+            llm.has_custom_headers = entry.has_custom_headers;
+            // Local model belongs to the provider — flat pair stays consistent.
+            llm.model.clone_from(&entry.model);
+        }
+        LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
+            llm.provider = Some(ANTHROPIC_PROVIDER_ID.to_string());
+            llm.base_url = None;
+            llm.has_api_key = false;
+            llm.has_custom_headers = false;
+            llm.model.clone_from(&entry.model);
+        }
+        // No v1 equivalent — flat masquerades as anthropic, so its model must
+        // NOT carry the OpenRouter id (404s a downgrade reader); v2 fields keep it.
+        LlmProviderKind::OpenRouter => {
+            llm.provider = Some(ANTHROPIC_PROVIDER_ID.to_string());
+            llm.base_url = None;
+            llm.has_api_key = false;
+            llm.has_custom_headers = false;
+            llm.model = None;
+        }
+    }
+    llm.context_tokens = entry.context_tokens;
+}
+
+/// Claude container overrides: extra env, settings.json patch, LLM config.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ClaudeOverrides {
+    /// Extra environment variables for the Claude container.
     pub env: Option<HashMap<String, String>>,
+    /// Patch merged into `~/.claude/settings.json`.
     pub settings: Option<serde_json::Value>,
+    /// LLM provider/model configuration.
     pub llm: Option<LlmConfig>,
 }
 
+/// Per-service enable toggle.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationConfig {
+    /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
 }
 
+/// Toggles for the macOS native integrations (Reminders, Calendar, Mail, Notes).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct OsIntegrationsConfig {
+    /// Reminders integration toggle.
     pub reminders: Option<IntegrationConfig>,
+    /// Calendar integration toggle.
     pub calendar: Option<IntegrationConfig>,
+    /// Mail integration toggle.
     pub mail: Option<IntegrationConfig>,
+    /// Notes integration toggle.
     pub notes: Option<IntegrationConfig>,
 }
 
@@ -60,9 +450,8 @@ impl OsIntegrationsConfig {
         true
     }
 
-    /// SSOT for service-key → field mapping. Returns `None` for unknown keys
-    /// so callers cannot silently miss a new service added to
-    /// `TOGGLEABLE_OS_SERVICES` without also updating this match.
+    /// SSOT for service-key → field mapping; `None` for unknown keys so a new
+    /// `TOGGLEABLE_OS_SERVICES` entry can't be silently missed without this match.
     pub fn get_service(&self, key: &str) -> Option<&IntegrationConfig> {
         match key {
             "reminders" => self.reminders.as_ref(),
@@ -74,65 +463,30 @@ impl OsIntegrationsConfig {
     }
 }
 
-/// One named parameter a recipe accepts from Claude. Regex semantics live in
-/// the JS worker; Rust only sanity-checks shape (ADR-054).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct HostExecParam {
-    /// Parameter name — `snake_case`, unique within the recipe.
-    pub name: String,
-    /// Regex the worker anchors as `^(?:…)$`; non-empty, length-bounded.
-    pub pattern: String,
-    /// Optional upper bound on value length (≤ `HOST_EXEC_PARAM_MAX_LEN`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_len: Option<usize>,
-}
-
-/// One whitelisted command. Exposed to Claude as `host_exec.<name>()` (ADR-054).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct HostExecRecipe {
-    /// Recipe name — `^[a-z][a-z0-9_]{0,63}$`, unique across the whitelist.
-    pub name: String,
-    /// Executable. Basename checked against ban lists; relative resolves on `PATH`.
-    pub exec: String,
-    /// Fixed argv — literals plus `{name}` tokens (one element per substitution).
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Optional subdirectory inside the project dir; worker canonicalises and pins to root.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd_sub: Option<String>,
-    /// Named parameters Claude supplies; every `{name}` token needs a match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<Vec<HostExecParam>>,
-    /// Literal env vars (no Claude values); reserved keys rejected. May hold secrets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
-}
-
-/// Per-project `host_exec` config. User-config only (ADR-054).
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
-pub struct HostExecConfig {
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub commands: Vec<HostExecRecipe>,
-}
-
+/// Per-project integration toggles (built-in MCP services, OS, plugins).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
+    /// Slack integration toggle.
     pub slack: Option<IntegrationConfig>,
+    /// SharePoint integration toggle.
     pub sharepoint: Option<IntegrationConfig>,
+    /// Redmine integration toggle.
     pub redmine: Option<IntegrationConfig>,
+    /// GitLab integration toggle.
     pub gitlab: Option<IntegrationConfig>,
+    /// GitHub integration toggle.
     pub github: Option<IntegrationConfig>,
+    /// Atlassian integration toggle.
     pub atlassian: Option<IntegrationConfig>,
+    /// Office documents integration toggle.
     pub office: Option<IntegrationConfig>,
+    /// Playwright integration toggle.
     pub playwright: Option<IntegrationConfig>,
+    /// Context7 integration toggle.
     pub context7: Option<IntegrationConfig>,
+    /// macOS native integration toggles.
     pub os: Option<OsIntegrationsConfig>,
-    /// Per-project `host_exec` whitelist (ADR-054). User-config only.
-    #[serde(default, rename = "hostExec", skip_serializing_if = "Option::is_none")]
-    pub host_exec: Option<HostExecConfig>,
+    /// Plugin toggles keyed by slug / service_id.
     #[serde(default)]
     pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
@@ -157,8 +511,7 @@ impl IntegrationsConfig {
     }
 
     /// Set plugin enabled state. Does NOT validate against installed manifests
-    /// (caller must do that). Separate from set_service() to prevent typos
-    /// from silently creating plugin entries.
+    /// (caller's job). Separate from `set_service` so typos can't create entries.
     pub fn set_plugin_enabled(&mut self, service_id: &str, enabled: bool) {
         let plugins = self.plugins.get_or_insert_with(HashMap::new);
         plugins.insert(
@@ -168,47 +521,48 @@ impl IntegrationsConfig {
             },
         );
     }
-
-    /// Set the `host_exec.enabled` flag. Caller handles worker + compose.
-    pub fn set_host_exec_enabled(&mut self, enabled: bool) {
-        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
-        cfg.enabled = Some(enabled);
-    }
-
-    /// Replace the whitelist. Caller must have validated via `validate_host_exec_config`.
-    pub fn set_host_exec_commands(&mut self, commands: Vec<HostExecRecipe>) {
-        let cfg = self.host_exec.get_or_insert_with(HostExecConfig::default);
-        cfg.commands = commands;
-    }
 }
 
+/// Fully resolved integration state after the layered config merge.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedIntegrationsConfig {
+    /// Slack enabled.
     pub slack: bool,
+    /// SharePoint enabled.
     pub sharepoint: bool,
+    /// Redmine enabled.
     pub redmine: bool,
+    /// GitLab enabled.
     pub gitlab: bool,
+    /// GitHub enabled.
     pub github: bool,
+    /// Atlassian enabled.
     pub atlassian: bool,
+    /// Office enabled.
     pub office: bool,
+    /// Playwright enabled.
     pub playwright: bool,
+    /// Context7 enabled.
     pub context7: bool,
+    /// macOS Reminders enabled.
     pub os_reminders: bool,
+    /// macOS Calendar enabled.
     pub os_calendar: bool,
+    /// macOS Mail enabled.
     pub os_mail: bool,
+    /// macOS Notes enabled.
     pub os_notes: bool,
-    /// `host_exec` enabled flag — user-config only (ADR-054).
-    pub host_exec: bool,
-    /// Resolved whitelist (user-config only). On-disk snapshot is the authoritative copy.
-    pub host_exec_commands: Vec<HostExecRecipe>,
+    /// Plugin enabled state keyed by slug / service_id.
     pub plugins: HashMap<String, bool>,
 }
 
 impl ResolvedIntegrationsConfig {
+    /// `true` if any macOS native integration is enabled.
     pub fn any_os_enabled(&self) -> bool {
         self.os_reminders || self.os_calendar || self.os_mail || self.os_notes
     }
 
+    /// Enabled state for a built-in MCP service by config key, or `None` if unknown.
     pub fn is_service_enabled(&self, key: &str) -> Option<bool> {
         match key {
             "slack" => Some(self.slack),
@@ -224,18 +578,25 @@ impl ResolvedIntegrationsConfig {
         }
     }
 
+    /// `true` if the plugin with this service_id is enabled.
     pub fn is_plugin_enabled(&self, service_id: &str) -> bool {
         self.plugins.get(service_id).copied().unwrap_or(false)
     }
 
+    /// Service ids of all enabled plugins, sorted — env values built from
+    /// this list must be deterministic or config-hash convergence flaps.
     pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
-        self.plugins
+        let mut ids: Vec<&str> = self
+            .plugins
             .iter()
             .filter(|(_, &enabled)| enabled)
             .map(|(id, _)| id.as_str())
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
+    /// Enabled state for a macOS native service by config key, or `None` if unknown.
     pub fn is_os_service_enabled(&self, key: &str) -> Option<bool> {
         match key {
             "reminders" => Some(self.os_reminders),
@@ -247,41 +608,38 @@ impl ResolvedIntegrationsConfig {
     }
 }
 
+/// Repo-side `.speedwave.json` — restricted subset a cloned repo may set.
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct ProjectRepoConfig {
+    /// Claude overrides (repo may set `model` only; rest stripped on merge).
     pub claude: Option<ClaudeOverrides>,
+    /// Integration toggles requested by the repo.
     pub integrations: Option<IntegrationsConfig>,
 }
 
+/// One registered project in the user's `~/.speedwave/config.json`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProjectUserEntry {
+    /// Project name (validated for filesystem/container safety).
     pub name: String,
+    /// Absolute project directory on the host.
     pub dir: String,
+    /// User-side Claude overrides.
     pub claude: Option<ClaudeOverrides>,
+    /// User-side integration toggles.
     pub integrations: Option<IntegrationsConfig>,
+    /// Per-plugin settings values keyed by slug.
     #[serde(default)]
     pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// The IDE selected for the IDE bridge.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SelectedIde {
+    /// Display name of the IDE.
     pub ide_name: String,
+    /// IDE bridge lock port.
     pub port: u16,
-}
-
-/// Meeting-transcription preferences (ADR-056). Top-level user config only —
-/// **not** part of `ProjectRepoConfig` (a checked-in repo file must not be
-/// able to turn on host-audio recording — privacy-sensitive host capability).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct TranscriptionConfig {
-    /// Feature toggle. `None` or `Some(false)` keeps the feature off.
-    pub enabled: Option<bool>,
-    /// Default Whisper model key for the live pass (e.g. `"small"`).
-    pub default_live_model: Option<String>,
-    /// Default forced language (`"pl"` / `"en"`).
-    pub default_language: Option<String>,
-    /// Keep `audio.wav` after the offline pass finishes. Default = keep.
-    pub keep_audio_after_finalize: Option<bool>,
 }
 
 /// UI preferences (ADR-058). Top-level user-only — a checked-in repo
@@ -292,13 +650,15 @@ pub struct UiPrefsConfig {
     pub beta_enabled: Option<bool>,
 }
 
+/// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
+    /// All registered projects.
     pub projects: Vec<ProjectUserEntry>,
+    /// Name of the currently active project.
     pub active_project: Option<String>,
+    /// IDE selected for the bridge.
     pub selected_ide: Option<SelectedIde>,
-    /// Meeting-transcription preferences (ADR-056). Top-level (not per-project).
-    pub transcription: Option<TranscriptionConfig>,
     /// UI preferences (ADR-058). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
 }
@@ -328,14 +688,6 @@ impl SpeedwaveUserConfig {
             .and_then(|n| self.find_project(n))
     }
 
-    /// `true` if the user toggled meeting transcription on (top-level only).
-    pub fn transcription_enabled(&self) -> bool {
-        self.transcription
-            .as_ref()
-            .and_then(|t| t.enabled)
-            .unwrap_or(false)
-    }
-
     /// `true` if beta-features UI surface is enabled (top-level only).
     pub fn beta_enabled(&self) -> bool {
         self.ui
@@ -345,16 +697,37 @@ impl SpeedwaveUserConfig {
     }
 }
 
+/// Fully resolved Claude container config after the layered merge.
 #[derive(Debug, Clone)]
 pub struct ResolvedClaudeConfig {
+    /// Environment variables for the Claude container.
     pub env: HashMap<String, String>,
+    /// Extra Claude Code CLI flags.
     pub flags: Vec<String>,
+    /// Resolved LLM provider/model configuration.
     pub llm: LlmConfig,
 }
 
 /// Resolves both Claude config and integrations in a single pass,
 /// reading the repo config file only once.
 pub fn resolve_project_config(
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    resolve_project_config_in(
+        crate::consts::data_dir(),
+        project_dir,
+        user_config,
+        project_name,
+    )
+}
+
+/// Testable variant of [`resolve_project_config`] with an explicit data dir —
+/// every on-disk lookup (legacy-key migration, has_api_key disk-sync, anthropic
+/// secret) resolves under `data_dir` so the migrate→sync ordering can be tested.
+pub(crate) fn resolve_project_config_in(
+    data_dir: &Path,
     project_dir: &Path,
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
@@ -369,19 +742,17 @@ pub fn resolve_project_config(
     // provider and base_url are ignored from repo config (SSRF prevention — ADR-040)
     if let Some(repo) = repo {
         if let Some(c) = repo.claude {
-            merge_env(&mut env, c.env);
+            merge_env(&mut env, sanitize_repo_env(c.env));
             if let Some(repo_llm) = c.llm {
                 merge_llm_repo(&mut llm, &repo_llm);
             }
         }
         if let Some(repo_integrations) = repo.integrations {
-            apply_integrations_layer(
-                &mut integrations,
-                &repo_integrations,
-                /* from_repo = */ true,
-            );
+            apply_integrations_layer(&mut integrations, &repo_integrations);
         }
     }
+    // Captured pre-user-layer so the documented repo suggestion survives migration.
+    let repo_model_suggestion = llm.model.clone();
 
     // Layer 2: user config (highest priority)
     if let Some(user) = user_config.find_project(project_name) {
@@ -392,20 +763,28 @@ pub fn resolve_project_config(
             }
         }
         if let Some(user_integrations) = &user.integrations {
-            apply_integrations_layer(
-                &mut integrations,
-                user_integrations,
-                /* from_repo = */ false,
-            );
+            apply_integrations_layer(&mut integrations, user_integrations);
         }
     }
 
-    // Local LLMs receive the full default Claude Code system prompt (Unsloth-style
-    // routing). Modern local models commonly ship with 32K-128K context windows
-    // that absorb the ~30K-token baseline (system prompt + tool definitions). This
-    // also lets `outputStyle` from settings.json reach local LLMs uniformly with
-    // Anthropic-hosted models. The model itself is selected via `ANTHROPIC_MODEL`
-    // env injected by `compose::apply_llm_config` — no per-provider CLI flags here.
+    // Migrate to the current LLM schema (ADR-073).
+    migrate_llm(
+        &mut llm,
+        AnthropicEvidence::detect_in(data_dir, project_name),
+    );
+    apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
+
+    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
+    // disk-sync below — otherwise the sync re-derives has_api_key from the (still
+    // empty) new path and the migration, gated on the new file, never runs.
+    crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
+
+    // Re-derive each provider's `has_api_key` from disk — the key file is the
+    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
+    // injection) reads the resolved config, so this is the single sync point.
+    llm.sync_has_api_key_from_disk_in(data_dir, project_name);
+
+    // Local LLMs get the full default Claude Code system prompt.
     let flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
         .map(|s| s.to_string())
@@ -415,14 +794,51 @@ pub fn resolve_project_config(
     (claude, integrations)
 }
 
-/// Provider names that route through a local LLM server (no Anthropic API
-/// call). SSOT for code that enumerates the set (e.g. tests that exercise
-/// every local provider). `is_local_provider` is the matching predicate.
+/// Repo model suggestion (docs contract): fills the resolved model only when
+/// the active entry has none of its own. In-memory only, never persisted.
+fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) {
+    let Some(model) = suggestion
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    if llm.effective_active_model().is_some() {
+        return;
+    }
+    let Some(entry) = llm.active_provider() else {
+        return;
+    };
+    if entry.kind.is_anthropic() && is_foreign_anthropic_model(&model) {
+        log::warn!("llm config: ignoring foreign repo model suggestion under anthropic provider");
+        return;
+    }
+    let id = entry.id.clone();
+    if let Some(e) = llm.providers.iter_mut().find(|p| p.id == id) {
+        e.model = Some(model.clone());
+    }
+    if let Some(active) = &mut llm.active {
+        active.model = Some(model.clone());
+    }
+    // Flat mirror for the legacy (proxy_enabled=false) renderer.
+    llm.model = Some(model);
+}
+
+/// True when `secrets/<project>/anthropic_api_key` exists under `data_dir`.
+fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
+    data_dir
+        .join("secrets")
+        .join(project_name)
+        .join("anthropic_api_key")
+        .is_file()
+}
+
+/// Provider names that route through a local LLM server. SSOT for the set;
+/// `is_local_provider` is the matching predicate.
 pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio", "llamacpp", "local"];
 
-/// Returns true for provider values that point at a local LLM server
-/// (Ollama, LM Studio, or llama.cpp).
-/// `None` / `Some("anthropic")` → false (Anthropic-hosted models).
+/// True for provider values pointing at a local LLM server;
+/// `None` / `Some("anthropic")` → false (Anthropic-hosted).
 pub fn is_local_provider(provider: Option<&str>) -> bool {
     provider.is_some_and(|p| LOCAL_PROVIDERS.contains(&p))
 }
@@ -446,17 +862,6 @@ pub fn resolve_integrations(
     resolve_project_config(project_dir, user_config, project_name).1
 }
 
-/// Builds `{ projectDir, commands }` for the worker snapshot. Caller must validate.
-pub fn host_exec_config_snapshot(
-    project_dir: &Path,
-    commands: &[HostExecRecipe],
-) -> serde_json::Value {
-    serde_json::json!({
-        "projectDir": project_dir.to_string_lossy(),
-        "commands": commands,
-    })
-}
-
 fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     if let Some(cfg) = source {
         if let Some(enabled) = cfg.enabled {
@@ -465,13 +870,8 @@ fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
     }
 }
 
-/// Applies one integrations layer. `from_repo=true` skips security-class fields
-/// (currently `host_exec`; mirrors `merge_llm_repo`'s `provider`/`base_url` rule).
-fn apply_integrations_layer(
-    result: &mut ResolvedIntegrationsConfig,
-    layer: &IntegrationsConfig,
-    from_repo: bool,
-) {
+/// Applies one integrations layer over the resolved result.
+fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &IntegrationsConfig) {
     apply_toggle(&mut result.slack, &layer.slack);
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
@@ -487,16 +887,6 @@ fn apply_integrations_layer(
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
     }
-    // `host_exec` is user-config only — repo layer ignored (ADR-054).
-    if !from_repo {
-        if let Some(ref he) = layer.host_exec {
-            if let Some(enabled) = he.enabled {
-                result.host_exec = enabled;
-            }
-            // User layer wins wholesale — no whitelist merging.
-            result.host_exec_commands = he.commands.clone();
-        }
-    }
     if let Some(ref plugins) = layer.plugins {
         for (service_id, cfg) in plugins {
             if let Some(enabled) = cfg.enabled {
@@ -506,6 +896,7 @@ fn apply_integrations_layer(
     }
 }
 
+/// Loads the repo `.speedwave.json` for a project directory.
 pub fn load_repo_config(project_dir: &Path) -> anyhow::Result<ProjectRepoConfig> {
     let config_path = project_dir.join(".speedwave.json");
     let content = std::fs::read_to_string(&config_path)?;
@@ -525,6 +916,7 @@ fn load_repo_config_logged(project_dir: &Path) -> Option<ProjectRepoConfig> {
     }
 }
 
+/// Loads the user config from `~/.speedwave/config.json`.
 pub fn load_user_config() -> anyhow::Result<SpeedwaveUserConfig> {
     let config_path = crate::consts::data_dir().join("config.json");
     load_user_config_from(&config_path)
@@ -539,6 +931,7 @@ pub(crate) fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUser
     Ok(config)
 }
 
+/// Durably saves the user config to `~/.speedwave/config.json`.
 pub fn save_user_config(config: &SpeedwaveUserConfig) -> anyhow::Result<()> {
     let config_path = crate::consts::data_dir().join("config.json");
     save_user_config_to(config, &config_path)
@@ -549,17 +942,12 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    // Durable atomic write (fsync data + parent dir).
+    crate::fs_perms::write_restricted_file_atomic(path, &content)
 }
 
-/// Acquires an exclusive file lock on `<data_dir>/config.lock` and runs the
-/// closure `f` while the lock is held.  This prevents race conditions between
-/// concurrent processes (CLI vs Desktop) that read-modify-write `config.json`.
-///
-/// Testable variant that accepts an explicit data directory.
+/// Runs `f` holding an exclusive lock on `<data_dir>/config.lock` (serialises
+/// CLI/Desktop read-modify-write of `config.json`); explicit data dir variant.
 pub fn with_config_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
@@ -581,14 +969,49 @@ where
     result
 }
 
-/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
-/// closure `f` while the lock is held.  Delegates to `with_config_lock_in`
-/// using `consts::data_dir()`.
+/// Runs `f` holding an exclusive lock on `~/.speedwave/config.lock`.
+/// Delegates to `with_config_lock_in` with `consts::data_dir()`.
 pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
     with_config_lock_in(crate::consts::data_dir(), f)
+}
+
+/// One-shot self-heal: migrate every project's LLM config and persist if
+/// changed. Idempotent once all are at [`LLM_SCHEMA_VERSION`]; under the config lock.
+pub fn heal_llm_config_on_disk() -> anyhow::Result<()> {
+    heal_llm_config_in(crate::consts::data_dir())
+}
+
+/// Testable variant of [`heal_llm_config_on_disk`] with an explicit data dir.
+pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
+    with_config_lock_in(data_dir, || {
+        let config_path = data_dir.join("config.json");
+        let mut config = load_user_config_from(&config_path)?;
+        let mut changed = false;
+        for project in &mut config.projects {
+            let evidence = AnthropicEvidence::detect_in(data_dir, &project.name);
+            let has_llm = project.claude.as_ref().is_some_and(|c| c.llm.is_some());
+            if has_llm {
+                if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+                    changed |= migrate_llm(llm, evidence);
+                }
+            } else if evidence != AnthropicEvidence::None {
+                // v0.13.3 default population: no llm block but working Anthropic
+                // credentials — fabricate the entry so the project keeps chatting.
+                let mut llm = LlmConfig::default();
+                migrate_llm(&mut llm, evidence);
+                project.claude.get_or_insert_with(Default::default).llm = Some(llm);
+                changed = true;
+            }
+        }
+        if changed {
+            save_user_config_to(&config, &config_path)?;
+            log::info!("llm config: healed on-disk config to schema v{LLM_SCHEMA_VERSION}");
+        }
+        Ok(())
+    })
 }
 
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
@@ -597,6 +1020,31 @@ fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String,
             base.insert(key, value);
         }
     }
+}
+
+/// Anthropic auth/routing env keys a repo `.speedwave.json` must never set
+/// (hijack risk); `ANTHROPIC_MODEL` stays allowed as a documented override.
+const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+];
+
+/// Strips security-class keys (Anthropic auth/routing + `RESERVED_ENV_KEYS`,
+/// case-insensitive) from a repo-layer `claude.env`; user config is unaffected.
+fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
+    env.map(|mut map| {
+        map.retain(|key, _| !repo_env_key_is_denied(key));
+        map
+    })
+}
+
+/// True when `key` matches (case-insensitively) a repo-layer deny-list entry.
+fn repo_env_key_is_denied(key: &str) -> bool {
+    REPO_ENV_DENY_ANTHROPIC
+        .iter()
+        .chain(crate::consts::RESERVED_ENV_KEYS.iter())
+        .any(|denied| denied.eq_ignore_ascii_case(key))
 }
 
 fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
@@ -618,22 +1066,31 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.has_custom_headers {
         base.has_custom_headers = true;
     }
+    // v2 (ADR-073): the user layer carries the provider list wholesale.
+    if overlay.schema_version.is_some() {
+        base.schema_version = overlay.schema_version;
+    }
+    if overlay.proxy_enabled.is_some() {
+        base.proxy_enabled = overlay.proxy_enabled;
+    }
+    if !overlay.providers.is_empty() {
+        base.providers.clone_from(&overlay.providers);
+    }
+    if overlay.active.is_some() {
+        base.active.clone_from(&overlay.active);
+    }
 }
 
-/// Merge LLM config from repo source (.speedwave.json).
-/// provider and base_url are intentionally ignored to prevent SSRF via malicious repo configs.
-/// Only model is merged, allowing repos to suggest a default model name.
+/// Merge LLM config from repo source; provider/base_url/v2-fields ignored (SSRF prevention).
+/// Only model is merged as a suggestion; see ADR-073 for the full SSRF policy.
 fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.model.is_some() {
         base.model.clone_from(&overlay.model);
     }
 }
 
-/// Removes the obsolete `log_level` field from `<data_dir>/config.json` if
-/// present. Returns `Ok(true)` when the field was removed, `Ok(false)` when
-/// nothing needed to change. Operates on `serde_json::Value` so unknown
-/// future fields are semantically preserved (re-serialised through
-/// `to_string_pretty` — key order and whitespace follow serde-json defaults).
+/// Removes the obsolete `log_level` field from `<data_dir>/config.json`;
+/// `Ok(true)` = removed. Unknown fields preserved (operates on `Value`).
 pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
     with_config_lock_in(data_dir, || {
         let path = data_dir.join("config.json");
@@ -652,18 +1109,13 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
             return Ok(false);
         }
         let content = serde_json::to_string_pretty(&value)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &content)?;
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            // Best-effort cleanup so the data dir isn't polluted by an orphan
-            // on filesystems where rename can fail (cross-device, locks).
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(anyhow::anyhow!(
-                "config migration: rename {} → {} failed: {e}",
-                tmp_path.display(),
+        // Durable atomic write (fsync data + parent dir) — see save_user_config_to.
+        crate::fs_perms::write_restricted_file_atomic(&path, &content).with_context(|| {
+            format!(
+                "config migration: durable write of {} failed",
                 path.display()
-            ));
-        }
+            )
+        })?;
         log::info!("config migration: removed obsolete log_level field");
         Ok(true)
     })
@@ -675,75 +1127,298 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // ---- TranscriptionConfig (ADR-056 Phase 3) ------------------------------
-
-    #[test]
-    fn transcription_disabled_by_default() {
-        let cfg = SpeedwaveUserConfig::default();
-        assert!(!cfg.transcription_enabled(), "off by default");
-        assert!(cfg.transcription.is_none());
+    fn anthropic_entry() -> LlmProviderEntry {
+        LlmProviderEntry {
+            id: "anthropic".into(),
+            kind: LlmProviderKind::AnthropicOauth,
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
     }
 
     #[test]
-    fn transcription_enabled_only_when_user_set_it() {
-        let cfg = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(true),
-                default_language: Some("pl".to_string()),
-                default_live_model: Some("small".to_string()),
-                keep_audio_after_finalize: Some(true),
-            }),
-            ..Default::default()
-        };
-        assert!(cfg.transcription_enabled());
-
-        let cfg_off = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(!cfg_off.transcription_enabled());
-
-        let cfg_none = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig::default()),
-            ..Default::default()
-        };
-        assert!(!cfg_none.transcription_enabled(), "enabled: None is off");
+    fn is_unconfigured_true_for_fresh_default() {
+        // Never-touched project: no llm override fields set at all → render must refuse.
+        assert!(LlmConfig::default().is_unconfigured());
+        assert!(!LlmConfig::default().is_logged_out());
     }
 
     #[test]
-    fn transcription_config_round_trips_through_serde() {
-        let cfg = SpeedwaveUserConfig {
-            transcription: Some(TranscriptionConfig {
-                enabled: Some(true),
-                default_language: Some("en".to_string()),
-                default_live_model: Some("large-v3-turbo".to_string()),
-                keep_audio_after_finalize: Some(false),
+    fn is_unconfigured_true_for_explicit_logout() {
+        // Emptied v2 (logout): schema + providers + no active → both true,
+        // is_logged_out picks the distinct "Run speedwave login" wording.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.is_unconfigured());
+        assert!(llm.is_logged_out());
+    }
+
+    #[test]
+    fn is_unconfigured_true_for_dangling_active() {
+        // Dangling active (points at a missing entry) is unconfigured: render
+        // must refuse rather than silently fall back to the Anthropic default
+        // for a config that names a provider id which doesn't exist.
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![],
+            active: Some(LlmActive {
+                provider_id: "ghost".into(),
+                model: None,
             }),
             ..Default::default()
         };
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(llm.is_unconfigured());
+        // Not a logout (active is Some, just dangling) — distinct bail wording.
+        assert!(!llm.is_logged_out());
+    }
+
+    #[test]
+    fn is_unconfigured_true_for_legacy_v1_with_provider_before_migration() {
+        // Legacy `provider` alone is not resolvable until migrated.
+        let llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        assert!(llm.is_unconfigured());
+    }
+
+    #[test]
+    fn is_unconfigured_false_for_configured_v2() {
+        let llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!llm.is_unconfigured());
+    }
+
+    #[test]
+    fn unhealed_config_with_providers_no_active_is_unconfigured() {
+        // Regression: a not-yet-healed config (no schema, but providers + no
+        // active) has no resolvable active provider → unconfigured.
+        let llm = LlmConfig {
+            schema_version: None,
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.is_unconfigured());
+    }
+
+    #[test]
+    fn anthropic_provider_id_is_pinned_for_on_disk_compat() {
+        // Persisted config.json files carry this id — changing it orphans them.
+        assert_eq!(ANTHROPIC_PROVIDER_ID, "anthropic");
+    }
+
+    #[test]
+    fn set_active_to_anthropic_selects_existing_entry() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic_entry()],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
         assert_eq!(
-            back.transcription, cfg.transcription,
-            "round-trip preserves the field"
+            llm.active.as_ref().unwrap().model,
+            None,
+            "entry has no model — pointer stays empty"
+        );
+        assert_eq!(llm.providers.len(), 1, "no duplicate entry added");
+        assert!(!llm.is_unconfigured());
+    }
+
+    #[test]
+    fn set_active_to_anthropic_mirrors_existing_entry_model() {
+        // Previously selected Anthropic model (per-provider SSOT) is not discarded.
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        let active = llm.active.as_ref().unwrap();
+        assert_eq!(active.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
         );
     }
 
     #[test]
-    fn repo_config_cannot_enable_transcription() {
-        // Decision 13: a checked-in repo .speedwave.json must not turn on host-
-        // audio recording. ProjectRepoConfig has no `transcription` field, so
-        // any unknown `transcription` key in a repo file is silently ignored.
+    fn set_active_to_anthropic_clears_foreign_entry_model() {
+        // Corrupt pre-quarantine state: a provider/model shape under an
+        // Anthropic entry must not leak into the active pointer.
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("openrouter/z-ai/glm-5.2".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
+    fn set_active_to_anthropic_adds_entry_when_absent() {
+        // Switching from an active non-Anthropic entry: its model must not
+        // carry over to the fresh Anthropic entry's pointer.
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: Some("qwen".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(llm.set_active_to_anthropic());
+        assert_eq!(llm.active.as_ref().unwrap().provider_id, "anthropic");
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "local model must not follow the provider switch"
+        );
+        assert!(llm.providers.iter().any(|p| p.kind.is_anthropic()));
+    }
+
+    #[test]
+    fn set_active_to_anthropic_noop_when_already_active() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !llm.set_active_to_anthropic(),
+            "no change when already active"
+        );
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "noop must not rewrite the pointer (migrate_llm reconciles it)"
+        );
+    }
+
+    // ---- LlmProviderKind Rust↔TS mirror (ADR-073) ---------------------------
+
+    #[test]
+    fn llm_provider_kind_matches_ts_union() {
+        // TS union must list exactly the Rust serde strings (cf. allowed_auth_field_types_match_ts_union).
+        let all = [
+            LlmProviderKind::AnthropicOauth,
+            LlmProviderKind::AnthropicApiKey,
+            LlmProviderKind::Local,
+            LlmProviderKind::OpenRouter,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for kind in all {
+            match kind {
+                LlmProviderKind::AnthropicOauth
+                | LlmProviderKind::AnthropicApiKey
+                | LlmProviderKind::Local
+                | LlmProviderKind::OpenRouter => {}
+            }
+        }
+        let mut rust_kinds: Vec<String> = all
+            .iter()
+            .map(|k| {
+                serde_json::to_value(k)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust_kinds.sort();
+
+        let src = include_str!("../../../desktop/src/src/app/models/llm.ts");
+        let re = regex::Regex::new(r"export\s+type\s+LlmProviderKind\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("llm.ts must declare `export type LlmProviderKind`");
+        let mut ts_kinds: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts_kinds.sort();
+
+        assert_eq!(
+            rust_kinds, ts_kinds,
+            "TS LlmProviderKind union must match Rust LlmProviderKind serde strings"
+        );
+    }
+
+    // ---- Transcription config retired (ADR-056) -----------------------------
+
+    #[test]
+    fn old_user_config_with_a_transcription_block_still_loads() {
+        // The `transcription` field was removed; a config still carrying the
+        // block must deserialize fine (the key is tolerated as unknown).
+        let old_json = r#"{
+            "projects": [],
+            "transcription": {
+                "enabled": true,
+                "default_language": "pl",
+                "default_live_model": "small",
+                "keep_audio_after_finalize": false
+            },
+            "ui": { "beta_enabled": true }
+        }"#;
+        let cfg: SpeedwaveUserConfig = serde_json::from_str(old_json).expect("deserialize");
+        assert!(cfg.beta_enabled(), "the rest of the config still parses");
+        let json_back = serde_json::to_string(&cfg).expect("reserialize");
+        assert!(
+            !json_back.contains("transcription"),
+            "the retired field is not re-emitted; got {json_back}"
+        );
+    }
+
+    #[test]
+    fn repo_config_has_no_transcription_field() {
+        // Repo .speedwave.json has no transcription field — a stray key is dropped.
         let repo_json = r#"{
             "claude": null,
             "integrations": null,
-            "transcription": { "enabled": true, "default_language": "pl" }
+            "transcription": { "enabled": true }
         }"#;
         let parsed: ProjectRepoConfig = serde_json::from_str(repo_json).expect("repo parse");
-        // The repo struct has no transcription field; the json is ignored.
         let json_back = serde_json::to_string(&parsed).expect("repo reserialize");
         assert!(
             !json_back.contains("transcription"),
@@ -810,6 +1485,47 @@ mod tests {
         assert!(!parsed.beta_enabled());
     }
 
+    /// `sync_has_api_key_from_disk_in` derives the flag from the key file's
+    /// existence, overriding whatever was persisted (stale-true and stale-false).
+    #[test]
+    fn sync_has_api_key_from_disk_overrides_persisted_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = |id: &str, has_api_key: bool| LlmProviderEntry {
+            id: id.into(),
+            kind: LlmProviderKind::OpenRouter,
+            base_url: None,
+            model: None,
+            has_api_key,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        let mut llm = LlmConfig {
+            providers: vec![
+                // Persisted true, but no key file on disk → must flip to false.
+                provider("stale-true", true),
+                // Persisted false, but key file exists → must flip to true.
+                provider("stale-false", false),
+            ],
+            ..Default::default()
+        };
+        crate::compose::write_llm_provider_key_in(dir.path(), "proj", "stale-false", "sk-x")
+            .unwrap();
+
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+
+        assert!(!llm.providers[0].has_api_key, "no key file → false");
+        assert!(llm.providers[1].has_api_key, "key file present → true");
+    }
+
+    /// Edge: empty provider list is a no-op (no panic, nothing to sync).
+    #[test]
+    fn sync_has_api_key_from_disk_empty_providers_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = LlmConfig::default();
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+        assert!(llm.providers.is_empty());
+    }
+
     #[test]
     fn test_default_config_has_expected_env() {
         let defaults = defaults::base_env();
@@ -822,10 +1538,7 @@ mod tests {
 
     #[test]
     fn test_is_local_provider_matches_local_providers_const() {
-        // Regression guard: `is_local_provider` and `LOCAL_PROVIDERS` must
-        // stay in sync. Callers (e.g. the `update_llm_config` model-required
-        // guard in desktop/src-tauri/src/containers_cmd.rs) iterate the
-        // const and expect every element to satisfy the predicate.
+        // `is_local_provider` and `LOCAL_PROVIDERS` must stay in sync.
         for name in LOCAL_PROVIDERS {
             assert!(
                 is_local_provider(Some(name)),
@@ -854,6 +1567,7 @@ mod tests {
             .iter()
             .any(|f| f == defaults::MCP_CONFIG_PATH));
         assert!(resolved.flags.iter().any(|f| f == "--strict-mcp-config"));
+        assert!(resolved.flags.iter().any(|f| f == "--ide"));
     }
 
     #[test]
@@ -908,10 +1622,11 @@ mod tests {
                 name: "test-project".to_string(),
                 dir: tmp.path().to_string_lossy().to_string(),
                 claude: Some(ClaudeOverrides {
-                    env: Some(HashMap::from([(
-                        "CLAUDE_CODE_ENABLE_TELEMETRY".to_string(),
-                        "0".to_string(),
-                    )])),
+                    env: Some(HashMap::from([
+                        ("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), "0".to_string()),
+                        // User can override the base_env default.
+                        ("WAYLAND_DISPLAY".to_string(), "".to_string()),
+                    ])),
                     settings: None,
                     llm: None,
                 }),
@@ -920,15 +1635,19 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User override wins
+        // User override wins over both repo (.speedwave.json) and base_env.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
             Some(&"0".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("WAYLAND_DISPLAY"),
+            Some(&"".to_string()),
+            "user config must be able to override the base_env WAYLAND_DISPLAY default"
         );
     }
 
@@ -964,6 +1683,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,
@@ -971,16 +1691,25 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // User config wins over repo config
-        assert_eq!(resolved.llm.provider.as_deref(), Some("ollama"));
+        // User config wins; v1→v2 migration normalises `ollama` to `local`.
+        assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(
             resolved.llm.base_url.as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+        // And the v2 shape carries the same selection.
+        let active = resolved.llm.active.as_ref().expect("active set");
+        assert_eq!(active.provider_id, "local");
+        assert_eq!(active.model.as_deref(), Some("llama3.3"));
+        let entry = resolved.llm.active_provider().expect("entry");
+        assert_eq!(entry.kind, LlmProviderKind::Local);
+        assert_eq!(
+            entry.base_url.as_deref(),
             Some("http://host.docker.internal:11434")
         );
     }
@@ -1005,9 +1734,792 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        // provider and base_url from repo config must be ignored (SSRF prevention — ADR-040)
+        // Repo provider/base_url ignored (SSRF, ADR-040): with no user-side
+        // override either, the project has no real config — stays unconfigured.
         assert_eq!(resolved.llm.provider, None);
         assert_eq!(resolved.llm.base_url, None);
+        assert!(resolved.llm.active.is_none());
+        assert!(resolved.llm.active_provider().is_none());
+        assert!(resolved.llm.is_unconfigured());
+    }
+
+    /// ADR-073: a repo `.speedwave.json` must not be able to inject the v2
+    /// fields either — providers (base URLs!), active selection, schema.
+    #[test]
+    fn test_repo_config_cannot_set_v2_providers_or_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "llm": {{
+                        "schema_version": 2,
+                        "providers": [{{
+                            "id": "evil",
+                            "kind": "local",
+                            "base_url": "http://attacker.example.com/v1",
+                            "has_api_key": true
+                        }}],
+                        "active": {{ "provider_id": "evil", "model": "x" }}
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert!(
+            !resolved.llm.providers.iter().any(|p| p.id == "evil"),
+            "repo must not inject providers: {:?}",
+            resolved.llm.providers
+        );
+        assert_ne!(
+            resolved.llm.active.as_ref().map(|a| a.provider_id.as_str()),
+            Some("evil"),
+            "repo must not switch the active provider"
+        );
+    }
+
+    /// Migration unit coverage: every legacy shape lands in the right kind,
+    /// the lift is idempotent, and the downgrade fields round-trip.
+    #[test]
+    fn test_migrate_llm_variants() {
+        // anthropic + secret → AnthropicApiKey
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            model: Some("claude-opus-4-8".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::ApiKey);
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        let entry = llm.active_provider().expect("entry");
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
+        assert!(entry.has_api_key);
+        assert_eq!(
+            llm.active.as_ref().unwrap().model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+
+        // anthropic without secret → AnthropicOauth
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(
+            llm.active_provider().unwrap().kind,
+            LlmProviderKind::AnthropicOauth
+        );
+
+        // truly fresh (provider unset) → no-op, stays unconfigured. Render
+        // must refuse to start rather than fabricate an Anthropic session.
+        let mut llm = LlmConfig::default();
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert!(llm.active_provider().is_none());
+        assert!(llm.providers.is_empty());
+        assert!(llm.is_unconfigured());
+        // Schema is still stamped (idempotent re-entry), but no provider/active
+        // is fabricated and the legacy flat field stays unset.
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        assert_eq!(llm.provider, None);
+
+        // every legacy local alias → Local, base_url + flags carried over
+        for alias in LOCAL_PROVIDERS {
+            let mut llm = LlmConfig {
+                provider: Some((*alias).into()),
+                model: Some("qwen".into()),
+                base_url: Some("http://host.docker.internal:9000".into()),
+                context_tokens: Some(131072),
+                has_api_key: true,
+                has_custom_headers: true,
+                ..Default::default()
+            };
+            migrate_llm(&mut llm, AnthropicEvidence::None);
+            let entry = llm
+                .active_provider()
+                .unwrap_or_else(|| panic!("alias '{alias}' must migrate to an active entry"));
+            assert_eq!(entry.kind, LlmProviderKind::Local);
+            assert_eq!(
+                entry.base_url.as_deref(),
+                Some("http://host.docker.internal:9000")
+            );
+            assert!(entry.has_api_key && entry.has_custom_headers);
+            assert_eq!(entry.context_tokens, Some(131072));
+            // Downgrade fields: alias normalised to `local`.
+            assert_eq!(llm.provider.as_deref(), Some("local"));
+            assert_eq!(llm.model.as_deref(), Some("qwen"));
+        }
+
+        // Idempotence: re-running must not duplicate or rebuild entries.
+        let mut llm = LlmConfig {
+            provider: Some("local".into()),
+            base_url: Some("http://host.docker.internal:8080".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        let first = serde_json::to_string(&llm).unwrap();
+        migrate_llm(&mut llm, AnthropicEvidence::ApiKey); // even with secret flag flipped
+        assert_eq!(first, serde_json::to_string(&llm).unwrap());
+    }
+
+    #[test]
+    fn test_is_anthropic_and_foreign_model_predicates() {
+        assert!(LlmProviderKind::AnthropicOauth.is_anthropic());
+        assert!(LlmProviderKind::AnthropicApiKey.is_anthropic());
+        assert!(!LlmProviderKind::Local.is_anthropic());
+        assert!(!LlmProviderKind::OpenRouter.is_anthropic());
+        // Foreign = provider/model shape, NOT catalog membership.
+        assert!(is_foreign_anthropic_model("nex-agi/nex-n2-pro:free"));
+        assert!(is_foreign_anthropic_model("openrouter/z-ai/glm-5.2"));
+        assert!(!is_foreign_anthropic_model("claude-opus-4-8"));
+        assert!(!is_foreign_anthropic_model("claude-opus-4-1")); // retired but kept
+        assert!(!is_foreign_anthropic_model(""));
+    }
+
+    /// `effective_active_model` enforces provenance: a foreign `active.model`
+    /// under an Anthropic entry must never be returned as the routing model.
+    #[test]
+    fn test_effective_active_model_enforces_provenance() {
+        let entry = |id: &str, kind, model: Option<&str>| LlmProviderEntry {
+            id: id.into(),
+            kind,
+            base_url: None,
+            model: model.map(str::to_string),
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+
+        // Real corrupted shape: anthropic entry + active both hold an OR id.
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth, None)],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model(),
+            None,
+            "foreign active.model under anthropic entry with no entry model → account default"
+        );
+
+        // Agreement: active.model == entry.model → used.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "anthropic",
+                LlmProviderKind::AnthropicOauth,
+                Some("claude-opus-4-8"),
+            )],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-opus-4-8".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-8")
+        );
+
+        // Disagreement: entry wins (provenance), not the stale active pointer.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "openrouter",
+                LlmProviderKind::OpenRouter,
+                Some("z-ai/glm-5.2"),
+            )],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("stale/old-model".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("z-ai/glm-5.2")
+        );
+
+        // Empty/whitespace entry model → None.
+        let llm = LlmConfig {
+            providers: vec![entry(
+                "anthropic",
+                LlmProviderKind::AnthropicOauth,
+                Some("  "),
+            )],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_active_model(), None);
+
+        // No active → None.
+        assert_eq!(LlmConfig::default().effective_active_model(), None);
+    }
+
+    /// `sync_llm_legacy_fields` must never stamp an OpenRouter model under the
+    /// masqueraded flat `provider="anthropic"` (would 404 a downgrade reader).
+    #[test]
+    fn test_sync_legacy_fields_no_foreign_model_under_flat_anthropic() {
+        let kind = LlmProviderKind::OpenRouter;
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".into(),
+                kind,
+                base_url: None,
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        sync_llm_legacy_fields(&mut llm);
+        assert_eq!(llm.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            llm.model, None,
+            "{kind:?}: flat model must be None, not the OR/compat id"
+        );
+
+        // Local/anthropic keep their own model in the flat field (consistent).
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:9000".into()),
+                model: Some("qwen3".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("qwen3".into()),
+            }),
+            ..Default::default()
+        };
+        sync_llm_legacy_fields(&mut llm);
+        assert_eq!(llm.provider.as_deref(), Some("local"));
+        assert_eq!(llm.model.as_deref(), Some("qwen3"));
+    }
+
+    /// v3 self-heal: an already-v2 config with a foreign model under the
+    /// anthropic entry (the real reported config) is quarantined on migrate.
+    #[test]
+    fn test_migrate_quarantines_foreign_anthropic_model() {
+        let mut llm = LlmConfig {
+            schema_version: Some(2),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "anthropic".into(),
+                    kind: LlmProviderKind::AnthropicOauth,
+                    base_url: None,
+                    model: Some("nex-agi/nex-n2-pro:free".into()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "openrouter".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("z-ai/glm-5.2".into()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        let anthropic = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(anthropic.model, None, "foreign anthropic model cleared");
+        assert_eq!(
+            llm.active.as_ref().unwrap().model,
+            None,
+            "active reconciled"
+        );
+        // The openrouter entry keeps its own (legitimate) model untouched.
+        let or = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
+        assert_eq!(or.model.as_deref(), Some("z-ai/glm-5.2"));
+        assert_eq!(llm.effective_active_model(), None);
+
+        // Idempotent: a second pass is a no-op (byte-identical).
+        let first = serde_json::to_string(&llm).unwrap();
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(first, serde_json::to_string(&llm).unwrap());
+    }
+
+    /// Heal-and-save: a corrupted config on disk is rewritten with the foreign
+    /// model cleared, and a second heal is a no-op.
+    #[test]
+    fn test_heal_llm_config_on_disk_clears_foreign_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "speedwave".into(),
+                dir: "/x".into(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(LlmConfig {
+                        schema_version: Some(2),
+                        providers: vec![LlmProviderEntry {
+                            id: "anthropic".into(),
+                            kind: LlmProviderKind::AnthropicOauth,
+                            base_url: None,
+                            model: Some("nex-agi/nex-n2-pro:free".into()),
+                            has_api_key: false,
+                            context_tokens: None,
+                            has_custom_headers: false,
+                        }],
+                        active: Some(LlmActive {
+                            provider_id: "anthropic".into(),
+                            model: Some("nex-agi/nex-n2-pro:free".into()),
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+        let healed = load_user_config_from(&config_path).unwrap();
+        let llm = healed.projects[0]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+
+        // Idempotent: a second heal leaves the file byte-identical.
+        let after_first = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// Upgrade rescue: unset provider + on-disk OAuth credentials must fabricate an
+    /// anthropic entry (v0.13.3 defaulted provider=None to anthropic).
+    #[test]
+    fn migrate_llm_fabricates_anthropic_for_unset_provider_with_oauth_evidence() {
+        let mut llm = LlmConfig::default();
+        assert!(migrate_llm(&mut llm, AnthropicEvidence::Oauth));
+        let entry = llm.active_provider().expect("active entry");
+        assert_eq!(entry.id, ANTHROPIC_PROVIDER_ID);
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicOauth);
+        assert!(!entry.has_api_key);
+        assert!(!llm.is_unconfigured());
+    }
+
+    #[test]
+    fn migrate_llm_fabricates_api_key_kind_for_unset_provider_with_key_evidence() {
+        let mut llm = LlmConfig::default();
+        assert!(migrate_llm(&mut llm, AnthropicEvidence::ApiKey));
+        let entry = llm.active_provider().expect("active entry");
+        assert_eq!(entry.kind, LlmProviderKind::AnthropicApiKey);
+        assert!(entry.has_api_key);
+    }
+
+    /// Truly fresh (no provider, no credentials) must stay unconfigured so the
+    /// render gate routes to provider setup instead of fabricating (R7).
+    #[test]
+    fn migrate_llm_leaves_unset_provider_unconfigured_without_evidence() {
+        let mut llm = LlmConfig::default();
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert!(llm.providers.is_empty());
+        assert!(llm.is_unconfigured());
+        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
+    }
+
+    /// A v1 local config without base_url relied on the per-alias default
+    /// port — the lift must materialize it (proxy routes need an explicit URL).
+    #[test]
+    fn migrate_llm_fills_per_alias_default_base_url() {
+        let host = crate::consts::HOST_GATEWAY_ALIAS;
+        for (alias, port) in [
+            ("ollama", 11434),
+            ("lmstudio", 1234),
+            ("llamacpp", 8080),
+            ("local", 11434),
+        ] {
+            let mut llm = LlmConfig {
+                provider: Some(alias.into()),
+                model: Some("m".into()),
+                ..Default::default()
+            };
+            migrate_llm(&mut llm, AnthropicEvidence::None);
+            let entry = llm.active_provider().expect("active entry");
+            assert_eq!(
+                entry.base_url.as_deref(),
+                Some(format!("http://{host}:{port}").as_str()),
+                "alias '{alias}'"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_llm_keeps_explicit_base_url_over_alias_default() {
+        let mut llm = LlmConfig {
+            provider: Some("lmstudio".into()),
+            base_url: Some("http://192.168.1.5:9999".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(
+            llm.active_provider().unwrap().base_url.as_deref(),
+            Some("http://192.168.1.5:9999")
+        );
+    }
+
+    #[test]
+    fn anthropic_evidence_detect_precedence_and_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::None
+        );
+        let home = dir
+            .path()
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("p")
+            .join(".claude");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".credentials.json"), "{}").unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::Oauth
+        );
+        let secrets = dir.path().join("secrets").join("p");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "k").unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::ApiKey,
+            "api key beats oauth"
+        );
+    }
+
+    /// Heal fabricates the llm block for a credentialed project with no
+    /// claude.llm at all (v0.13.3 default population); fresh stays untouched.
+    #[test]
+    fn heal_fabricates_llm_for_credentialed_blockless_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let proj = |name: &str, project_dir: &str| ProjectUserEntry {
+            name: name.into(),
+            dir: project_dir.into(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+        };
+        let config = SpeedwaveUserConfig {
+            projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+        let home = dir
+            .path()
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("with-creds")
+            .join(".claude");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".credentials.json"), "{}").unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+        let healed = load_user_config_from(&config_path).unwrap();
+        let llm = healed.projects[0]
+            .claude
+            .as_ref()
+            .expect("claude block fabricated")
+            .llm
+            .as_ref()
+            .expect("llm block fabricated");
+        assert!(!llm.is_unconfigured());
+        assert_eq!(llm.active_provider().unwrap().id, ANTHROPIC_PROVIDER_ID);
+        assert!(
+            healed.projects[1].claude.is_none(),
+            "credential-less project untouched"
+        );
+
+        // Idempotent: a second heal leaves the file byte-identical.
+        let after_first = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// F10: the documented repo `.speedwave.json` model suggestion fills a
+    /// model-less active entry after migration.
+    #[test]
+    fn repo_model_suggestion_fills_modelless_active_entry() {
+        let mut llm = LlmConfig::default();
+        assert!(llm.set_active_to_anthropic());
+        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            llm.model.as_deref(),
+            Some("claude-opus-4-6"),
+            "flat mirror for the legacy renderer"
+        );
+    }
+
+    #[test]
+    fn repo_model_suggestion_never_overrides_entry_model() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: None,
+            ..Default::default()
+        };
+        llm.set_active_to_anthropic();
+        apply_repo_model_suggestion(&mut llm, Some("claude-haiku-4-5".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn repo_model_suggestion_foreign_shape_ignored_under_anthropic() {
+        let mut llm = LlmConfig::default();
+        llm.set_active_to_anthropic();
+        apply_repo_model_suggestion(&mut llm, Some("openrouter/z-ai/glm-5.2".into()));
+        assert_eq!(llm.effective_active_model(), None);
+        assert_eq!(llm.model, None);
+    }
+
+    #[test]
+    fn repo_model_suggestion_noop_when_unconfigured() {
+        let mut llm = LlmConfig::default();
+        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        assert!(llm.is_unconfigured());
+        assert_eq!(llm.model, None);
+    }
+
+    /// I2: heal skips projects with no claude/llm config, leaves a clean config
+    /// untouched (no churn), and heals only the corrupt project in a multi set.
+    #[test]
+    fn test_heal_llm_config_in_skips_and_preserves() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let clean_llm = |id: &str, model: Option<&str>| LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: id.into(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: model.map(str::to_string),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: id.into(),
+                model: model.map(str::to_string),
+            }),
+            ..Default::default()
+        };
+        let proj = |name: &str, llm: Option<LlmConfig>| ProjectUserEntry {
+            name: name.into(),
+            dir: "/x".into(),
+            claude: llm.map(|l| ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(l),
+            }),
+            integrations: None,
+            plugin_settings: None,
+        };
+        let config = SpeedwaveUserConfig {
+            projects: vec![
+                proj("no-claude", None),
+                proj("clean", Some(clean_llm("openrouter", Some("z-ai/glm-5.2")))),
+            ],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+
+        // First heal reaches the synced steady state (and must not panic on the
+        // no-claude project). The SECOND heal must be a no-op — no startup churn.
+        heal_llm_config_in(dir.path()).unwrap();
+        let steady = std::fs::read_to_string(&config_path).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(
+            steady,
+            std::fs::read_to_string(&config_path).unwrap(),
+            "a settled config must not be rewritten on subsequent heals"
+        );
+        // The clean openrouter model survived; no-claude project untouched.
+        let healed = load_user_config_from(&config_path).unwrap();
+        let or = healed.projects[1]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(or.providers[0].model.as_deref(), Some("z-ai/glm-5.2"));
+        assert!(healed.projects[0].claude.is_none());
+    }
+
+    /// Regression (F-5): switching active OpenRouter→anthropic must never let
+    /// the anthropic entry inherit the OR model across migrate/sync round-trips.
+    #[test]
+    fn test_roundtrip_openrouter_then_anthropic_does_not_poison_entry() {
+        let or = LlmProviderEntry {
+            id: "openrouter".into(),
+            kind: LlmProviderKind::OpenRouter,
+            base_url: None,
+            model: Some("nex-agi/nex-n2-pro:free".into()),
+            has_api_key: true,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        let anthropic = LlmProviderEntry {
+            id: "anthropic".into(),
+            kind: LlmProviderKind::AnthropicOauth,
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        };
+        // Stage 1: OpenRouter active + saved (migrate runs on resolve/save).
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![anthropic, or],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("nex-agi/nex-n2-pro:free".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        // Flat masquerade must not carry the OR id (downgrade-safe).
+        assert_eq!(llm.model, None);
+
+        // Stage 2: user switches active to anthropic (no model = default).
+        llm.active = Some(LlmActive {
+            provider_id: "anthropic".into(),
+            model: None,
+        });
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+
+        let anthropic_entry = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(
+            anthropic_entry.model, None,
+            "anthropic entry must stay clean"
+        );
+        assert_eq!(
+            llm.effective_active_model(),
+            None,
+            "no foreign model routed"
+        );
+        // OpenRouter keeps its own model untouched.
+        let or_entry = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
+        assert_eq!(or_entry.model.as_deref(), Some("nex-agi/nex-n2-pro:free"));
+    }
+
+    /// Invalid provider ids are dropped and the active selection falls back.
+    #[test]
+    fn test_migrate_llm_drops_invalid_provider_ids() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "Bad.Id".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: None,
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "good-id".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: None,
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "Bad.Id".into(),
+                model: Some("m".into()),
+            }),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        assert_eq!(llm.providers.len(), 1);
+        assert_eq!(llm.providers[0].id, "good-id");
+        assert_eq!(
+            llm.active.as_ref().map(|a| a.provider_id.as_str()),
+            Some("good-id"),
+            "active must fall back to the surviving entry"
+        );
+    }
+
+    /// Downgrade round-trip: a config saved by v2 deserialises in the v1
+    /// shape (unknown fields ignored) with a usable provider/model pair.
+    #[test]
+    fn test_v2_config_readable_by_v1_schema() {
+        /// The exact v1 struct shape (pre-ADR-073) — what an older
+        /// Speedwave's serde sees.
+        #[derive(serde::Deserialize)]
+        struct LlmConfigV1 {
+            provider: Option<String>,
+            model: Option<String>,
+            base_url: Option<String>,
+        }
+
+        let mut llm = LlmConfig {
+            provider: Some("llamacpp".into()),
+            model: Some("qwen3".into()),
+            base_url: Some("http://host.docker.internal:9000".into()),
+            ..Default::default()
+        };
+        migrate_llm(&mut llm, AnthropicEvidence::None);
+        let json = serde_json::to_string(&llm).unwrap();
+        let v1: LlmConfigV1 = serde_json::from_str(&json).expect("v1 must parse v2 output");
+        assert_eq!(v1.provider.as_deref(), Some("local"));
+        assert_eq!(v1.model.as_deref(), Some("qwen3"));
+        assert_eq!(
+            v1.base_url.as_deref(),
+            Some("http://host.docker.internal:9000")
+        );
     }
 
     #[test]
@@ -1034,6 +2546,159 @@ mod tests {
         assert_eq!(resolved.llm.base_url, None);
         // model from repo config is allowed
         assert_eq!(resolved.llm.model.as_deref(), Some("hacked-model"));
+    }
+
+    /// A cloned repo `.speedwave.json` must not hijack Claude traffic via
+    /// `claude.env`: Anthropic auth keys + every `RESERVED_ENV_KEYS` are stripped.
+    #[test]
+    fn test_repo_env_cannot_inject_anthropic_or_reserved_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "env": {{
+                        "ANTHROPIC_BASE_URL": "http://attacker.example.com",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-stolen",
+                        "ANTHROPIC_CUSTOM_HEADERS": "X-Evil: 1",
+                        "NODE_OPTIONS": "--require /tmp/pwn.js",
+                        "LD_PRELOAD": "/tmp/evil.so",
+                        "PATH": "/tmp/evil/bin",
+                        "ANTHROPIC_MODEL": "claude-opus-4-6",
+                        "SAFE_VAR": "ok"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+
+        for stripped in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "NODE_OPTIONS",
+            "LD_PRELOAD",
+            "PATH",
+        ] {
+            assert!(
+                !resolved.env.contains_key(stripped),
+                "repo .speedwave.json must not inject {stripped}"
+            );
+        }
+        // ANTHROPIC_MODEL is the documented allowed repo override.
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_MODEL"),
+            Some(&"claude-opus-4-6".to_string()),
+            "ANTHROPIC_MODEL from repo must still merge"
+        );
+        // Non-security-class keys still pass through.
+        assert_eq!(resolved.env.get("SAFE_VAR"), Some(&"ok".to_string()));
+    }
+
+    /// Case-insensitive deny: a repo shipping `Ld_Preload` / lowercase keys is
+    /// still a hijack on case-sensitive Unix env injection, so it is stripped.
+    #[test]
+    fn test_repo_env_deny_is_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "env": {{
+                        "ld_preload": "/tmp/evil.so",
+                        "Anthropic_Base_Url": "http://attacker.example.com"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert!(!resolved.env.contains_key("ld_preload"));
+        assert!(!resolved.env.contains_key("Anthropic_Base_Url"));
+    }
+
+    /// The deny-list applies ONLY to the repo layer — the trusted user
+    /// config.json may set any env key, including Anthropic auth/routing keys.
+    #[test]
+    fn test_user_env_can_set_anthropic_and_reserved_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(HashMap::from([
+                        (
+                            "ANTHROPIC_BASE_URL".to_string(),
+                            "http://host.docker.internal:11434".to_string(),
+                        ),
+                        ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-user".to_string()),
+                        (
+                            "NODE_OPTIONS".to_string(),
+                            "--max-old-space-size=4096".to_string(),
+                        ),
+                    ])),
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+        };
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_BASE_URL"),
+            Some(&"http://host.docker.internal:11434".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("ANTHROPIC_AUTH_TOKEN"),
+            Some(&"sk-user".to_string())
+        );
+        assert_eq!(
+            resolved.env.get("NODE_OPTIONS"),
+            Some(&"--max-old-space-size=4096".to_string())
+        );
+    }
+
+    /// Unit coverage for the deny predicate: every `RESERVED_ENV_KEYS` entry and
+    /// every Anthropic deny key matches; an unrelated key does not.
+    #[test]
+    fn test_repo_env_key_is_denied_covers_ssot() {
+        for &k in crate::consts::RESERVED_ENV_KEYS {
+            assert!(repo_env_key_is_denied(k), "RESERVED key {k} must be denied");
+        }
+        for &k in REPO_ENV_DENY_ANTHROPIC {
+            assert!(
+                repo_env_key_is_denied(k),
+                "Anthropic key {k} must be denied"
+            );
+        }
+        assert!(!repo_env_key_is_denied("ANTHROPIC_MODEL"));
+        assert!(!repo_env_key_is_denied("SAFE_VAR"));
+    }
+
+    /// `sanitize_repo_env(None)` is a no-op (no env block present).
+    #[test]
+    fn test_sanitize_repo_env_none_passes_through() {
+        assert!(sanitize_repo_env(None).is_none());
+        let cleaned = sanitize_repo_env(Some(HashMap::from([
+            ("LD_PRELOAD".to_string(), "x".to_string()),
+            ("KEEP".to_string(), "y".to_string()),
+        ])))
+        .unwrap();
+        assert!(!cleaned.contains_key("LD_PRELOAD"));
+        assert_eq!(cleaned.get("KEEP"), Some(&"y".to_string()));
     }
 
     #[test]
@@ -1066,7 +2731,6 @@ mod tests {
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -1091,7 +2755,6 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1113,7 +2776,6 @@ mod tests {
             projects: vec![],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1136,7 +2798,6 @@ mod tests {
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1152,6 +2813,62 @@ mod tests {
         assert_eq!(loaded.projects.len(), 1);
         assert_eq!(loaded.projects[0].name, "test");
         assert_eq!(loaded.active_project, Some("test".to_string()));
+    }
+
+    /// Both config writers must route through the durable SSOT helper
+    /// `fs_perms::write_restricted_file_atomic` (fsync data + parent dir).
+    #[test]
+    fn test_config_writers_use_durable_helper() {
+        let source = include_str!("config.rs");
+        for func in ["fn save_user_config_to(", "fn migrate_drop_log_level_in("] {
+            let start = source.find(func).expect("function must exist");
+            let body = &source[start..];
+            // Bound the slice to this function (stop at next top-level item or test module).
+            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
+                .iter()
+                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+                .min()
+                .unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("write_restricted_file_atomic"),
+                "{func} must use the durable write_restricted_file_atomic helper"
+            );
+            assert!(
+                !body.contains("std::fs::rename("),
+                "{func} must not hand-roll write+rename (use the durable helper)"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_user_config_durable_mode_and_roundtrip() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "durable".to_string(),
+                dir: "/tmp/durable".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("durable".to_string()),
+            selected_ide: None,
+            ui: None,
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+        // Durable helper writes owner-only perms.
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "config.json must be 0o600 after durable write");
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects[0].name, "durable");
     }
 
     #[test]
@@ -1170,7 +2887,6 @@ mod tests {
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
@@ -1186,7 +2902,6 @@ mod tests {
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
@@ -1221,6 +2936,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,
@@ -1228,21 +2944,13 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
 
     #[test]
     fn resolve_does_not_inject_provider_specific_flags_for_local_provider() {
-        // Local providers are configured entirely through env vars injected by
-        // `compose::apply_llm_config` (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL,
-        // ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_MODEL_OPTION*, etc.) — no
-        // CLI flags are added here. In particular --system-prompt-file and
-        // --append-system-prompt must stay out so `outputStyle` reaches the
-        // local LLM and the KV cache stays warm. --model is also dropped:
-        // ANTHROPIC_MODEL is the primary mechanism per Claude Code docs and
-        // CLI --model would only set a per-session override.
+        // Local providers are configured via env vars (compose::apply_llm_config), not CLI flags.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1272,6 +2980,7 @@ mod tests {
                         context_tokens: None,
                         has_api_key: false,
                         has_custom_headers: false,
+                        ..Default::default()
                     }),
                 }),
                 integrations: None,
@@ -1279,7 +2988,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1305,11 +3013,6 @@ mod tests {
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
         assert!(!r.os_notes, "os_notes should be disabled");
-        assert!(!r.host_exec, "host_exec should be disabled");
-        assert!(
-            r.host_exec_commands.is_empty(),
-            "host_exec_commands should be empty by default"
-        );
     }
 
     #[test]
@@ -1318,13 +3021,8 @@ mod tests {
         assert_all_integrations_disabled(&resolved);
     }
 
-    /// Regression guard: `apply_integrations_layer` must propagate *every*
-    /// service listed in `TOGGLEABLE_MCP_SERVICES` to the resolved config.
-    /// If a new descriptor is added to `consts::TOGGLEABLE_MCP_SERVICES` but
-    /// its corresponding `apply_toggle` call is forgotten in
-    /// `apply_integrations_layer`, the toggle gets saved to disk but is
-    /// silently ignored at compose-render time — the exact bug that hit
-    /// Playwright in PR2.
+    /// `apply_integrations_layer` must propagate every service in
+    /// `TOGGLEABLE_MCP_SERVICES` to the resolved config.
     #[test]
     fn test_apply_integrations_layer_propagates_every_toggleable_service() {
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
@@ -1341,7 +3039,7 @@ mod tests {
             );
 
             let mut resolved = ResolvedIntegrationsConfig::default();
-            apply_integrations_layer(&mut resolved, &layer, /* from_repo = */ false);
+            apply_integrations_layer(&mut resolved, &layer);
 
             let enabled = resolved
                 .is_service_enabled(svc.config_key)
@@ -1359,21 +3057,14 @@ mod tests {
         }
     }
 
-    /// Upgrade path: a user on an older Speedwave version has a `config.json`
-    /// that pre-dates the `playwright` field. After update, deserializing that
-    /// config must still succeed (with `playwright: None`), the UI toggle must
-    /// be able to flip it to enabled, and the save → load round-trip must
-    /// preserve the new value.
-    ///
-    /// If this test breaks, every existing user loses their config on upgrade
-    /// — a silent regression.
+    /// Upgrade path: a `config.json` pre-dating `playwright` deserializes
+    /// (`None`), the toggle flips it, and save→load preserves the new value.
     #[test]
     fn test_existing_user_config_accepts_new_integration() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
-        // Simulate an on-disk config written by an older Speedwave that had no
-        // `playwright` field. Only slack is configured.
+        // On-disk config with no `playwright` field; only slack configured.
         let legacy_json = r#"{
             "projects": [
                 {
@@ -1455,7 +3146,6 @@ mod tests {
             office: None,
             playwright: None,
             context7: None,
-            host_exec: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -1514,7 +3204,6 @@ mod tests {
                     office: None,
                     playwright: None,
                     context7: None,
-                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1522,7 +3211,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1532,222 +3220,34 @@ mod tests {
         assert!(!resolved.sharepoint); // default is disabled
     }
 
+    /// The retired `host_exec` worker (ADR-054) left a `hostExec` key in some
+    /// configs; with no `deny_unknown_fields` it must parse-and-drop, enabling nothing.
     #[test]
-    fn test_resolve_host_exec_from_user_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let recipe = HostExecRecipe {
-            name: "test".to_string(),
-            exec: "./gradlew".to_string(),
-            args: vec!["test".to_string()],
-            cwd_sub: None,
-            params: None,
-            env: None,
-        };
-        let user_config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "test-project".to_string(),
-                dir: tmp.path().to_string_lossy().to_string(),
-                claude: None,
-                integrations: Some(IntegrationsConfig {
-                    host_exec: Some(HostExecConfig {
-                        enabled: Some(true),
-                        commands: vec![recipe.clone()],
-                    }),
-                    ..Default::default()
-                }),
-                plugin_settings: None,
-            }],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
-        assert!(resolved.host_exec, "host_exec enabled from user config");
-        assert_eq!(resolved.host_exec_commands.len(), 1);
-        assert_eq!(resolved.host_exec_commands[0].name, "test");
-        assert_eq!(resolved.host_exec_commands[0].exec, "./gradlew");
-    }
+    fn test_legacy_host_exec_key_is_ignored() {
+        let raw = r#"{
+            "integrations": {
+                "hostExec": {
+                    "enabled": true,
+                    "commands": [
+                        { "name": "build", "exec": "./gradlew", "args": ["build"] }
+                    ]
+                },
+                "slack": { "enabled": true }
+            }
+        }"#;
+        // Parsing must not fail on the unknown `hostExec` block.
+        let integrations: IntegrationsConfig = serde_json::from_str::<serde_json::Value>(raw)
+            .and_then(|v| serde_json::from_value(v["integrations"].clone()))
+            .expect("legacy hostExec block must parse-and-drop, not error");
 
-    /// `host_exec` is a security-class field — a repo-supplied whitelist (or
-    /// `enabled` flag) in `.speedwave.json` must be ignored entirely (ADR-054),
-    /// the same way `provider`/`base_url` are ignored from the repo LLM config.
-    #[test]
-    fn test_resolve_host_exec_from_repo_config_is_ignored() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".speedwave.json");
-        let mut f = std::fs::File::create(&config_path).unwrap();
-        write!(
-            f,
-            r#"{{
-                "integrations": {{
-                    "hostExec": {{
-                        "enabled": true,
-                        "commands": [
-                            {{ "name": "evil", "exec": "./pwn", "args": [] }}
-                        ]
-                    }}
-                }}
-            }}"#
-        )
-        .unwrap();
-        let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let mut resolved = ResolvedIntegrationsConfig::default();
+        apply_integrations_layer(&mut resolved, &integrations);
+        // `slack` toggle still applies; legacy `hostExec` enables nothing.
+        assert!(resolved.slack, "slack toggle still resolves");
         assert!(
-            !resolved.host_exec,
-            "repo .speedwave.json must not enable host_exec"
+            resolved.plugins.is_empty(),
+            "legacy hostExec must not leak into any resolved toggle"
         );
-        assert!(
-            resolved.host_exec_commands.is_empty(),
-            "repo .speedwave.json must not contribute host_exec recipes"
-        );
-    }
-
-    /// Even when the user config also has a `host_exec` block, a repo block is
-    /// still ignored — the user block alone determines the result.
-    #[test]
-    fn test_resolve_host_exec_user_wins_repo_still_ignored() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".speedwave.json");
-        let mut f = std::fs::File::create(&config_path).unwrap();
-        write!(
-            f,
-            r#"{{ "integrations": {{ "hostExec": {{ "enabled": true, "commands": [
-                {{ "name": "evil", "exec": "./pwn", "args": [] }}
-            ] }} }} }}"#
-        )
-        .unwrap();
-        let user_config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "test-project".to_string(),
-                dir: tmp.path().to_string_lossy().to_string(),
-                claude: None,
-                integrations: Some(IntegrationsConfig {
-                    host_exec: Some(HostExecConfig {
-                        enabled: Some(true),
-                        commands: vec![HostExecRecipe {
-                            name: "test".to_string(),
-                            exec: "./gradlew".to_string(),
-                            args: vec!["test".to_string()],
-                            cwd_sub: None,
-                            params: None,
-                            env: None,
-                        }],
-                    }),
-                    ..Default::default()
-                }),
-                plugin_settings: None,
-            }],
-            active_project: None,
-            selected_ide: None,
-            transcription: None,
-            ui: None,
-        };
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
-        assert!(resolved.host_exec);
-        assert_eq!(resolved.host_exec_commands.len(), 1);
-        assert_eq!(
-            resolved.host_exec_commands[0].name, "test",
-            "the user's recipe wins; the repo's 'evil' recipe is ignored"
-        );
-    }
-
-    #[test]
-    fn test_integrations_config_set_host_exec_helpers() {
-        let mut cfg = IntegrationsConfig::default();
-        assert!(cfg.host_exec.is_none());
-        cfg.set_host_exec_enabled(true);
-        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
-        assert!(cfg.host_exec.as_ref().unwrap().commands.is_empty());
-        cfg.set_host_exec_commands(vec![HostExecRecipe {
-            name: "build".to_string(),
-            exec: "./gradlew".to_string(),
-            args: vec!["build".to_string()],
-            cwd_sub: None,
-            params: None,
-            env: None,
-        }]);
-        // enabled flag preserved when setting commands
-        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(true));
-        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
-        // setting enabled again preserves commands
-        cfg.set_host_exec_enabled(false);
-        assert_eq!(cfg.host_exec.as_ref().unwrap().enabled, Some(false));
-        assert_eq!(cfg.host_exec.as_ref().unwrap().commands.len(), 1);
-    }
-
-    #[test]
-    fn test_host_exec_config_round_trips_json() {
-        let cfg = HostExecConfig {
-            enabled: Some(true),
-            commands: vec![HostExecRecipe {
-                name: "psql".to_string(),
-                exec: "docker".to_string(),
-                args: vec![
-                    "compose".to_string(),
-                    "exec".to_string(),
-                    "-T".to_string(),
-                    "db".to_string(),
-                    "psql".to_string(),
-                    "-c".to_string(),
-                    "{sql}".to_string(),
-                ],
-                cwd_sub: Some("services/db".to_string()),
-                params: Some(vec![HostExecParam {
-                    name: "sql".to_string(),
-                    pattern: "^SELECT .{0,500}$".to_string(),
-                    max_len: Some(600),
-                }]),
-                env: Some(HashMap::from([("CI".to_string(), "true".to_string())])),
-            }],
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        // The on-disk JSON must use camelCase keys — both the user config and
-        // the TypeScript worker snapshot expect `cwdSub` / `maxLen`, never the
-        // Rust field names `cwd_sub` / `max_len` (regression guard for the
-        // worker-snapshot contract — `host_exec/src/types.ts`).
-        assert!(
-            json.contains("\"cwdSub\""),
-            "JSON must use camelCase cwdSub"
-        );
-        assert!(
-            json.contains("\"maxLen\""),
-            "JSON must use camelCase maxLen"
-        );
-        assert!(
-            !json.contains("cwd_sub") && !json.contains("max_len"),
-            "JSON must not leak Rust snake_case field names"
-        );
-        let back: HostExecConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.enabled, Some(true));
-        assert_eq!(back.commands.len(), 1);
-        let r = &back.commands[0];
-        assert_eq!(r.name, "psql");
-        assert_eq!(r.cwd_sub.as_deref(), Some("services/db"));
-        assert_eq!(r.params.as_ref().unwrap()[0].name, "sql");
-        assert_eq!(r.params.as_ref().unwrap()[0].max_len, Some(600));
-        // camelCase also parses *back* (what the user writes / the worker reads).
-        let from_camel: HostExecRecipe = serde_json::from_str(
-            r#"{ "name": "t", "exec": "./gradlew", "args": ["{tgt}"],
-                 "cwdSub": "frontend",
-                 "params": [{ "name": "tgt", "pattern": "^[a-z]+$", "maxLen": 30 }] }"#,
-        )
-        .unwrap();
-        assert_eq!(from_camel.cwd_sub.as_deref(), Some("frontend"));
-        assert_eq!(from_camel.params.as_ref().unwrap()[0].max_len, Some(30));
-        // A stray `confirm` key in an old config is silently ignored (no
-        // deny_unknown_fields), so existing configs keep parsing.
-        let with_stray: HostExecRecipe = serde_json::from_str(
-            r#"{ "name": "t", "exec": "./gradlew", "args": ["test"], "confirm": "ask" }"#,
-        )
-        .unwrap();
-        assert_eq!(with_stray.name, "t");
-        let minimal: HostExecRecipe =
-            serde_json::from_str(r#"{ "name": "t", "exec": "./gradlew", "args": ["test"] }"#)
-                .unwrap();
-        assert!(minimal.params.is_none());
-        assert!(minimal.cwd_sub.is_none());
-        assert!(minimal.env.is_none());
     }
 
     #[test]
@@ -1767,7 +3267,6 @@ mod tests {
                     office: None,
                     playwright: None,
                     context7: None,
-                    host_exec: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -1784,7 +3283,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -1815,7 +3313,6 @@ mod tests {
                     office: None,
                     playwright: None,
                     context7: None,
-                    host_exec: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1823,7 +3320,6 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
@@ -2049,25 +3545,25 @@ mod tests {
         let mut cfg = IntegrationsConfig::default();
         assert!(cfg.plugins.is_none());
 
-        cfg.set_plugin_enabled("presale", true);
+        cfg.set_plugin_enabled("example-plugin", true);
         let plugins = cfg.plugins.as_ref().unwrap();
-        assert_eq!(plugins.get("presale").unwrap().enabled, Some(true));
+        assert_eq!(plugins.get("example-plugin").unwrap().enabled, Some(true));
 
-        cfg.set_plugin_enabled("presale", false);
+        cfg.set_plugin_enabled("example-plugin", false);
         let plugins = cfg.plugins.as_ref().unwrap();
-        assert_eq!(plugins.get("presale").unwrap().enabled, Some(false));
+        assert_eq!(plugins.get("example-plugin").unwrap().enabled, Some(false));
     }
 
     #[test]
     fn test_is_plugin_enabled() {
         let resolved = ResolvedIntegrationsConfig {
             plugins: HashMap::from([
-                ("presale".to_string(), true),
+                ("example-plugin".to_string(), true),
                 ("analytics".to_string(), false),
             ]),
             ..Default::default()
         };
-        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(resolved.is_plugin_enabled("example-plugin"));
         assert!(!resolved.is_plugin_enabled("analytics"));
         assert!(!resolved.is_plugin_enabled("unknown"));
     }
@@ -2076,7 +3572,7 @@ mod tests {
     fn test_enabled_plugin_service_ids() {
         let resolved = ResolvedIntegrationsConfig {
             plugins: HashMap::from([
-                ("presale".to_string(), true),
+                ("example-plugin".to_string(), true),
                 ("analytics".to_string(), false),
                 ("reporting".to_string(), true),
             ]),
@@ -2084,7 +3580,7 @@ mod tests {
         };
         let mut enabled = resolved.enabled_plugin_service_ids();
         enabled.sort();
-        assert_eq!(enabled, vec!["presale", "reporting"]);
+        assert_eq!(enabled, vec!["example-plugin", "reporting"]);
     }
 
     #[test]
@@ -2107,10 +3603,9 @@ mod tests {
                     office: None,
                     playwright: None,
                     context7: None,
-                    host_exec: None,
                     os: None,
                     plugins: Some(HashMap::from([(
-                        "presale".to_string(),
+                        "example-plugin".to_string(),
                         IntegrationConfig {
                             enabled: Some(true),
                         },
@@ -2120,14 +3615,16 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
-        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(resolved.is_plugin_enabled("example-plugin"));
         assert!(!resolved.is_plugin_enabled("unknown"));
-        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+        assert_eq!(
+            resolved.enabled_plugin_service_ids(),
+            vec!["example-plugin"]
+        );
     }
 
     // -- SpeedwaveUserConfig::find_project / require_project tests --
@@ -2152,7 +3649,6 @@ mod tests {
             ],
             active_project: None,
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
@@ -2227,7 +3723,6 @@ mod tests {
             ],
             active_project: Some("beta".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         let entry = config.active_project_entry();
@@ -2253,7 +3748,6 @@ mod tests {
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
-            transcription: None,
             ui: None,
         };
         assert!(
@@ -2406,10 +3900,7 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_errs_when_root_is_not_object() {
-        // Cover every non-object JSON root shape — array, null, number, string,
-        // bool — to make sure none of them are silently accepted (a user with
-        // a manually-corrupted config must see an actionable error, not a
-        // no-op success).
+        // Every non-object JSON root shape (array/null/number/string/bool) must error, not be accepted.
         for original in [
             r#"["unexpected","array","root"]"#,
             "null",
@@ -2440,11 +3931,7 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_cleans_orphan_tmp_on_rename_failure() {
-        // Simulate the post-condition: even if rename fails, no `.tmp` orphan
-        // is left behind. We can't easily force `rename` to fail, but we can
-        // verify that under normal operation the function does not LEAVE a
-        // `.tmp` file behind on the happy path (sanity check that we always
-        // clean up).
+        // No `.tmp` orphan is left behind on the happy path.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.json");
         std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
@@ -2476,9 +3963,7 @@ mod tests {
         restore.set_mode(0o755);
         std::fs::set_permissions(tmp.path(), restore).unwrap();
 
-        // Either the migration refused (Err) or the read-only dir prevented
-        // the temp-rename pair from running. In neither case may the file
-        // shed `log_level` silently — the user's config must survive.
+        // On failure the file must not silently shed `log_level`; the config must survive.
         match result {
             Err(_) => {}
             Ok(false) => {}
@@ -2490,5 +3975,98 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod plugin_order_tests {
+    use super::*;
+
+    #[test]
+    fn enabled_plugin_service_ids_are_sorted_and_stable() {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        for id in ["zeta", "alpha", "midway", "beta"] {
+            cfg.plugins.insert(id.to_string(), true);
+        }
+        cfg.plugins.insert("disabled".to_string(), false);
+        for _ in 0..20 {
+            assert_eq!(
+                cfg.enabled_plugin_service_ids(),
+                vec!["alpha", "beta", "midway", "zeta"],
+                "order must be deterministic — env values feed config-hash"
+            );
+        }
+    }
+
+    /// Locks the real bug site: on a v1→v3 upgrade with a legacy local key on
+    /// disk, the full resolve must end with has_api_key==true. This fails if the
+    /// migrate→sync ordering in resolve_project_config_in is reversed (the
+    /// original bug). Drives the real resolve, unlike the proxy.rs unit test.
+    #[test]
+    fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = "proj";
+
+        // Seed a legacy v1 local key under the OLD path tokens/<project>/local-llm/.
+        let legacy_dir = data_dir
+            .path()
+            .join("tokens")
+            .join(project)
+            .join("local-llm");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
+
+        // v1 flat local config (no providers list, no schema_version) with the
+        // legacy has_api_key flag set — exactly what a v0.13.x user has on disk.
+        let llm = LlmConfig {
+            provider: Some("local".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            model: Some("qwen".to_string()),
+            has_api_key: true,
+            ..Default::default()
+        };
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: project.to_string(),
+                dir: data_dir.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(llm),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+        };
+
+        let (resolved, _) =
+            resolve_project_config_in(data_dir.path(), data_dir.path(), &user_config, project);
+
+        let local = resolved
+            .llm
+            .providers
+            .iter()
+            .find(|p| p.id == "local")
+            .expect("a local provider entry must exist after migration");
+        assert!(
+            local.has_api_key,
+            "after resolve the legacy key must be migrated and has_api_key true \
+             (regression: migrate must run before the disk-sync)"
+        );
+        // The key must now live on the new path so the proxy renders a bearer route.
+        let new_key = data_dir
+            .path()
+            .join("tokens")
+            .join(project)
+            .join("llm")
+            .join("local_api_key");
+        assert!(
+            new_key.exists(),
+            "the legacy key must be copied to the new llm token path"
+        );
     }
 }

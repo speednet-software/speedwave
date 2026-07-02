@@ -1,9 +1,5 @@
 #!/usr/bin/env bats
-# Static checks on desktop/src-tauri/entitlements/reminders.plist — prevents
-# regressions where the Reminders entitlement file is missing or malformed.
-# The separate reminders.plist (distinct from calendars.plist) is required because
-# com.apple.security.personal-information.reminders and .calendars are separate
-# Hardened Runtime Resource Access entitlements per ADR-037.
+# Static checks on desktop/src-tauri/entitlements/reminders.plist per ADR-037.
 
 PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/reminders.plist"
 

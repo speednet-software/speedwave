@@ -6,12 +6,9 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 /**
  * Chat header strip — terminal-minimal layout.
  *
- * Layout (left → right):
- * - Hamburger button (⌘B) opens the conversations drawer.
- * - Brain button toggles the memory panel.
- * - Plus button (⌘N) starts a new conversation.
- * - Title (`view-title` font) — the active conversation's name.
- * - Right cluster: monogram-prefixed project pill opens the project switcher.
+ * Full mode shows the conversation controls (history / memory / new) plus the
+ * project pill. `compact` hides the conversation controls so blocked chat
+ * states (no-provider, auth-required) still expose the project switcher.
  */
 @Component({
   selector: 'app-chat-header',
@@ -23,42 +20,44 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
       data-testid="chat-header"
       class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
     >
-      <button
-        type="button"
-        data-testid="chat-header-history"
-        class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        appTooltip="Conversations"
-        tooltipKbd="⌘B"
-        aria-label="Toggle conversations sidebar"
-        [attr.aria-pressed]="historyOpen()"
-        (click)="toggleHistory.emit()"
-      >
-        <app-icon name="menu-alt" class="h-4 w-4" />
-      </button>
+      @if (!compact()) {
+        <button
+          type="button"
+          data-testid="chat-header-history"
+          class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          appTooltip="Conversations"
+          tooltipKbd="⌘B"
+          aria-label="Toggle conversations sidebar"
+          [attr.aria-pressed]="historyOpen()"
+          (click)="toggleHistory.emit()"
+        >
+          <app-icon name="menu-alt" class="h-4 w-4" />
+        </button>
 
-      <button
-        type="button"
-        data-testid="chat-header-memory"
-        class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        appTooltip="Memory"
-        aria-label="Toggle project memory panel"
-        [attr.aria-pressed]="memoryOpen()"
-        (click)="toggleMemory.emit()"
-      >
-        <app-icon name="brain" class="h-4 w-4" />
-      </button>
+        <button
+          type="button"
+          data-testid="chat-header-memory"
+          class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          appTooltip="Memory"
+          aria-label="Toggle project memory panel"
+          [attr.aria-pressed]="memoryOpen()"
+          (click)="toggleMemory.emit()"
+        >
+          <app-icon name="brain" class="h-4 w-4" />
+        </button>
 
-      <button
-        type="button"
-        data-testid="chat-header-new"
-        class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        appTooltip="New conversation"
-        tooltipKbd="⌘N"
-        aria-label="New conversation"
-        (click)="newConversation.emit()"
-      >
-        <app-icon name="plus" class="h-4 w-4" />
-      </button>
+        <button
+          type="button"
+          data-testid="chat-header-new"
+          class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          appTooltip="New conversation"
+          tooltipKbd="⌘N"
+          aria-label="New conversation"
+          (click)="newConversation.emit()"
+        >
+          <app-icon name="plus" class="h-4 w-4" />
+        </button>
+      }
 
       <h1
         data-testid="chat-header-title"
@@ -80,6 +79,8 @@ export class ChatHeaderComponent {
   readonly memoryOpen = input<boolean>(false);
   /** Whether the conversations drawer is currently open (drives aria-pressed). */
   readonly historyOpen = input<boolean>(false);
+  /** Hide conversation controls, keep the project pill (blocked chat states). */
+  readonly compact = input<boolean>(false);
 
   /** Toggle the memory panel drawer. */
   readonly toggleMemory = output<void>();

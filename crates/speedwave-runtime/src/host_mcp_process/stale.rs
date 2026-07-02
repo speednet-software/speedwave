@@ -1,10 +1,5 @@
 //! Stale-process detection helpers shared by every host MCP worker
 //! manager.
-//!
-//! The generic [`super::process::HostMcpProcess::spawn_with_spec`]
-//! reads the PID from `lock.json` and gates the kill behind
-//! `is_node_process` so a recycled PID for a non-node process is not
-//! touched.
 
 #[cfg(unix)]
 use std::process::Command;
@@ -26,6 +21,7 @@ pub fn is_node_process(pid: u32) -> bool {
     }
 }
 
+/// `true` if `pid` is a `node` process (Windows; matches the image name).
 #[cfg(windows)]
 pub fn is_node_process(pid: u32) -> bool {
     let output = crate::binary::system_command("tasklist")
@@ -54,6 +50,8 @@ pub fn kill_process(pid: u32) {
         .status();
 }
 
+/// Terminate a process by PID (`taskkill /F` on Windows). Errors are ignored —
+/// the process may already be gone.
 #[cfg(windows)]
 pub fn kill_process(pid: u32) {
     let _ = crate::binary::system_command("taskkill")

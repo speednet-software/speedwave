@@ -35,7 +35,7 @@ fn detect_platform() -> Option<String> {
     // system_command applies CREATE_NO_WINDOW on Windows so this PowerShell
     // probe (runs on every render_compose → add/switch project) does not flash
     // a console window over the Desktop UI.
-    let mut child = crate::binary::system_command("powershell")
+    let mut child = crate::binary::powershell_command()
         .args([
             "-NoProfile",
             "-NonInteractive",

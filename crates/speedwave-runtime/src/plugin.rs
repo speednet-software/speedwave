@@ -1,3 +1,5 @@
+//! Plugin manifest schema, validation, and install/remove lifecycle.
+
 use crate::compose::container_user;
 use crate::consts;
 use crate::signing;
@@ -15,8 +17,12 @@ pub fn is_valid_slug(slug: &str) -> bool {
     validate_slug(slug).is_ok()
 }
 
+/// Token-readiness verdict for a plugin. Test-only: Desktop computes
+/// readiness with `blocks_plugin_readiness` directly (`plugin_cmd.rs`); the
+/// runtime crate only models the verdict in its own token-layout tests.
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
-pub enum TokenStatus {
+enum TokenStatus {
     /// All required secret fields have token files.
     Configured,
     /// Some or all required secret fields are missing token files.
@@ -33,12 +39,18 @@ impl Drop for TmpDirGuard {
     }
 }
 
+/// One credential field a plugin manifest declares for its config form.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AuthFieldDef {
+    /// Token filename the value is stored under.
     pub key: String,
+    /// Field label shown in the UI.
     pub label: String,
+    /// Input type (`text` | `password` | `textarea`).
     pub field_type: String,
+    /// Placeholder text for the input.
     pub placeholder: String,
+    /// Whether the value is a secret (stored as a token file).
     pub is_secret: bool,
     /// Whether the user must provide a value before the plugin can run.
     /// Defaults to `true` so manifests that omit the field keep the
@@ -55,6 +67,11 @@ pub struct AuthFieldDef {
     /// Desktop form (HTML `pattern` attribute) and at save time on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<AuthFieldValidation>,
+    /// Marks a field as an OAuth credential: filled by the host-driven flow and
+    /// saved off-mount under `~/.speedwave/oauth/<project>/<slug>.json`, never
+    /// into `/tokens`. Omitted manifests deserialize to `false`.
+    #[serde(default)]
+    pub oauth_flow: bool,
 }
 
 /// Allowed `auth_fields[].field_type` values. Public plugin contract — mirrored
@@ -137,23 +154,116 @@ pub fn blocks_plugin_readiness(field: &AuthFieldDef) -> bool {
     field.is_secret && field.required
 }
 
+/// Mount mode for a plugin's `/tokens` directory.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum TokenMount {
+    /// Read-only mount (the only mode allowed for plugins).
     #[default]
     ReadOnly,
+    /// Read-write mount (built-in services only).
     ReadWrite {
+        /// Reason the writable mount is required.
         justification: String,
     },
 }
 
+/// The *initial* grant a manifest declares, gated by `SUPPORTED_OAUTH_GRANT_TYPES`.
+/// Distinct from the on-disk *refresh* grant (`oauth-state.ts::GrantType`):
+/// authorization_code/device_code persist as `refresh_token`. See ADR-069.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthGrantType {
+    /// Browser redirect + PKCE loopback (RFC 6749 §4.1, RFC 8252).
+    AuthorizationCode,
+    /// Device authorization grant (RFC 8628).
+    DeviceCode,
+    /// Machine-to-machine grant (RFC 6749 §4.4) — no human identity.
+    ClientCredentials,
+}
+
+impl OAuthGrantType {
+    /// Wire string, matching `serde(rename_all = "snake_case")`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OAuthGrantType::AuthorizationCode => "authorization_code",
+            OAuthGrantType::DeviceCode => "device_code",
+            OAuthGrantType::ClientCredentials => "client_credentials",
+        }
+    }
+}
+
+/// How client credentials reach the token endpoint: HTTP Basic header or POST
+/// body params. Defaults to Basic (RFC 6749 §2.3.1).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthAuthStyle {
+    /// HTTP Basic auth header (RFC 6749 §2.3.1 default).
+    #[default]
+    Basic,
+    /// `client_id`/`client_secret` as POST body params.
+    Body,
+}
+
+/// OAuth2 declaration in `plugin.json`. Drives the host-side `generic` provider
+/// and the `start_plugin_oauth` flow. See ADR-069.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PluginOAuthSpec {
+    /// Initial grant the host performs (gated by `SUPPORTED_OAUTH_GRANT_TYPES`).
+    pub grant_type: OAuthGrantType,
+    /// Static token endpoint. Mutually exclusive with `base_url_field` (a
+    /// self-hosted IdP derives it per-instance — see `token_suffix`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    /// Static authorization endpoint (`authorization_code`). Mutually exclusive
+    /// with `base_url_field`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
+    /// Device-authorization endpoint (required for `device_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_url: Option<String>,
+    /// `auth_fields[].key` carrying a per-instance base URL (self-hosted IdP).
+    /// The endpoints are this value + `authorize_suffix`/`token_suffix`,
+    /// resolved + SSRF-validated at authorize time, not install. See ADR-069.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url_field: Option<String>,
+    /// Path appended to the resolved base for the authorize endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorize_suffix: Option<String>,
+    /// Path appended to the resolved base for the token endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_suffix: Option<String>,
+    /// OAuth scopes requested at authorize/token time.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// How client credentials reach the token endpoint.
+    #[serde(default)]
+    pub auth_style: OAuthAuthStyle,
+    /// `auth_fields[].key` carrying the client id.
+    pub client_id_field: String,
+    /// `auth_fields[].key` carrying the client secret (optional for public
+    /// `authorization_code` clients using PKCE only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_field: Option<String>,
+    /// Fixed loopback redirect port for IdPs that require a registered URI;
+    /// `None` picks an ephemeral port (RFC 8252 §7.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
+}
+
+/// Parsed `plugin.json` manifest (contract surface — see CLAUDE.md).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginManifest {
+    /// Display name.
     pub name: String,
+    /// Service id for MCP plugins; `None` for resource-only plugins.
     #[serde(default)]
     pub service_id: Option<String>,
+    /// Slug (`^[a-z][a-z0-9-]{0,63}$`).
     pub slug: String,
+    /// Plugin version string.
     pub version: String,
+    /// One-line description / tagline.
     pub description: String,
     /// Optional long-form Markdown shown on the plugin's Dashboard tab in
     /// Desktop — setup/usage guidance (how to obtain a token, post-install
@@ -169,22 +279,31 @@ pub struct PluginManifest {
     /// include it.
     #[serde(default, skip_serializing)]
     pub port: Option<u16>,
+    /// Pre-built image tag, if the plugin ships one.
     #[serde(default)]
     pub image_tag: Option<String>,
+    /// Claude-resources directories shipped by the plugin.
     #[serde(default)]
     pub resources: Vec<String>,
+    /// `/tokens` mount mode (plugins must be read-only).
     #[serde(default)]
     pub token_mount: TokenMount,
+    /// Credential fields shown in the config form.
     #[serde(default)]
     pub auth_fields: Vec<AuthFieldDef>,
+    /// JSON Schema for the plugin's settings form.
     #[serde(default)]
     pub settings_schema: Option<serde_json::Value>,
+    /// Speedwave version compatibility range.
     #[serde(default)]
     pub speedwave_compat: Option<String>,
+    /// Extra env vars injected into the worker (reserved keys rejected).
     #[serde(default)]
     pub extra_env: Option<HashMap<String, String>>,
+    /// Memory limit override (capped by the plugin envelope).
     #[serde(default)]
     pub mem_limit: Option<String>,
+    /// CPU limit override (capped by the plugin envelope).
     #[serde(default)]
     pub cpu_limit: Option<String>,
     /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
@@ -197,6 +316,10 @@ pub struct PluginManifest {
     /// token via env vars named here. See ADR-063.
     #[serde(default)]
     pub host_bridge: Option<HostBridgeManifest>,
+    /// Optional OAuth2 declaration. Drives host-side authorization + refresh
+    /// via the `oauth` worker; secrets stay off-mount. See ADR-069.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<PluginOAuthSpec>,
 }
 
 /// Host-bridge declaration in `plugin.json`. Speedwave Desktop reads
@@ -239,23 +362,35 @@ pub struct HostBridgeManifest {
 #[serde(tag = "scheme", rename_all = "snake_case")]
 pub enum HostBridgeRoleAuth {
     /// HTTP header — clients that can set arbitrary headers on upgrade.
-    Header { name: String },
+    Header {
+        /// Header name carrying the token.
+        name: String,
+    },
     /// `?<name>=<token>` — required for browser-based clients.
-    QueryParam { name: String },
+    QueryParam {
+        /// Query parameter name carrying the token.
+        name: String,
+    },
 }
 
+/// CSRF / Origin policy for a host bridge.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBridgeOriginPolicy {
+    /// Reject any upgrade carrying an `Origin` header.
     #[default]
     RejectIfPresent,
+    /// Accept an `Origin` only when auth is via query param.
     AcceptIfAuthIsQueryParam,
 }
 
+/// What to do when a new bridge collides with an existing registration.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBridgeCollisionPolicy {
+    /// Reject the new registration.
     Reject,
+    /// Evict the older registration.
     #[default]
     EvictOlder,
 }
@@ -269,8 +404,11 @@ pub enum HostBridgeCollisionPolicy {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginInstallProgress {
+    /// Current install phase (see [`ALL_PLUGIN_INSTALL_PHASES`]).
     pub phase: String,
+    /// Human-readable progress message.
     pub message: String,
+    /// Sanitized error message if the phase failed.
     pub error: Option<String>,
 }
 
@@ -280,7 +418,9 @@ pub struct PluginInstallProgress {
 /// deferred to the next launch (`.image_pending` marker remains).
 #[derive(Debug, Clone)]
 pub enum InstallOutcome {
+    /// Fully installed and image built.
     Installed(PluginManifest),
+    /// Installed; image build deferred to the next launch.
     InstalledPendingBuild(PluginManifest),
 }
 
@@ -304,8 +444,11 @@ pub const ALL_PLUGIN_INSTALL_PHASES: &[&str] = &[
 /// signature verification, extraction, or any side-effect.
 #[derive(Serialize, Debug, Clone)]
 pub struct PluginManifestSummary {
+    /// Plugin slug.
     pub slug: String,
+    /// Display name.
     pub name: String,
+    /// Whether the plugin declares a `service_id` (i.e. is an MCP plugin).
     pub has_service_id: bool,
 }
 
@@ -315,16 +458,7 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Returns the base directory for mutable per-plugin state — by default
-/// `~/.speedwave/plugin-state/`. Kept *outside* the signed plugin
-/// directory: markers like `image_pending` (telling the next launch to
-/// retry an image build) used to live inside the plugin tree, but writing
-/// into a tree that we then sign and re-verify is contradictory — any
-/// post-install marker invalidates the digest.
-///
-/// `plugins_dir` ends in `plugins`; we replace that final segment with
-/// `plugin-state` so unit tests pointing `plugins_dir` at a temp dir keep
-/// their state under the same temp root instead of leaking into the user's
-/// real `~/.speedwave/`.
+/// `~/.speedwave/plugin-state/`.
 fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
     plugins_dir
         .parent()
@@ -349,19 +483,56 @@ pub fn plugin_state_dir(slug: &str) -> PathBuf {
     }
 }
 
+/// Filename of a plugin's persisted host-bridge auth token under
+/// `plugin-state/<slug>/`. SSOT: Desktop's `HostBridge` writes it, the CLI
+/// compose builder reads it back. See ADR-063 and ADR-074.
+pub const BRIDGE_TOKEN_FILENAME: &str = "bridge-token";
+
+/// Read a plugin's persisted host-bridge token from
+/// `plugin-state/<slug>/bridge-token`. Returns the trimmed UUID, or `None`
+/// if absent/empty/non-UUID — no malformed value reaches compose (ADR-074).
+pub(crate) fn read_persistent_bridge_token_from(plugins_dir: &Path, slug: &str) -> Option<String> {
+    read_bridge_token_at(&plugin_state_dir_for(plugins_dir, slug).join(BRIDGE_TOKEN_FILENAME))
+}
+
+fn read_bridge_token_at(path: &Path) -> Option<String> {
+    // Reject symlinks (`read_to_string` follows them).
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        log::warn!("bridge token at {} is a symlink; ignoring", path.display());
+        return None;
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Absent file is the expected "Desktop has not minted it yet" path.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // Anything else is unexpected — leave a breadcrumb, don't degrade silently.
+        Err(e) => {
+            log::warn!("bridge token unreadable at {}: {e}", path.display());
+            return None;
+        }
+    };
+    let token = raw.trim();
+    if token.is_empty() {
+        // Present-but-empty is anomalous: the writer mints a UUID or nothing.
+        log::warn!("bridge token at {} is empty; ignoring", path.display());
+        return None;
+    }
+    if uuid::Uuid::parse_str(token).is_err() {
+        log::warn!("bridge token at {} is not a UUID; ignoring", path.display());
+        return None;
+    }
+    Some(token.to_string())
+}
+
 fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
     plugin_state_dir_for(plugins_dir, slug).join("image_pending")
 }
 
 /// Returns true if the plugin has a pending image build, looking in both
-/// the new state directory and the legacy in-tree location. Legacy-only
-/// markers are still observed so plugins installed before this change
-/// keep building on next launch. The first fail-closed load
-/// (`audit_all` / `list_verified_*`, both via `verify_one_plugin_dir`)
-/// migrates the in-tree marker into `plugin-state/` via
-/// `migrate_legacy_image_pending`, after which only the new location ever
-/// has the marker. The tolerant `list_for_ui` path does *not* migrate —
-/// it must not mutate a tampered tree.
+/// the new state directory and the legacy in-tree location.
 fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
     image_pending_marker_for(plugins_dir, slug).exists()
         || plugin_dir.join(".image_pending").exists()
@@ -384,15 +555,62 @@ fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
 }
 
+/// Marker under `plugin-state/<slug>/` holding the previously-built image tag
+/// in use while a failed content-addressed rebuild is pending retry (ADR-072).
+const IMAGE_REBUILD_PENDING_MARKER: &str = "image_rebuild_pending";
+
+fn image_rebuild_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
+    plugin_state_dir_for(plugins_dir, slug).join(IMAGE_REBUILD_PENDING_MARKER)
+}
+
+/// Charset gate for tags read back from plugin-state before they reach the
+/// compose `image:` field — blocks YAML injection via a tampered marker.
+fn is_safe_image_ref(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 256
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+}
+
+/// Reads the recorded fallback tag; `None` when absent, a symlink, or unsafe.
+fn read_image_fallback_tag_for(plugins_dir: &Path, slug: &str) -> Option<String> {
+    let path = image_rebuild_pending_marker_for(plugins_dir, slug);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        log::warn!("plugin '{slug}': rebuild-pending marker is a symlink; ignoring");
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let tag = raw.trim();
+    if !is_safe_image_ref(tag) {
+        log::warn!("plugin '{slug}': rebuild-pending marker holds an invalid image ref; ignoring");
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+pub(crate) fn write_image_fallback_tag_for(
+    plugins_dir: &Path,
+    slug: &str,
+    tag: &str,
+) -> anyhow::Result<()> {
+    let dir = plugin_state_dir_for(plugins_dir, slug);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(IMAGE_REBUILD_PENDING_MARKER), tag)?;
+    Ok(())
+}
+
+/// Best-effort clear — after a successful rebuild, or when the
+/// content-addressed image turns out to be present after all.
+fn clear_image_rebuild_pending_for(plugins_dir: &Path, slug: &str) {
+    let _ = std::fs::remove_file(image_rebuild_pending_marker_for(plugins_dir, slug));
+}
+
 /// Moves a legacy marker into the plugin-state dir. Returns `true` only
-/// on a clean relocation. Tries the cheap same-FS `rename` first (which
-/// only re-points the dirent — safe even for a hardlink). On cross-FS
-/// (`rename` fails, e.g. `~/.speedwave/` on a separate volume): Unix
-/// falls back to `write(target) + unlink(legacy)` (hardlinks were ruled
-/// out by the `nlink` check before this is reached); Windows refuses the
-/// fallback entirely because `std::fs::Metadata` exposes no link count,
-/// so an NTFS hardlink can't be excluded. Whenever this returns `false`
-/// the legacy file is still in the tree and audit fails on the next load.
+/// on a clean relocation.
 fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
     if std::fs::rename(legacy, target).is_ok() {
         return true;
@@ -426,22 +644,9 @@ fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
     }
 }
 
-/// Migrates the legacy in-tree `.image_pending` marker out of the
-/// signed plugin tree before the digest is computed. Without this, every
-/// MCP plugin installed under an older Speedwave release fails signature
-/// verification on first launch under a runtime-invariant build — the
-/// in-tree marker was never part of the signed tree, so its presence
-/// changes the digest. Idempotent; missing marker is a no-op.
-///
-/// Only a *root-level, regular-file* `.image_pending` is migrated — a
-/// symlink (or a hardlink, on Unix where we can detect it) is left in
-/// place so the verifier fails loudly rather than us silently relocating
-/// attacker-planted content. Whenever the marker cannot be fully moved
-/// the legacy file stays put and audit fails on the next load; we only
-/// log "migrated" on a clean move.
-///
-/// Run BEFORE every load-side signature check that observes a tree the
-/// user might be upgrading from — `audit_all`, `list_verified_*`.
+/// Migrates the legacy in-tree `.image_pending` marker out of the signed
+/// plugin tree. Idempotent; only root-level regular files, not symlinks.
+/// Run before every load-side signature check (`audit_all`, `list_verified_*`).
 fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let legacy = plugin_dir.join(".image_pending");
     let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
@@ -488,29 +693,43 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(service_id))
+    Ok(token_dir_in(consts::data_dir(), project, service_id))
 }
 
-/// Returns `~/.speedwave/oauth/<project>/<service_id>.json` — the host-only OAuth
-/// state file containing `refreshToken`, `clientId`, `tenantId`, scopes,
-/// `expiresAt`, `lastRefreshAt`, `grantedScopes` (ADR-060). This file is read
-/// and written only by the host (Tauri `oauth_cmd` for setup; the `oauth` worker
-/// for refresh). It is NOT mounted into any worker container.
+/// `data_dir`-parameterised variant (cf. `oauth_state_file_in`) so test code
+/// can bypass the `consts::data_dir()` OnceLock.
+pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
+    data_dir.join("tokens").join(project).join(service_id)
+}
+
+/// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
+/// (refreshToken + providerData + scopes; ADR-060). Never mounted into a worker.
 pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
     oauth_state_file_in(consts::data_dir(), project, service_id)
 }
 
-/// Parameterised by `data_dir` so that one-shot migration code can avoid the
-/// `consts::data_dir()` `OnceLock` cache shared across the `cargo test` binary.
-/// Production callers go through `oauth_state_file` and inherit the SSOT path.
+/// `data_dir`-parameterised variant so migration/test code can bypass the
+/// `consts::data_dir()` `OnceLock`. Production goes through `oauth_state_file`.
 pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
     data_dir
         .join(consts::OAUTH_SUBDIR)
         .join(project)
         .join(format!("{service_id}.json"))
+}
+
+/// Host-only pre-auth seed `~/.speedwave/oauth/<project>/<slug>.seed.json`:
+/// client id/secret saved before authorization. `start_plugin_oauth` reads it
+/// and writes the full state; never mounted into a worker.
+pub fn oauth_seed_file(project: &str, slug: &str) -> PathBuf {
+    oauth_seed_file_in(consts::data_dir(), project, slug)
+}
+
+/// `data_dir`-parameterised variant of [`oauth_seed_file`] for tests.
+pub fn oauth_seed_file_in(data_dir: &Path, project: &str, slug: &str) -> PathBuf {
+    data_dir
+        .join(consts::OAUTH_SUBDIR)
+        .join(project)
+        .join(format!("{slug}.seed.json"))
 }
 
 /// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
@@ -522,21 +741,10 @@ fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf 
         .join(service_id)
 }
 
-/// Writes credential/token files for a plugin to the project's token directory.
-/// Creates `~/.speedwave/tokens/<project>/<service_id>/<key>` for each entry.
-/// Sets file permissions to 0o600 (owner read/write only).
-pub fn configure_plugin_tokens(
-    project: &str,
-    service_id: &str,
-    tokens: &HashMap<String, String>,
-) -> anyhow::Result<()> {
-    let token_dir = consts::data_dir()
-        .join("tokens")
-        .join(project)
-        .join(service_id);
-    write_token_files(&token_dir, tokens)
-}
-
+/// Writes credential/token files for a plugin to a token directory. Creates
+/// `<dir>/<key>` for each entry with 0o600 perms (owner read/write only).
+/// Test-only: Desktop owns the production credential-write path
+/// (`plugin_cmd.rs`); the runtime crate only exercises the layout in tests.
 #[cfg(test)]
 fn configure_plugin_tokens_with_base(
     home: &Path,
@@ -548,6 +756,7 @@ fn configure_plugin_tokens_with_base(
     write_token_files(&token_dir, tokens)
 }
 
+#[cfg(test)]
 fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(token_dir)?;
 
@@ -581,11 +790,10 @@ fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyh
     Ok(())
 }
 
-/// Checks whether a plugin's required auth_fields have corresponding token files.
-pub fn get_plugin_token_status(project: &str, manifest: &PluginManifest) -> TokenStatus {
-    get_plugin_token_status_in(consts::data_dir(), project, manifest)
-}
-
+/// Checks whether a plugin's required auth_fields have corresponding token
+/// files. Test-only: Desktop owns the production readiness check (`plugin_cmd`);
+/// the runtime crate only exercises the layout in tests.
+#[cfg(test)]
 fn get_plugin_token_status_in(
     data_dir: &Path,
     project: &str,
@@ -634,12 +842,12 @@ fn get_plugin_token_status_with_base(
     get_plugin_token_status_in(&home.join(consts::DATA_DIR), project, manifest)
 }
 
-/// Derives WORKER_{SID}_URL from a service_id. E.g. "presale" → "WORKER_PRESALE_URL"
+/// Derives WORKER_{SID}_URL from a service_id. E.g. "example-plugin" → "WORKER_EXAMPLE_PLUGIN_URL"
 pub fn derive_worker_env(service_id: &str) -> String {
     format!("WORKER_{}_URL", service_id.to_uppercase().replace('-', "_"))
 }
 
-/// Derives compose service name from service_id. E.g. "presale" → "mcp-presale"
+/// Derives compose service name from service_id. E.g. "example-plugin" → "mcp-example-plugin"
 pub fn derive_compose_name(service_id: &str) -> String {
     format!("mcp-{}", service_id)
 }
@@ -799,20 +1007,28 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Validate image_tag format (alphanumeric, dots, hyphens, underscores)
-    if let Some(ref tag) = manifest.image_tag {
-        static TAG_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+    // One charset gate for every tag-feeding field (image_tag AND version) —
+    // an out-of-charset value would corrupt the OCI tag (or panic truncate).
+    fn tag_charset_re() -> anyhow::Result<&'static regex::Regex> {
+        static RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
             std::sync::OnceLock::new();
-        let re = TAG_RE
-            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
+        RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
             .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid image_tag regex: {e}"))?;
-        if !re.is_match(tag) {
+            .map_err(|e| anyhow::anyhow!("invalid tag charset regex: {e}"))
+    }
+    if let Some(ref tag) = manifest.image_tag {
+        if !tag_charset_re()?.is_match(tag) {
             anyhow::bail!(
                 "Invalid image_tag '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
                 tag
             );
         }
+    }
+    if !tag_charset_re()?.is_match(&manifest.version) {
+        anyhow::bail!(
+            "Invalid version '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
+            manifest.version
+        );
     }
 
     // Validate auth_fields keys are safe filesystem names and field_type is known
@@ -942,7 +1158,218 @@ pub(crate) fn validate_manifest(
         validate_host_bridge_manifest(bridge)?;
     }
 
+    validate_oauth_spec(manifest.oauth.as_ref(), &manifest.auth_fields)?;
+
     Ok(())
+}
+
+/// Validates a plugin's `oauth` block: cross-field invariant with
+/// `oauth_flow`, grant gating, grant-specific endpoints, SSRF on every URL,
+/// scope caps, and `client_*_field` references.
+fn validate_oauth_spec(
+    oauth: Option<&PluginOAuthSpec>,
+    auth_fields: &[AuthFieldDef],
+) -> anyhow::Result<()> {
+    let has_oauth_field = auth_fields.iter().any(|f| f.oauth_flow);
+    let Some(spec) = oauth else {
+        if has_oauth_field {
+            anyhow::bail!(
+                "auth_fields declares an `oauth_flow` field but the manifest has no `oauth` block"
+            );
+        }
+        return Ok(());
+    };
+    if !has_oauth_field {
+        anyhow::bail!(
+            "manifest declares an `oauth` block but no `auth_fields` entry sets `oauth_flow: true`"
+        );
+    }
+
+    if !consts::SUPPORTED_OAUTH_GRANT_TYPES.contains(&spec.grant_type.as_str()) {
+        anyhow::bail!(
+            "oauth.grant_type '{}' is not supported by this Speedwave version. Supported: {:?}",
+            spec.grant_type.as_str(),
+            consts::SUPPORTED_OAUTH_GRANT_TYPES
+        );
+    }
+
+    // Endpoints are either static URLs or derived from base_url_field + suffix
+    // (resolved + SSRF-validated at authorize time). Mutually exclusive.
+    let derived = spec.base_url_field.is_some();
+    if let Some(base_field) = spec.base_url_field.as_deref() {
+        if !auth_fields.iter().any(|f| f.key == base_field) {
+            anyhow::bail!("oauth.base_url_field '{base_field}' does not match any auth_fields key");
+        }
+        if spec.token_url.is_some() || spec.authorize_url.is_some() {
+            anyhow::bail!(
+                "oauth.base_url_field is mutually exclusive with token_url / authorize_url"
+            );
+        }
+        validate_oauth_suffix("oauth.token_suffix", spec.token_suffix.as_deref())?;
+        if spec.grant_type == OAuthGrantType::AuthorizationCode {
+            validate_oauth_suffix("oauth.authorize_suffix", spec.authorize_suffix.as_deref())?;
+        }
+    } else {
+        let token_url = spec.token_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("oauth.token_url (or oauth.base_url_field) is required")
+        })?;
+        validate_oauth_url("oauth.token_url", token_url)?;
+    }
+
+    validate_grant_endpoints(spec, derived)?;
+
+    // A fixed loopback redirect port must be a non-privileged user port; 0 is
+    // reserved to mean "ephemeral" (omit the field for that).
+    if let Some(port) = spec.redirect_port {
+        if port < 1024 {
+            anyhow::bail!(
+                "oauth.redirect_port must be >= 1024 (got {port}); omit it for an ephemeral port"
+            );
+        }
+    }
+
+    if spec.scopes.len() > consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT {
+        anyhow::bail!(
+            "oauth.scopes must not exceed {} entries (got {})",
+            consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT,
+            spec.scopes.len()
+        );
+    }
+    for scope in &spec.scopes {
+        if scope.is_empty() {
+            anyhow::bail!("oauth.scopes must not contain an empty entry");
+        }
+        if scope.len() > consts::PLUGIN_OAUTH_SCOPE_MAX_LEN {
+            anyhow::bail!(
+                "oauth.scopes entry exceeds {} bytes",
+                consts::PLUGIN_OAUTH_SCOPE_MAX_LEN
+            );
+        }
+        if scope.contains('\n') || scope.contains('\r') || scope.contains('\0') {
+            anyhow::bail!("oauth.scopes entry must not contain newlines or null bytes");
+        }
+    }
+
+    let has_field = |key: &str| auth_fields.iter().any(|f| f.key == key);
+    if !has_field(&spec.client_id_field) {
+        anyhow::bail!(
+            "oauth.client_id_field '{}' does not match any auth_fields key",
+            spec.client_id_field
+        );
+    }
+    if let Some(ref secret_key) = spec.client_secret_field {
+        if !has_field(secret_key) {
+            anyhow::bail!(
+                "oauth.client_secret_field '{}' does not match any auth_fields key",
+                secret_key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Grant-specific endpoint requirements (`derived` = endpoints come from
+/// `base_url_field` + suffixes). Kept separate from the
+/// `SUPPORTED_OAUTH_GRANT_TYPES` gate so the not-yet-enabled grants stay
+/// directly unit-tested until their enabling PR widens the gate.
+fn validate_grant_endpoints(spec: &PluginOAuthSpec, derived: bool) -> anyhow::Result<()> {
+    match spec.grant_type {
+        OAuthGrantType::AuthorizationCode if !derived => {
+            let url = spec.authorize_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("oauth.authorize_url is required for grant_type authorization_code")
+            })?;
+            validate_oauth_url("oauth.authorize_url", url)?;
+        }
+        OAuthGrantType::DeviceCode => {
+            let url = spec.device_authorization_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "oauth.device_authorization_url is required for grant_type device_code"
+                )
+            })?;
+            validate_oauth_url("oauth.device_authorization_url", url)?;
+        }
+        OAuthGrantType::ClientCredentials => {
+            if spec.client_secret_field.is_none() {
+                anyhow::bail!(
+                    "oauth.client_secret_field is required for grant_type client_credentials"
+                );
+            }
+        }
+        OAuthGrantType::AuthorizationCode => {} // derived: suffix checked by caller
+    }
+    Ok(())
+}
+
+/// SSRF + length gate for one OAuth endpoint URL: caps length, runs
+/// `validate_url` (which rejects every private/reserved/loopback IP and
+/// localhost domains), then enforces https. `field` names the manifest key
+/// for the error.
+fn validate_oauth_url(field: &str, url: &str) -> anyhow::Result<()> {
+    if url.len() > consts::PLUGIN_OAUTH_URL_MAX_LEN {
+        anyhow::bail!("{field} exceeds {} bytes", consts::PLUGIN_OAUTH_URL_MAX_LEN);
+    }
+    let parsed =
+        crate::url_validation::validate_url(url).map_err(|e| anyhow::anyhow!("{field} {e}"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("{field} must use https (got '{}')", parsed.scheme());
+    }
+    Ok(())
+}
+
+/// Validates a path suffix appended to a per-instance base URL: required,
+/// bounded, relative (leading `/`, no scheme/authority), no `..` traversal.
+fn validate_oauth_suffix(field: &str, suffix: Option<&str>) -> anyhow::Result<()> {
+    let s =
+        suffix.ok_or_else(|| anyhow::anyhow!("{field} is required with oauth.base_url_field"))?;
+    if s.is_empty() || !s.starts_with('/') {
+        anyhow::bail!("{field} must be a path starting with '/'");
+    }
+    if s.len() > consts::PLUGIN_OAUTH_SUFFIX_MAX_LEN {
+        anyhow::bail!(
+            "{field} exceeds {} bytes",
+            consts::PLUGIN_OAUTH_SUFFIX_MAX_LEN
+        );
+    }
+    if s.contains("..") || s.contains("://") || s.contains(['\n', '\r', '\0', ' ']) {
+        anyhow::bail!("{field} must be a clean relative path (no '..', scheme, or whitespace)");
+    }
+    Ok(())
+}
+
+/// Resolves the authorize + token endpoints for a derived (`base_url_field`)
+/// spec from the seed's base value, then SSRF-validates each resolved URL.
+/// Returns `(authorize_url, token_url)`. See ADR-069.
+pub fn resolve_oauth_endpoints(
+    spec: &PluginOAuthSpec,
+    seed: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<(Option<String>, String)> {
+    let base_field = spec
+        .base_url_field
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("resolve_oauth_endpoints called without base_url_field"))?;
+    let base = seed
+        .get(base_field)
+        .map(|v| v.trim_end_matches('/'))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("base URL field '{base_field}' is not configured"))?;
+
+    let token_suffix = spec
+        .token_suffix
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("oauth.token_suffix missing"))?;
+    let token_url = format!("{base}{token_suffix}");
+    validate_oauth_url("resolved token_url", &token_url)?;
+
+    let authorize_url = match (spec.grant_type, spec.authorize_suffix.as_deref()) {
+        (OAuthGrantType::AuthorizationCode, Some(sfx)) => {
+            let url = format!("{base}{sfx}");
+            validate_oauth_url("resolved authorize_url", &url)?;
+            Some(url)
+        }
+        _ => None,
+    };
+    Ok((authorize_url, token_url))
 }
 
 /// Manifest-time checks for the optional `host_bridge` block. Mirrors
@@ -1063,7 +1490,7 @@ fn validate_bridge_env_name(field: &str, name: &str) -> anyhow::Result<()> {
 /// Accepts: bare bytes (`"512000"`), or `<number><unit>` where unit is one of
 /// `b/k/m/g` (case-insensitive). Returns an error on malformed input,
 /// negative or zero values, or arithmetic overflow.
-fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         anyhow::bail!("mem_limit must not be empty");
@@ -1344,7 +1771,7 @@ fn install_plugin_with_base(
 ///
 /// When `runtime` is provided AND the plugin has a `service_id` (i.e. an
 /// MCP plugin with a built container image), also removes the cached
-/// container image (`speedwave-mcp-<slug>:<version>`). Image cleanup is
+/// container images (content-addressed tags, ADR-072). Image cleanup is
 /// best-effort — a failure is logged at warn level but does not fail the
 /// removal, since at that point the plugin directory is already gone and
 /// the surviving image is at worst a few hundred MB of leaked disk.
@@ -1382,6 +1809,38 @@ fn remove_plugin_with_base(
     } else {
         None
     };
+    // Content-addressed tags (ADR-072): collect BOTH the tag derived from the
+    // current tree and the last-built tag recorded in plugin-state — they can
+    // differ when a reinstall happened without a rebuild.
+    let mut tags_for_removal: Vec<String> = Vec::new();
+    if let Some(ref manifest) = manifest_for_image {
+        if manifest.service_id.is_some() {
+            if let Ok(digest_hex) = signing::plugin_tree_digest_hex(&plugin_dir) {
+                tags_for_removal.push(plugin_image_tag(manifest, &digest_hex));
+            }
+            if let Ok(applied) = std::fs::read_to_string(
+                plugin_state_dir_for(plugins_dir, slug).join(APPLIED_IMAGE_TAG_MARKER),
+            ) {
+                let applied = applied.trim().to_string();
+                if !applied.is_empty() && !tags_for_removal.contains(&applied) {
+                    tags_for_removal.push(applied);
+                }
+            }
+            if let Ok(pending) = std::fs::read_to_string(
+                plugin_state_dir_for(plugins_dir, slug).join(SUPERSEDED_TAGS_FILE),
+            ) {
+                for t in pending.lines().map(str::trim).filter(|t| !t.is_empty()) {
+                    if !tags_for_removal.contains(&t.to_string()) {
+                        tags_for_removal.push(t.to_string());
+                    }
+                }
+            }
+            let legacy = plugin_legacy_image_tag(manifest);
+            if !tags_for_removal.contains(&legacy) {
+                tags_for_removal.push(legacy);
+            }
+        }
+    }
 
     // Drop the cached signature verdict BEFORE removing the directory —
     // `invalidate_cache` resolves its key via `canonicalize`, which
@@ -1407,16 +1866,17 @@ fn remove_plugin_with_base(
 
     if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
         if manifest.service_id.is_some() {
-            let tag = plugin_image_tag(&manifest);
             // force=true: the user explicitly asked to remove this plugin,
             // and the worker container is almost always still running until
             // the next compose recreate. Without --force, rmi would refuse
             // and the layer cache would survive — defeating the next
             // reinstall (a fresh ZIP would receive the stale cached image).
-            if let Err(e) = rt.remove_images(std::slice::from_ref(&tag), true) {
-                log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
-            } else {
-                log::info!("Removed container image '{tag}' for plugin '{slug}'");
+            for tag in &tags_for_removal {
+                if let Err(e) = rt.remove_images(std::slice::from_ref(tag), true) {
+                    log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
+                } else {
+                    log::info!("Removed container image '{tag}' for plugin '{slug}'");
+                }
             }
         }
     }
@@ -1432,18 +1892,44 @@ fn remove_plugin_with_base(
 /// silently re-routes to a different on-disk tree).
 #[derive(Debug)]
 pub struct VerifiedPlugin {
-    pub manifest: PluginManifest,
-    pub dir: PathBuf,
+    // Private so the ONLY construction path is `new` (called after the full
+    // verification in `verify_one_plugin_dir`) — ADR-051 runtime invariant.
+    // Literal construction elsewhere would let a caller fabricate a
+    // "verified" pair that never passed the signature/dir-slug checks.
+    manifest: PluginManifest,
+    dir: PathBuf,
+    digest_hex: String,
 }
 
 impl VerifiedPlugin {
     /// Constructs a `VerifiedPlugin`. Only callers that have just run
     /// the full verification (`verify_one_plugin_dir`) — or test code
-    /// — should reach this; prefer it over the literal struct syntax so
-    /// the "this pair has been verified" intent is explicit at the
-    /// construction site.
-    pub(crate) fn new(manifest: PluginManifest, dir: PathBuf) -> Self {
-        Self { manifest, dir }
+    /// — should reach this; the private fields force every other caller
+    /// through the accessors, so the "this pair has been verified" intent
+    /// cannot be bypassed with literal struct syntax.
+    pub(crate) fn new(manifest: PluginManifest, dir: PathBuf, digest_hex: String) -> Self {
+        Self {
+            manifest,
+            dir,
+            digest_hex,
+        }
+    }
+
+    /// Hex digest of the signed tree — drives the content-addressed image tag.
+    pub fn tree_digest_hex(&self) -> &str {
+        &self.digest_hex
+    }
+
+    /// The verified manifest.
+    pub fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    /// The on-disk plugin directory (`dir.file_name() == manifest.slug`,
+    /// enforced at verification). Callers must use this rather than
+    /// reconstructing the path via `plugins_base.join(slug)`.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }
 
@@ -1478,10 +1964,15 @@ pub enum VerificationStatus {
 /// the invariant can't be silently broken at a new construction site.
 #[derive(Debug)]
 pub struct PluginListEntry {
+    /// Plugin slug.
     pub slug: String,
+    /// Installed plugin directory.
     pub dir: PathBuf,
+    /// Parsed manifest, present iff verification succeeded.
     pub manifest: Option<PluginManifest>,
+    /// Signature verification status.
     pub verification_status: VerificationStatus,
+    /// Verification error message for non-verified entries.
     pub verification_error: Option<String>,
 }
 
@@ -1557,9 +2048,13 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
         return Ok(vec![]);
     }
 
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    // Sort by slug — non-deterministic readdir order flips SPW_PLUGIN_DIGESTS across renders.
+    entries.sort_by_key(|e| e.file_name());
+
     let mut plugins = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -1602,8 +2097,12 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
+    // Sorted: SPEEDWAVE_PLUGINS and service insertion order must be
+    // deterministic or the rendered YAML (and config-hash) flaps per run.
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
@@ -1650,7 +2149,12 @@ fn verify_one_plugin_dir(
     }
     validate_manifest(&manifest, plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': manifest validation failed: {e}"))?;
-    Ok(VerifiedPlugin::new(manifest, plugin_dir.to_path_buf()))
+    let digest_hex = signing::plugin_tree_digest_hex(plugin_dir)?;
+    Ok(VerifiedPlugin::new(
+        manifest,
+        plugin_dir.to_path_buf(),
+        digest_hex,
+    ))
 }
 
 /// Tolerant lister for the Desktop UI. Never returns `Err` — every
@@ -1876,7 +2380,7 @@ fn ensure_plugin_images_from_dir(
     let mut errors: Vec<String> = Vec::new();
 
     for vp in &plugins {
-        let manifest = &vp.manifest;
+        let manifest = vp.manifest();
         let sid = match manifest.service_id.as_deref() {
             Some(s) => s,
             None => continue, // resource-only plugin, no image
@@ -1886,7 +2390,7 @@ fn ensure_plugin_images_from_dir(
             continue; // not enabled for this project
         }
 
-        let plugin_dir = vp.dir.as_path();
+        let plugin_dir = vp.dir();
         if !plugin_dir.join("Containerfile").exists() {
             log::warn!(
                 "Plugin '{}' has service_id but no Containerfile — skipping image check",
@@ -1895,17 +2399,45 @@ fn ensure_plugin_images_from_dir(
             continue;
         }
 
-        let tag = plugin_image_tag(manifest);
-        let exists = runtime.image_exists(&tag).unwrap_or(false);
-        if !exists {
-            log::info!(
-                "Plugin image '{}' missing — rebuilding from {}",
-                tag,
-                plugin_dir.display()
-            );
-            if let Err(e) = build_single_plugin_image(runtime, manifest, plugin_dir) {
-                errors.push(format!("plugin '{}': {e}", manifest.slug));
+        let tag = plugin_image_tag(manifest, vp.tree_digest_hex());
+        if runtime.image_exists(&tag).unwrap_or(false) {
+            // Content-addressed image present — drop any stale fallback marker.
+            clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
+            continue;
+        }
+        log::info!(
+            "Plugin image '{}' missing — rebuilding from {}",
+            tag,
+            plugin_dir.display()
+        );
+        let build_err = match build_single_plugin_image(runtime, manifest, plugin_dir) {
+            Ok(()) => continue,
+            Err(e) => e,
+        };
+        // Rebuild failed (e.g. offline right after the ADR-072 retag). Fall back
+        // to a surviving previously-built image; the rebuild retries next start.
+        match usable_fallback_tag(runtime, plugins_dir, manifest, &tag) {
+            Some(fallback) => {
+                match write_image_fallback_tag_for(plugins_dir, &manifest.slug, &fallback) {
+                    Ok(()) => log::warn!(
+                        "plugin '{}': rebuild of image '{tag}' failed ({build_err}); \
+                         starting with previously-built image '{fallback}' — the \
+                         rebuild will be retried on the next project start",
+                        manifest.slug
+                    ),
+                    Err(we) => errors.push(format!(
+                        "plugin '{}': image build failed ({build_err}); fallback image \
+                         '{fallback}' exists but recording it failed: {we}",
+                        manifest.slug
+                    )),
+                }
             }
+            None => errors.push(format!(
+                "plugin '{}': image build failed ({build_err}); no previously-built \
+                 image is available — restore network/registry access and restart \
+                 the project to retry, or reinstall the plugin",
+                manifest.slug
+            )),
         }
     }
 
@@ -1917,6 +2449,34 @@ fn ensure_plugin_images_from_dir(
             errors.join("\n")
         )
     }
+}
+
+/// First previously-built tag for this plugin still present in the engine:
+/// the recorded fallback, the last applied tag, then the legacy pre-ADR-072 tag.
+fn usable_fallback_tag(
+    runtime: &crate::runtime::LockedRuntime,
+    plugins_dir: &Path,
+    manifest: &PluginManifest,
+    current_tag: &str,
+) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = read_image_fallback_tag_for(plugins_dir, &manifest.slug) {
+        candidates.push(t);
+    }
+    if let Ok(applied) = std::fs::read_to_string(
+        plugin_state_dir_for(plugins_dir, &manifest.slug).join(APPLIED_IMAGE_TAG_MARKER),
+    ) {
+        let applied = applied.trim();
+        if is_safe_image_ref(applied) {
+            candidates.push(applied.to_string());
+        }
+    }
+    candidates.push(plugin_legacy_image_tag(manifest));
+    candidates.retain(|t| t != current_tag);
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find(|t| runtime.image_exists(t).unwrap_or(false))
 }
 
 /// Builds pending plugin images (`.image_pending` marker).
@@ -2005,13 +2565,32 @@ fn build_single_plugin_image(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
+    // ADR-072: every image build + tag prune is serialised by build.lock.
+    // Single choke point for install / ensure / pending paths; callers must
+    // not already hold the lock (it is not reentrant).
+    crate::build::with_build_lock(|| {
+        build_single_plugin_image_locked(runtime, manifest, plugin_dir)
+    })
+}
+
+fn build_single_plugin_image_locked(
+    runtime: &crate::runtime::LockedRuntime,
+    manifest: &PluginManifest,
+    plugin_dir: &Path,
+) -> anyhow::Result<()> {
+    // Move any legacy in-tree pending marker out FIRST — it is not part of
+    // the signed tree and must not perturb the content-addressed tag.
+    if let Some(plugins_dir) = plugin_dir.parent() {
+        migrate_legacy_image_pending(plugins_dir, plugin_dir, &manifest.slug);
+    }
     signing::verify_plugin_signature(plugin_dir).map_err(|e| {
         anyhow::anyhow!(
             "refusing to build image for plugin '{}': {e}",
             manifest.slug
         )
     })?;
-    let tag = plugin_image_tag(manifest);
+    let digest_hex = signing::plugin_tree_digest_hex(plugin_dir)?;
+    let tag = plugin_image_tag(manifest, &digest_hex);
     let vm_root = runtime.prepare_build_context(plugin_dir)?;
     // vm_root is a VM-side path (on Windows a WSL `/mnt/c/...` path); join with
     // `vm_path_join`, never `PathBuf::join` which mangles it on Windows.
@@ -2023,14 +2602,26 @@ fn build_single_plugin_image(
         tag,
         plugin_dir.display()
     );
-    runtime.build_image(&tag, root_str.trim_end_matches('/'), &containerfile, &[])?;
+    let build_target = root_str.trim_end_matches('/');
+    crate::build::with_build_recovery(runtime, || {
+        runtime.build_image(&tag, build_target, &containerfile, &[])
+    })?;
 
     // Remove the pending marker on success — both the new state-dir
     // location and the legacy in-tree marker, so a plugin installed by an older release
     // stops re-triggering on every launch. `plugin_dir` is always
     // `<plugins_dir>/<slug>/`, so its parent is the plugins base.
+    record_applied_image_tag_and_prune(
+        runtime,
+        plugin_dir,
+        &manifest.slug,
+        &tag,
+        &plugin_legacy_image_tag(manifest),
+    );
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
+        // Successful rebuild ends any fallback-image period (ADR-072).
+        clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
     } else {
         // Unreachable: a plugin dir always has a parent. Don't touch the
         // signed tree here as a "fallback" — that's exactly what the
@@ -2054,16 +2645,123 @@ fn build_single_plugin_image(
     Ok(())
 }
 
-/// Returns the image tag for a plugin. E.g. "speedwave-mcp-presale:1.2.0"
-fn plugin_image_tag(manifest: &PluginManifest) -> String {
-    let tag = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
-    format!("speedwave-mcp-{}:{}", manifest.slug, tag)
+/// Content-addressed plugin image tag (ADR-072): `<version|image_tag>-<digest16>`.
+/// Any tree change retags, so idempotent `compose up` recreates the container.
+fn plugin_image_tag(manifest: &PluginManifest, digest_hex: &str) -> String {
+    let mut base = manifest
+        .image_tag
+        .as_deref()
+        .unwrap_or(&manifest.version)
+        .to_string();
+    // OCI tag cap is 128 chars; cut on a char boundary (truncate panics mid-char).
+    let mut cut = 100.min(base.len());
+    while !base.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    base.truncate(cut);
+    let short = &digest_hex[..16.min(digest_hex.len())];
+    format!("speedwave-mcp-{}:{base}-{short}", manifest.slug)
+}
+
+/// Marker file under `plugin-state/<slug>/` holding the last-built image tag.
+const APPLIED_IMAGE_TAG_MARKER: &str = "applied_image_tag";
+
+/// Pending-prune list (one tag per line): superseded tags whose `rmi` failed
+/// (worker still running on them) — retried on every subsequent build.
+const SUPERSEDED_TAGS_FILE: &str = "superseded_image_tags";
+
+/// Queues the superseded tag(s), retries the pending prunes, records the new
+/// tag. First content-addressed build also queues the legacy `slug:version`.
+fn record_applied_image_tag_and_prune(
+    runtime: &crate::runtime::LockedRuntime,
+    plugin_dir: &Path,
+    slug: &str,
+    tag: &str,
+    legacy_tag: &str,
+) {
+    let Some(plugins_dir) = plugin_dir.parent() else {
+        return;
+    };
+    let state_dir = plugin_state_dir_for(plugins_dir, slug);
+    let marker = state_dir.join(APPLIED_IMAGE_TAG_MARKER);
+    let pending_path = state_dir.join(SUPERSEDED_TAGS_FILE);
+
+    let mut pending: Vec<String> = std::fs::read_to_string(&pending_path)
+        .map(|c| c.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    if let Err(e) = std::fs::read_to_string(&marker) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "applied-tag marker unreadable for '{slug}' ({e}) — treating as first build"
+            );
+        }
+    }
+    match std::fs::read_to_string(&marker) {
+        Ok(old) if !old.trim().is_empty() => {
+            if old.trim() != tag {
+                pending.push(old.trim().to_string());
+            }
+        }
+        _ => {
+            // Pre-marker install (old tag scheme) — queue the legacy tag once.
+            if legacy_tag != tag {
+                pending.push(legacy_tag.to_string());
+            }
+        }
+    }
+    pending.retain(|t| !t.is_empty() && t != tag);
+    pending.sort_unstable();
+    pending.dedup();
+    pending.retain(
+        |old| match runtime.remove_images(std::slice::from_ref(old), false) {
+            Ok(()) => false,
+            Err(e) => {
+                log::debug!(
+                    "superseded plugin image '{old}' not removed yet (retried next build): {e}"
+                );
+                true
+            }
+        },
+    );
+
+    let _ = std::fs::create_dir_all(&state_dir);
+    if pending.is_empty() {
+        let _ = std::fs::remove_file(&pending_path);
+    } else if let Err(e) = std::fs::write(&pending_path, pending.join("\n")) {
+        log::warn!("failed to persist superseded tags for '{slug}': {e}");
+    }
+    if let Err(e) = std::fs::write(&marker, tag) {
+        log::warn!("failed to record applied image tag for '{slug}': {e}");
+    }
+}
+
+/// Legacy (pre-content-addressed) tag: `speedwave-mcp-<slug>:<version|image_tag>`.
+fn plugin_legacy_image_tag(manifest: &PluginManifest) -> String {
+    let base = manifest.image_tag.as_deref().unwrap_or(&manifest.version);
+    format!("speedwave-mcp-{}:{base}", manifest.slug)
+}
+
+/// Compose-facing tag: the recorded fallback while a rebuild is pending
+/// (ADR-072 upgrade resilience), otherwise the content-addressed tag.
+fn effective_plugin_image_tag(
+    manifest: &PluginManifest,
+    digest_hex: &str,
+    plugin_dir: &Path,
+) -> String {
+    if let Some(plugins_dir) = plugin_dir.parent() {
+        if let Some(tag) = read_image_fallback_tag_for(plugins_dir, &manifest.slug) {
+            return tag;
+        }
+    }
+    plugin_image_tag(manifest, digest_hex)
 }
 
 /// Generates a fully-resolved compose service definition for a plugin.
 /// Follows the `apply_llm_config()` pattern (format! + serde_yaml insert).
 pub fn generate_plugin_service(
     manifest: &PluginManifest,
+    digest_hex: &str,
+    plugin_dir: &Path,
     project_name: &str,
     network_name: &str,
     tokens_dir: &Path,
@@ -2074,7 +2772,7 @@ pub fn generate_plugin_service(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("generate_plugin_service requires service_id"))?;
 
-    let tag = plugin_image_tag(manifest);
+    let tag = effective_plugin_image_tag(manifest, digest_hex, plugin_dir);
     let container_name = format!(
         "{}_{}_{}_{}",
         consts::compose_prefix(),
@@ -2092,8 +2790,14 @@ pub fn generate_plugin_service(
 
     let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
-    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
-    let cpu_limit = manifest.cpu_limit.as_deref().unwrap_or("2.0");
+    let mem_limit = manifest
+        .mem_limit
+        .as_deref()
+        .unwrap_or(consts::PLUGIN_DEFAULT_MEM);
+    let cpu_limit = manifest
+        .cpu_limit
+        .as_deref()
+        .unwrap_or(consts::PLUGIN_DEFAULT_CPU);
     let user = container_user();
 
     let mut env_lines = format!("  - PORT={port}");
@@ -2116,7 +2820,7 @@ cap_drop:
 security_opt:
   - no-new-privileges:true
 tmpfs:
-  - /tmp:noexec,nosuid,size=512m
+  - /tmp:noexec,nosuid,size={plugin_tmpfs}
 volumes:
   - {tokens_path}:/tokens:{token_mount_mode}
   - {workspace_path}:/workspace:rw
@@ -2142,6 +2846,7 @@ deploy:
         network_name = network_name,
         mem_limit = mem_limit,
         cpu_limit = cpu_limit,
+        plugin_tmpfs = consts::PLUGIN_DEFAULT_TMPFS,
     );
 
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml_str)?;
@@ -2287,14 +2992,94 @@ fn warn_legacy_addons() {
 mod tests {
     use super::*;
 
+    const FIXTURE_UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn bridge_token_filename_is_stable_on_disk_contract() {
+        // Writer (Desktop) and reader (CLI) address the same on-disk file; a
+        // rename would compile cleanly but orphan every persisted token. Pin
+        // the literal so renaming stays a deliberate change. See ADR-074.
+        assert_eq!(BRIDGE_TOKEN_FILENAME, "bridge-token");
+    }
+
+    #[test]
+    fn bridge_token_reader_validates_and_resolves_plugin_state_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let slug = "example-plugin";
+
+        // Missing file → None.
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // A token in the WRONG (in-signed-tree) location must be ignored: the
+        // reader resolves under plugin-state/<slug>/, never plugins/<slug>/.
+        let wrong = plugins_dir.join(slug);
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join(BRIDGE_TOKEN_FILENAME), FIXTURE_UUID).unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // Correct location, valid UUID with trailing newline → trimmed token.
+        let state = plugin_state_dir_for(&plugins_dir, slug);
+        std::fs::create_dir_all(&state).unwrap();
+        let token_path = state.join(BRIDGE_TOKEN_FILENAME);
+        std::fs::write(&token_path, format!("{FIXTURE_UUID}\n")).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, slug).as_deref(),
+            Some(FIXTURE_UUID)
+        );
+
+        // Empty / whitespace-only → None.
+        std::fs::write(&token_path, "   \n").unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+
+        // Non-UUID content → None; also blocks a crafted multi-line value
+        // from reaching compose env injection.
+        std::fs::write(&token_path, "not-a-uuid\ninjected: value").unwrap();
+        assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
+    }
+
+    #[test]
+    fn bridge_token_reader_returns_none_on_non_notfound_error() {
+        // A directory sitting at the token path is an unexpected (non-NotFound)
+        // error; the reader degrades to None (and warns) rather than panicking.
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(state.join(BRIDGE_TOKEN_FILENAME)).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, "example-plugin"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_token_reader_rejects_symlink() {
+        // A symlink at the token path is ignored even when its target holds a
+        // valid UUID.
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(&state).unwrap();
+        let target = dir.path().join("real-token");
+        std::fs::write(&target, FIXTURE_UUID).unwrap();
+        std::os::unix::fs::symlink(&target, state.join(BRIDGE_TOKEN_FILENAME)).unwrap();
+        assert_eq!(
+            read_persistent_bridge_token_from(&plugins_dir, "example-plugin"),
+            None
+        );
+        // Same content read directly stays valid — the rejection targets the symlink.
+        assert_eq!(read_bridge_token_at(&target).as_deref(), Some(FIXTURE_UUID));
+    }
+
     #[test]
     fn test_manifest_serde_roundtrip() {
         let manifest = PluginManifest {
-            name: "Presale CRM".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin CRM".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.2.0".to_string(),
-            description: "Presale CRM integration".to_string(),
+            description: "Example Plugin CRM integration".to_string(),
             port: None,
             image_tag: None,
             resources: vec!["skills".to_string(), "commands".to_string()],
@@ -2308,6 +3093,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: Some(">=0.1.0".to_string()),
@@ -2317,12 +3103,13 @@ mod tests {
             requires_integrations: vec!["sharepoint".to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.name, "Presale CRM");
-        assert_eq!(parsed.service_id.as_deref(), Some("presale"));
-        assert_eq!(parsed.slug, "presale");
+        assert_eq!(parsed.name, "Example Plugin CRM");
+        assert_eq!(parsed.service_id.as_deref(), Some("example-plugin"));
+        assert_eq!(parsed.slug, "example-plugin");
         assert_eq!(parsed.version, "1.2.0");
         assert_eq!(parsed.port, None);
         assert_eq!(parsed.resources.len(), 2);
@@ -2354,10 +3141,10 @@ mod tests {
     #[test]
     fn test_manifest_with_requires_integrations() {
         let json = r#"{
-            "name": "Presale Plugin",
-            "slug": "presale",
+            "name": "Example Plugin Plugin",
+            "slug": "example-plugin",
             "version": "1.0.0",
-            "description": "Presale CRM",
+            "description": "Example Plugin CRM",
             "requires_integrations": ["sharepoint"]
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -2386,7 +3173,7 @@ mod tests {
 
     #[test]
     fn test_slug_validation_valid() {
-        assert!(validate_slug("presale").is_ok());
+        assert!(validate_slug("example-plugin").is_ok());
         assert!(validate_slug("my-plugin").is_ok());
         assert!(validate_slug("a").is_ok());
         assert!(validate_slug("plugin123").is_ok());
@@ -2428,6 +3215,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -2460,6 +3248,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -2488,6 +3277,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -2521,6 +3311,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -2532,25 +3323,28 @@ mod tests {
 
     #[test]
     fn test_derive_worker_env() {
-        assert_eq!(derive_worker_env("presale"), "WORKER_PRESALE_URL");
+        assert_eq!(
+            derive_worker_env("example-plugin"),
+            "WORKER_EXAMPLE_PLUGIN_URL"
+        );
         assert_eq!(derive_worker_env("my-plugin"), "WORKER_MY_PLUGIN_URL");
         assert_eq!(derive_worker_env("crm"), "WORKER_CRM_URL");
     }
 
     #[test]
     fn test_derive_compose_name() {
-        assert_eq!(derive_compose_name("presale"), "mcp-presale");
+        assert_eq!(derive_compose_name("example-plugin"), "mcp-example-plugin");
         assert_eq!(derive_compose_name("my-plugin"), "mcp-my-plugin");
     }
 
     #[test]
     fn test_generate_plugin_service_output() {
         let manifest = PluginManifest {
-            name: "Presale CRM".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
+            name: "Example Plugin CRM".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(),
             version: "1.2.0".to_string(),
-            description: "Presale CRM".to_string(),
+            description: "Example Plugin CRM".to_string(),
             port: None,
             image_tag: None,
             resources: vec![],
@@ -2564,11 +3358,14 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
@@ -2580,24 +3377,27 @@ mod tests {
 
         // Verify key properties
         assert!(
-            yaml.contains("speedwave-mcp-presale:1.2.0"),
+            yaml.contains("speedwave-mcp-example-plugin:1.2.0"),
             "image tag: {yaml}"
         );
         assert!(
             yaml.contains(&format!(
-                "{}_myproject_mcp_presale",
+                "{}_myproject_mcp_example_plugin",
                 crate::consts::compose_prefix()
             )),
             "container_name: {yaml}"
         );
         assert!(yaml.contains("read_only: true"), "read_only: {yaml}");
-        assert!(yaml.contains(&container_user()), "user: {yaml}");
+        assert!(yaml.contains(container_user()), "user: {yaml}");
         assert!(yaml.contains("ALL"), "cap_drop ALL: {yaml}");
         assert!(
             yaml.contains("no-new-privileges:true"),
             "security_opt: {yaml}"
         );
-        assert!(yaml.contains("/tmp:noexec,nosuid"), "tmpfs: {yaml}");
+        assert!(
+            yaml.contains("/tmp:noexec,nosuid,size=512m"),
+            "default tmpfs from PLUGIN_DEFAULT_TMPFS: {yaml}"
+        );
         assert!(yaml.contains("/tokens:ro"), "token mount: {yaml}");
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
@@ -2607,8 +3407,16 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        assert!(yaml.contains("memory: 128m"), "mem limit: {yaml}");
-        assert!(yaml.contains("cpus: '2.0'"), "default cpu limit: {yaml}");
+        // Reference the SSOT constants, not literals — a bump of either default
+        // must not silently leave this test asserting the old value.
+        assert!(
+            yaml.contains(&format!("memory: {}", consts::PLUGIN_DEFAULT_MEM)),
+            "mem limit: {yaml}"
+        );
+        assert!(
+            yaml.contains(&format!("cpus: '{}'", consts::PLUGIN_DEFAULT_CPU)),
+            "default cpu limit: {yaml}"
+        );
     }
 
     #[test]
@@ -2634,11 +3442,14 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/sp-ext"),
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -2676,12 +3487,20 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result =
-            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
-                .unwrap();
+        let result = generate_plugin_service(
+            &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-env"),
+            "proj",
+            "net",
+            &tokens_dir,
+            "/test/project",
+        )
+        .unwrap();
 
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
         assert!(yaml.contains("CUSTOM_VAR=value"), "extra env: {yaml}");
@@ -2699,13 +3518,13 @@ mod tests {
     #[test]
     fn test_list_installed_plugins_from_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("presale");
+        let plugin_dir = tmp.path().join("example-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
 
         let manifest = r#"{
-            "name": "Presale",
-            "slug": "presale",
-            "service_id": "presale",
+            "name": "Example Plugin",
+            "slug": "example-plugin",
+            "service_id": "example-plugin",
             "version": "1.0.0",
             "description": "test",
             "port": 4010
@@ -2714,7 +3533,7 @@ mod tests {
 
         let plugins = list_installed_from_dir(tmp.path()).unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].slug, "presale");
+        assert_eq!(plugins[0].slug, "example-plugin");
     }
 
     #[test]
@@ -2742,6 +3561,32 @@ mod tests {
             "should skip bad manifest and return only the valid one"
         );
         assert_eq!(plugins[0].slug, "good-plugin");
+    }
+
+    #[test]
+    fn test_list_installed_from_dir_sorted_by_slug() {
+        // Non-deterministic readdir order causes compose volumes and SPW_PLUGIN_DIGESTS
+        // to change between renders, triggering spurious container recreates. The list
+        // must always come back in ascending slug order regardless of filesystem order.
+        let tmp = tempfile::tempdir().unwrap();
+        for slug in ["zebra-plugin", "alpha-plugin", "middle-plugin"] {
+            let dir = tmp.path().join(slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.json"),
+                format!(
+                    r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"ok","port":4010}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let plugins = list_installed_from_dir(tmp.path()).unwrap();
+        let slugs: Vec<&str> = plugins.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["alpha-plugin", "middle-plugin", "zebra-plugin"],
+            "plugins must be returned in ascending slug order for deterministic compose output"
+        );
     }
 
     #[test]
@@ -2796,8 +3641,12 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
-        assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
+        assert_eq!(
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123"),
+            "speedwave-mcp-test:2.0.0-f00ddeadbeefcafe"
+        );
     }
 
     #[test]
@@ -2821,8 +3670,12 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
-        assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
+        assert_eq!(
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123"),
+            "speedwave-mcp-test:custom-tag-f00ddeadbeefcafe"
+        );
     }
 
     #[test]
@@ -2836,7 +3689,7 @@ mod tests {
     #[test]
     fn test_find_plugin_dir_nested() {
         let tmp = tempfile::tempdir().unwrap();
-        let nested = tmp.path().join("presale-1.0.0");
+        let nested = tmp.path().join("example-plugin-1.0.0");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("plugin.json"), "{}").unwrap();
         let result = find_plugin_dir(tmp.path()).unwrap();
@@ -2872,7 +3725,7 @@ mod tests {
         );
     }
 
-    // --- Task 1: configure_plugin_tokens + get_plugin_token_status tests ---
+    // --- token-layout tests (via the _with_base test helpers) ---
 
     #[test]
     fn test_configure_plugin_tokens_creates_files() {
@@ -2883,13 +3736,13 @@ mod tests {
         tokens.insert("api_key".to_string(), "sk-secret-123".to_string());
         tokens.insert("refresh_token".to_string(), "rt-abc".to_string());
 
-        configure_plugin_tokens_with_base(home, "myproject", "presale", &tokens).unwrap();
+        configure_plugin_tokens_with_base(home, "myproject", "example-plugin", &tokens).unwrap();
 
         let token_dir = home
             .join(consts::DATA_DIR)
             .join("tokens")
             .join("myproject")
-            .join("presale");
+            .join("example-plugin");
 
         assert_eq!(
             std::fs::read_to_string(token_dir.join("api_key")).unwrap(),
@@ -2965,6 +3818,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -2975,6 +3829,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "label".to_string(),
@@ -2985,6 +3840,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
             ],
             settings_schema: None,
@@ -2995,6 +3851,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3036,6 +3893,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
                 AuthFieldDef {
                     key: "token".to_string(),
@@ -3046,6 +3904,7 @@ mod tests {
                     required: true,
                     description: None,
                     validation: None,
+                    oauth_flow: false,
                 },
             ],
             settings_schema: None,
@@ -3056,6 +3915,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3091,6 +3951,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3121,6 +3982,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3130,6 +3992,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3169,6 +4032,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -3178,6 +4042,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -3546,6 +4411,10 @@ mod tests {
         signing::invalidate_cache(&plugin_dir);
 
         let entries = list_for_ui_from_dir(&plugins);
+        // The fail-closed loader yields a VerifiedPlugin under the bypass;
+        // assert it before clearing the env so the accessors see it.
+        let verified = list_verified_from_dir(&plugins)
+            .expect("bypass must let the fail-closed loader accept the unsigned plugin");
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].slug, "devplugin");
@@ -3554,6 +4423,12 @@ mod tests {
             VerificationStatus::Verified,
             "SPEEDWAVE_ALLOW_UNSIGNED must let an unsigned plugin list as Verified"
         );
+
+        // The only construction path is the verifying `new`; the private
+        // fields are reachable solely via the accessors (ADR-051 invariant).
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].manifest().slug, "devplugin");
+        assert_eq!(verified[0].dir(), plugin_dir.as_path());
     }
 
     /// A plugin dir that *has* a `SIGNATURE` file, but one that was
@@ -4055,6 +4930,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "img-cleanup", true);
+        // Compute the expected content-addressed tag BEFORE removal deletes the tree.
+        let expected_tag = expected_tag_for(&plugins_dir, "img-cleanup");
 
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
@@ -4064,9 +4941,13 @@ mod tests {
         // remove_images called once with the expected tag AND force=true
         // (uninstall is an explicit user request — no waiting for prune).
         let calls = handles.remove_images_calls.lock().unwrap().clone();
+        // Current content-addressed tag + the legacy version-only tag.
         assert_eq!(
             calls,
-            vec![(vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)]
+            vec![
+                (vec![expected_tag], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
+            ]
         );
     }
 
@@ -4110,11 +4991,10 @@ mod tests {
         // remove_images was attempted with force=true even on the error path
         // — the uninstall caller never silently downgrades to non-force rmi.
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2, "current + legacy tag, both attempted");
         assert!(
-            calls[0].1,
-            "rmi error path should still pass force=true, got force={}",
-            calls[0].1
+            calls.iter().all(|(_, force)| *force),
+            "rmi error path should still pass force=true for every tag"
         );
     }
 
@@ -4130,17 +5010,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Create an "existing" plugin with service_id "presale"
-        let existing_dir = plugins_dir.join("presale");
+        // Create an "existing" plugin with service_id "example-plugin"
+        let existing_dir = plugins_dir.join("example-plugin");
         std::fs::create_dir_all(&existing_dir).unwrap();
         std::fs::write(
             existing_dir.join("plugin.json"),
             r#"{
-                "name": "Presale Original",
-                "slug": "presale",
-                "service_id": "presale",
+                "name": "Example Plugin Original",
+                "slug": "example-plugin",
+                "service_id": "example-plugin",
                 "version": "1.0.0",
-                "description": "Original presale plugin",
+                "description": "Original example-plugin plugin",
                 "port": 4010
             }"#,
         )
@@ -4162,9 +5042,9 @@ mod tests {
 
         // New plugin with the same service_id but different slug
         let new_manifest = PluginManifest {
-            name: "Presale Clone".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(), // slug == service_id (required by validation)
+            name: "Example Plugin Clone".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin".to_string(), // slug == service_id (required by validation)
             version: "2.0.0".to_string(),
             description: "A clone".to_string(),
             port: None,
@@ -4180,6 +5060,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         // Replicate the duplicate check from install_plugin
@@ -4200,9 +5081,9 @@ mod tests {
 
         // Now test with a DIFFERENT slug but same service_id
         let conflict_manifest = PluginManifest {
-            name: "Presale Fork".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale-fork".to_string(),
+            name: "Example Plugin Fork".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            slug: "example-plugin-fork".to_string(),
             version: "1.0.0".to_string(),
             description: "A fork".to_string(),
             port: None,
@@ -4218,6 +5099,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -4267,12 +5149,20 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result =
-            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
-                .unwrap();
+        let result = generate_plugin_service(
+            &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/test-special"),
+            "proj",
+            "net",
+            &tokens_dir,
+            "/test/project",
+        )
+        .unwrap();
 
         // Verify it parses back as valid YAML
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
@@ -4371,6 +5261,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -4402,6 +5293,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4428,6 +5320,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4454,6 +5347,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4480,6 +5374,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4506,11 +5401,14 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
         let result = generate_plugin_service(
             &manifest,
+            "f00ddeadbeefcafe0123456789abcdef",
+            Path::new("/nonexistent/plugins/heavy"),
             "proj",
             "speedwave_proj_network",
             &tokens_dir,
@@ -4543,6 +5441,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4569,6 +5468,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4578,6 +5478,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4604,6 +5505,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4613,6 +5515,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -4644,6 +5547,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4673,6 +5577,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
@@ -4699,6 +5604,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4734,6 +5640,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4766,6 +5673,7 @@ mod tests {
             requires_integrations: vec!["nonexistent-service".to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4798,6 +5706,7 @@ mod tests {
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
@@ -4824,6 +5733,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation: None,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4833,6 +5743,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&manifest, tmp.path())
@@ -4847,10 +5758,10 @@ mod tests {
     #[test]
     fn auth_field_description_defaults_to_none_when_omitted() {
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
-            "placeholder": "figd_...",
+            "placeholder": "tok_...",
             "is_secret": true
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
@@ -4862,17 +5773,17 @@ mod tests {
     #[test]
     fn auth_field_description_parses_when_present() {
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
-            "placeholder": "figd_...",
+            "placeholder": "tok_...",
             "is_secret": true,
-            "description": "Generate at figma.com → Settings → Security."
+            "description": "Generate at example.com → Settings → Security."
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         assert_eq!(
             field.description.as_deref(),
-            Some("Generate at figma.com → Settings → Security.")
+            Some("Generate at example.com → Settings → Security.")
         );
     }
 
@@ -4881,7 +5792,7 @@ mod tests {
         // An explicit empty string must round-trip as Some(""), not be
         // coerced to None — the author chose to render nothing deliberately.
         let json = r#"{
-            "key": "figma_pat",
+            "key": "example_pat",
             "label": "Token",
             "field_type": "password",
             "placeholder": "",
@@ -4918,6 +5829,7 @@ mod tests {
                 required: true,
                 description: None,
                 validation,
+                oauth_flow: false,
             }],
             settings_schema: None,
             speedwave_compat: None,
@@ -4927,19 +5839,21 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 
     fn field_with_validation(validation: Option<AuthFieldValidation>) -> AuthFieldDef {
         AuthFieldDef {
             key: "token".to_string(),
-            label: "Figma Token".to_string(),
+            label: "Example Plugin Token".to_string(),
             field_type: "password".to_string(),
             placeholder: "".to_string(),
             is_secret: true,
             required: true,
             description: None,
             validation,
+            oauth_flow: false,
         }
     }
 
@@ -4958,12 +5872,12 @@ mod tests {
         let json = r#"{
             "key": "token", "label": "T", "field_type": "password",
             "placeholder": "", "is_secret": true,
-            "validation": { "pattern": "^figd_[A-Za-z0-9_-]+$", "message": "Must start with figd_" }
+            "validation": { "pattern": "^tok_[A-Za-z0-9_-]+$", "message": "Must start with tok_" }
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         let v = field.validation.expect("validation should parse");
-        assert_eq!(v.pattern, "^figd_[A-Za-z0-9_-]+$");
-        assert_eq!(v.message.as_deref(), Some("Must start with figd_"));
+        assert_eq!(v.pattern, "^tok_[A-Za-z0-9_-]+$");
+        assert_eq!(v.message.as_deref(), Some("Must start with tok_"));
     }
 
     #[test]
@@ -4980,7 +5894,7 @@ mod tests {
     #[test]
     fn validate_manifest_accepts_valid_pattern() {
         let m = manifest_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
             message: Some("bad".to_string()),
         }));
         let tmp = tempfile::tempdir().unwrap();
@@ -5014,12 +5928,479 @@ mod tests {
     fn validate_manifest_rejects_uncompilable_pattern() {
         // Unbalanced group — invalid in the Rust regex crate.
         let m = manifest_with_validation(Some(AuthFieldValidation {
-            pattern: "^(figd_".to_string(),
+            pattern: "^(tok_".to_string(),
             message: None,
         }));
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_manifest(&m, tmp.path()).unwrap_err().to_string();
         assert!(err.contains("invalid validation.pattern"), "got: {err}");
+    }
+
+    fn oauth_field(key: &str) -> AuthFieldDef {
+        AuthFieldDef {
+            key: key.to_string(),
+            label: key.to_string(),
+            field_type: "password".to_string(),
+            placeholder: "".to_string(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation: None,
+            oauth_flow: true,
+        }
+    }
+
+    /// auth_fields a `valid_oauth_spec` references (client id + secret).
+    fn oauth_auth_fields() -> Vec<AuthFieldDef> {
+        vec![oauth_field("client_id"), oauth_field("client_secret")]
+    }
+
+    fn valid_oauth_spec() -> PluginOAuthSpec {
+        PluginOAuthSpec {
+            grant_type: OAuthGrantType::AuthorizationCode,
+            token_url: Some("https://accounts.example.com/token".to_string()),
+            authorize_url: Some("https://accounts.example.com/authorize".to_string()),
+            device_authorization_url: None,
+            base_url_field: None,
+            authorize_suffix: None,
+            token_suffix: None,
+            scopes: vec!["read".to_string(), "write".to_string()],
+            auth_style: OAuthAuthStyle::Basic,
+            client_id_field: "client_id".to_string(),
+            client_secret_field: Some("client_secret".to_string()),
+            redirect_port: None,
+        }
+    }
+
+    // Happy path: oauth_flow field + matching oauth block passes.
+    #[test]
+    fn validate_oauth_spec_accepts_valid() {
+        assert!(validate_oauth_spec(Some(&valid_oauth_spec()), &oauth_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn supported_grant_types_are_known_variants() {
+        // Every gated grant string must round-trip to an OAuthGrantType, so the
+        // install gate can't admit a grant the enum / host flow doesn't model.
+        for g in consts::SUPPORTED_OAUTH_GRANT_TYPES {
+            let parsed: OAuthGrantType =
+                serde_json::from_value(serde_json::Value::String((*g).to_string()))
+                    .unwrap_or_else(|_| panic!("SUPPORTED grant '{g}' is not an OAuthGrantType"));
+            assert_eq!(parsed.as_str(), *g);
+        }
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_zero_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(0);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_privileged_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(80);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_accepts_user_redirect_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_port = Some(5005);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
+    }
+
+    // -- derived endpoints (base_url_field + suffix) --
+
+    fn derived_oauth_spec() -> PluginOAuthSpec {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = None;
+        spec.authorize_url = None;
+        spec.base_url_field = Some("base_url".to_string());
+        spec.authorize_suffix = Some("/authorize".to_string());
+        spec.token_suffix = Some("/token".to_string());
+        spec
+    }
+
+    fn derived_auth_fields() -> Vec<AuthFieldDef> {
+        vec![
+            oauth_field("client_id"),
+            oauth_field("client_secret"),
+            oauth_field("base_url"),
+        ]
+    }
+
+    #[test]
+    fn validate_oauth_spec_accepts_derived_endpoints() {
+        assert!(validate_oauth_spec(Some(&derived_oauth_spec()), &derived_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_base_url_field_with_static_url() {
+        let mut spec = derived_oauth_spec();
+        spec.token_url = Some("https://idp.example.com/token".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_base_url_field() {
+        let mut spec = derived_oauth_spec();
+        spec.base_url_field = Some("nonexistent".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_missing_token_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = None;
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_traversal_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = Some("/../etc/token".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_non_relative_suffix() {
+        let mut spec = derived_oauth_spec();
+        spec.token_suffix = Some("token".to_string()); // no leading slash
+        assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_joins_base_and_suffix() {
+        let spec = derived_oauth_spec();
+        let mut seed = std::collections::HashMap::new();
+        seed.insert(
+            "base_url".to_string(),
+            "https://glpi.example.com/api.php".to_string(),
+        );
+        let (authorize, token) = resolve_oauth_endpoints(&spec, &seed).unwrap();
+        assert_eq!(token, "https://glpi.example.com/api.php/token");
+        assert_eq!(
+            authorize.as_deref(),
+            Some("https://glpi.example.com/api.php/authorize")
+        );
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_rejects_private_base() {
+        let spec = derived_oauth_spec();
+        let mut seed = std::collections::HashMap::new();
+        seed.insert(
+            "base_url".to_string(),
+            "https://127.0.0.1/api.php".to_string(),
+        );
+        assert!(resolve_oauth_endpoints(&spec, &seed).is_err());
+    }
+
+    #[test]
+    fn resolve_oauth_endpoints_errors_when_base_unconfigured() {
+        let spec = derived_oauth_spec();
+        let seed = std::collections::HashMap::new();
+        assert!(resolve_oauth_endpoints(&spec, &seed).is_err());
+    }
+
+    // Edge: no oauth field and no oauth block — nothing to validate.
+    #[test]
+    fn validate_oauth_spec_ok_when_absent() {
+        let plain = field_with_validation(None);
+        assert!(validate_oauth_spec(None, &[plain]).is_ok());
+    }
+
+    // Error path: oauth_flow field without an oauth block.
+    #[test]
+    fn validate_oauth_spec_rejects_field_without_block() {
+        let err = validate_oauth_spec(None, &[oauth_field("client_id")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `oauth` block"), "got: {err}");
+    }
+
+    // Error path: oauth block without any oauth_flow field.
+    #[test]
+    fn validate_oauth_spec_rejects_block_without_field() {
+        let plain = field_with_validation(None);
+        let err = validate_oauth_spec(Some(&valid_oauth_spec()), &[plain])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("oauth_flow: true"), "got: {err}");
+    }
+
+    // Error path: non-https endpoint is rejected by the SSRF/scheme gate.
+    #[test]
+    fn validate_oauth_spec_rejects_non_https() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = Some("http://accounts.example.com/authorize".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must use https"), "got: {err}");
+    }
+
+    // The device_code / client_credentials branches below sit behind the
+    // SUPPORTED_OAUTH_GRANT_TYPES gate at install time; testing
+    // validate_grant_endpoints directly keeps them honest until the PRs that
+    // widen the gate land (ADR-069 staged rollout).
+
+    #[test]
+    fn grant_endpoints_device_code_requires_device_authorization_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("device_authorization_url is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_endpoints_device_code_accepts_valid_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://accounts.example.com/devicecode".to_string());
+        assert!(validate_grant_endpoints(&spec, false).is_ok());
+    }
+
+    #[test]
+    fn grant_endpoints_device_code_rejects_private_url() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://192.168.1.1/devicecode".to_string());
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        // Rejected by the shared SSRF validator ("private/reserved IP").
+        assert!(err.contains("private"), "got: {err}");
+    }
+
+    #[test]
+    fn grant_endpoints_client_credentials_requires_secret_field() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::ClientCredentials;
+        spec.client_secret_field = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("client_secret_field is required"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_endpoints_client_credentials_accepts_with_secret() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::ClientCredentials;
+        assert!(validate_grant_endpoints(&spec, false).is_ok());
+    }
+
+    #[test]
+    fn grant_endpoints_authorization_code_requires_authorize_url_when_static() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        let err = validate_grant_endpoints(&spec, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authorize_url is required"), "got: {err}");
+    }
+
+    #[test]
+    fn grant_endpoints_authorization_code_derived_skips_authorize_url() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        assert!(validate_grant_endpoints(&spec, true).is_ok());
+    }
+
+    // Error path: loopback/private endpoint blocked by the shared validator.
+    #[test]
+    fn validate_oauth_spec_rejects_private_address() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = Some("https://127.0.0.1/token".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("private") || err.contains("loopback"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_empty_token_url() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = Some(String::new());
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_malformed_token_url() {
+        let mut spec = valid_oauth_spec();
+        spec.token_url = Some("not-a-url".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    #[test]
+    fn validate_oauth_spec_rejects_metadata_ip_token_url() {
+        // Cloud metadata endpoint must be blocked through the OAuth path.
+        let mut spec = valid_oauth_spec();
+        spec.token_url = Some("https://169.254.169.254/token".to_string());
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
+    }
+
+    // Edge: oversized endpoint URL is rejected by the length cap.
+    #[test]
+    fn validate_oauth_spec_rejects_oversized_url() {
+        let mut spec = valid_oauth_spec();
+        let pad = "a".repeat(consts::PLUGIN_OAUTH_URL_MAX_LEN);
+        spec.authorize_url = Some(format!("https://example.com/{pad}"));
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    // Edge: too many scopes rejected by the count cap.
+    #[test]
+    fn validate_oauth_spec_rejects_too_many_scopes() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = (0..=consts::PLUGIN_OAUTH_SCOPES_MAX_COUNT)
+            .map(|i| format!("scope{i}"))
+            .collect();
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not exceed"), "got: {err}");
+    }
+
+    // Edge: an oversized single scope is rejected by the per-scope length cap.
+    #[test]
+    fn validate_oauth_spec_rejects_oversized_scope() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = vec!["s".repeat(consts::PLUGIN_OAUTH_SCOPE_MAX_LEN + 1)];
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytes"), "got: {err}");
+    }
+
+    // Edge: an empty scope entry is rejected.
+    #[test]
+    fn validate_oauth_spec_rejects_empty_scope() {
+        let mut spec = valid_oauth_spec();
+        spec.scopes = vec!["".to_string()];
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    // Reserved: a grant not in SUPPORTED_OAUTH_GRANT_TYPES is rejected even
+    // though the enum can represent it (grant gating per PR).
+    #[test]
+    fn validate_oauth_spec_rejects_unsupported_grant() {
+        let mut spec = valid_oauth_spec();
+        spec.grant_type = OAuthGrantType::DeviceCode;
+        spec.device_authorization_url = Some("https://idp.example.com/device".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    // Error path: authorization_code without authorize_url.
+    #[test]
+    fn validate_oauth_spec_rejects_missing_authorize_url() {
+        let mut spec = valid_oauth_spec();
+        spec.authorize_url = None;
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authorize_url is required"), "got: {err}");
+    }
+
+    // Error path: client_id_field references a non-existent auth_field.
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_client_id_field() {
+        let mut spec = valid_oauth_spec();
+        spec.client_id_field = "nonexistent".to_string();
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("client_id_field"), "got: {err}");
+    }
+
+    // Error path: client_secret_field references a non-existent auth_field.
+    #[test]
+    fn validate_oauth_spec_rejects_dangling_client_secret_field() {
+        let mut spec = valid_oauth_spec();
+        spec.client_secret_field = Some("nonexistent".to_string());
+        let err = validate_oauth_spec(Some(&spec), &oauth_auth_fields())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("client_secret_field"), "got: {err}");
+    }
+
+    // Seed file is under oauth/, distinct from the state file, never tokens/.
+    #[test]
+    fn oauth_seed_file_is_off_mount_and_distinct() {
+        let base = std::path::Path::new("/d");
+        let seed = oauth_seed_file_in(base, "proj", "my-plugin");
+        let state = oauth_state_file_in(base, "proj", "my-plugin");
+        assert!(seed.starts_with(base.join(consts::OAUTH_SUBDIR)));
+        assert!(!seed.starts_with(base.join("tokens")));
+        assert_ne!(seed, state);
+        assert!(seed.to_string_lossy().ends_with("my-plugin.seed.json"));
+    }
+
+    // Grant string mapping matches the wire form.
+    #[test]
+    fn oauth_grant_type_as_str() {
+        assert_eq!(
+            OAuthGrantType::AuthorizationCode.as_str(),
+            "authorization_code"
+        );
+        assert_eq!(OAuthGrantType::DeviceCode.as_str(), "device_code");
+        assert_eq!(
+            OAuthGrantType::ClientCredentials.as_str(),
+            "client_credentials"
+        );
+    }
+
+    // Default: omitted oauth_flow → false, omitted oauth → None, omitted
+    // auth_style → Basic.
+    #[test]
+    fn oauth_fields_default_when_omitted() {
+        let json = r#"{
+            "key": "token", "label": "T", "field_type": "password",
+            "placeholder": "", "is_secret": true
+        }"#;
+        let field: AuthFieldDef = serde_json::from_str(json).unwrap();
+        assert!(!field.oauth_flow);
+
+        let mjson = r#"{
+            "name": "Plain", "slug": "plain", "version": "1.0.0",
+            "description": "no oauth"
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(mjson).unwrap();
+        assert!(manifest.oauth.is_none());
+
+        let sjson = r#"{
+            "grant_type": "authorization_code",
+            "token_url": "https://idp.example.com/token",
+            "client_id_field": "client_id"
+        }"#;
+        let spec: PluginOAuthSpec = serde_json::from_str(sjson).unwrap();
+        assert_eq!(spec.auth_style, OAuthAuthStyle::Basic);
+        assert!(spec.client_secret_field.is_none());
+        assert!(spec.redirect_port.is_none());
     }
 
     #[test]
@@ -5033,7 +6414,7 @@ mod tests {
         // Empty == "leave stored value untouched"; required-ness is enforced
         // elsewhere, so the pattern must not fire on an empty submission.
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_.+$".to_string(),
+            pattern: "^tok_.+$".to_string(),
             message: None,
         }));
         assert!(validate_credential_value(&field, "").is_ok());
@@ -5042,31 +6423,31 @@ mod tests {
     #[test]
     fn validate_credential_value_accepts_matching() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
             message: Some("nope".to_string()),
         }));
-        assert!(validate_credential_value(&field, "figd_abc-123_XYZ").is_ok());
+        assert!(validate_credential_value(&field, "tok_abc-123_XYZ").is_ok());
     }
 
     #[test]
     fn validate_credential_value_rejects_mismatch_with_author_message() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_[A-Za-z0-9_-]+$".to_string(),
-            message: Some("Token must start with figd_".to_string()),
+            pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
+            message: Some("Token must start with tok_".to_string()),
         }));
         let err = validate_credential_value(&field, "ghp_wrongprefix").unwrap_err();
-        assert_eq!(err, "Token must start with figd_");
+        assert_eq!(err, "Token must start with tok_");
     }
 
     #[test]
     fn validate_credential_value_rejects_mismatch_with_generic_fallback() {
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "^figd_.+$".to_string(),
+            pattern: "^tok_.+$".to_string(),
             message: None,
         }));
         let err = validate_credential_value(&field, "bad").unwrap_err();
         // Falls back to a message naming the field's label, not its key.
-        assert!(err.contains("Figma Token"), "got: {err}");
+        assert!(err.contains("Example Plugin Token"), "got: {err}");
     }
 
     #[test]
@@ -5074,12 +6455,12 @@ mod tests {
         // A value that only *contains* a match (but has extra chars) must be
         // rejected — anchoring mirrors the HTML pattern's full-match rule.
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "figd_[a-z]+".to_string(), // intentionally un-anchored by author
+            pattern: "tok_[a-z]+".to_string(), // intentionally un-anchored by author
             message: Some("bad".to_string()),
         }));
-        assert!(validate_credential_value(&field, "figd_abc").is_ok());
+        assert!(validate_credential_value(&field, "tok_abc").is_ok());
         assert!(
-            validate_credential_value(&field, "prefix_figd_abc_suffix").is_err(),
+            validate_credential_value(&field, "prefix_tok_abc_suffix").is_err(),
             "partial match must be rejected by the anchoring wrapper"
         );
     }
@@ -5195,10 +6576,10 @@ mod tests {
         assert!(compile_anchored_pattern("(")
             .unwrap_err()
             .contains("invalid"));
-        let re = compile_anchored_pattern("figd_[a-z]+").unwrap();
-        assert!(re.is_match("figd_abc"));
+        let re = compile_anchored_pattern("tok_[a-z]+").unwrap();
+        assert!(re.is_match("tok_abc"));
         assert!(
-            !re.is_match("x figd_abc"),
+            !re.is_match("x tok_abc"),
             "compile_anchored_pattern must wrap in ^(?:…)$ for full-match"
         );
     }
@@ -5207,8 +6588,8 @@ mod tests {
     fn test_token_dir_returns_correct_path() {
         // Isolated: build under a tempdir home instead of consts::data_dir().
         let tmp = tempfile::tempdir().unwrap();
-        let result = token_dir_with_base(tmp.path(), "myproject", "presale");
-        let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/presale");
+        let result = token_dir_with_base(tmp.path(), "myproject", "example-plugin");
+        let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/example-plugin");
         assert!(
             result.ends_with(expected_suffix),
             "token_dir should return ~/.speedwave/tokens/<project>/<service_id>, got: {}",
@@ -5425,6 +6806,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("ReadWrite must be rejected for plugins");
@@ -5463,6 +6845,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("slug colliding with built-in compose name must be rejected");
@@ -5522,6 +6905,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("dangerous env key must be rejected");
@@ -5575,6 +6959,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: Some(bridge),
             instructions: None,
+            oauth: None,
         }
     }
 
@@ -5925,6 +7310,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("mem_limit beyond cap must be rejected");
@@ -5957,6 +7343,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("cpu_limit beyond cap must be rejected");
@@ -5993,6 +7380,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err =
                 validate_manifest(&manifest, dir.path()).expect_err("cpu_limit must be rejected");
@@ -6035,6 +7423,7 @@ mod tests {
                 requires_integrations: vec![],
                 host_bridge: None,
                 instructions: None,
+                oauth: None,
             };
             let err = validate_manifest(&manifest, dir.path())
                 .expect_err("non-object settings_schema must be rejected");
@@ -6074,6 +7463,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         let err = validate_manifest(&manifest, dir.path())
             .expect_err("oversized settings_schema must be rejected");
@@ -6112,6 +7502,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         };
         validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
@@ -6438,51 +7829,479 @@ mod tests {
     fn test_ensure_plugin_images_rebuilds_missing_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         let (rt, handle) = tracking_runtime(&[]); // no existing images
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
             handle.build_call_count(),
             1,
             "should build the missing image"
         );
-        assert!(handle.was_built("speedwave-mcp-presale:1.4.6"));
+        assert!(handle.was_built(&expected_tag_for(tmp.path(), "example-plugin")));
     }
 
     #[test]
     fn test_build_single_plugin_image_containerfile_path_has_separator() {
         // Regression: on Windows `prepare_build_context` returns a WSL path
         // (`/mnt/c/...`); building the Containerfile path with `PathBuf::join`
-        // mangled it into `.../presaleContainerfile` (no separator). The
+        // mangled it into `.../examplePluginContainerfile` (no separator). The
         // containerfile arg passed to `build_image` must always be
         // `<vm_root>/Containerfile`, separator intact, on every host OS.
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         // Simulate the Windows case: prepare_build_context yields a WSL path.
-        let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/presale");
+        let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/example-plugin");
         let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(wsl_root.clone())
             .build();
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         let calls = handle.build_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "should build the image");
         let cf = &calls[0].containerfile;
         assert_eq!(
-            cf, "/mnt/c/Users/u/.speedwave/plugins/presale/Containerfile",
+            cf, "/mnt/c/Users/u/.speedwave/plugins/example-plugin/Containerfile",
             "containerfile must be <vm_root>/Containerfile with separator, got: {cf}"
         );
         assert!(
-            !cf.contains("presaleContainerfile"),
+            !cf.contains("examplePluginContainerfile"),
             "separator must not be dropped (Windows PathBuf::join bug), got: {cf}"
         );
         assert_eq!(
-            calls[0].context_dir, "/mnt/c/Users/u/.speedwave/plugins/presale",
+            calls[0].context_dir, "/mnt/c/Users/u/.speedwave/plugins/example-plugin",
             "context dir must be the WSL vm_root verbatim"
+        );
+    }
+
+    #[test]
+    fn plugin_image_tag_changes_when_tree_changes() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let before = expected_tag_for(tmp.path(), "example-plugin");
+        std::fs::write(
+            tmp.path().join("example-plugin").join("Containerfile"),
+            "FROM scratch\nLABEL changed=1",
+        )
+        .unwrap();
+        let after = expected_tag_for(tmp.path(), "example-plugin");
+        assert_ne!(before, after, "tree change must retag (ADR-072)");
+        assert!(after.starts_with("speedwave-mcp-example-plugin:1.0.0-"));
+    }
+
+    #[test]
+    fn plugin_image_tag_truncate_survives_multibyte_boundary() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test".to_string()),
+            slug: "test".to_string(),
+            // 99 ASCII chars then a multibyte char straddling index 100.
+            version: format!("{}{}", "v".repeat(99), "łłł"),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        // Must not panic; result stays within the OCI cap.
+        let tag = plugin_image_tag(&manifest, "0123456789abcdef");
+        assert!(tag.split(':').nth(1).unwrap().len() <= 128);
+    }
+
+    #[test]
+    fn validate_manifest_rejects_version_outside_tag_charset() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("badver");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"x","slug":"badver","version":"1.0:evil","description":"d"}"#,
+        )
+        .unwrap();
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        let err = validate_manifest(&manifest, &dir).unwrap_err().to_string();
+        assert!(err.contains("Invalid version"), "got: {err}");
+    }
+
+    #[test]
+    fn plugin_image_tag_truncates_long_base_within_oci_limit() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test".to_string()),
+            slug: "test".to_string(),
+            version: "2.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: Some("x".repeat(128)),
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let tag = plugin_image_tag(&manifest, "0123456789abcdef0123");
+        let after_colon = tag.split(':').nth(1).unwrap();
+        assert!(
+            after_colon.len() <= 128,
+            "OCI tag cap: {}",
+            after_colon.len()
+        );
+        assert!(after_colon.ends_with("-0123456789abcdef"));
+    }
+
+    #[test]
+    fn record_applied_tag_prunes_superseded_and_updates_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plugins dir must be a subdir: plugin-state lives at its SIBLING,
+        // and tmp.path() directly would leak state into the shared TMPDIR.
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("prune-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let plugins_dir = plugins_dir.as_path();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+
+        // First build: no marker yet — queues + prunes the LEGACY tag, records.
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-one",
+            "repo:legacy",
+        );
+        assert_eq!(
+            handles.remove_images_calls.lock().unwrap().clone(),
+            vec![(vec!["repo:legacy".to_string()], false)],
+            "pre-marker install queues the legacy version-only tag"
+        );
+
+        // Second build with a new digest: prunes the recorded tag (force=false).
+        record_applied_image_tag_and_prune(
+            &rt,
+            &plugin_dir,
+            "prune-test",
+            "repo:tag-two",
+            "repo:legacy",
+        );
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.last().unwrap(),
+            &(vec!["repo:tag-one".to_string()], false)
+        );
+
+        let marker = plugin_state_dir_for(plugins_dir, "prune-test").join(APPLIED_IMAGE_TAG_MARKER);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "repo:tag-two");
+        // Everything pruned → no pending file left.
+        assert!(!plugin_state_dir_for(plugins_dir, "prune-test")
+            .join(SUPERSEDED_TAGS_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn record_applied_tag_keeps_failed_prune_pending_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("retry-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let state = plugin_state_dir_for(&plugins_dir, "retry-test");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:old").unwrap();
+
+        // rmi fails (worker still running) → tag must land on the pending list.
+        let (rt_fail, _h) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_remove_images_error("in use")
+            .build();
+        record_applied_image_tag_and_prune(
+            &rt_fail,
+            &plugin_dir,
+            "retry-test",
+            "repo:new",
+            "repo:legacy",
+        );
+        let pending = std::fs::read_to_string(state.join(SUPERSEDED_TAGS_FILE)).unwrap();
+        assert_eq!(pending.trim(), "repo:old");
+        assert_eq!(
+            std::fs::read_to_string(state.join(APPLIED_IMAGE_TAG_MARKER)).unwrap(),
+            "repo:new"
+        );
+
+        // Next build: retry succeeds → pending list drained.
+        let (rt_ok, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        record_applied_image_tag_and_prune(
+            &rt_ok,
+            &plugin_dir,
+            "retry-test",
+            "repo:newer",
+            "repo:legacy",
+        );
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert!(calls.contains(&(vec!["repo:old".to_string()], false)));
+        assert!(calls.contains(&(vec!["repo:new".to_string()], false)));
+        assert!(!state.join(SUPERSEDED_TAGS_FILE).exists());
+    }
+
+    #[test]
+    fn record_applied_tag_same_tag_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("idem-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
+        // Unchanged tag (legacy == current too) must not remove anything.
+        assert!(handles.remove_images_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_plugin_removes_marker_tag_when_it_differs_from_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "img-cleanup", true);
+        let current_tag = expected_tag_for(&plugins_dir, "img-cleanup");
+        // Simulate an earlier build of a different tree revision.
+        let state = plugin_state_dir_for(&plugins_dir, "img-cleanup");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:stale-old").unwrap();
+
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
+
+        let calls = handles.remove_images_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (vec![current_tag], true),
+                (vec!["repo:stale-old".to_string()], true),
+                (vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_build_runs_under_build_lock() {
+        let source = include_str!("plugin.rs");
+        let outer = source
+            .find("fn build_single_plugin_image(")
+            .expect("outer build fn must exist");
+        let body_end = source[outer..]
+            .find("fn build_single_plugin_image_locked(")
+            .map(|i| outer + i)
+            .expect("locked inner fn must exist");
+        assert!(
+            source[outer..body_end].contains("with_build_lock"),
+            "plugin build+prune must be serialised by build.lock (ADR-072)"
+        );
+    }
+
+    #[test]
+    fn plugin_build_recovers_from_corrupted_snapshot() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+
+        // First build hits the corrupted-snapshot signature; recovery prunes and
+        // the retry succeeds — parity with bundle builds.
+        let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_prepare_build_context_root(tmp.path().join("example-plugin"))
+            .with_build_error_for_attempt(
+                &tag,
+                1,
+                "failed to compute cache key: failed to stat parent: \
+                 stat /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/7/fs: \
+                 no such file or directory",
+            )
+            .build();
+
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path())
+            .expect("plugin build must recover from a corrupted containerd snapshot");
+
+        let builds = handle
+            .build_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.tag == tag)
+            .count();
+        assert_eq!(builds, 2, "build retried once after prune");
+        let prunes = handle.prune_calls.lock().unwrap();
+        assert!(prunes.contains(&"system"), "system_prune ran");
+        assert!(prunes.contains(&"buildkit"), "BuildKit cache pruned");
+    }
+
+    /// Expected content-addressed tag for a plugin dir created by a test.
+    fn expected_tag_for(plugins_dir: &Path, slug: &str) -> String {
+        let dir = plugins_dir.join(slug);
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        let digest = signing::plugin_tree_digest_hex(&dir).unwrap();
+        plugin_image_tag(&manifest, &digest)
+    }
+
+    // --- Rebuild-failure fallback to a previously-built image ---
+
+    /// Plugins dir nested in the tempdir so `plugin-state/` (a sibling) stays inside it.
+    fn nested_plugins_dir(tmp: &Path) -> PathBuf {
+        let plugins_dir = tmp.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        plugins_dir
+    }
+
+    fn manifest_for(plugins_dir: &Path, slug: &str) -> PluginManifest {
+        serde_json::from_str(
+            &std::fs::read_to_string(plugins_dir.join(slug).join("plugin.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rebuild_failure_falls_back_to_surviving_legacy_image() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let manifest = manifest_for(&plugins_dir, "example-plugin");
+        let legacy = plugin_legacy_image_tag(&manifest);
+
+        let (rt, _handle) = failing_tracking_runtime(&[&legacy]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir)
+            .expect("a surviving previously-built image must keep the project startable");
+
+        let digest = signing::plugin_tree_digest_hex(&plugins_dir.join("example-plugin")).unwrap();
+        assert_eq!(
+            effective_plugin_image_tag(&manifest, &digest, &plugins_dir.join("example-plugin")),
+            legacy,
+            "compose must run the recorded fallback image"
+        );
+    }
+
+    #[test]
+    fn rebuild_failure_without_any_image_fails_with_retry_guidance() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+
+        let (rt, _handle) = failing_tracking_runtime(&[]);
+        let err =
+            ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("no previously-built"),
+            "error must say no fallback exists and how to retry: {err}"
+        );
+    }
+
+    #[test]
+    fn successful_rebuild_clears_fallback_marker() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        write_image_fallback_tag_for(
+            &plugins_dir,
+            "example-plugin",
+            "speedwave-mcp-example-plugin:old",
+        )
+        .unwrap();
+
+        let (rt, handle) = tracking_runtime(&[]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
+        assert_eq!(handle.build_call_count(), 1, "missing image rebuilt");
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "successful rebuild ends the fallback period"
+        );
+    }
+
+    #[test]
+    fn present_content_image_clears_stale_fallback_marker() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        write_image_fallback_tag_for(
+            &plugins_dir,
+            "example-plugin",
+            "speedwave-mcp-example-plugin:old",
+        )
+        .unwrap();
+
+        let tag = expected_tag_for(&plugins_dir, "example-plugin");
+        let (rt, handle) = tracking_runtime(&[&tag]);
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
+        assert_eq!(handle.build_call_count(), 0, "present image skips rebuild");
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "stale marker dropped once the content-addressed image exists"
+        );
+    }
+
+    #[test]
+    fn unsafe_fallback_marker_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let manifest = manifest_for(&plugins_dir, "example-plugin");
+        write_image_fallback_tag_for(&plugins_dir, "example-plugin", "bad tag; rm -rf /").unwrap();
+
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "charset-invalid marker must be ignored"
+        );
+        assert_eq!(
+            effective_plugin_image_tag(
+                &manifest,
+                "f00ddeadbeefcafe0123456789abcdef",
+                &plugins_dir.join("example-plugin")
+            ),
+            plugin_image_tag(&manifest, "f00ddeadbeefcafe0123456789abcdef"),
+            "compose falls back to the content-addressed tag"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_fallback_marker_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = nested_plugins_dir(tmp.path());
+        make_mcp_plugin_dir(&plugins_dir, "example-plugin", "1.4.6");
+        let target = tmp.path().join("target-file");
+        std::fs::write(&target, "speedwave-mcp-example-plugin:evil").unwrap();
+        let state_dir = plugin_state_dir_for(&plugins_dir, "example-plugin");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::os::unix::fs::symlink(&target, state_dir.join(IMAGE_REBUILD_PENDING_MARKER)).unwrap();
+
+        assert_eq!(
+            read_image_fallback_tag_for(&plugins_dir, "example-plugin"),
+            None,
+            "symlinked marker must be ignored"
         );
     }
 
@@ -6490,10 +8309,11 @@ mod tests {
     fn test_ensure_plugin_images_skips_existing() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        let (rt, handle) = tracking_runtime(&["speedwave-mcp-presale:1.4.6"]); // image exists
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+        let (rt, handle) = tracking_runtime(&[&tag]); // image exists
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
             handle.build_call_count(),
@@ -6506,10 +8326,10 @@ mod tests {
     fn test_ensure_plugin_images_skips_disabled_plugin() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         let (rt, handle) = tracking_runtime(&[]); // no existing images
-                                                  // enabled_service_ids is empty — presale is disabled for this project
+                                                  // enabled_service_ids is empty — example-plugin is disabled for this project
         ensure_plugin_images_from_dir(&rt, &[], tmp.path()).unwrap();
 
         assert_eq!(
@@ -6544,7 +8364,8 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // enabled, existing image
         make_mcp_plugin_dir(tmp.path(), "plugin-c", "1.0.0"); // disabled, missing image
 
-        let (rt, handle) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]); // B exists
+        let tag_b = expected_tag_for(tmp.path(), "plugin-b");
+        let (rt, handle) = tracking_runtime(&[&tag_b]); // B exists
         ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -6552,20 +8373,20 @@ mod tests {
             1,
             "only plugin-a should be built (plugin-b exists, plugin-c disabled)"
         );
-        assert!(handle.was_built("speedwave-mcp-plugin-a:1.0.0"));
-        assert!(!handle.was_built("speedwave-mcp-plugin-c:1.0.0"));
+        assert!(handle.was_built(&expected_tag_for(tmp.path(), "plugin-a")));
+        assert!(!handle.was_built(&expected_tag_for(tmp.path(), "plugin-c")));
     }
 
     #[test]
     fn test_ensure_plugin_images_also_builds_pending_for_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
         // Add .image_pending marker
-        std::fs::write(tmp.path().join("presale").join(".image_pending"), "").unwrap();
+        std::fs::write(tmp.path().join("example-plugin").join(".image_pending"), "").unwrap();
 
         let (rt, handle) = tracking_runtime(&[]); // image missing
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         // Built exactly once: the pending pass builds it, then the second pass sees it via
         // image_exists() and skips. (TrackingRuntime.build_image now inserts into existing_images.)
@@ -6655,13 +8476,13 @@ mod tests {
         // (which succeeds with the default builder), so the whole pass returns Ok.
 
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
 
         let (rt, _handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_image_exists_error("runtime unavailable")
             .build();
         // image_exists returns Err → treated as missing → build attempted → succeeds
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
     }
 
     // --- Edge cases ---
@@ -6673,7 +8494,7 @@ mod tests {
         std::fs::create_dir_all(&plugins_dir).unwrap();
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], &plugins_dir).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins_dir).unwrap();
         assert_eq!(handle.build_call_count(), 0);
     }
 
@@ -6683,7 +8504,7 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], &nonexistent).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &nonexistent).unwrap();
         assert_eq!(handle.build_call_count(), 0);
     }
 
@@ -6714,14 +8535,14 @@ mod tests {
     fn test_ensure_plugin_images_custom_image_tag() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("presale");
+        let plugin_dir = tmp.path().join("example-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),
             r#"{
-                "name": "presale",
-                "slug": "presale",
-                "service_id": "presale",
+                "name": "example-plugin",
+                "slug": "example-plugin",
+                "service_id": "example-plugin",
                 "version": "1.0.0",
                 "image_tag": "custom-tag",
                 "description": "test",
@@ -6732,12 +8553,17 @@ mod tests {
         std::fs::write(plugin_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(handle.build_call_count(), 1);
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
         assert!(
-            handle.was_built("speedwave-mcp-presale:custom-tag"),
-            "should use custom image_tag, got calls: {:?}",
+            tag.starts_with("speedwave-mcp-example-plugin:custom-tag-"),
+            "tag must keep the custom base and append the digest, got: {tag}"
+        );
+        assert!(
+            handle.was_built(&tag),
+            "should use custom image_tag + digest, got calls: {:?}",
             handle.build_tags()
         );
     }
@@ -6748,13 +8574,13 @@ mod tests {
     fn test_ensure_plugin_images_pending_marker_cleared_after_build() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
-        let pending = tmp.path().join("presale").join(".image_pending");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
+        let pending = tmp.path().join("example-plugin").join(".image_pending");
         std::fs::write(&pending, "").unwrap();
         assert!(pending.exists(), "marker should exist before build");
 
         let (rt, _handle) = tracking_runtime(&[]); // image missing
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert!(
             !pending.exists(),
@@ -6766,16 +8592,17 @@ mod tests {
     fn test_ensure_plugin_images_image_exists_after_rebuild() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
 
         // First call: image missing → builds it
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(handle.build_call_count(), 1, "first call should build");
 
         // Second call: image now exists (simulate by creating a runtime that knows about it)
-        let (rt2, handle2) = tracking_runtime(&["speedwave-mcp-presale:1.0.0"]);
-        ensure_plugin_images_from_dir(&rt2, &["presale"], tmp.path()).unwrap();
+        let tag = expected_tag_for(tmp.path(), "example-plugin");
+        let (rt2, handle2) = tracking_runtime(&[&tag]);
+        ensure_plugin_images_from_dir(&rt2, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(
             handle2.build_call_count(),
             0,
@@ -6803,7 +8630,8 @@ mod tests {
         );
 
         // Project using only plugin-b — succeeds (image already exists in this runtime).
-        let (rt_b_exists, _) = tracking_runtime(&["speedwave-mcp-plugin-b:1.0.0"]);
+        let tag_b = expected_tag_for(tmp.path(), "plugin-b");
+        let (rt_b_exists, _) = tracking_runtime(&[&tag_b]);
         let project_b_result =
             ensure_plugin_images_from_dir(&rt_b_exists, &["plugin-b"], tmp.path());
         assert!(
@@ -6844,6 +8672,7 @@ mod tests {
             requires_integrations: vec![],
             host_bridge: None,
             instructions: None,
+            oauth: None,
         }
     }
 

@@ -4,6 +4,16 @@
 
 **Date:** 2026-05-06
 
+> **Update (2026-06-30):** `speedwave login` now execs `claude auth login --claudeai`
+> directly instead of dropping the user at an interactive prompt to type `/login`.
+> The subcommand starts OAuth at once (prints the URL + paste-back prompt, the same
+> fallback the localhost callback already required), so the "one extra keypress"
+> noted under Negative is gone — without the brittle stdout parser that alternative
+> implied. The login exec also unsets non-Anthropic provider env first (the
+> anthropic-login-env-unset change) so OAuth runs against Anthropic regardless of
+> the active provider. The credential-lifecycle and clipboard-bridge decisions below
+> are unchanged.
+
 > **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^1]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
 
 ## Context
@@ -87,17 +97,27 @@ Render the login flow as an in-app pseudo-terminal panel. **Rejected** — adds 
 
 ### Negative
 
-- The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.
+- ~~The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.~~ Resolved by the 2026-06-30 update: `claude auth login` starts OAuth automatically, with no stdout parser.
 - Per-project credentials (one `CLAUDE_HOME` per project) means logging into project A does not authenticate project B. A user with N projects logs in N times. Acceptable: tokens are valid one year[^1], and project isolation is a load-bearing security property.
 
 ### Addendum: clipboard bridge for the "press `c` to copy URL" hint
 
-Claude Code's TUI prints "press `c` to copy URL" and, on `c`, probes for
-`pbcopy` / `xclip` / `xsel` / `wl-copy` / `clip.exe` (OSC 52 as a last resort).
-Our hardened container has none of those binaries and no path to the host
-clipboard. The `claude` image therefore bakes five symlinks at
-`/usr/local/bin/` (all the names above), all pointing at one `osc52-copy.sh`
-which sends the URL down **two write-only channels**:
+Claude Code's TUI prints "press `c` to copy URL" and, on `c`, routes the copy
+by detected platform (Claude Code ≥ 2.1.161[^4]): on `linux` it probes for
+`wl-copy` — only when `WAYLAND_DISPLAY` is set — then `xclip`/`xsel` (only when
+`DISPLAY` is set), with OSC 52 as a last resort; on Windows hosts the container
+self-identifies as platform `wsl` (via `/proc/version`) and execs
+`powershell.exe … Set-Clipboard` instead. Our hardened container has none of
+those binaries and no path to the host clipboard. The `claude` image therefore
+bakes six symlinks at `/usr/local/bin/` (`pbcopy` / `xclip` / `xsel` /
+`wl-copy` / `clip.exe` / `powershell.exe`), all pointing at one
+`osc52-copy.sh`, and `defaults.rs::base_env()` injects a dummy
+`WAYLAND_DISPLAY` so the probe finds the `wl-copy` shim (no Wayland socket
+exists or is needed — the shim never talks to a display server). The shim
+treats a `Set-Clipboard` PowerShell command as a copy and fails read-style
+commands (`Get-Clipboard`, `ContainsImage`) with exit 1 so paste keeps using
+the `xclip` image path below. The copy sends the URL down **two write-only
+channels**:
 
 1. **File bridge (primary).** Atomically writes the URL to
    `~/.clipboard-bridge` inside the container (i.e. on the host at
@@ -151,3 +171,5 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 [^2]: GitHub issue tfvchow/field-notes-public#10 — both `.credentials.json` and `.claude.json` are required for Claude Code to skip onboarding in a devcontainer. <https://github.com/tfvchow/field-notes-public/issues/10>
 
 [^3]: OSC 52 terminal-emulator support data — survey of which terminals honor the sequence by default and which require an opt-in setting. <https://github.com/ojroques/vim-oscyank#which-terminals-support-osc-52>
+
+[^4]: Claude Code CHANGELOG 2.1.160/2.1.161 — copy-on-select moved to PowerShell interop on WSL and the fullscreen clipboard probe gained `wl-copy`/`xclip`/`xsel` with PRIMARY-selection writes; verified against the published 2.1.154 vs 2.1.173 `linux-x64` binaries (the linux probe is gated on `WAYLAND_DISPLAY`/`DISPLAY`; platform `wsl` execs `powershell.exe … Set-Clipboard`). <https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md>

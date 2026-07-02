@@ -43,9 +43,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 ctrlc = { version = "3", features = ["termination"] }
-dashmap = "6"
-futures-core = "0.3"
-json-patch = "4"
 # JSON Schema validation for `plugin_save_settings` — refuses payloads
 # that don't match the plugin's manifest-declared `settings_schema`.
 # MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).

@@ -24,20 +24,20 @@ describe('authRequiredGuard', () => {
   });
 
   it('should allow access when status is ready', () => {
-    projectState.status = 'ready';
+    projectState.status.set('ready');
     const result = TestBed.runInInjectionContext(() => authRequiredGuard({} as never, {} as never));
     expect(result).toBe(true);
   });
 
   it('should redirect to /settings when status is auth_required', () => {
-    projectState.status = 'auth_required';
+    projectState.status.set('auth_required');
     const result = TestBed.runInInjectionContext(() => authRequiredGuard({} as never, {} as never));
     expect(result).toBeInstanceOf(UrlTree);
     expect(router.serializeUrl(result as UrlTree)).toBe('/settings');
   });
 
   it('should allow access (fail-open) during transient states', () => {
-    projectState.status = 'loading';
+    projectState.status.set('loading');
     const result = TestBed.runInInjectionContext(() => authRequiredGuard({} as never, {} as never));
     expect(result).toBe(true);
   });

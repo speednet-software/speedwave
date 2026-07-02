@@ -31,7 +31,7 @@ make status         # quick health check
 
 ### Granular targets
 
-- **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-desktop`, `test-e2e`, `test-e2e-plugin-tamper-release`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
+- **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-swift`, `test-desktop`, `test-e2e`, `test-e2e-plugin-tamper-release`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
 - **Build:** `build-runtime`, `build-cli`, `build-cli-release`, `build-desktop`, `build-native-macos`, `build-os-cli`, `build-mcp`, `build-angular`, `build-tauri`
 - **Check:** `check-clippy`, `check-desktop-clippy`, `check-fmt`, `check-mcp`, `check-mcp-lint`, `check-angular`, `check-angular-lint`
 - **Coverage:** `coverage-rust`, `coverage-mcp`, `coverage-angular`
@@ -52,6 +52,12 @@ The `desktop/src-tauri/cli/` directory is in `.gitignore` — it is populated at
 
 `make dev` automatically builds the CLI first and copies it to `desktop/src-tauri/cli/` before starting Tauri dev mode. This ensures the "Open Terminal" feature works during development.
 
+> **Note:** `desktop/src/angular.json` sets `"cli": {"analytics": false}` intentionally. Without it,
+> Angular CLI shows an interactive telemetry prompt on the first `ng serve` / `ng test` / `ng build`
+> run on a fresh machine and waits for stdin indefinitely — hanging `make dev` and the Angular test
+> suite. The value must be the boolean `false` (not the string `"false"`) because Angular CLI uses a
+> strict `=== false` check; a string would be treated as a user-id and would enable analytics.
+
 ## Windows dev setup
 
 `make dev` works on Windows-native through Git Bash, but the toolchain has several quirks that need addressing. Once configured, the same `make` targets work as on macOS.
@@ -67,6 +73,23 @@ choco install -y git make rustup.install nodejs-lts cmake llvm `
 ```
 
 `make` from Chocolatey is GNU Make 4.4 — required because **GnuWin32 make 3.81** (sometimes pre-installed elsewhere) mishandles `$(VAR)` expansion in recipes and `\` line continuations.
+
+### Non-ASCII Windows username (git over SSH)
+
+If your Windows profile directory contains non-ASCII characters (for example `C:\Users\ŁukaszSzczepański`), `git clone` over SSH fails in Git Bash with a mangled path:
+
+```text
+Could not create directory '/c/Users/\243ukaszSzczepa\361ski/.ssh' (No such file or directory).
+Failed to add the host to the list of known hosts.
+```
+
+Git for Windows bundles an MSYS build of OpenSSH that resolves `HOME` through the ANSI code page, so accented characters turn into unmapped bytes. Switch git to the Unicode-aware OpenSSH that ships with Windows (one-time):
+
+```bash
+git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"
+```
+
+Plain `ssh` in the terminal keeps using the MSYS build; prefer `C:\Windows\System32\OpenSSH\ssh.exe` there too, or set `HOME` to an ASCII-only path in `~/.bashrc` before using ssh directly.
 
 ### `.cargo/config.toml`
 
@@ -94,10 +117,6 @@ export PATH="${_VCVARS_PATH:-}:/c/ProgramData/chocolatey/bin:/c/Users/<you>/.car
 ```
 
 PATH order matters: MSVC bin must precede `/usr/bin` so cargo's child processes find MSVC `cl.exe` first. The `.cargo/config.toml` linker pin makes this less critical for `link.exe` specifically, but other MSVC tools (`cl.exe`, `dumpbin.exe`) still rely on PATH.
-
-### Sherpa-onnx CRT alignment
-
-`make dev` automatically pre-fetches the sherpa-onnx MD-Release prebuilt for Windows (see [ADR-061](../adr/ADR-061-windows-crt-runtime-alignment.md)) and pins `SHERPA_ONNX_LIB_DIR` to a persistent cache under `target/sherpa-onnx-md/`. No manual step needed beyond `make download-sherpa-onnx` (called as a prerequisite of `make dev`).
 
 ### Run
 

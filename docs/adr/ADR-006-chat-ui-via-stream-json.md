@@ -1,142 +1,56 @@
 # ADR-006: Chat UI via claude -p --stream-json
 
+> **Status:** Accepted
+> **Context:** The Desktop needs to embed Claude Code in a chat GUI with real-time token streaming and multi-turn conversation, without a terminal.
+
 ## Decision
 
-The Desktop uses `claude -p --output-format=stream-json --input-format=stream-json --include-partial-messages` to embed Claude Code in the GUI with real-time token streaming and bidirectional multi-turn conversation.
+Run Claude Code headless (`claude -p`) with `--output-format=stream-json --input-format=stream-json --include-partial-messages`. Claude emits typed NDJSON on stdout; the host writes user messages (and control responses) to stdin. The process stays alive across turns, so one subprocess serves a whole conversation.
 
-## Rationale
+## Why
 
-Claude Code has a headless mode (`-p`/`--print`) that runs non-interactively without a terminal UI.[^41] Combined with `--output-format=stream-json`, it produces NDJSON (newline-delimited JSON) on stdout.[^17] Adding `--input-format=stream-json` enables bidirectional communication — the host writes user messages to stdin, Claude responds on stdout, and the process stays alive across turns.[^42]
+- Headless mode (`-p`) plus `stream-json` output yields newline-delimited JSON the host can parse incrementally for real-time token streaming.
+- `--input-format=stream-json` makes the channel bidirectional: the same long-lived subprocess handles many turns, preserving session, context, and MCP-hub state.
+- The chat UI gives non-technical users a far better experience than an embedded terminal, while still exposing Claude Code's real tools (Read, Edit, Bash).
 
-vibe-kanban[^16] uses the identical approach — a proven production pattern.
+## How it works
 
-```bash
-claude -p \
-  --output-format=stream-json \
-  --input-format=stream-json \
-  --verbose \
-  --include-partial-messages \
-  --dangerously-skip-permissions
-```
+- The base CLI invocation (`-p`, `--output-format stream-json`, `--input-format stream-json`, `--verbose`, `--include-partial-messages`, `--permission-prompt-tool stdio`, plus optional `--resume`/`--resume-session-at`) is assembled by `build_claude_args()` in `desktop/src-tauri/src/chat.rs`. It does **not** add `--dangerously-skip-permissions` itself — that flag (along with `--mcp-config`, `--strict-mcp-config`, `--thinking-display summarized`) arrives through the `flags` argument, whose source is `DEFAULT_FLAGS` in `crates/speedwave-runtime/src/defaults.rs`. The security rationale for skipping permissions lives in the comment on that constant: Claude runs in an isolated, read-only, token-free, capability-dropped container.
+- A background thread reads the subprocess stdout (running inside the container via container exec), feeds each line to `StreamParser::parse_line()`, and emits typed `StreamChunk` events to Angular via Tauri's `app_handle.emit("chat_stream", ...)`. Direct emission was chosen over an intermediate mpsc channel + polling bridge, which added latency and a middleman.
+- Every emit is sanitized first (`sanitize_chunk` in `chat.rs`) so neither the `chat_stream` channel nor its patch mirror can leak secrets.
 
-`--verbose` is recommended alongside `--include-partial-messages` for full streaming output.[^41]
+## Stream protocol shape
 
-## Stream-JSON Output Protocol
+- Output is typed NDJSON. `--include-partial-messages` makes Claude emit `stream_event` messages wrapping raw Anthropic Messages API events (`content_block_start/delta/stop`, `message_stop`) for real-time token, thinking, and tool-input streaming. Complete `assistant` messages are intentionally ignored — they duplicate content already streamed.
+- Input lines use the `user` message shape (`{"type":"user","message":{"role":"user","content":...}}`); `content` is a string or an array of content blocks for image input. The host wire format is `WireContentBlock` (`desktop/src-tauri/src/chat.rs`, mirrored in `desktop/src/src/app/models/chat.ts`; see ADR-065).
+- `StreamParser` collapses the raw events into the `StreamChunk` tagged enum (`desktop/src-tauri/src/chat.rs`, mirrored 1:1 by the TS `StreamChunk` union in `desktop/src/src/app/models/chat.ts`). It has **12 variants**: `Text`, `Thinking`, `ToolStart`, `ToolInputDelta`, `ToolResult`, `Result`, `AskUserQuestion`, `Error`, `SystemInit` (model from the system-init message), `RateLimit`, `UserMessageCommit` (commits a UUID onto the latest user entry, ADR-046), and `QueueDrained` (one-slot queued message drained server-side, ADR-045).
+- The frontend accumulates `MessageBlock[]` during a turn; the TS `MessageBlock` union (`desktop/src/src/app/models/chat.ts`) covers `text`, `thinking`, `tool_use`, `ask_user`, `error`, `permission_prompt`, and `image` (metadata only — ADR-065). Only the `Result` chunk finalizes a turn, moving the blocks into the message list and capturing session stats (session id, cost from `total_cost_usd`, usage).
 
-Claude Code's stream-json output consists of typed NDJSON messages. The `SDKMessage` union type defines five message types:[^43]
+## Interactive questions, stop, retry
 
-| Message Type                 | `type` Field   | Purpose                                                                  |
-| ---------------------------- | -------------- | ------------------------------------------------------------------------ |
-| `SDKPartialAssistantMessage` | `stream_event` | Real-time token streaming — wraps raw Anthropic Messages API events[^44] |
-| `SDKAssistantMessage`        | `assistant`    | Complete assistant turn (all content blocks finalized)                   |
-| `SDKResultMessage`           | `result`       | Final result — conversation turn done, includes `is_error` flag          |
-| `SDKSystemMessage`           | `system`       | System messages (e.g. compact boundary markers)                          |
-| `SDKUserMessage`             | `user`         | Echo of user messages                                                    |
+- **AskUserQuestion:** Claude sends a `control_request` via `--permission-prompt-tool stdio` (up to 4 questions). The host parses an `AskUserQuestion` chunk; the frontend answers each slot via the `submit_question_answer` command, and once all slots are filled the host writes one `control_response` to stdin. A 4-question cap and a serialized-wire byte ceiling (`MAX_ASK_USER_QUESTIONS` / `MAX_ASK_USER_WIRE_BYTES` in `crates/speedwave-runtime/src/stream/`) guard against adversarial fan-out; duplicate question texts are rejected at build time.
+- **Stop/interrupt:** the `stop_chat` command writes a `control_request` with `subtype: interrupt` to stdin. Claude aborts the in-flight turn, emits a `result` with an error subtype, and stays ready on the same stdin — session and history are preserved. Killing the host-side container exec would not signal the in-container process, so the protocol-level interrupt is the only reliable cancel.
+- **Auto-retry:** if `send_message` fails with a session-death error ("session exited", "no active session", "Broken pipe"), the frontend transparently restarts the subprocess via `start_chat` and retries. The interrupt path never triggers this — the session is still alive after a stop.
 
-**`stream_event` structure:** When `--include-partial-messages` is enabled,[^45] Claude emits `stream_event` messages that wrap raw Anthropic Messages API events in the `event` field.[^44] The key event types are:
+## Chat history
 
-| Event Type            | Delta Type         | Contains                                               |
-| --------------------- | ------------------ | ------------------------------------------------------ |
-| `content_block_start` | —                  | Start of text or `tool_use` block (includes tool name) |
-| `content_block_delta` | `text_delta`       | Incremental text token (real-time streaming)           |
-| `content_block_delta` | `input_json_delta` | Tool input JSON fragment                               |
-| `content_block_stop`  | —                  | End of content block                                   |
-| `message_stop`        | —                  | End of message                                         |
+The Desktop exposes Tauri commands backed by `desktop/src-tauri/src/history.rs` (wired in `desktop/src-tauri/src/main.rs`) that read Claude Code's native JSONL session files at `~/.speedwave/claude-home/<project>/.claude/projects/-workspace/*.jsonl` (resolved by `sessions_dir_impl`, with auto-discovery fallback when the `-workspace` dir name differs):
 
-Example `stream_event` for a text token:
+- `list_conversations(project)` — lists sessions by last activity, newest-first, with a preview (junk `/`-only sessions filtered out).
+- `get_conversation(project, session_id)` — reads one session into rich `MessageBlock[]`.
+- `get_project_memory(project)` — reads the project's `MEMORY.md` (empty string if absent).
+- `resume_conversation(project, session_id)` — stops the current session and starts a new subprocess with `--resume <id>`.
 
-```json
-{
-  "type": "stream_event",
-  "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": "Hello" } }
-}
-```
+Session ids are validated as lowercase UUID hex before any file access (path-traversal prevention).
 
-## Stream-JSON Input Protocol
+## Rejected alternatives
 
-The input format for `--input-format=stream-json` uses the `SDKUserMessage` structure:[^46]
+- **Anthropic API directly** — no access to Claude Code's tools (Read, Edit, Bash).
+- **Embedded terminal (xterm.js)** — workable, but a chat UI is better UX for non-technical users.
+- **mpsc channel → polling bridge** — extra latency and a middleman vs. direct `app_handle.emit()`.
+- **Finalizing on the `assistant` message** — duplicates content already streamed via `stream_event`.
 
-```json
-{
-  "type": "user",
-  "message": { "role": "user", "content": [{ "type": "text", "text": "user message here" }] }
-}
-```
+## References
 
-The `content` field accepts either a plain string or an array of content blocks (for multi-modal input with images).[^46] Each JSON message is written as a single line to stdin, followed by a newline.
-
-## Tauri Integration Architecture
-
-```
-Claude subprocess (inside container via container_exec_piped)
-  stdout → BufReader → background thread → StreamParser::parse_line() → app_handle.emit("chat_stream", chunk)
-  stdin  ← build_user_message() → writeln!(stdin, "{}", json)
-  stdin  ← submit_question_answer() → writeln!(stdin, "{}", control_response_json)
-                                                    ↓
-Angular frontend ← listen("chat_stream") → handleStreamChunk() block-based state machine
-```
-
-**Design decision: direct Tauri event emission, not mpsc channel.** The background thread that reads Claude's stdout calls `app_handle.emit()` directly to push `StreamChunk` events to the Angular frontend. An earlier design used an intermediate `mpsc::channel` to collect output, but this required a separate polling mechanism to bridge chunks to the frontend — adding latency and complexity. Direct emission eliminates the middleman.
-
-**Block-based streaming model.** The backend `StreamParser` converts raw NDJSON `stream_event` messages into typed `StreamChunk` variants:
-
-| StreamChunk Variant | Source Event                                     | Frontend Action                                                |
-| ------------------- | ------------------------------------------------ | -------------------------------------------------------------- |
-| `Text`              | `content_block_delta` with `text_delta`          | Append to current text block (or create new one)               |
-| `Thinking`          | `content_block_start/delta` with `thinking` type | Append to current thinking block (collapsible)                 |
-| `ToolStart`         | `content_block_start` with `tool_use` type       | Push new `ToolUseBlock` with `status: running`                 |
-| `ToolInputDelta`    | `content_block_delta` with `input_json_delta`    | Append partial JSON to matching tool block                     |
-| `ToolResult`        | User message with `tool_result` content          | Complete tool block with result and `status: done/error`       |
-| `AskUserQuestion`   | `control_request` with `AskUser` tool            | Push interactive question block with options                   |
-| `Result`            | `result` message type                            | Finalize turn: capture `SessionStats`, move blocks to messages |
-| `Error`             | Parse failures, subprocess errors                | Push error block and finalize turn                             |
-
-The frontend accumulates `MessageBlock[]` in `currentBlocks` during an assistant turn. Each `MessageBlock` is one of: `text`, `thinking`, `tool_use`, `ask_user`, or `error`. Only the `Result` chunk finalizes the turn — it moves `currentBlocks` into the `messages` array as a complete `ChatMessage { role, blocks, timestamp }` and captures `SessionStats` (`session_id`, `total_cost` — parsed from the JSON `total_cost_usd` field, with `total_cost` as a legacy fallback; `usage`). The `assistant` message type from Claude is intentionally ignored — it duplicates content already streamed via `stream_event`.
-
-**Interactive questions (AskUserQuestion flow).** When Claude needs user input it sends a `control_request` via `--permission-prompt-tool stdio`. The Agent SDK ships up to 4 questions per request; the backend parses them into an `AskUserQuestion` chunk carrying `questions: AskUserQuestionItem[]`, `current_index`, and the parent `tool_id`. The frontend renders questions sequentially — only the active slot is interactive, previously-answered slots show a locked badge — and per-slot answers go to the `submit_question_answer(tool_use_id, question_idx, answer)` Tauri command. The host stores partial answers per `tool_use_id`; once every slot is filled it writes a single `control_response` to Claude's stdin (with the answers map keyed by question text, multi-select labels joined with `", "` per the SDK contract). A 4-question hard cap and a 64 KiB serialized-wire ceiling guard against adversarial fan-out; duplicate question texts are rejected at host build time to prevent silent answer collapse.
-
-**Stop / interrupt (turn cancel).** Pressing Esc or the Stop button calls the `stop_chat` Tauri command. The backend writes a `control_request` with `subtype: "interrupt"` to Claude's stdin (matching `SDKControlInterruptRequest` in claude-agent-sdk-python[^47]). Claude aborts the in-flight turn, emits a `result` with `subtype: "error_during_execution"`[^48], and stays ready for the next user message on the same stdin — session, context, MCP hub, and history are preserved. The next `send_message` continues the same conversation; no `start_chat` or `resume_conversation` is needed. Killing the host-side `nerdctl exec` would not propagate any signal to the Claude process inside the container, so the protocol-level interrupt is the only reliable cancel mechanism.
-
-**Auto-retry on session death.** If `send_message` fails with "session exited", "no active session", or "Broken pipe", the frontend transparently restarts the Claude subprocess via `start_chat` and retries the message — the user sees no interruption. (The interrupt path above never triggers this retry — the session is still alive after a stop.)
-
-## Chat History API
-
-The Desktop exposes four Tauri commands for browsing and resuming past conversations. All operate on Claude Code's native JSONL session files stored at `~/.speedwave/data/claude-home/<project>/.claude/projects/-workspace/*.jsonl`.
-
-| Command               | Parameters              | Returns                  | Description                                                                                         |
-| --------------------- | ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------- |
-| `list_conversations`  | `project`               | `ConversationSummary[]`  | Lists JSONL session files, sorted newest first. Reads first ~50 lines per file for preview/count    |
-| `get_conversation`    | `project`, `session_id` | `ConversationTranscript` | Reads a full session by UUID. Returns messages with rich `MessageBlock[]` for block-based rendering |
-| `resume_conversation` | `project`, `session_id` | `()`                     | Stops current session, starts a new Claude subprocess with `--resume <session_id>`                  |
-| `get_project_memory`  | `project`               | `String`                 | Reads the project's MEMORY.md file. Returns empty string if the file does not exist                 |
-
-Session IDs are validated as lowercase UUID v4 hex strings before any file access (path traversal prevention). `resume_conversation` re-uses the existing `ChatSession::start()` with an optional `resume_session_id` parameter that appends `--resume <id>` to the Claude CLI arguments.
-
-## Rejected Alternatives
-
-- **Anthropic API directly** — no access to Claude Code tools (Read, Edit, Bash)
-- **Tauri terminal (xterm.js)** — possible, but chat UI provides better UX for non-technical users
-- **mpsc channel → polling bridge** — adds latency; direct `app_handle.emit()` is simpler and faster
-- **Finalizing on `assistant` message** — causes duplicate messages when combined with `stream_event` streaming
-
----
-
-[^16]: [vibe-kanban - Claude Code GUI integration](https://github.com/BloopAI/vibe-kanban)
-
-[^17]: [Claude Code CLI reference - --output-format](https://code.claude.com/docs/en/cli-reference)
-
-[^41]: [Claude Code Headless Mode — -p flag and stream responses](https://code.claude.com/docs/en/headless)
-
-[^42]: [Claude Code CLI reference — --input-format stream-json](https://code.claude.com/docs/en/cli-reference)
-
-[^43]: [Claude Agent SDK TypeScript — SDKMessage union type](https://platform.claude.com/docs/en/agent-sdk/typescript)
-
-[^44]: [Claude Agent SDK — Streaming Output and StreamEvent reference](https://platform.claude.com/docs/en/agent-sdk/streaming-output)
-
-[^45]: [Claude Code CLI reference — --include-partial-messages](https://code.claude.com/docs/en/cli-reference)
-
-[^46]: [Claude Agent SDK — Streaming vs Single Mode, input message format](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
-
-[^47]: [claude-agent-sdk-python — SDKControlInterruptRequest in types.py](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py)
-
-[^48]: [claude-agent-sdk-python — interrupt() emits result with subtype "error_during_execution"](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/client.py)
+- Claude Code headless mode and CLI reference: https://code.claude.com/docs/en/headless and https://code.claude.com/docs/en/cli-reference
+- Claude Agent SDK streaming output: https://platform.claude.com/docs/en/agent-sdk/streaming-output

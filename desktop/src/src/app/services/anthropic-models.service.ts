@@ -1,27 +1,22 @@
 import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
 import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 /**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
- * backend (`list_anthropic_models` Tauri command, sourced from
- * `speedwave_runtime::defaults::ANTHROPIC_MODELS`).
- *
- * The list never changes within a session, so we fetch it once and reuse the
- * cached promise — every call to `list()` returns the same in-memory array,
- * and `contextTokensFor()` is synchronous after the first call settles.
+ * backend (`list_anthropic_models`, from `defaults::ANTHROPIC_MODELS`).
  */
 @Injectable({ providedIn: 'root' })
 export class AnthropicModelsService {
   private readonly tauri = inject(TauriService);
+  private readonly logger = inject(LoggerService);
   private cache: AnthropicModel[] | null = null;
   private inflight: Promise<AnthropicModel[]> | null = null;
 
   /**
-   * Returns the model catalog. Fetches from the backend on first call;
-   * subsequent calls reuse the cached result. Returns an empty list when
-   * running outside Tauri (browser dev mode) so consumers can fall back to
-   * sensible defaults rather than crash.
+   * Returns the model catalog, caching the first successful fetch. On failure
+   * returns an empty list WITHOUT caching, so a later call retries.
    */
   async list(): Promise<AnthropicModel[]> {
     if (this.cache) return this.cache;
@@ -29,13 +24,23 @@ export class AnthropicModelsService {
     this.inflight = (async () => {
       try {
         const result = await this.tauri.invoke<AnthropicModel[]>('list_anthropic_models');
-        this.cache = Array.isArray(result) ? result : [];
-      } catch {
-        this.cache = [];
+        if (Array.isArray(result)) {
+          this.cache = result;
+          return result;
+        }
+        // Non-array payload is a contract violation; not caching.
+        this.logger.warn(
+          `list_anthropic_models returned a non-array payload (${typeof result}); not caching`
+        );
+        return [];
+      } catch (e: unknown) {
+        // Do NOT cache on failure — leave `cache` null so the next call retries.
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`list_anthropic_models failed: ${msg}`);
+        return [];
       } finally {
         this.inflight = null;
       }
-      return this.cache ?? [];
     })();
     return this.inflight;
   }
@@ -54,9 +59,7 @@ export class AnthropicModelsService {
     if (!trimmed) return null;
     const direct = this.cache.find((m) => m.id === trimmed);
     if (direct) return direct.context_tokens;
-    // Claude Code's session metadata sometimes carries the short form
-    // (`opus-4.7` instead of `claude-opus-4-7`). Try both shapes before
-    // giving up.
+    // Session metadata may carry the short form (`opus-4.7`); try prefixed too.
     const candidate = trimmed.startsWith('claude-')
       ? trimmed
       : `claude-${trimmed.replace('.', '-')}`;
@@ -73,6 +76,17 @@ export class AnthropicModelsService {
    */
   contextTokensOrDefault(modelId: string | null | undefined): number {
     return this.contextTokensFor(modelId) ?? DEFAULT_CONTEXT_TOKENS;
+  }
+
+  /**
+   * The Settings placeholder hint: the latest non-`premium` entry, falling back
+   * to the first `latest` then the first entry. `null` while loading or empty.
+   */
+  latestEverydayModelId(): string | null {
+    if (!this.cache || this.cache.length === 0) return null;
+    const latest = this.cache.filter((m) => m.latest);
+    const everyday = latest.find((m) => !m.premium);
+    return (everyday ?? latest[0] ?? this.cache[0]).id;
   }
 
   /** Test-only hook to reset cached state between specs. */

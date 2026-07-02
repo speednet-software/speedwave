@@ -1,18 +1,6 @@
 //! Per-project process manager for the `oauth` MCP worker (ADR-060).
-//!
-//! Thin wrapper: `OauthProcess` is a type alias over
-//! [`crate::host_mcp_process::HostMcpProcess`] with `OauthSpec` as the
-//! worker spec. All lifecycle (spawn/stop/respawn/cleanup) lives in
-//! the generic struct; this module only carries worker-specific bits:
-//!
-//! - Per-consumer bearer provisioning (`.bearer-map.json` +
-//!   `bearer-<service>` files) — mounted into consumer containers by
-//!   compose, must survive a supervisor respawn.
-//! - State-dir owner-only perms (0o700, ADR-060).
-//! - The supervisor token + state-dir env vars Node oauth worker reads.
-//! - Custom `is_oauth_alive` with retry + backoff — a transient probe
-//!   failure cascades into recreate of every consumer container, so
-//!   the retry matters (ADR-060).
+//! `OauthProcess` aliases [`crate::host_mcp_process::HostMcpProcess`]
+//! with `OauthSpec`; this module carries only worker-specific bits.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,9 +27,11 @@ pub struct OauthSpec {
 }
 
 impl OauthSpec {
+    /// Project this OAuth supervisor serves.
     pub fn project(&self) -> &str {
         &self.project
     }
+    /// Services consuming the OAuth tokens.
     pub fn consumers(&self) -> &[String] {
         &self.consumers
     }
@@ -63,11 +53,7 @@ impl WorkerSpec for OauthSpec {
             .env("OAUTH_TOKENS_BASE", &self.tokens_base);
     }
     fn pre_spawn(&self, ctx: &SpawnContext) -> anyhow::Result<()> {
-        // Per-consumer bearer provisioning. Each consumer gets a fresh
-        // UUID bound to its service id; the worker derives `caller`
-        // from the bearer via `.bearer-map.json` (ADR-060). The bearer
-        // files are mounted into consumer containers (read-only), so
-        // they live as separate on-disk artifacts beside lock.json.
+        // Per-consumer bearer files mapped to service ids via .bearer-map.json (ADR-060).
         let bearer_map_path = ctx.state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
         let mut bearer_map: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
@@ -105,10 +91,7 @@ impl OauthProcess {
         data_dir: &Path,
         consumers: &[&str],
     ) -> anyhow::Result<Self> {
-        // The state dir must exist with 0o700 *before* the generic
-        // spawn writes lock.json / bearer files into it, so the perms
-        // are inherited. Subsequent `create_dir_all` inside the generic
-        // is a cheap no-op.
+        // State dir must exist with 0o700 before the generic spawn writes into it.
         let state_dir = oauth_project_dir(data_dir, project);
         std::fs::create_dir_all(&state_dir)?;
         set_dir_owner_only(&state_dir)?;
@@ -132,15 +115,13 @@ impl OauthProcess {
         )
     }
 
+    /// Project this OAuth process serves.
     pub fn project(&self) -> &str {
         self.spec().project()
     }
 }
 
-/// TCP liveness probe against `127.0.0.1:<port>`. Retries on failure
-/// with backoff — oauth respawn forces a recreate of every consumer
-/// container, so a transient probe failure (worker mid-refresh,
-/// accept loop briefly stalled) must NOT cascade into a respawn loop.
+/// TCP liveness probe against `127.0.0.1:<port>`, retrying with backoff (ADR-060).
 pub fn is_oauth_alive(port: u16) -> bool {
     if port == 0 {
         return false;
@@ -162,8 +143,7 @@ fn set_dir_owner_only(_dir: &Path) -> anyhow::Result<()> {
         let mode = consts::OAUTH_PROJECT_DIR_MODE;
         std::fs::set_permissions(_dir, std::fs::Permissions::from_mode(mode))?;
     }
-    // On Windows, the parent dir's ACL inherits from `~/.speedwave/` which is
-    // user-owned by default. A future hardening pass can add explicit ACL here.
+    // On Windows the parent dir's ACL inherits from `~/.speedwave/` (user-owned).
     Ok(())
 }
 
@@ -260,11 +240,7 @@ mod tests {
 
     #[test]
     fn pre_spawn_writes_consistent_bearer_files_and_map() {
-        // Invariant: after successful pre_spawn, every bearer-<svc> file
-        // on disk maps to its service via .bearer-map.json. The worker
-        // reads the map at startup and resolves incoming bearers through
-        // it; a mismatch = 401. This test pins the on-disk consistency
-        // contract so a future refactor can't silently desynchronize them.
+        // After pre_spawn every bearer-<svc> file maps to its service via .bearer-map.json.
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -304,9 +280,7 @@ mod tests {
 
     #[test]
     fn pre_spawn_rejects_invalid_service_slug_without_writing_anything() {
-        // Defense-in-depth: a malformed slug must bail before any bearer
-        // file lands on disk, so a malicious settings inject can't trick
-        // us into writing `bearer-../evil` somewhere.
+        // A malformed slug must bail before any bearer file lands on disk.
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -333,12 +307,8 @@ mod tests {
             err.to_string().contains("invalid service slug"),
             "error must call out the slug: {err}"
         );
-        // The first iteration wrote `bearer-sharepoint` before the invalid
-        // slug aborted the loop. Document this partial-write window — fixing
-        // it requires building artifacts in a tempdir and rename-once, which
-        // is tracked separately. Restart of the supervisor overwrites.
-        // (No assertion about .bearer-map.json: it is written *after* the
-        // loop, so on bail it must NOT exist.)
+        // The first iteration wrote `bearer-sharepoint` before the invalid slug aborted.
+        // .bearer-map.json is written after the loop, so on bail it must not exist.
         assert!(
             !state_dir.join(consts::OAUTH_BEARER_MAP_FILE).exists(),
             ".bearer-map.json must not be written when pre_spawn bails"

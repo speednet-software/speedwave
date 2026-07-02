@@ -1,5 +1,5 @@
 # bundle-build-context.ps1 — PowerShell equivalent of bundle-build-context.sh
-# Copies container build context, mcp-os, host_exec, and the oauth worker into
+# Copies container build context, mcp-os, and the oauth worker into
 # desktop\src-tauri\ for Tauri resource bundling.
 #
 # Usage: powershell -File scripts/bundle-build-context.ps1
@@ -60,12 +60,26 @@ try {
     "$PID" | Out-File -FilePath "$lockDir\pid" -Encoding ascii
 
 # Clean destination
-Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\host_exec","$dest\oauth" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
 
 # -- Build context (containers + MCP server sources) --------------------------
 
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
+
+# Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
+# (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
+function Remove-BuildOutputs {
+    param([string]$root)
+    foreach ($dir in Get-ChildItem -Path $root -Directory -Force) {
+        if ($dir.Name -in 'target', 'dist', 'node_modules') {
+            Remove-Item -Recurse -Force $dir.FullName
+        } else {
+            Remove-BuildOutputs $dir.FullName
+        }
+    }
+}
+Remove-BuildOutputs "$dest\build-context\containers"
 
 # Strip CR from every .sh. UTF-8 without BOM — a BOM before the shebang
 # breaks Linux exec just like CRLF would.
@@ -116,7 +130,7 @@ foreach ($svc in $services) {
     }
 }
 
-# -- mcp-os + host_exec + oauth (host-side TypeScript workers) ---------------
+# -- mcp-os + oauth (host-side TypeScript workers) ---------------------------
 
 # Stage-Host-Worker <worker-dir-name> <bundle-dir-name>
 #   Mirrors stage_host_worker() in bundle-build-context.sh — stages
@@ -140,7 +154,6 @@ function Stage-Host-Worker {
 }
 
 Stage-Host-Worker -worker os -bundle mcp-os
-Stage-Host-Worker -worker host_exec -bundle host_exec
 Stage-Host-Worker -worker oauth -bundle oauth
 
 Write-Host "Build context bundled into $dest"

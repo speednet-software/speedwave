@@ -19,11 +19,7 @@ A bind-mount of `/etc/localtime` was considered (the Docker convention). Rejecte
 
 ### Detection
 
-A new module `crates/speedwave-runtime/src/tz.rs` exposes:
-
-```rust
-pub fn detect_host_timezone() -> String
-```
+`crates/speedwave-runtime/src/tz.rs::detect_host_timezone()` returns the host IANA zone as a `String` (never errors):
 
 - **Unix (macOS):** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (e.g. `/var/db/timezone/zoneinfo/...`). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.[^1][^2]
 - **Windows:** invoke `powershell -NoProfile -NonInteractive -Command "(Get-TimeZone).Id"` (5 s deadline) and map the Windows zone ID to IANA via an inline `WINDOWS_TO_IANA` table sourced from CLDR `windowsZones.xml` (territory `001`).[^3][^4]
@@ -37,14 +33,15 @@ The helper is invoked **after** `apply_plugins()` so plugin services injected dy
 
 ### `tzdata` in base images
 
-Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision adds `tzdata` to four base images:
+Setting `TZ=Europe/Warsaw` is a no-op without the zoneinfo database. The decision installs `tzdata` in every container image:
 
 - `containers/Containerfile.claude` (`apt-get install ... tzdata`)
-- `containers/mcp-servers/Containerfile.mcp-base` (`apk add --no-cache tzdata`)
 - `mcp-servers/hub/Containerfile` (`apk add --no-cache curl tzdata`)
+- every `mcp-servers/<service>/Dockerfile` (`apk add --no-cache tzdata` — `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `context7`)
 - `mcp-servers/office/Dockerfile` (Debian/bookworm, `apt-get install ... tzdata` — ADR-055)
+- `mcp-servers/playwright/Containerfile` (Ubuntu/jammy, `apt-get install -y tzdata` — explicit, not relying on the base image)
 
-The Playwright worker uses `mcr.microsoft.com/playwright:*-jammy`, which already ships `tzdata` from the Ubuntu base — no change.
+The shared `containers/mcp-servers/Containerfile.mcp-base` was retired; each worker ships its own `Dockerfile`, so `tzdata` is installed per worker.
 
 This pair (detection in `tz.rs` ↔ `tzdata` in these base images) is recorded in CLAUDE.md as a new SSOT-alignment row. Adding another base image is a compile-time invitation to reread that row.
 

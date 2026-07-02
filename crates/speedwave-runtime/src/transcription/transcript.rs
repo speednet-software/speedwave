@@ -1,6 +1,5 @@
-//! Per-recording session: status, segments, speaker names, on-disk persistence.
+//! Per-recording session: status, segments, on-disk persistence.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -8,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::transcription::audio::AudioSourceInfo;
-use crate::transcription::diarizer::SpeakerTurn;
-use crate::transcription::transcriber::{Language, Segment, SpeakerId};
+use crate::transcription::transcriber::{Language, Segment};
 
 /// On-disk filename for the persisted session.
 pub const TRANSCRIPT_JSON: &str = "transcript.json";
@@ -37,17 +35,13 @@ pub enum TranscriptStatus {
     },
 }
 
-/// Which Whisper / diarization model was used for each pass.
+/// Which Whisper model was used for each pass.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelsUsed {
     /// Whisper catalogue key used for the live pass.
     pub live: Option<String>,
     /// Whisper catalogue key used for the higher-quality offline pass.
     pub finalize: Option<String>,
-    /// Diarization segmentation model key.
-    pub diarization_segmentation: Option<String>,
-    /// Diarization embedding model key.
-    pub diarization_embedding: Option<String>,
 }
 
 /// One transcript session — the persisted artifact.
@@ -67,15 +61,10 @@ pub struct TranscriptSession {
     pub live_segments: Vec<Segment>,
     /// Segments from the higher-quality offline pass; `None` until it runs.
     pub final_segments: Option<Vec<Segment>>,
-    /// On-disk audio file (`None` once "discard audio" was applied).
+    /// On-disk audio file (`None` if missing/never recorded).
     pub audio_path: Option<PathBuf>,
-    /// User-supplied speaker names (`SpeakerId → "Alice"`). Empty by default.
-    pub speaker_names: HashMap<SpeakerId, String>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
-    /// User hint for the diarizer (`None` = auto-estimate, default).
-    #[serde(default)]
-    pub expected_speakers: Option<u32>,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
 }
@@ -104,9 +93,7 @@ impl TranscriptSession {
             live_segments: Vec::new(),
             final_segments: None,
             audio_path: Some(audio_path),
-            speaker_names: HashMap::new(),
             models_used: ModelsUsed::default(),
-            expected_speakers: None,
             last_seq: 0,
         }
     }
@@ -119,81 +106,28 @@ impl TranscriptSession {
         }
     }
 
-    /// Sets a user-supplied display name for `speaker`. Empty string clears it.
-    pub fn relabel_speaker(&mut self, speaker: SpeakerId, name: &str) {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            self.speaker_names.remove(&speaker);
-        } else {
-            // Cap label length defensively — matches the Tauri command's cap.
-            let capped: String = trimmed.chars().take(64).collect();
-            self.speaker_names.insert(speaker, capped);
-        }
-    }
-
-    /// Display label for a speaker — the user-supplied name if any, else
-    /// `Speaker N` (1-indexed).
-    pub fn speaker_label(&self, speaker: SpeakerId) -> String {
-        self.speaker_names
-            .get(&speaker)
-            .cloned()
-            .unwrap_or_else(|| speaker.display_label())
-    }
-
-    /// Merges `final_segments` from the offline pass; remaps speaker IDs to
-    /// preserve user-supplied names by max-overlap against the live turns.
-    /// `final_turns` and `live_turns` are the diarizer outputs from each pass.
-    pub fn merge_live_into_final(
-        &mut self,
-        mut final_segs: Vec<Segment>,
-        final_turns: &[SpeakerTurn],
-        live_turns: &[SpeakerTurn],
-    ) {
-        let remap = remap_speakers_by_overlap(final_turns, live_turns);
-        for seg in &mut final_segs {
-            if let Some(s) = seg.speaker {
-                seg.speaker = remap.get(&s).copied().or(seg.speaker);
-            }
-        }
+    /// Installs `final_segments` from the higher-quality offline pass.
+    pub fn set_final_segments(&mut self, final_segs: Vec<Segment>) {
         self.final_segments = Some(final_segs);
     }
 
-    /// Drops the recorded audio file (best-effort) and clears `audio_path`.
-    /// After this, re-transcription is impossible.
-    pub fn discard_audio(&mut self) -> std::io::Result<()> {
-        if let Some(p) = self.audio_path.take() {
-            if p.exists() {
-                std::fs::remove_file(&p)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Renders the transcript as markdown with `[Speaker N]` (or the user-supplied
-    /// name) per segment, plus a header and an "approximate labels" footer.
+    /// Renders the transcript as markdown: a header plus one timestamped line
+    /// per segment. (Speaker labels were removed — ADR-075.)
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Meeting transcript ({})\n\n", self.created_at));
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
-        let mut last_speaker: Option<SpeakerId> = None;
         for seg in self.effective_segments() {
-            if seg.speaker != last_speaker {
-                let label = match seg.speaker {
-                    Some(id) => self.speaker_label(id),
-                    None => "Speaker ?".to_string(),
-                };
-                s.push_str(&format!("\n**{label}** ({}):\n", fmt_ts(seg.start)));
-                last_speaker = seg.speaker;
+            let text = seg.text.trim();
+            if text.is_empty() {
+                continue;
             }
-            s.push_str(seg.text.trim());
-            s.push('\n');
+            s.push_str(&format!("**({})** {text}\n\n", fmt_ts(seg.start)));
         }
-        s.push_str("\n---\n");
-        s.push_str(
-            "_Transcript generated locally by Speedwave; speaker labels are approximate._\n",
-        );
+        s.push_str("---\n");
+        s.push_str("_Transcript generated locally by Speedwave._\n");
         s
     }
 
@@ -300,45 +234,6 @@ fn restrict_file_perms(p: &Path) {
     let _ = p;
 }
 
-/// Builds a `live-speaker → final-speaker` remap by finding, for each final
-/// speaker, the live speaker whose turns overlap most.
-fn remap_speakers_by_overlap(
-    final_turns: &[SpeakerTurn],
-    live_turns: &[SpeakerTurn],
-) -> HashMap<SpeakerId, SpeakerId> {
-    let mut overlap: HashMap<(SpeakerId, SpeakerId), f64> = HashMap::new();
-    for f in final_turns {
-        for l in live_turns {
-            let a = f.start.max(l.start).as_secs_f64();
-            let b = f.end.min(l.end).as_secs_f64();
-            let ov = (b - a).max(0.0);
-            if ov > 0.0 {
-                *overlap.entry((f.speaker, l.speaker)).or_insert(0.0) += ov;
-            }
-        }
-    }
-    let final_ids: std::collections::BTreeSet<SpeakerId> =
-        final_turns.iter().map(|t| t.speaker).collect();
-    let mut out: HashMap<SpeakerId, SpeakerId> = HashMap::new();
-    for f in final_ids {
-        let mut best: Option<(SpeakerId, f64)> = None;
-        for ((ff, ll), ov) in overlap.iter() {
-            if *ff != f {
-                continue;
-            }
-            match best {
-                Some((_, cur)) if *ov < cur => {}
-                Some((id, cur)) if (*ov - cur).abs() < 1e-9 && ll.0 >= id.0 => {}
-                _ => best = Some((*ll, *ov)),
-            }
-        }
-        if let Some((live_id, _)) = best {
-            out.insert(f, live_id);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -350,23 +245,14 @@ mod tests {
         AudioSourceInfo {
             source: AudioSource::SystemWide,
             label: "System (everything)".to_string(),
-            app_id: None,
         }
     }
-    fn seg(start_s: f32, end_s: f32, text: &str, spk: Option<u32>) -> Segment {
+    fn seg(start_s: f32, end_s: f32, text: &str) -> Segment {
         Segment {
             start: Duration::from_secs_f32(start_s),
             end: Duration::from_secs_f32(end_s),
             text: text.to_string(),
             words: vec![],
-            speaker: spk.map(SpeakerId),
-        }
-    }
-    fn turn(start_s: f32, end_s: f32, spk: u32) -> SpeakerTurn {
-        SpeakerTurn {
-            start: Duration::from_secs_f32(start_s),
-            end: Duration::from_secs_f32(end_s),
-            speaker: SpeakerId(spk),
         }
     }
 
@@ -377,7 +263,6 @@ mod tests {
         assert_eq!(s.language, Language::Pl);
         assert!(s.live_segments.is_empty());
         assert!(s.final_segments.is_none());
-        assert!(s.speaker_names.is_empty());
         assert_eq!(s.last_seq, 0);
         assert_eq!(s.audio_path, Some(PathBuf::from("/tmp/a.wav")));
         // created_at parses as RFC 3339-ish (YYYY-MM-DDTHH:MM:SSZ).
@@ -407,119 +292,73 @@ mod tests {
     #[test]
     fn effective_segments_prefers_final_when_present() {
         let mut s = TranscriptSession::new(Language::En, mk_source(), PathBuf::from("/a.wav"));
-        s.live_segments = vec![seg(0.0, 1.0, "live", None)];
+        s.live_segments = vec![seg(0.0, 1.0, "live")];
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "live");
-        s.final_segments = Some(vec![seg(0.0, 2.0, "final", None)]);
+        s.set_final_segments(vec![seg(0.0, 2.0, "final")]);
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "final");
     }
 
     #[test]
-    fn relabel_speaker_sets_clears_and_caps_length() {
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        s.relabel_speaker(SpeakerId(0), "  Alice  ");
-        assert_eq!(
-            s.speaker_names.get(&SpeakerId(0)).map(String::as_str),
-            Some("Alice")
-        );
-        // Empty / whitespace clears.
-        s.relabel_speaker(SpeakerId(0), "   ");
-        assert!(s.speaker_names.get(&SpeakerId(0)).is_none());
-        // Long names are capped (defensively).
-        let long = "x".repeat(200);
-        s.relabel_speaker(SpeakerId(1), &long);
-        assert_eq!(
-            s.speaker_names.get(&SpeakerId(1)).unwrap().chars().count(),
-            64
-        );
-    }
-
-    #[test]
-    fn speaker_label_uses_user_name_else_default() {
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        assert_eq!(s.speaker_label(SpeakerId(0)), "Speaker 1");
-        s.relabel_speaker(SpeakerId(0), "Alice");
-        assert_eq!(s.speaker_label(SpeakerId(0)), "Alice");
-        assert_eq!(s.speaker_label(SpeakerId(1)), "Speaker 2"); // unset → default
-    }
-
-    #[test]
-    fn merge_live_into_final_preserves_user_relabels_via_overlap() {
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        // Live: Alice = SpeakerId(0) from 0..10; Bob = SpeakerId(1) from 10..20.
-        s.relabel_speaker(SpeakerId(0), "Alice");
-        s.relabel_speaker(SpeakerId(1), "Bob");
-        let live_turns = vec![turn(0.0, 10.0, 0), turn(10.0, 20.0, 1)];
-        // Final pass re-clustered with the same boundaries but flipped ids.
-        let final_turns = vec![turn(0.0, 10.0, 7), turn(10.0, 20.0, 3)];
-        let final_segs = vec![
-            seg(2.0, 4.0, "hi", Some(7)),
-            seg(12.0, 14.0, "hey", Some(3)),
-        ];
-        s.merge_live_into_final(final_segs, &final_turns, &live_turns);
-        let merged = s.final_segments.as_ref().unwrap();
-        // Final-7 had max overlap with live-0 → remapped to SpeakerId(0) = "Alice".
-        assert_eq!(merged[0].speaker, Some(SpeakerId(0)));
-        // Final-3 had max overlap with live-1 → remapped to SpeakerId(1) = "Bob".
-        assert_eq!(merged[1].speaker, Some(SpeakerId(1)));
-        // And speaker_label still resolves the user-supplied names.
-        assert_eq!(s.speaker_label(SpeakerId(0)), "Alice");
-        assert_eq!(s.speaker_label(SpeakerId(1)), "Bob");
-    }
-
-    #[test]
-    fn merge_with_no_overlap_leaves_final_speakers_unmapped() {
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        let live_turns = vec![turn(0.0, 5.0, 0)];
-        // Final turns completely disjoint from live.
-        let final_turns = vec![turn(100.0, 105.0, 9)];
-        let final_segs = vec![seg(101.0, 102.0, "x", Some(9))];
-        s.merge_live_into_final(final_segs, &final_turns, &live_turns);
-        // No mapping — speaker stays as-is (the final pass's own id).
-        assert_eq!(
-            s.final_segments.as_ref().unwrap()[0].speaker,
-            Some(SpeakerId(9))
-        );
-    }
-
-    #[test]
-    fn discard_audio_clears_path_and_removes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.wav");
-        std::fs::write(&path, b"fake wav").unwrap();
-        let mut s = TranscriptSession::new(Language::Pl, mk_source(), path.clone());
-        s.discard_audio().unwrap();
-        assert!(s.audio_path.is_none());
-        assert!(!path.exists());
-        // Idempotent — a second call is a no-op.
-        s.discard_audio().unwrap();
-    }
-
-    #[test]
-    fn to_markdown_renders_speakers_timestamps_and_the_footer() {
+    fn to_markdown_renders_timestamps_text_and_the_footer() {
         let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
         s.live_segments = vec![
-            seg(0.0, 2.5, "Cześć!", Some(0)),
-            seg(2.5, 5.0, "Witaj.", Some(1)),
-            seg(5.0, 7.0, "Co słychać?", Some(0)),
+            seg(0.0, 2.5, "Cześć!"),
+            seg(2.5, 5.0, "Witaj."),
+            seg(5.0, 7.0, "   "), // blank → skipped
         ];
-        s.relabel_speaker(SpeakerId(0), "Ola");
         let md = s.to_markdown();
         assert!(md.starts_with("# Meeting transcript ("));
         assert!(md.contains("Language: `pl`"));
-        assert!(md.contains("**Ola** (00:00.00):"));
-        assert!(md.contains("**Speaker 2** (00:02.50):"));
-        assert!(md.contains("Cześć!"));
-        assert!(md.ends_with("speaker labels are approximate._\n"));
+        assert!(md.contains("**(00:00.00)** Cześć!"));
+        assert!(md.contains("**(00:02.50)** Witaj."));
+        assert!(!md.contains("Speaker"), "no speaker labels after ADR-075");
+        assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
+    }
+
+    #[test]
+    fn old_transcript_json_with_speaker_fields_still_loads() {
+        // Backward compat (ADR-075): a pre-removal transcript.json carried
+        // `speaker_names`, `expected_speakers`, per-segment `speaker`, and
+        // `models_used.diarization_*`. Loading must ignore them (serde drops
+        // unknown keys) and re-save in the new shape.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = r#"{
+            "id":"00000000-0000-4000-8000-000000000000",
+            "created_at":"2026-01-01T00:00:00Z",
+            "language":"pl",
+            "audio_source":{"source":{"kind":"system_wide"},"label":"System","app_id":null},
+            "status":{"state":"done"},
+            "live_segments":[{"start":{"secs":0,"nanos":0},"end":{"secs":1,"nanos":0},
+                "text":"hej","words":[],"speaker":2}],
+            "final_segments":null,
+            "audio_path":null,
+            "speaker_names":[[0,"Ola"]],
+            "models_used":{"live":"small","finalize":null,
+                "diarization_segmentation":"pyannote","diarization_embedding":"campplus"},
+            "expected_speakers":3,
+            "last_seq":7
+        }"#;
+        std::fs::write(dir.path().join(TRANSCRIPT_JSON), legacy).unwrap();
+        let s = TranscriptSession::load(dir.path()).unwrap();
+        assert_eq!(s.live_segments.len(), 1);
+        assert_eq!(s.live_segments[0].text, "hej");
+        assert_eq!(s.models_used.live.as_deref(), Some("small"));
+        assert_eq!(s.last_seq, 7);
+        // Re-saving produces the new shape with no diarization keys.
+        s.save(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(TRANSCRIPT_JSON)).unwrap();
+        assert!(!body.contains("speaker_names"));
+        assert!(!body.contains("diarization"));
+        assert!(!body.contains("expected_speakers"));
     }
 
     #[test]
     fn save_and_load_round_trip_with_atomic_write_and_restricted_perms() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = TranscriptSession::new(Language::En, mk_source(), PathBuf::from("/a.wav"));
-        s.live_segments = vec![seg(0.0, 1.0, "hi", Some(0))];
-        s.relabel_speaker(SpeakerId(0), "Alice");
+        s.live_segments = vec![seg(0.0, 1.0, "hi")];
         s.last_seq = 42;
         s.save(dir.path()).unwrap();
         // No leftover .part temp.
@@ -568,7 +407,7 @@ mod tests {
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
         let year: i32 = s[..4].parse().unwrap();
-        assert!(year >= 2020 && year < 2100, "year {year} not plausible");
+        assert!((2020..2100).contains(&year), "year {year} not plausible");
     }
 
     #[test]

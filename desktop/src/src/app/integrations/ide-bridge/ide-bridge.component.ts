@@ -8,6 +8,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
 import { DetectedIde } from '../../models/health';
 
 /** Manages IDE Bridge detection, connection, and event display. */
@@ -119,6 +120,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private log = inject(LoggerService);
   private ideIntervalId: ReturnType<typeof setInterval> | null = null;
   private eventTimerId: ReturnType<typeof setTimeout> | null = null;
   private unlistenEvent: (() => void) | null = null;
@@ -216,7 +218,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
       if (sel) this.selectedIde = { ide_name: sel.ide_name, port: sel.port };
     } catch (e: unknown) {
       if (this.tauri.isRunningInTauri()) {
-        console.warn('loadSelectedIde failed:', e);
+        this.log.warn(`loadSelectedIde failed: ${String(e)}`);
       }
     }
     this.cdr.markForCheck();
@@ -227,7 +229,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
       this.availableIdes = await this.tauri.invoke<DetectedIde[]>('list_available_ides');
     } catch (e: unknown) {
       if (this.tauri.isRunningInTauri()) {
-        console.warn('pollIdes failed:', e);
+        this.log.warn(`pollIdes failed: ${String(e)}`);
       }
     }
     this.cdr.markForCheck();

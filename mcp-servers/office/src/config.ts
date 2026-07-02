@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 /** Root of the mounted project workspace inside the container (compose mounts `${PROJECT_DIR}:/workspace:rw`). */
 export const WORKSPACE_ROOT = '/workspace';
 
-/** Default output directory for generated files — kept out of the repo root so an exploited parser cannot overwrite `.git`/config/scripts. */
-export const OUTPUT_DIR = path.join(WORKSPACE_ROOT, '.speedwave-office');
+/** Default output directory for generated files — kept under `/workspace/.speedwave/` so an exploited parser cannot overwrite `.git`/config/scripts. */
+export const OUTPUT_DIR = path.join(WORKSPACE_ROOT, '.speedwave', 'office');
 
 /** Path to the Python virtualenv created in the Dockerfile (`/opt/office-venv`). The `python3` binary used for support-scripts. */
 export const PYTHON_BIN = `${process.env.OFFICE_VENV ?? '/opt/office-venv'}/bin/python3`;
@@ -41,10 +41,10 @@ export const TIMEOUT_STANDARD_MS = parsePositiveInt(process.env.OFFICE_TIMEOUT_S
 /** Per-subprocess wall-time timeout (ms) for LibreOffice conversions (slow cold start + render). */
 export const TIMEOUT_LIBREOFFICE_MS = parsePositiveInt(process.env.OFFICE_TIMEOUT_LO_MS, 120_000);
 
-/** Cap on captured stdout/stderr per subprocess (bytes) — without this, a chatty tool can exhaust worker memory. */
+/** Cap on captured stdout/stderr per subprocess (bytes). */
 export const MAX_SUBPROCESS_OUTPUT_BYTES = 10 * 1024 * 1024;
 
-/** Default `maxChars` for text previews returned by read/convert tools — keeps large documents out of the model context. */
+/** Default `maxChars` for text previews returned by read/convert tools. */
 export const DEFAULT_MAX_CHARS = 4000;
 
 /**

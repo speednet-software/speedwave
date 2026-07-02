@@ -1,31 +1,6 @@
 /**
- * Pagination Helpers for Sandbox
+ * Sandbox pagination helpers — async generators that iterate large datasets.
  * @module paginate
- *
- * Async generators for efficient iteration over large datasets.
- * Processes data page-by-page to minimize memory usage and token consumption.
- *
- * Usage in execute_code:
- * ```typescript
- * // Iterate page by page (most memory efficient)
- * for await (const page of paginate(
- *   (offset, limit) => redmine.listIssues({ offset, limit, status: "open" })
- * )) {
- *   console.log(`Page ${page.pageNumber}: ${page.items.length} items`);
- * }
- *
- * // Collect all items (use with caution)
- * const all = await collectPages(paginate(
- *   (o, l) => redmine.listIssues({ offset: o, limit: l }),
- *   { maxItems: 100 }
- * ));
- *
- * // Find first match (stops early)
- * const urgent = await findInPages(
- *   paginate((o, l) => redmine.listIssues({ offset: o, limit: l })),
- *   issue => issue.priority?.name === "Urgent"
- * );
- * ```
  */
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -101,13 +76,7 @@ type PaginatedResponse<T> = {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Create async generator for paginated API calls
- *
- * Automatically extracts items from common response shapes:
- * - Redmine: { issues: [], total_count: N }
- * - GitLab: { projects: [], merge_requests: [] }
- * - Slack: { messages: [], channels: [] }
- * - Generic: { items: [], results: [] }
+ * Create async generator for paginated API calls.
  * @param fetcher - Function that fetches a page given offset and limit
  * @param config - Pagination configuration
  * @yields {PageResult<T>} PageResult for each page
@@ -203,9 +172,7 @@ function extractItems<T>(result: PaginatedResponse<T>): T[] {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Collect all pages into a single array
- *
- * WARNING: Use maxItems config to prevent memory issues with large datasets
+ * Collect all pages into a single array.
  * @param generator - Pagination generator
  * @returns All items from all pages
  */
@@ -218,9 +185,7 @@ export async function collectPages<T>(generator: AsyncGenerator<PageResult<T>>):
 }
 
 /**
- * Find first item matching predicate across all pages
- *
- * Stops fetching as soon as a match is found (efficient for large datasets)
+ * Find first item matching predicate across all pages.
  * @param generator - Pagination generator
  * @param predicate - Function to test each item
  * @returns First matching item or undefined
@@ -294,9 +259,7 @@ export async function mapPages<T, U>(
 }
 
 /**
- * Take first N items across pages
- *
- * Stops fetching once N items are collected
+ * Take first N items across pages.
  * @param generator - Pagination generator
  * @param n - Number of items to take
  * @returns First N items

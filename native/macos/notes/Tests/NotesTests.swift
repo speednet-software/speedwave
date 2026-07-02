@@ -59,12 +59,77 @@ final class NotesTests: XCTestCase {
         XCTAssertNil(body)
     }
 
+    // MARK: - runCLI command table (NotesCLI.commands)
+
+    func testCommandTableHasAllExpectedKeys() {
+        let expected: Set<String> = [
+            "list_folders", "list_notes", "get_note", "search_notes",
+            "create_note", "update_note", "delete_note",
+        ]
+        XCTAssertEqual(Set(NotesCLI.commands.keys), expected,
+                       "command table must dispatch exactly the documented commands (minus check_permission)")
+    }
+
+    func testCommandTableKeysAreSubsetOfCommandList() {
+        // Each dispatch key (plus check_permission) must appear in the advertised command list.
+        for key in NotesCLI.commands.keys {
+            XCTAssertTrue(NotesCLI.commandList.contains(key),
+                          "command '\(key)' missing from advertised commandList")
+        }
+        XCTAssertTrue(NotesCLI.commandList.contains("check_permission"))
+    }
+
+    func testGetNoteCommandThrowsMissingIdBeforeScriptRuns() {
+        // Required-field validation must fire before any AppleScript is spawned.
+        let handler = NotesCLI.commands["get_note"]!
+        XCTAssertThrowsError(try handler([:])) { error in
+            guard case NotesCLIError.missingField(let f) = error else {
+                return XCTFail("expected missingField, got \(error)")
+            }
+            XCTAssertEqual(f, "id")
+        }
+    }
+
+    func testSearchNotesCommandThrowsMissingQuery() {
+        let handler = NotesCLI.commands["search_notes"]!
+        XCTAssertThrowsError(try handler(["limit": 5])) { error in
+            guard case NotesCLIError.missingField("query") = error else {
+                return XCTFail("expected missingField(query), got \(error)")
+            }
+        }
+    }
+
+    func testCreateNoteCommandThrowsMissingTitle() {
+        let handler = NotesCLI.commands["create_note"]!
+        XCTAssertThrowsError(try handler(["body": "x"])) { error in
+            guard case NotesCLIError.missingField("title") = error else {
+                return XCTFail("expected missingField(title), got \(error)")
+            }
+        }
+    }
+
+    func testUpdateNoteCommandThrowsMissingId() {
+        let handler = NotesCLI.commands["update_note"]!
+        XCTAssertThrowsError(try handler(["title": "x"])) { error in
+            guard case NotesCLIError.missingField("id") = error else {
+                return XCTFail("expected missingField(id), got \(error)")
+            }
+        }
+    }
+
+    func testDeleteNoteCommandThrowsMissingId() {
+        let handler = NotesCLI.commands["delete_note"]!
+        XCTAssertThrowsError(try handler([:])) { error in
+            guard case NotesCLIError.missingField("id") = error else {
+                return XCTFail("expected missingField(id), got \(error)")
+            }
+        }
+    }
+
     // MARK: - Permission Check Script
 
     func testPermissionCheckScriptAccessesData() {
-        // "to name" does NOT require Automation permission — it returns the app
-        // name without triggering a TCC prompt. The script must access actual
-        // data (e.g. notes, folders) to force macOS to check permission.
+        // script must access data to trigger TCC prompt, not 'to name'
         XCTAssertFalse(
             permissionCheckScript.hasSuffix("to name"),
             "permissionCheckScript must not use 'to name' — it does not require Automation permission"
@@ -76,8 +141,7 @@ final class NotesTests: XCTestCase {
     }
 
     func testPermissionCheckScriptDeniedIncludesGuidance() {
-        // When permission is denied, the error message should guide the user
-        // to System Settings > Automation (not Calendars/Reminders).
+        // denied error must point to System Settings > Automation
         let detail = "Notes access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
         XCTAssertTrue(detail.contains("Automation"))
     }
@@ -181,11 +245,6 @@ final class NotesTests: XCTestCase {
     }
 
     // MARK: - AppleEventsGate end-to-end through performCheckPermission
-    //
-    // Mirrors MailTests AppleEventsGate suite — same pattern, with .notes entity
-    // and com.apple.Notes target bundle. Verifies that the notes-cli check_permission
-    // path produces status-aware output identical to mail-cli, which is the
-    // unification goal of this change.
 
     final class FakeNotesGate: PermissionGate {
         var initialStatus: RawAuthorizationStatus = .notDetermined
@@ -226,8 +285,7 @@ final class NotesTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
-        // post-status must also be .targetNotRunning — orchestrator no longer
-        // short-circuits on initial .targetNotRunning (gate may auto-launch).
+        // post-status must remain .targetNotRunning — gate may auto-launch
         let gate = FakeNotesGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.Notes")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.Notes")

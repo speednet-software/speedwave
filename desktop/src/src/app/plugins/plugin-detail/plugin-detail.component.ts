@@ -11,12 +11,17 @@ import { Marked } from 'marked';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { LoggerService } from '../../services/logger.service';
 import {
   PluginStatusEntry,
   PluginsResponse,
   PluginSaveCredentialsEvent,
 } from '../../models/plugin';
-import { IntegrationsResponse } from '../../models/integration';
+import {
+  IntegrationsResponse,
+  OAuthFlowStatus,
+  OAuthProgressEvent,
+} from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
@@ -29,19 +34,9 @@ export type PluginDetailTab = 'dashboard' | 'settings' | 'logs';
 /** Shown when a mutation is attempted with no active project / loaded plugin. */
 const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
 
+/** Scoped `marked` for the Dashboard `instructions` block; forces `<a>` to open in a new tab with `rel="noopener noreferrer"`. */
 /**
- * Scoped `marked` instance for the Dashboard `instructions` block. Forces
- * every rendered `<a>` to open in a new tab with `rel="noopener noreferrer"`
- * so a click inside the Tauri webview can't navigate the SPA away (state
- * loss) nor leak `window.opener` to the linked page. Scoped — does not
- * touch other markdown call sites (e.g. chat text-block).
- */
-/**
- * Escape user-supplied strings before interpolating into an HTML attribute
- * value. Angular's `DomSanitizer` still applies at bind time (so this is
- * defence-in-depth, not the primary XSS gate), but a manifest author writing
- * `[x](url "It's a \"quote\"")` would otherwise produce structurally
- * malformed HTML that breaks subsequent attributes on the same `<a>`.
+ * Escape a string for interpolation into an HTML attribute value.
  * @param s the string to escape
  * @returns `s` with `&` → `&amp;` and `"` → `&quot;`
  */
@@ -372,9 +367,16 @@ const instructionsMarked = new Marked({
                     [authFields]="plugin.auth_fields"
                     [configuredFields]="plugin.configured_fields"
                     [inFlight]="saving"
+                    [providerLabel]="plugin.name"
+                    [oauthConfigured]="plugin.configured"
+                    [oauthStatus]="oauthStatus"
+                    [oauthRedirectUri]="oauthRedirectUri"
+                    [oauthStatusMessage]="oauthStatusMessage"
                     (save)="onSaveCredentials($event)"
                     (clear)="confirmingReset = true"
                     (clearField)="onClearField($event)"
+                    (authorizeOauth)="handleStartPluginOAuth()"
+                    (cancelOauth)="handleCancelPluginOAuth()"
                   />
                   @if (confirmingReset) {
                     <div class="mt-4 flex items-center gap-3">
@@ -467,12 +469,20 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   /** True while `delete_plugin_credentials` is in flight; disables confirm/cancel. */
   resetting = false;
 
-  /**
-   * True while any credential/settings mutation is in flight via
-   * `runPluginMutation`. Bound to the credentials form's `inFlight` input so
-   * Save disables + flips to "Saving…" — blocks double-submit + signals work.
-   */
+  /** True while any credential/settings mutation is in flight; disables Save. */
   saving = false;
+
+  // -- OAuth (authorization_code) flow state --
+  /** Current flow status; null when idle. Passed to the credentials form. */
+  oauthStatus: OAuthFlowStatus | null = null;
+  oauthStatusMessage = '';
+  /** Loopback redirect URI surfaced while awaiting the browser callback. */
+  oauthRedirectUri: string | null = null;
+  /** Correlates progress events to the in-flight flow. */
+  private activeOAuthRequestId: string | null = null;
+  /** Latest event per request that arrived before `start_plugin_oauth` returned its request_id. */
+  private pendingOAuthEvents = new Map<string, OAuthProgressEvent>();
+  private unlistenOAuth: (() => void) | null = null;
 
   /** Handle for the M9 auto-fade timeout on `success` — cancelled on new mutations. */
   private successFadeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -482,6 +492,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private log = inject(LoggerService);
   private activeProject: string | null = null;
   private unsubProjectReady: (() => void) | null = null;
 
@@ -495,10 +506,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private instructionsCache: { src: string; html: string } | null = null;
 
   /**
-   * Renders the manifest's `instructions` Markdown. Result is bound via
-   * `[innerHTML]`, sanitised at bind-time by Angular's default `SecurityContext.HTML`
-   * (only holds while the binding is NOT wrapped in `bypassSecurityTrustHtml`).
-   * Memoised on the source string so OnPush ticks don't re-parse.
+   * Renders the manifest's `instructions` Markdown, memoised on the source string.
    * @returns HTML string (sanitised at bind time), or `''`
    */
   renderedInstructions(): string {
@@ -527,6 +535,8 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     await this.loadIntegrationStatuses();
     this.cdr.markForCheck();
 
+    this.unlistenOAuth = await this.subscribePluginOAuthProgress(slug);
+
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
       await this.loadActiveProject();
       const currentSlug = this.route.snapshot.paramMap.get('slug');
@@ -546,6 +556,10 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
+    }
+    if (this.unlistenOAuth) {
+      this.unlistenOAuth();
+      this.unlistenOAuth = null;
     }
     this.cancelSuccessFade();
   }
@@ -629,11 +643,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Shared skeleton for credentials/settings mutations: guard → clear status
-   * → invoke → set success → reload. Captures slug/project before the first
-   * await (project-switch mid-flight would otherwise null `this.plugin`). On
-   * reload failure the success message survives (the mutation already won)
-   * with a "view may be stale" caveat.
+   * Shared skeleton for credentials/settings mutations; captures slug/project before the first await.
    * @param command - Tauri command name to invoke
    * @param buildPayload - given validated (slug, project), returns the payload
    * @param successMsg - message to show on success
@@ -667,11 +677,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.success = successMsg;
     this.projectState.requestRestart();
     // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
-    // into `this.error`; downgrade to a caveat on the success line + console
+    // into `this.error`; downgrade to a caveat on the success line + log
     // so a stale view is signalled rather than hidden under the success msg.
     await this.loadPlugin(slug);
     if (this.error) {
-      console.warn('plugin reload after mutation failed:', this.error);
+      this.log.warn(`plugin reload after mutation failed: ${this.error}`);
       this.error = '';
       this.success = `${successMsg} — but the view could not refresh; reopen the plugin to see the latest state.`;
     }
@@ -713,14 +723,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Persists filled credential fields to disk via the Rust-side
-   * `save_plugin_credentials` Tauri command. The command writes each
-   * accepted key as `~/.speedwave/tokens/<project>/<service_id>/<key>`
-   * with chmod 600, having first verified the plugin's Ed25519 signature
-   * and validated that every key is in the manifest's `auth_fields`
-   * allow-list. On success, requests a container restart so workers pick
-   * up the new tokens, then reloads the plugin entry to refresh the
-   * `configured` status badge.
+   * Persists filled credential fields to disk via `save_plugin_credentials`.
    * @param event - filled credentials emitted by PluginCredentialsFormComponent
    */
   async onSaveCredentials(event: PluginSaveCredentialsEvent): Promise<void> {
@@ -732,13 +735,99 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     );
   }
 
+  /** Starts the plugin's authorization_code OAuth flow; client credentials must be pre-saved. */
+  async handleStartPluginOAuth(): Promise<void> {
+    const slug = this.plugin?.service_id ?? this.plugin?.slug;
+    if (!slug || !this.activeProject) return;
+    this.oauthStatus = 'starting';
+    this.oauthStatusMessage = '';
+    this.oauthRedirectUri = null;
+    this.cdr.markForCheck();
+    try {
+      const result = await this.tauri.invoke<{ request_id: string }>('start_plugin_oauth', {
+        project: this.activeProject,
+        slug,
+      });
+      this.activeOAuthRequestId = result.request_id;
+      // Replay any event buffered before the invoke resolved.
+      const buffered = this.pendingOAuthEvents.get(result.request_id);
+      this.pendingOAuthEvents.clear();
+      if (buffered) await this.applyOAuthProgress(buffered, slug);
+    } catch (e: unknown) {
+      this.oauthStatus = 'error';
+      this.oauthStatusMessage = e instanceof Error ? e.message : String(e);
+      this.activeOAuthRequestId = null;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /** Cancels an in-flight plugin OAuth flow. */
+  async handleCancelPluginOAuth(): Promise<void> {
+    try {
+      await this.tauri.invoke('cancel_plugin_oauth');
+    } catch {
+      // Best-effort — the loopback server also times out on its own.
+    }
+    this.oauthStatus = null;
+    this.oauthRedirectUri = null;
+    this.activeOAuthRequestId = null;
+    this.pendingOAuthEvents.clear();
+    this.cdr.markForCheck();
+  }
+
   /**
-   * Clears a SINGLE stored credential field via `delete_plugin_credential_field`.
-   * Unlike the full reset, this is not gated behind a confirm prompt — it
-   * removes just one token (trivially re-entered) and leaves the rest plus
-   * the plugin's enabled state intact.
-   * @param key - the auth_field key to clear (emitted by the form's per-field
-   *   "clear" button)
+   * Subscribes to `plugin_oauth_progress`; updates status/redirect and reloads
+   * the plugin (configured badge) + requests a restart on success.
+   * @param slug - the plugin slug whose flow to track
+   */
+  private subscribePluginOAuthProgress(slug: string): Promise<() => void> {
+    return this.tauri
+      .listen<OAuthProgressEvent>('plugin_oauth_progress', async (event) => {
+        const payload = (event as { payload: OAuthProgressEvent }).payload;
+        if (payload.request_id !== this.activeOAuthRequestId) {
+          // Buffer the newest event per request until the request_id is correlated.
+          this.pendingOAuthEvents.set(payload.request_id, payload);
+          return;
+        }
+        await this.applyOAuthProgress(payload, slug);
+      })
+      .catch((e: unknown) => {
+        // Without the listener the flow would look hung — leave a breadcrumb.
+        this.log.warn(`plugin_oauth_progress listener registration failed: ${String(e)}`);
+        return () => {};
+      });
+  }
+
+  /**
+   * Applies one progress event for the active flow — shared by the live
+   * listener and the pre-correlation buffer replay.
+   * @param payload - the progress event
+   * @param slug - the plugin slug whose flow is tracked
+   */
+  private async applyOAuthProgress(payload: OAuthProgressEvent, slug: string): Promise<void> {
+    this.oauthStatus = payload.status;
+    // The host sends the redirect URI as the message on awaiting_redirect.
+    if (payload.status === 'awaiting_redirect') {
+      this.oauthRedirectUri = payload.message;
+    } else {
+      this.oauthStatusMessage = payload.message;
+    }
+    if (payload.status === 'success') {
+      this.activeOAuthRequestId = null;
+      this.oauthRedirectUri = null;
+      await this.loadPlugin(slug);
+      this.projectState.requestRestart();
+    }
+    if (['error', 'expired', 'cancelled'].includes(payload.status)) {
+      this.activeOAuthRequestId = null;
+      this.oauthRedirectUri = null;
+    }
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Clears a single stored credential field via `delete_plugin_credential_field`; not gated by confirm.
+   * @param key - the auth_field key to clear
    */
   async onClearField(key: string): Promise<void> {
     await this.runPluginMutation(
@@ -748,17 +837,8 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     );
   }
 
-  /**
-   * Deletes every stored credential for this plugin via the Rust-side
-   * `delete_plugin_credentials` Tauri command (which removes the per-plugin
-   * tokens directory). The destructive confirm is handled in the template
-   * via `confirmingReset` (mirrors the uninstall confirm pattern), so this
-   * method is only reached after the user clicked "yes, reset".
-   */
+  /** Deletes every stored credential for this plugin via `delete_plugin_credentials`; reached only after confirm. */
   async onResetCredentials(): Promise<void> {
-    // `resetting` is set unconditionally and always cleared after the call
-    // (runPluginMutation returns rather than throwing on a guard failure), so
-    // the flag can never stick on an early exit.
     this.resetting = true;
     this.cdr.markForCheck();
     await this.runPluginMutation(
@@ -772,7 +852,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   }
 
   private loadActiveProject(): void {
-    this.activeProject = this.projectState.activeProject;
+    this.activeProject = this.projectState.activeProject();
   }
 
   private async loadPlugin(slug: string): Promise<void> {
@@ -811,10 +891,8 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         this.integrationStatuses.set(integration, svc?.configured ?? false);
       }
     } catch (e: unknown) {
-      // Non-fatal: the integration badges fall back to "not configured". Log
-      // so the failure isn't invisible — a swallowed get_integrations error
-      // would otherwise masquerade as genuinely unconfigured integrations.
-      console.warn('loadIntegrationStatuses: get_integrations failed:', e);
+      // Non-fatal: badges fall back to "not configured"; log so the error isn't invisible.
+      this.log.warn(`loadIntegrationStatuses: get_integrations failed: ${String(e)}`);
     }
   }
 }

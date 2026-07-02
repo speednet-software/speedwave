@@ -1,141 +1,46 @@
 # ADR-041: Local LLM Model Discovery and SSRF Policy
 
-**Status:** Accepted
-**Date:** 2026-04-20
-
-## Context
-
-After ADR-040 removed the LiteLLM proxy and wired Claude Code directly to a local LLM server (`ollama`, `lmstudio`, or `llamacpp`), a UX failure surfaced during integration testing: `llama.cpp` silently ignores the `model` field in an Anthropic `/v1/messages` request and answers with whatever model the user loaded at server startup.[^15] If the user typed a model name in Settings that did not match the server's loaded model, requests still went through — on the wrong model, with no visible error. Chat UI appeared to hang while a 35 B reasoning model ran; the session_stats field showed a model name the user never asked for.
-
-At the same time, the Settings save path (`containers_cmd::update_llm_config`) validated only URL syntax (scheme, no path, no query). A user could save `http://169.254.169.254` and Speedwave would render it into `ANTHROPIC_BASE_URL` on the claude container, causing every Claude Code request to hit the cloud metadata endpoint — a textbook SSRF primitive.[^11][^16]
-
-Both problems had one solution in common: query the server's advertised model list, and apply a uniform SSRF policy to both the discovery probe and the save path.
+> **Status:** Accepted
+> **Context:** After ADR-040 wired Claude Code directly to a local LLM server, users could type a model name the server didn't actually have loaded (silent wrong-model answers), and the Settings save path validated only URL syntax — letting a user save a cloud-metadata IP into `ANTHROPIC_BASE_URL`, an SSRF primitive.
 
 ## Decision
 
-Add a Tauri command `discover_llm_models(provider, base_url) -> Vec<DiscoveredModel>` that probes the local LLM server and returns the list of available models, so Settings can render a `<select>` instead of a free-text input. Introduce a shared URL validator `validate_llm_base_url` used by **both** the discovery command and `update_llm_config`. The validator follows the existing Redmine pattern (`validate_redmine_host_url`[^18]) but allows loopback — required because Speedwave's `default_base_url` for every local provider uses `host.docker.internal`, which the Desktop host-side code rewrites to `127.0.0.1` before probing.
+Add a Tauri command `discover_llm_models` that probes the configured local LLM server and returns its advertised model list, so Settings renders a `<select>` instead of free text. Both the discovery probe and the config save path share one SSRF-aware URL validator, so a metadata-endpoint or malformed URL is rejected uniformly. Discovery never guesses a context window — when the server doesn't advertise one, the value stays `None` and the UI hides the used/max ratio rather than fabricating it.
 
-**Single SSRF policy, two callsites:**
+## Why
 
-| Address class                            | Policy      | Rationale                                                                         |
-| ---------------------------------------- | ----------- | --------------------------------------------------------------------------------- |
-| Loopback (127.0.0.0/8, ::1)              | Allow, warn | `default_base_url` resolves here after container-alias rewrite                    |
-| RFC 1918 private (IPv4)[^3]              | Allow, warn | LAN LLM servers, self-hosted Ollama on a private address                          |
-| RFC 6598 CGNAT (100.64.0.0/10)[^7]       | Allow, warn | Tailscale / carrier NAT shared address space; functionally equivalent to RFC 1918 |
-| IPv6 ULA (`fc00::/7`, RFC 4193)[^4]      | Allow, warn | Same rationale as RFC 1918 for IPv6 networks                                      |
-| Link-local (169.254.0.0/16, `fe80::/10`) | Block       | Cloud metadata endpoints[^11][^12] live here; never a legitimate LLM host         |
-| RFC 5737 TEST-NET[^5], RFC 2544[^6]      | Block       | Reserved documentation/benchmarking ranges                                        |
-| RFC 3849 IPv6 documentation prefix[^8]   | Block       | Reserved documentation range                                                      |
-| RFC 6666 IPv6 discard prefix[^9]         | Block       | Reserved                                                                          |
-| Multicast, unspecified (`0.0.0.0`, `::`) | Block       | Not valid HTTP destinations                                                       |
-| Public IP / public domain                | Allow, warn | User-written URL is user's threat; same as Redmine                                |
-| `http://` scheme on private address      | Allow, warn | Local LAN; cleartext on loopback/RFC1918 is acceptable                            |
-| Embedded credentials (`user:pass@`)      | Block       | Credentials do not belong in base URLs                                            |
-| Query string / fragment                  | Block       | LLM endpoints are canonical paths                                                 |
-| Non-`http`/`https` scheme                | Block       | `file://`, `javascript:`, `ssh://`, `ftp://`, `data:` all rejected                |
+- Eliminates the silent model-name mismatch: a `<select>` cannot hold a model the server doesn't know.
+- Symmetric SSRF guard: the save path and the discovery probe run the same classifier, so a config containing a link-local / metadata address is rejected on both.
+- Loopback is intentionally allowed for LLM discovery (the default base URL resolves to `127.0.0.1` after alias rewrite) but blocked for Redmine — a self-hosted Redmine on loopback is almost always a mistake. Both share one `PrivatePolicy`-parameterised classifier, so a future tightening reaches both at once.
 
-IPv6-mapped IPv4 bypasses (`::ffff:169.254.169.254`) are handled by the underlying `url_validation::validate_url`, which checks `Ipv6Addr::to_ipv4_mapped()` against the same classifier.[^16]
+## Address policy (single classifier, two callsites)
 
-**Layered HTTP hardening for the discovery probe:**
+- **Allow (with warn):** loopback (LLM only), RFC 1918 private, RFC 6598 CGNAT (Tailscale / carrier NAT), IPv6 ULA (`fc00::/7`), public IP / public domain (user-written URL is the user's own threat surface), and cleartext `http://` on private addresses.
+- **Block:** link-local / cloud metadata (`169.254.0.0/16`, `fe80::/10`), RFC 5737 / RFC 2544 / RFC 3849 / RFC 6666 reserved ranges, unspecified (`0.0.0.0`, `::`), embedded `user:pass@` credentials, query strings / fragments, and any non-`http(s)` scheme (`file:`, `javascript:`, `ssh:`, `ftp:`, `data:`). IPv6-mapped IPv4 bypasses (e.g. `::ffff:169.254.169.254`) are caught by mapping back to the v4 classifier.
 
-1. `reqwest::ClientBuilder::redirect(Policy::none())`[^1] — prevents `302 Location: http://169.254.169.254/` bypass.
-2. 5-second request timeout[^2] — a stuck model load should fall back to the free-text input, not freeze Settings.
-3. Response body capped at 5 MiB via `http_util::read_body_limited` (shared with Redmine) — prevents OOM from a hostile endpoint.
-4. Case-insensitive prefix check on `Content-Type`: `text/html` responses are rejected (user pointed at Grafana/a 404 page instead of an LLM server).
+## Probe behavior
 
-**Endpoint selection:**
+- Unified `discover_local` path: one `GET /v1/models` request returns the model list; the per-model context window is read inline from `meta.n_ctx_train` (llama.cpp / vLLM / Unsloth shape) or `max_context_length` (LM Studio). If an entry lacks inline metadata, a single `POST /api/show` sanity call decides whether to fan out (Ollama) or leave the rest as `None`. Legacy `ollama` / `lmstudio` / `llamacpp` provider names still route through this path for two release cycles.
+- A `POST /v1/messages` 1-token sanity probe detects whether the server implements the Anthropic Messages endpoint: 200 or 4xx (other than 404/405) means present, 404/405 means missing, transport error means unknown. No OPTIONS preflight — local servers often answer 405 to OPTIONS even when the endpoint exists.
+- All HTTP calls (model list, `/api/show`, and the `/v1/messages` sanity probe) share **one** request timeout — `DISCOVERY_TIMEOUT_SECS = 5` — passed once into the transport. There is no separate per-request 3-second timeout.
+- Host-side hardening: no redirects (`Policy::none()`, blocks a `302` to a metadata IP), response body capped at 5 MiB, and `text/html` responses rejected (user pointed at a 404 page or dashboard instead of an LLM server). Empty model lists and any non-2xx response fall back to the free-text input; models with empty `id` strings are dropped.
 
-- `ollama` → `GET {base}/api/tags`[^13] for the id list, then a parallel fan-out of `POST {base}/api/show` per id to read `model_info.<arch>.context_length` (falls back to the first numeric `*.context_length` field for unrecognised archs). Individual `/api/show` failures degrade silently — the model still appears in the list, but with `context_tokens: None`.
-- `lmstudio` → `GET {base}/api/v0/models`[^14] (extended listing carrying `max_context_length` per entry). The previous OpenAI-compat `/v1/models` fallback was removed: id-only listings forced a second round-trip and a duplicate parser without delivering the per-model context window the UI now consumes.
-- `llamacpp` → `GET {base}/v1/models`[^15] reading `meta.n_ctx_train` per entry. The runtime `--ctx-size` flag may constrain the live limit lower (visible via `/props`); we report the trained value as the best-available approximation rather than racing a slot-config change.
+## Where it lives in code
 
-The Tauri command signature is `discover_llm_models(provider, base_url) -> Vec<DiscoveredModel>` where `DiscoveredModel = { id: String, context_tokens: Option<u32> }`. `context_tokens` stays `None` when the provider does not advertise a window — the chat fallback chain takes over rather than guessing. Empty model lists return `Err("empty")` so the UI falls back to the free-text input. A `404` (or any other non-2xx response) triggers the same graceful fallback. Discovered models with empty `id` strings are dropped before the response is returned.
+- Discovery command, transport, probes, and the LLM-specific URL guard `validate_llm_base_url` — `desktop/src-tauri/src/llm_cmd.rs` (`do_discover_llm_models`, `discover_local`, `probe_messages_endpoint`, `normalize_and_validate_discovery_url`).
+- Shared SSRF classifier (`is_private_on_premise`, `PrivatePolicy::{AllowLoopback, BlockLoopback}`, `validate_url`) — `crates/speedwave-runtime/src/url_validation.rs`. Hoisted into the runtime crate (ADR-069) so plugin-manifest OAuth-URL validation and the host-side Tauri commands share one SSOT; `desktop/src-tauri/src/url_validation.rs` re-exports it. The classifier is pure URL/IP policy with no Tauri or networking dependency, so it lives cleanly in the runtime crate. The LLM-specific wrapper `validate_llm_base_url` stays in `llm_cmd.rs`.
+- Body-size cap and shared HTTP helpers (`read_body_limited`, `MAX_RESPONSE_BODY_BYTES = 5 MiB`) — `desktop/src-tauri/src/http_util.rs`.
+- Container-host alias rewrite (`rewrite_container_alias_to_loopback`, maps `host.docker.internal` → `127.0.0.1` before probing) — `desktop/src-tauri/src/http_util.rs`. It is a pure string→string mapping in the Desktop crate; the canonical alias itself is the SSOT `consts::HOST_GATEWAY_ALIAS` in `crates/speedwave-runtime/src/consts.rs`.
+- Save-path enforcement (calls `validate_llm_base_url` before writing the base URL) — `desktop/src-tauri/src/containers_cmd.rs`.
 
-**Container-host alias rewrite.** The canonical `host.docker.internal` alias injected into `extra_hosts` (`compose.template.yml`) does not resolve from the Desktop host process — Speedwave does not bundle Docker Desktop, so Docker's /etc/hosts injection does not happen. A helper `speedwave_runtime::compose::rewrite_container_alias_to_loopback` rewrites `host.docker.internal` to `127.0.0.1` before the probe. The single SSOT for the alias is `consts::HOST_GATEWAY_ALIAS`.
+## Residual risks (accepted)
 
-**Delta vs Redmine policy.** Two differences between `validate_redmine_host_url` (ADR sibling documented at[^18]) and the new `validate_llm_base_url`:
-
-1. **Loopback** — `AllowLoopback` for LLM (default base URLs resolve to 127.0.0.1), `BlockLoopback` for Redmine (a self-hosted Redmine on 127.0.0.1 is an unusual config likely to indicate a mistake). Implemented via `PrivatePolicy::{BlockLoopback, AllowLoopback}` on the shared helper.
-2. **CGNAT (100.64.0.0/10)** — classified as on-premise for **both** paths. Previously the Redmine-local `is_private_on_premise` used `ipv4.is_private()` which covers only RFC 1918, so CGNAT fell through to `validate_url` → `is_private_or_reserved` → rejected. The new shared helper explicitly accepts CGNAT because it is non-routable on the public internet and legitimate for Tailscale-hosted instances.
-
-## Consequences
-
-### Positive
-
-- Silent model-name mismatch bug eliminated at the UX layer: the select cannot contain a name the server doesn't know.
-- Save path gains SSRF protection symmetric to the discovery probe. Historical configs containing `http://169.254.169.254` log a warning on load and are rejected on the next save.
-- `is_private_on_premise` logic consolidated — Redmine and LLM discovery share one policy function; a future tightening (e.g. new IPv6 bypass) automatically reaches both.
-- `read_body_limited` + `MAX_RESPONSE_BODY_BYTES` extracted to `http_util.rs` (Rule of Three — second concrete consumer).
-
-### Neutral
-
-- ~400 new lines of Rust code + ~100 lines of Angular. Largely test harness (53 Rust unit/integration tests in `llm_cmd` + 16 policy-branch tests in `url_validation` + 9 save-path tests in `containers_cmd` + 10 Angular tests + 8 alias / template guards).
-- Frontend adds a discriminated-union `DiscoveryState` with a monotonic counter for stale-response discard. Replaces an earlier design that used 5 loose booleans — fewer invariants to reason about.
-
-### Negative (residual risks, accepted)
-
-1. **DNS rebinding in the discovery probe.** `Policy::none()` eliminates the redirect vector, but a user-written hostname (`http://attacker.example.com`) whose DNS returns a public IP on first resolve and `169.254.169.254` on a subsequent connect can still bypass the IP classifier. Mitigations: (a) discovery output is a typed `Vec<String>` rendered as `<option>` text — attacker cannot pivot from reading an internal service, (b) user-initiated only (per click/blur), (c) 5-second total request timeout.[^17] We explicitly do not use `reqwest::ClientBuilder::resolve()` pre-resolve — that mitigation is architecturally partial (redirect + idle-connection reconnect + IDN re-lookup all reintroduce the race) and gives a false sense of immunity.
-
-2. **Save-path public-domain SSRF.** A user can save `http://my-ollama.company.com` whose DNS later resolves to `169.254.169.254`. Every Claude Code request would then hit metadata. Decision: this is user-originated input; we apply the same threat model as Redmine (`validate_redmine_host_url` accepts public domains).[^18] If a future codepath adds a way for an attacker to inject URLs into the config without user consent, this decision must be revisited.
-
-3. **Rust-style constraint.** The SSRF policy lives in `desktop/src-tauri/src/url_validation.rs`, not in `speedwave-runtime`. Runtime is pure Rust with no Tauri coupling (per `.claude/rules/rust-style.md`) — networking policy must not leak there. The host-alias rewrite helper lives in runtime because it is a pure string→string mapping (no I/O, no policy).
-
-## Known Limitations
-
-- Discovery does not cache results. Every trigger re-probes. Localhost is fast enough; over a LAN the latency is bounded by the 5-second timeout.
-- `rustls-tls` uses bundled CA roots, inherited from Redmine[^18]. Corporate users with custom CAs may see TLS errors on public-domain HTTPS endpoints.
-- Ollama does not implement `/v1/messages/count_tokens?beta=true`. Claude Code's token counting falls back gracefully but counts may be approximate. Tracked upstream at [ollama/ollama#13949](https://github.com/ollama/ollama/issues/13949).
-
-## Update — Unified `discover_local` and chat-endpoint sanity probe
-
-This section supersedes the per-provider endpoint table above for the unified `provider="local"` path. Legacy `ollama`/`lmstudio`/`llamacpp` continue to work via their original helpers for two release cycles.
-
-**Dialect autodetect.** A single `GET /v1/models` request returns the model list. For each entry, context window is extracted in priority order: `meta.n_ctx_train` (llama.cpp / Unsloth / vLLM inline shape), then `max_context_length` (LM Studio 0.4.1+ inline). Entries lacking inline metadata trigger a single sanity `POST /api/show` on the first missing entry: 200 → fan out to the rest with bounded concurrency (Ollama path), 404/non-2xx → all remaining missing stay `context_tokens: None`. This bounds the worst-case call count for unknown servers to **3 HTTP requests** (`/v1/models` + `/api/show` sanity + `/v1/messages` sanity), not N×404.
-
-**Bearer + custom headers.** The Tauri command accepts two tri-state credential parameters (`api_key`, `custom_headers`). Field omitted → use the project's stored token file (if `has_api_key=true`); JSON `null` or empty string → probe without auth (UI explicitly testing "without"); non-empty string → use the transient value, strip a leading `Bearer ` prefix. Custom headers are applied to the reqwest client as default headers; `Authorization` is rejected (collides with Bearer); per-line `Name: Value` parser rejects CRLF and the hop-by-hop blacklist (`Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`).
-
-**Chat-endpoint sanity probe.** Discovery additionally hits `POST /v1/messages` with a 1-token request (`{model, max_tokens: 1, messages: [{role:"user", content:"ping"}]}`, 3 s timeout). 200 / 4xx (not 404/405) → `messages_endpoint_ok: Some(true)`; 404 or 405 → `Some(false)`; transport error / timeout → `None` ("unknown"). **No OPTIONS preflight** — local servers (Ollama, llama.cpp) frequently return 405 to OPTIONS even when the endpoint exists, producing false negatives in ~90% of practical setups.
-
-Cost disclosure: on a local GPU server the probe consumes 1 token (effectively free); on cloud-backed gateways (LiteLLM, Bedrock proxies) it costs a single token billed against the user's account. The UI surfaces this disclosure under the Discover button.
-
-**Honest context-window fallback.** When discovery returns no context for the selected model, the frontend's `ChatStateService.resolveContextWindow` propagates `null` for local providers (does **not** fall back to `DEFAULT_CONTEXT_TOKENS` = 200 K). `session-stats.component` hides the `used / max` ratio and the progress bar rather than fabricating a ratio. ADR-041 "never guess" is honored at every layer.
+- **DNS rebinding** in the discovery probe: a hostname that resolves public first and metadata on a later connect can bypass the IP classifier. Mitigations: discovery output is only rendered as `<option>` text (no internal-service exfil pivot), it is user-initiated only, and the request timeout bounds the window. `reqwest`'s `resolve()` pre-resolve is deliberately NOT used — it is only architecturally partial (redirect, idle-connection reconnect, and IDN re-lookup all reintroduce the race) and would give a false sense of immunity.
+- **Save-path public-domain SSRF:** a user can save a public hostname that later resolves to a metadata IP. This is treated as user-originated input, the same threat model as Redmine. If a future codepath ever lets an attacker inject URLs into config without explicit user action, this decision must be revisited.
+- Discovery does not cache — every trigger re-probes (localhost is fast; LAN is bounded by the timeout). TLS uses `rustls-tls` with bundled CA roots (inherited from Redmine), so corporate custom CAs may fail on public HTTPS endpoints. Ollama doesn't implement `count_tokens`, so Claude Code's token counts can be approximate (tracked at [ollama/ollama#13949](https://github.com/ollama/ollama/issues/13949)).
 
 ## References
 
-[^1]: reqwest `redirect::Policy` — https://docs.rs/reqwest/latest/reqwest/redirect/enum.Policy.html
-
-[^2]: reqwest `ClientBuilder::timeout` — https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.timeout
-
-[^3]: RFC 1918 — "Address Allocation for Private Internets" — https://www.rfc-editor.org/rfc/rfc1918
-
-[^4]: RFC 4193 — "Unique Local IPv6 Unicast Addresses" — https://www.rfc-editor.org/rfc/rfc4193
-
-[^5]: RFC 5737 — "IPv4 Address Blocks Reserved for Documentation" — https://www.rfc-editor.org/rfc/rfc5737
-
-[^6]: RFC 2544 — "Benchmarking Methodology for Network Interconnect Devices" — https://www.rfc-editor.org/rfc/rfc2544
-
-[^7]: RFC 6598 — "IANA-Reserved IPv4 Prefix for Shared Address Space" (CGNAT) — https://www.rfc-editor.org/rfc/rfc6598
-
-[^8]: RFC 3849 — "IPv6 Address Prefix Reserved for Documentation" — https://www.rfc-editor.org/rfc/rfc3849
-
-[^9]: RFC 6666 — "A Discard Prefix for IPv6" — https://www.rfc-editor.org/rfc/rfc6666
-
-[^10]: RFC 1122 — "Requirements for Internet Hosts" (incl. 0.0.0.0/8 "this host") — https://www.rfc-editor.org/rfc/rfc1122
-
-[^11]: AWS EC2 Instance Metadata Service — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html
-
-[^12]: Google Cloud Metadata server — https://cloud.google.com/compute/docs/metadata/overview
-
-[^13]: Ollama API — `/api/tags` list local models — https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
-
-[^14]: LM Studio — REST API (extended `/api/v0/models` listing with `max_context_length`) — https://lmstudio.ai/docs/app/api/endpoints/rest
-
-[^15]: llama.cpp — HTTP server — https://github.com/ggml-org/llama.cpp/tree/master/examples/server
-
-[^16]: OWASP — Server-Side Request Forgery Prevention Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
-
-[^17]: OWASP — DNS Rebinding — https://owasp.org/www-community/attacks/DNS_rebinding
-
-[^18]: Speedwave Redmine SSRF policy — `../architecture/security.md#redmine-api-proxy-commands`
-
-[^19]: ADR-040 — Remove LiteLLM, direct provider injection — `./ADR-040-remove-litellm-direct-provider-injection.md`
+- ADR-040 — Remove LiteLLM, direct provider injection — `./ADR-040-remove-litellm-direct-provider-injection.md`
+- Redmine SSRF policy (sibling pattern) — `../architecture/security.md#redmine-api-proxy-commands`
+- OWASP — Server-Side Request Forgery Prevention — https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html

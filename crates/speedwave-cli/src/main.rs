@@ -1,6 +1,4 @@
-// CLI binary intentionally uses stdout/stderr for user output.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-#![allow(missing_docs)]
+//! `speedwave` CLI: runs Claude Code in a hardened per-project container.
 
 use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
@@ -11,10 +9,46 @@ use speedwave_runtime::update;
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+
+/// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
+/// Split out from [`emit`] so the redaction is unit-testable without
+/// capturing stdout.
+fn sanitize_output_line(line: &str) -> String {
+    speedwave_runtime::log_sanitizer::sanitize(line)
+}
+
+/// Redact secrets from an error before interpolating it into user-facing output.
+fn redact_err(e: &impl std::fmt::Display) -> String {
+    sanitize_output_line(&e.to_string())
+}
+
+/// Single output sink for `out!`/`err!`; every line passes through the
+/// `log_sanitizer` SSOT before reaching the terminal.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
+    let line = sanitize_output_line(&args.to_string());
+    if to_stderr {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+/// Print a line to stdout (normal CLI result output).
+macro_rules! out {
+    () => { emit(false, format_args!("")) };
+    ($($arg:tt)*) => { emit(false, format_args!($($arg)*)) };
+}
+
+/// Print a line to stderr (diagnostics, prompts, errors).
+macro_rules! err {
+    () => { emit(true, format_args!("")) };
+    ($($arg:tt)*) => { emit(true, format_args!($($arg)*)) };
+}
 
 #[derive(Debug, PartialEq)]
 enum CliAction {
@@ -45,11 +79,8 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
 }
 
 /// Parses an optional `--project <value>` / `--project=<value>` flag from the
-/// argv tail that follows a subcommand. `tail` is the slice *after* the
-/// subcommand token (e.g. `args[2..]` for `login`, `args[1..]` for the leading
-/// bare-run form). The only accepted token is the project flag; any other
-/// token — a stray positional, an unknown flag, a second `--project` — is a
-/// hard error. Returns `Ok(None)` when the tail is empty.
+/// argv `tail` (slice after the subcommand token). Any other token is a hard
+/// error; returns `Ok(None)` when the tail is empty.
 fn parse_optional_project_tail(
     tail: &[String],
     subcommand: &str,
@@ -174,14 +205,8 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-/// Returns true for actions that must run even when one or more
-/// installed plugins fail signature verification. Without these
-/// skips, `speedwave plugin remove <bad>` would refuse to run while
-/// `<bad>` is the plugin causing the failure — leaving the user with
-/// no recovery path other than manually editing `~/.speedwave/`.
-///
-/// Help and self-update are handled earlier in `main` and never reach
-/// the audit; they are intentionally not listed here.
+/// Returns true for actions that must run even when an installed plugin fails
+/// signature verification (recovery actions like `plugin remove`).
 fn skip_plugin_audit(action: &CliAction) -> bool {
     matches!(
         action,
@@ -259,9 +284,10 @@ fn maybe_print_update_hint() {
                 semver::Version::parse(&cache.latest_version),
             ) {
                 if latest > cur {
-                    eprintln!(
+                    err!(
                         "Update available: speedwave {} -> {}. Run: speedwave self-update",
-                        current, cache.latest_version
+                        current,
+                        cache.latest_version
                     );
                 }
             }
@@ -293,14 +319,8 @@ fn maybe_print_update_hint() {
     });
 }
 
-/// Re-exec the given binary with `update` arg to rebuild container images.
-/// Must re-exec because the current process has a stale `bundle_id` compiled
-/// into `env!("CARGO_PKG_VERSION")` — only the new binary knows the correct
-/// image tags.
-///
-/// CWD is intentionally inherited from the caller. If the user runs
-/// `speedwave self-update` from a non-project directory, `update` will fail
-/// to resolve a project — the error message guides them to run it manually.
+/// Re-exec the new binary with `update` to rebuild container images with the
+/// correct image tags; CWD is inherited from the caller.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
     let status = std::process::Command::new(exe)
         .arg("update")
@@ -330,8 +350,8 @@ fn run_self_update() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
     let current = env!("CARGO_PKG_VERSION");
-    println!("Current version: {}", current);
-    println!("Checking for updates...");
+    out!("Current version: {}", current);
+    out!("Checking for updates...");
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -349,15 +369,32 @@ fn run_self_update() -> anyhow::Result<()> {
     });
 
     if status.updated() {
-        println!("Updated to version {}.", status.version());
-        println!("Rebuilding container images...");
-        if let Err(e) = run_rebuild(&exe_path) {
-            eprintln!("Binary updated successfully, but container rebuild failed: {e}");
-            std::process::exit(1);
+        out!("Updated to version {}.", status.version());
+        // Older Desktop resources cannot digest the new image catalogue —
+        // skip the rebuild with guidance instead of bricking every invocation.
+        let resources_version = speedwave_runtime::build::resolve_build_root()
+            .ok()
+            .and_then(|root| speedwave_runtime::bundle::manifest_app_version_in(&root));
+        let new_version = status.version().trim_start_matches('v').to_string();
+        match resources_version {
+            Some(v) if v.trim_start_matches('v') != new_version => {
+                out!(
+                    "Installed Speedwave Desktop resources are v{v}. Update the Desktop \
+                     app, then run `speedwave update` to rebuild container images."
+                );
+            }
+            _ => {
+                out!("Rebuilding container images...");
+                if let Err(e) = run_rebuild(&exe_path) {
+                    let e = redact_err(&e);
+                    err!("Binary updated successfully, but container rebuild failed: {e}");
+                    std::process::exit(1);
+                }
+                out!("Container images rebuilt successfully.");
+            }
         }
-        println!("Container images rebuilt successfully.");
     } else {
-        println!("Already up to date ({}).", current);
+        out!("Already up to date ({}).", current);
     }
 
     Ok(())
@@ -369,11 +406,56 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
+/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
+/// re-exports the proxy base URL, then execs `claude auth login --claudeai` so
+/// the OAuth flow starts directly (no interactive prompt, no MCP session).
+fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
+    let script = format!(
+        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
+        unset_keys.join(" "),
+        consts::CLAUDE_BINARY,
+    );
+    vec!["sh".to_string(), "-lc".to_string(), script]
+}
+
+/// Makes Anthropic active on `project`'s `llm` config, creating the override
+/// when absent; `false` when `project` has no entry in `user_config` at all.
+fn select_anthropic_in(
+    user_config: &mut config::SpeedwaveUserConfig,
+    project: &str,
+    evidence: config::AnthropicEvidence,
+) -> bool {
+    let Some(entry) = user_config.find_project_mut(project) else {
+        return false;
+    };
+    let claude = entry.claude.get_or_insert_with(Default::default);
+    let llm = claude.llm.get_or_insert_with(Default::default);
+    // Lift v1 BEFORE selecting — set_active_to_anthropic on a raw v1 shape
+    // stamps schema_version and would permanently disable the lift (data loss).
+    let migrated = config::migrate_llm(llm, evidence);
+    let selected = llm.set_active_to_anthropic();
+    selected || migrated
+}
+
+/// After a successful `speedwave login`, makes Anthropic active so a
+/// logout-emptied OR never-configured project is usable again. No-op when
+/// the project has no entry in `user_config` (nothing to attach `llm` to).
+fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let evidence = config::AnthropicEvidence::detect_in(consts::data_dir().as_path(), project);
+        if select_anthropic_in(&mut user_config, project, evidence) {
+            config::save_user_config(&user_config)?;
+        }
+        Ok(())
+    })
+}
+
 /// Printed by `speedwave --help` / `-h` / `help`. Must not require the
 /// runtime or any I/O so users can discover commands before Desktop is
 /// running (or while troubleshooting a broken setup).
 fn print_help() {
-    println!(
+    out!(
         "\
 speedwave — run Claude Code in a hardened container per project
 
@@ -381,7 +463,7 @@ USAGE:
     speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
     speedwave check                   Run security + OS prerequisite checks
     speedwave init [name]             Register the current directory as a project
-    speedwave login   [--project <p>] Run Anthropic OAuth login (type /login at Claude's prompt)
+    speedwave login   [--project <p>] Run Anthropic OAuth login (sign-in starts automatically)
     speedwave logout  [--project <p>] Delete Claude Code credentials for the project
     speedwave update                  Rebuild container images for the active project
     speedwave self-update             Download the latest speedwave CLI binary
@@ -402,12 +484,12 @@ Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
 }
 
 fn runtime_not_available() -> ! {
-    eprintln!("Speedwave runtime is not running.");
-    eprintln!("CLI requires Speedwave Desktop to be running with a completed setup.");
-    eprintln!("1. Open Speedwave.app");
-    eprintln!("2. Complete the Setup Wizard");
-    eprintln!("3. Start your project");
-    eprintln!("Then run `speedwave` again.");
+    err!("Speedwave runtime is not running.");
+    err!("CLI requires Speedwave Desktop to be running with a completed setup.");
+    err!("1. Open Speedwave.app");
+    err!("2. Complete the Setup Wizard");
+    err!("3. Start your project");
+    err!("Then run `speedwave` again.");
     std::process::exit(1);
 }
 
@@ -422,7 +504,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook;
-            eprintln!("PANIC: {sanitized}");
+            err!("PANIC: {sanitized}");
         }
     }));
 
@@ -443,10 +525,8 @@ fn main() -> anyhow::Result<()> {
         })
         .init();
 
-    // If SPEEDWAVE_RESOURCES_DIR is not set, try reading the marker file written
-    // by the Desktop app (e.g. ~/.speedwave/resources-dir → "/usr/lib/Speedwave").
-    // This lets the CLI find bundled binaries (nerdctl, node) without inheriting
-    // the Desktop's environment.
+    // If SPEEDWAVE_RESOURCES_DIR is unset, read the marker file the Desktop app
+    // writes (e.g. ~/.speedwave/resources-dir → "/usr/lib/Speedwave").
     if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
         let marker = consts::data_dir().join(consts::RESOURCES_MARKER);
         if let Ok(contents) = std::fs::read_to_string(&marker) {
@@ -461,18 +541,12 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let action = parse_action(&args).unwrap_or_else(|msg| {
-        eprintln!("{}", msg);
+        err!("{}", msg);
         std::process::exit(1);
     });
 
-    // `--help` / `-h` / `help` must print usage without touching the runtime
-    // so users can discover commands when Desktop isn't running (or while
-    // troubleshooting a broken setup).
-    //
-    // NOTE: `main_handles_help_before_runtime_check` in the tests below
-    // asserts that the literal string `if action == CliAction::Help` appears
-    // before any `runtime_not_available()` call site inside `fn main()`. If
-    // you rename either identifier, update the test assertion too.
+    // `--help` must print usage without touching the runtime; ordering pinned
+    // by `main_handles_help_before_runtime_check`.
     if action == CliAction::Help {
         print_help();
         std::process::exit(0);
@@ -481,7 +555,8 @@ fn main() -> anyhow::Result<()> {
     // Handle `speedwave self-update` before anything else
     if action == CliAction::SelfUpdate {
         if let Err(e) = run_self_update() {
-            eprintln!("Self-update failed: {e}");
+            let e = redact_err(&e);
+            err!("Self-update failed: {e}");
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -490,17 +565,20 @@ fn main() -> anyhow::Result<()> {
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
 
-    // Hard-fail on tampered plugins. Recovery actions (remove, list,
-    // install) and project setup (init) skip the audit so a user with
-    // a bad plugin can still use the CLI to recover. Help/self-update
-    // already exited above.
+    // Persist the LLM schema migration for CLI-first upgrades (Desktop heals at
+    // its own startup); non-fatal — resolve still migrates in-memory.
+    if let Err(e) = config::heal_llm_config_on_disk() {
+        log::warn!("llm config heal failed: {}", redact_err(&e));
+    }
+
+    // Hard-fail on tampered plugins, except for recovery actions.
     if !skip_plugin_audit(&action) {
         if let Err(failures) = speedwave_runtime::plugin::audit_all() {
-            eprintln!("Plugin verification failed:");
+            err!("Plugin verification failed:");
             for (slug, reason) in &failures {
-                eprintln!("  • {slug}: {reason}");
+                err!("  • {slug}: {reason}");
             }
-            eprintln!(
+            err!(
                 "\nFix: speedwave plugin remove <slug>   OR   \
                  rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
             );
@@ -524,12 +602,12 @@ fn main() -> anyhow::Result<()> {
         let canonical_str = canonical.to_string_lossy().to_string();
         match speedwave_runtime::project::add_project(&name, &canonical_str) {
             Ok(()) => {
-                println!("Project '{}' registered at {}", name, canonical_str);
+                out!("Project '{}' registered at {}", name, canonical_str);
             }
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("already registered") || msg.contains("already exists") {
-                    println!("{}", msg);
+                    out!("{}", msg);
                 } else {
                     return Err(e);
                 }
@@ -545,32 +623,48 @@ fn main() -> anyhow::Result<()> {
             runtime_not_available();
         }
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            eprintln!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
-        println!("Updating containers for project '{}'...", project_name);
+        out!("Updating containers for project '{}'...", project_name);
         match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
-                println!(
+                out!(
                     "Updated {} containers ({} images rebuilt)",
-                    result.containers_recreated, result.images_rebuilt
+                    result.containers_recreated,
+                    result.images_rebuilt
                 );
                 std::process::exit(0);
             }
             Err(e) => {
-                eprintln!("Container update failed: {e}");
+                let msg = redact_err(&e);
+                err!("Container update failed: {msg}");
+                // Roll back only when containers are torn down (compose_down+).
+                // Early failures leave old containers running; rollback there
+                // would needlessly recreate from a possibly stale snapshot.
+                if update::is_torn_down(&e) {
+                    match update::rollback_containers(&runtime, &project_name) {
+                        Ok(()) => err!("Rolled back to the previous container state."),
+                        Err(rollback_err) => {
+                            let rollback_err = redact_err(&rollback_err);
+                            err!(
+                                "Automatic rollback also failed: {rollback_err}. \
+                                 Run `speedwave` to start containers manually."
+                            );
+                        }
+                    }
+                }
                 std::process::exit(1);
             }
         }
     }
 
-    // Handle `speedwave logout` — deletes Claude Code's credential files
-    // (~/.claude/.credentials.json and ~/.claude.json) from the per-project
-    // CLAUDE_HOME mount. No runtime needed.
+    // Handle `speedwave logout` — deletes Claude Code's credential files from
+    // the per-project CLAUDE_HOME mount; no runtime needed.
     if let CliAction::Logout(_) = action {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
-            eprintln!("Failed to load config: {e}");
+            err!("Failed to load config: {err}", err = redact_err(&e));
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
@@ -580,11 +674,9 @@ fn main() -> anyhow::Result<()> {
             &project_name,
         )?;
         if removed == 0 {
-            eprintln!("No Claude credentials found for project '{project_name}'.");
+            err!("No Claude credentials found for project '{project_name}'.");
         } else {
-            eprintln!(
-                "Removed Claude credentials for project '{project_name}' ({removed} file(s))."
-            );
+            err!("Removed Claude credentials for project '{project_name}' ({removed} file(s)).");
         }
         std::process::exit(0);
     }
@@ -599,13 +691,14 @@ fn main() -> anyhow::Result<()> {
             let outcome = plugin::install_plugin(std::path::Path::new(path), rt_ref, &mut |_| {})?;
             match outcome {
                 plugin::InstallOutcome::Installed(manifest) => {
-                    println!(
+                    out!(
                         "Plugin '{}' ({}) installed successfully",
-                        manifest.name, manifest.slug
+                        manifest.name,
+                        manifest.slug
                     );
                 }
                 plugin::InstallOutcome::InstalledPendingBuild(manifest) => {
-                    eprintln!(
+                    err!(
                         "Plugin '{}' ({}) installed; image build failed and will retry on next launch",
                         manifest.name, manifest.slug
                     );
@@ -614,13 +707,10 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         CliAction::PluginList => {
-            // Tolerant listing: never fails, reports a verification status
-            // per plugin so the user can see *why* a plugin was rejected
-            // (this command intentionally skips the startup audit so it
-            // stays usable as a recovery/diagnostic path).
+            // Tolerant listing: never fails, reports verification status per plugin.
             let plugins = plugin::list_for_ui();
             if plugins.is_empty() {
-                println!("No plugins installed");
+                out!("No plugins installed");
             } else {
                 for e in &plugins {
                     let name = e
@@ -634,10 +724,10 @@ fn main() -> anyhow::Result<()> {
                         .map(|m| m.version.as_str())
                         .unwrap_or("?");
                     if e.verification_status == plugin::VerificationStatus::Verified {
-                        println!("{name} ({}): {version}  [verified]", e.slug);
+                        out!("{name} ({}): {version}  [verified]", e.slug);
                     } else {
                         let reason = e.verification_error.as_deref().unwrap_or("unverified");
-                        println!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
+                        out!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
                     }
                 }
             }
@@ -648,20 +738,15 @@ fn main() -> anyhow::Result<()> {
             let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
                 if rt.is_available() { Some(&rt) } else { None };
             plugin::remove_plugin(slug, rt_ref)?;
-            println!("Plugin '{}' removed", slug);
+            out!("Plugin '{}' removed", slug);
             std::process::exit(0);
         }
         CliAction::PluginEnable {
             service_id,
             project,
         } => {
-            // Enabling requires a *verified* plugin — the same gate the
-            // Desktop `set_plugin_enabled` command enforces. The
-            // startup audit already ran (PluginEnable is not in the
-            // skip-list), but a plugin tampered between two audit runs
-            // must still be rejected here. `list_for_ui` is tolerant
-            // (other unverified plugins don't block the lookup) and
-            // exposes `verification_status` per entry.
+            // Enabling requires a verified plugin — same gate as the Desktop
+            // `set_plugin_enabled` command.
             let entries = plugin::list_for_ui();
             let entry = entries
                 .iter()
@@ -699,9 +784,11 @@ fn main() -> anyhow::Result<()> {
             let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, true);
             config::save_user_config(&user_config)?;
-            println!(
+            out!(
                 "Plugin '{}' (service_id: {}) enabled for project '{}'",
-                display_name, service_id, project
+                display_name,
+                service_id,
+                project
             );
             std::process::exit(0);
         }
@@ -709,9 +796,8 @@ fn main() -> anyhow::Result<()> {
             service_id,
             project,
         } => {
-            // Disabling does NOT require verification — the user must
-            // always be able to turn off a bad plugin. Use the tolerant
-            // lister so an unverified plugin elsewhere doesn't block it.
+            // Disabling does NOT require verification — a bad plugin must
+            // always be turn-off-able. `list_for_ui` is tolerant.
             let entries = plugin::list_for_ui();
             let entry = entries
                 .iter()
@@ -739,9 +825,11 @@ fn main() -> anyhow::Result<()> {
             let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
             integrations.set_plugin_enabled(service_id, false);
             config::save_user_config(&user_config)?;
-            println!(
+            out!(
                 "Plugin '{}' (service_id: {}) disabled for project '{}'",
-                display_name, service_id, project
+                display_name,
+                service_id,
+                project
             );
             std::process::exit(0);
         }
@@ -750,15 +838,26 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = detect_runtime();
 
-    // CLI checks availability but does NOT install (ensure_ready).
-    // Installation is the Setup Wizard's responsibility in Speedwave.app.
+    // Install stays the wizard's job; an installed-but-stopped runtime
+    // (Lima VM after reboot, containerd down) is recovered right here.
     if !runtime.is_available() {
-        runtime_not_available();
+        if !runtime.is_installed() {
+            runtime_not_available();
+        }
+        err!("Starting the Speedwave runtime (it was stopped)...");
+        if let Err(e) = runtime.ensure_ready() {
+            err!("Failed to start the runtime: {}", redact_err(&e));
+            std::process::exit(1);
+        }
     }
 
+    // Windows engine invariants (nerdctl pin + drvfs metadata automount);
+    // no-op elsewhere. Warn-only, Once-guarded inside.
+    speedwave_runtime::provision::ensure_windows_invariants();
+
     // Load config once — used for both project resolution and compose rendering
-    let user_config = config::load_user_config().unwrap_or_else(|e| {
-        eprintln!("Failed to load config: {e}");
+    let mut user_config = config::load_user_config().unwrap_or_else(|e| {
+        err!("Failed to load config: {err}", err = redact_err(&e));
         std::process::exit(1);
     });
 
@@ -767,10 +866,26 @@ fn main() -> anyhow::Result<()> {
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Project dir comes from config (authoritative). resolve_action_project
-    // already rejected an explicit `--project` naming a missing project; an
-    // unresolved name here means a stale active/first entry, which we reject
-    // with a clear error rather than silently mounting the working directory.
+    // Login must select Anthropic BEFORE render_compose, else the no-provider
+    // guard bails and the terminal closes before `claude auth login` runs.
+    if matches!(action, CliAction::Login(_)) {
+        // Fatal on failure: continuing would hit that very guard and print a
+        // misleading "Run `speedwave login`" while the real cause stays hidden.
+        if let Err(e) = select_anthropic_after_login(&project_name) {
+            err!(
+                "Login failed: could not select Anthropic: {}",
+                redact_err(&e)
+            );
+            std::process::exit(1);
+        }
+        user_config = config::load_user_config().unwrap_or_else(|e| {
+            err!("Failed to load config: {err}", err = redact_err(&e));
+            std::process::exit(1);
+        });
+    }
+
+    // Project dir comes from config (authoritative); an unresolved name is a
+    // hard error, never a working-directory fallback.
     let project_dir = user_config
         .find_project(&project_name)
         .map(|p| std::path::PathBuf::from(&p.dir))
@@ -786,28 +901,35 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
+    // Cloud-storage preflight (Desktop parity): a TCC-blocked iCloud/OneDrive
+    // dir must be a clear message, not a cryptic compose failure.
+    if let Err(e) = speedwave_runtime::cloudstorage::check_project_readable_or_err(&project_dir) {
+        err!(
+            "{}",
+            speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE
+        );
+        err!("({e})");
+        std::process::exit(1);
+    }
+
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
-    // Sanitise any v1 SharePoint secrets still sitting in the worker-mounted
-    // token dir (refresh_token / client_id / tenant_id). Idempotent — no-op
-    // when no project has the legacy layout. Secrets are never migrated.
+    // Sanitise v1 SharePoint secrets from the worker-mounted token dir.
+    // Idempotent; secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
         log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
     }
 
-    // Self-heal legacy/partial oauth.json whose clientId/tenantId sit top-level
-    // instead of under providerData (ADR-060 addendum). Shape-only, idempotent.
-    // It logs its own summary; do not re-log the return value (CodeQL taints it).
+    // Self-heal legacy/partial oauth.json shape (ADR-060 addendum); idempotent.
+    // Do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Spawn host_exec BEFORE render_compose — hub needs port/auth-token files (ADR-054).
-    let _host_exec_worker =
-        maybe_spawn_host_exec_worker(&project_name, &project_dir, &integrations);
-
-    // Spawn oauth BEFORE render_compose — apply_oauth_config reads port + bearer-map (ADR-060).
-    let _oauth_worker = maybe_spawn_oauth_worker(&project_name, &integrations);
+    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its
+    // own. render_compose reads the Desktop-held lock + bearer-map from disk.
+    // Reconstruct host-bridge registrations from disk (ADR-074).
+    let host_bridges = compose::host_bridges_from_disk();
 
     let compose_yml = compose::render_compose(
         &project_name,
@@ -815,7 +937,7 @@ fn main() -> anyhow::Result<()> {
         &resolved,
         &integrations,
         Some(&runtime),
-        &compose::HostBridgesInfo::default(),
+        &host_bridges,
     )?;
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -836,7 +958,7 @@ fn main() -> anyhow::Result<()> {
         // Non-blocking warnings (e.g. nested virtualization) — printed in both OK and FAILED paths
         let os_warnings = speedwave_runtime::os_prereqs::check_os_warnings();
         for w in &os_warnings {
-            eprintln!("  WARNING: {w}\n");
+            err!("  WARNING: {w}\n");
         }
 
         // ANSI color codes (only when stderr is a terminal)
@@ -846,35 +968,35 @@ fn main() -> anyhow::Result<()> {
         let reset = if use_color { "\x1b[0m" } else { "" };
 
         if prereq_violations.is_empty() && security_violations.is_empty() {
-            println!("speedwave check OK -- all system checks passed");
-            eprintln!();
+            out!("speedwave check OK -- all system checks passed");
+            err!();
             for rule in SecurityRule::iter() {
-                eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                err!("  {green}OK{reset}    {}  {}", rule, rule.description());
             }
             std::process::exit(0);
         } else {
-            eprintln!("speedwave check FAILED -- containers NOT started\n");
+            err!("speedwave check FAILED -- containers NOT started\n");
             let failed_rules: std::collections::HashSet<SecurityRule> =
                 security_violations.iter().map(|v| v.rule).collect();
             for rule in SecurityRule::iter() {
                 if failed_rules.contains(&rule) {
-                    eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
+                    err!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
                 } else {
-                    eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                    err!("  {green}OK{reset}    {}  {}", rule, rule.description());
                 }
             }
             if !prereq_violations.is_empty() {
-                eprintln!();
+                err!();
                 for v in &prereq_violations {
-                    eprintln!("  {} -- {}", v.rule, v.message);
-                    eprintln!("  Fix: {}\n", v.remediation);
+                    err!("  {} -- {}", v.rule, v.message);
+                    err!("  Fix: {}\n", v.remediation);
                 }
             }
             if !security_violations.is_empty() {
-                eprintln!();
+                err!();
                 for v in &security_violations {
-                    eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-                    eprintln!("  Fix: {}\n", v.remediation);
+                    err!("  [{}] {} -- {}", v.container, v.rule, v.message);
+                    err!("  Fix: {}\n", v.remediation);
                 }
             }
             std::process::exit(1);
@@ -883,31 +1005,67 @@ fn main() -> anyhow::Result<()> {
 
     // Mandatory prereq + security gate before container start
     if !prereq_violations.is_empty() {
-        eprintln!("speedwave check FAILED -- containers NOT started\n");
+        err!("speedwave check FAILED -- containers NOT started\n");
         for v in &prereq_violations {
-            eprintln!("  {} -- {}", v.rule, v.message);
-            eprintln!("  Fix: {}\n", v.remediation);
+            err!("  {} -- {}", v.rule, v.message);
+            err!("  Fix: {}\n", v.remediation);
         }
         std::process::exit(1);
     }
     speedwave_runtime::fs_security::ensure_data_dir_permissions(&project_name)?;
     let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
-        eprintln!("speedwave check FAILED -- containers NOT started\n");
+        err!("speedwave check FAILED -- containers NOT started\n");
         for v in &violations {
-            eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-            eprintln!("  Fix: {}\n", v.remediation);
+            err!("  [{}] {} -- {}", v.container, v.rule, v.message);
+            err!("  Fix: {}\n", v.remediation);
         }
         std::process::exit(1);
     }
 
-    // Save compose file and start containers.
-    // compose_up is idempotent (no --force-recreate) — nerdctl
-    // recreates containers whose config changed. Skip the expensive compose_ps
-    // call over SSH; just call compose_up unconditionally and let the engine
-    // decide what needs recreating. Wrapped in a per-project transaction so a
-    // concurrent Desktop process restarting the same project cannot overwrite
-    // compose.yml between save and up (see ADR-066).
+    // Build missing images before compose-up, outside the compose lock (ADR-066).
+    let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
+    let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
+    let prior_state = speedwave_runtime::bundle::load_bundle_state();
+    let built = speedwave_runtime::build::build_missing_images_locked(
+        &runtime,
+        &enabled_imgs,
+        &bundle_manifest,
+    )
+    .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
+    if built > 0 {
+        out!("Built {built} container image(s) for this app version");
+        // Half-applied bundle bug: an image rebuild without the resource sync
+        // leaves stale skills/commands until the next Desktop launch.
+        match speedwave_runtime::build::resolve_build_root() {
+            Ok(root) => {
+                if let Err(e) = speedwave_runtime::bundle::sync_claude_resources(&root) {
+                    err!(
+                        "Warning: claude-resources sync failed: {} (skills may be stale)",
+                        redact_err(&e)
+                    );
+                }
+            }
+            Err(e) => err!(
+                "Warning: build root unavailable, claude-resources not synced: {}",
+                redact_err(&e)
+            ),
+        }
+        // Prune superseded tags (warn-only) so CLI-only users don't leak a tag generation.
+        speedwave_runtime::build::prune_superseded_images(
+            &runtime,
+            &prior_state.applied_image_hashes,
+            prior_state.applied_bundle_id.as_deref(),
+            &bundle_manifest,
+        );
+    }
+    let enabled_plugin_ids: Vec<&str> = integrations.enabled_plugin_service_ids();
+    plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
+        .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
+
+    // compose_up is idempotent (no --force-recreate). Wrapped in a per-project
+    // transaction so a concurrent Desktop process can't overwrite compose.yml
+    // between save and up (ADR-066).
     runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
         compose::save_compose(&project_name, &compose_yml)?;
         speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
@@ -920,26 +1078,27 @@ fn main() -> anyhow::Result<()> {
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
     ensure_exec_healthy(&runtime, &project_name, &container_name)?;
 
-    // Handle `speedwave login` — runs `claude` interactively with the same
-    // resolved flags as a normal start (--dangerously-skip-permissions etc.).
-    // User types /login; Claude writes ~/.claude/.credentials.json to the
-    // per-project CLAUDE_HOME mount. Speedwave persists nothing itself.
+    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065). Spawned
+    // before the login branch so image paste works in `login` sessions too.
+    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
+
+    // Handle `speedwave login` — runs `claude auth login` directly so the
+    // Anthropic OAuth flow starts at once. Claude Code writes credentials to the mount.
     if let CliAction::Login(_) = action {
-        eprintln!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend(resolved.flags.iter().map(String::as_str));
-        let status = runtime
-            .container_exec(&container_name, &exec_cmd)
-            .status()?;
+        err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
+        // Unset any non-Anthropic provider env so OAuth runs against Anthropic.
+        let cmd = build_login_exec_cmd(
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
         std::process::exit(
             status
                 .code()
                 .unwrap_or(if status.success() { 0 } else { 1 }),
         );
     }
-
-    // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065).
-    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
@@ -950,111 +1109,16 @@ fn main() -> anyhow::Result<()> {
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
-        eprintln!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+        err!("{}", speedwave_runtime::resources::OOM_MESSAGE);
     }
-    // Normalize: when OOM is detected via signal()==Some(9) (Linux),
-    // code() returns None. Return 137 for consistency with macOS
-    // (where nerdctl translates SIGKILL → exit code 137).
+    // Normalize OOM-via-SIGKILL (code()==None on Linux) to 137 for macOS parity.
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
 }
 
-/// Spawn per-project `host_exec` worker if enabled; the handle keeps it alive.
-/// Best-effort: failures are logged and `None` returned.
-fn maybe_spawn_host_exec_worker(
-    project_name: &str,
-    project_dir: &Path,
-    integrations: &config::ResolvedIntegrationsConfig,
-) -> Option<speedwave_runtime::host_exec_process::HostExecProcess> {
-    use speedwave_runtime::host_exec_process::{write_host_exec_config_snapshot, HostExecProcess};
-    if !integrations.host_exec {
-        return None;
-    }
-    let data_dir = consts::data_dir();
-    let state_dir = speedwave_runtime::host_exec::host_exec_project_dir(data_dir, project_name);
-    if let Err(e) = std::fs::create_dir_all(&state_dir) {
-        log::warn!("host_exec[{project_name}]: cannot create state dir: {e}");
-        return None;
-    }
-    let snapshot = config::host_exec_config_snapshot(project_dir, &integrations.host_exec_commands);
-    let config_path = state_dir.join(consts::HOST_EXEC_CONFIG_FILE);
-    if let Err(e) = write_host_exec_config_snapshot(&config_path, &snapshot) {
-        log::warn!("host_exec[{project_name}]: cannot write config snapshot: {e}");
-        return None;
-    }
-    let script = match speedwave_runtime::build::resolve_host_exec_script() {
-        Some(s) => s.to_string_lossy().to_string(),
-        None => {
-            log::warn!(
-                "host_exec[{project_name}]: worker script not found — host_exec unavailable"
-            );
-            return None;
-        }
-    };
-    let host_path = std::env::var("PATH").unwrap_or_default();
-    match HostExecProcess::spawn_in(project_name, project_dir, &script, &host_path, data_dir) {
-        Ok(proc) => {
-            log::info!("host_exec[{project_name}]: started (port {})", proc.port());
-            Some(proc)
-        }
-        Err(e) => {
-            log::warn!("host_exec[{project_name}]: spawn failed: {e}");
-            None
-        }
-    }
-}
-
-/// Spawn per-project `oauth` worker if any OAuth-consuming integration is enabled.
-/// Best-effort: failures are logged and `None` returned (ADR-060).
-fn maybe_spawn_oauth_worker(
-    project_name: &str,
-    integrations: &config::ResolvedIntegrationsConfig,
-) -> Option<speedwave_runtime::oauth_process::OauthProcess> {
-    use speedwave_runtime::oauth_process::OauthProcess;
-
-    // List of enabled OAuth-consuming integrations (drives bearer-map).
-    // `is_service_enabled` is the SSOT match on `ResolvedIntegrationsConfig`
-    // (`speedwave_runtime::config`) — reused by Desktop's `ensure_oauth_running`.
-    let oauth_consumers: Vec<&'static str> = consts::TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .filter(|d| {
-            d.uses_oauth_refresh
-                && integrations
-                    .is_service_enabled(d.config_key)
-                    .unwrap_or(false)
-        })
-        .map(|d| d.config_key)
-        .collect();
-    if oauth_consumers.is_empty() {
-        return None;
-    }
-
-    let script = match speedwave_runtime::build::resolve_oauth_script() {
-        Some(s) => s.to_string_lossy().to_string(),
-        None => {
-            log::warn!(
-                "oauth[{project_name}]: worker script not found — OAuth refresh unavailable"
-            );
-            return None;
-        }
-    };
-    match OauthProcess::spawn_in(project_name, &script, consts::data_dir(), &oauth_consumers) {
-        Ok(proc) => {
-            log::info!("oauth[{project_name}]: started (port {})", proc.port());
-            Some(proc)
-        }
-        Err(e) => {
-            log::warn!("oauth[{project_name}]: spawn failed: {e}");
-            None
-        }
-    }
-}
-
 /// Picks the project an action operates on. An explicit `--project` override
-/// on `run`/`login`/`logout`/`update` wins and must name a real project
-/// (`require_project`); otherwise the active project (Desktop selector) is
-/// used, then the first configured project. The working directory is never
-/// consulted.
+/// wins and must name a real project; otherwise falls back to the active then
+/// first configured project. The working directory is never consulted.
 fn resolve_action_project(
     action: &CliAction,
     user_config: &config::SpeedwaveUserConfig,
@@ -1064,9 +1128,7 @@ fn resolve_action_project(
         | CliAction::Login(Some(name))
         | CliAction::Logout(Some(name))
         | CliAction::Update(Some(name)) => {
-            // An explicit `--project` must name a real project. Without this
-            // guard a typo'd name passes syntactic validation and main()
-            // silently mounts the working directory instead (defect #6).
+            // An explicit `--project` must name a real project.
             user_config.require_project(name)?;
             Ok(name.clone())
         }
@@ -1074,11 +1136,9 @@ fn resolve_action_project(
     }
 }
 
-/// Resolves the project to act on when no explicit `--project` was given.
-/// The active project (set by the Desktop selector) is authoritative; the
-/// first configured project is the fallback when none is active. The working
-/// directory is intentionally NOT consulted — the selector is the single
-/// source of truth.
+/// Resolves the project when no explicit `--project` was given: the active
+/// project is authoritative, else the first configured project. The working
+/// directory is never consulted.
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
     user_config
         .active_project
@@ -1095,6 +1155,85 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_bare_run_syncs_resources_when_images_rebuilt() {
+        // Post-app-update bare run: image rebuild without the resource sync
+        // half-applies the bundle (stale skills until Desktop launches).
+        let source = include_str!("main.rs");
+        let run_flow = source
+            .find("Built {built} container image(s)")
+            .expect("bare-run rebuild message must exist");
+        let window = &source[run_flow..run_flow + 900];
+        assert!(
+            window.contains("sync_claude_resources"),
+            "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
+
+    #[test]
+    fn cli_aligns_nerdctl_before_compose_work() {
+        let source = include_str!("main.rs");
+        let avail = source
+            .find("runtime_not_available();")
+            .expect("availability gate must exist");
+        let align = source
+            .find("ensure_windows_invariants();")
+            .expect("CLI must apply Windows invariants (nerdctl pin + metadata automount)");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
+        assert!(
+            avail < align && align < txn,
+            "Windows invariants must run after availability, before compose work"
+        );
+    }
+
+    /// Structural (ADR-072): the run path must build missing images BEFORE the
+    /// compose transaction — pull_policy:never fails a CLI-first-after-update.
+    #[test]
+    fn run_builds_missing_images_before_compose_transaction() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must build missing images");
+        let tx_pos = src
+            .find("runtime.transaction(&project_name")
+            .expect("run path must use the compose transaction");
+        assert!(
+            build_pos < tx_pos,
+            "missing-image build (at {build_pos}) must precede the compose \
+             transaction (at {tx_pos}) — builds stay outside compose locks"
+        );
+    }
+
+    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded
+    /// tags immediately after — CLI-only users never see Desktop reconcile, so
+    /// without this they leak one tag generation per update.
+    #[test]
+    fn cli_prunes_superseded_images_after_build() {
+        let src = include_str!("main.rs");
+        let build_pos = src
+            .find("build_missing_images_locked")
+            .expect("run path must call build_missing_images_locked");
+        let prune_pos = src
+            .find("prune_superseded_images")
+            .expect("run path must prune superseded images after build");
+        assert!(
+            build_pos < prune_pos,
+            "prune_superseded_images (at {prune_pos}) must follow build_missing_images_locked \
+             (at {build_pos}) — prune needs the previous state captured before the build"
+        );
+        // The prune must use the state captured BEFORE the build.
+        let state_pos = src
+            .find("load_bundle_state()")
+            .expect("run path must load prior bundle state for GC");
+        assert!(
+            state_pos < build_pos,
+            "load_bundle_state (at {state_pos}) must precede build_missing_images_locked \
+             (at {build_pos}) — prune compares applied hashes vs new manifest"
+        );
+    }
 
     #[test]
     fn parse_action_no_args_returns_run() {
@@ -1120,10 +1259,7 @@ mod tests {
         assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
     }
 
-    /// Regression guard: the Help action must be reachable without touching
-    /// the runtime. If the main() ordering ever changes so that runtime
-    /// detection runs before Help is handled, users lose `--help` whenever
-    /// Desktop isn't running — defeating the purpose of the flag.
+    /// Regression guard: `main()` must handle Help before any runtime check.
     #[test]
     fn main_handles_help_before_runtime_check() {
         let source = include_str!("main.rs");
@@ -1142,6 +1278,47 @@ mod tests {
             "CliAction::Help must be handled BEFORE any runtime_not_available \
              call site inside main() — otherwise `speedwave --help` fails \
              when Desktop is not running"
+        );
+    }
+
+    /// CLI must never spawn host workers — Desktop is sole supervisor (ADR-068);
+    /// re-adding a spawn call would silently reintroduce the exit-137 crash.
+    #[test]
+    fn cli_does_not_spawn_host_workers() {
+        let source = include_str!("main.rs");
+        // Needles assembled from fragments so this test can't match itself;
+        // type-prefix catches any spawn variant (spawn / spawn_in).
+        let forbidden = [
+            (concat!("maybe_", "spawn_oauth_worker"), "oauth"),
+            (concat!("OauthProcess::", "spawn"), "oauth"),
+            (concat!("McpOsProcess::", "spawn"), "mcp-os"),
+        ];
+        for (needle, worker) in forbidden {
+            assert!(
+                !source.contains(needle),
+                "CLI must not spawn the {worker} worker ({needle}) — Desktop is the \
+                 sole supervisor; two supervisors race kill_stale_node and crash \
+                 the Claude exec with exit 137 (ADR-068)"
+            );
+        }
+    }
+
+    /// PasteWatcher must spawn BEFORE the `login` branch, which exits the
+    /// process — otherwise image paste is dead in the login session (#image-paste).
+    #[test]
+    fn paste_watcher_spawns_before_login_branch_exit() {
+        let source = include_str!("main.rs");
+        let spawn_idx = source
+            .find(concat!("PasteWatcher::", "spawn"))
+            .expect("main.rs must spawn the PasteWatcher");
+        let login_idx = source
+            .find("if let CliAction::Login(_) = action")
+            .expect("main.rs must handle the login branch");
+        assert!(
+            spawn_idx < login_idx,
+            "PasteWatcher::spawn must run BEFORE the login branch — the login \
+             branch ends in process::exit, so a watcher spawned after it never \
+             runs during `speedwave login` and clipboard image paste fails there"
         );
     }
 
@@ -1299,9 +1476,7 @@ mod tests {
 
     #[test]
     fn parse_action_leading_flag_before_subcommand_errors() {
-        // Defect #1: `speedwave --project acme login` must NOT silently run
-        // acme and drop `login`. The leading `--project acme` is consumed as
-        // the bare-run override, then `login` is trailing garbage → error.
+        // `speedwave --project acme login` must error: `login` is trailing garbage.
         let args = argv(&["speedwave", "--project", "acme", "login"]);
         let err = parse_action(&args).unwrap_err();
         assert!(
@@ -1442,10 +1617,7 @@ mod tests {
 
     #[test]
     fn print_help_lists_login_and_logout() {
-        // Source-level check: `include_str!` embeds main.rs at compile time,
-        // then we assert at runtime that the `print_help` body mentions both
-        // subcommands. Avoids subprocess-based stdout capture while keeping
-        // user-facing help in sync with the CliAction variants.
+        // Source-level check that the `print_help` body documents both subcommands.
         let source = include_str!("main.rs");
         let help_start = source
             .find("fn print_help() {")
@@ -1472,43 +1644,355 @@ mod tests {
     }
 
     #[test]
-    fn host_exec_worker_does_not_spawn_when_integration_disabled() {
-        // Disabled host_exec → no worker, no snapshot written. (The enabled
-        // path needs a fake worker + an injectable data dir; the e2e suite
-        // exercises it end-to-end.)
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = config::ResolvedIntegrationsConfig::default(); // host_exec: false
-        assert!(!integrations.host_exec);
-        let handle = maybe_spawn_host_exec_worker("proj", tmp.path(), &integrations);
+    fn build_login_exec_cmd_unsets_and_execs_auth_login() {
+        let cmd = build_login_exec_cmd(
+            "http://proxy:4000",
+            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
+        );
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-lc");
+        let script = &cmd[2];
         assert!(
-            handle.is_none(),
-            "no worker should spawn when host_exec is disabled"
+            script.contains("unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL"),
+            "{script}"
+        );
+        assert!(
+            script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
+            "{script}"
+        );
+        // `auth login --claudeai` runs OAuth directly — no interactive prompt.
+        let exec_pos = script.find("exec ").expect("exec present");
+        let unset_pos = script.find("unset ").unwrap();
+        assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
+        assert!(
+            script.contains(&format!("{} auth login --claudeai", consts::CLAUDE_BINARY)),
+            "auth login subcommand: {script}"
         );
     }
 
     #[test]
-    fn host_exec_worker_is_spawned_before_render_compose() {
-        // Structural guard: the worker spawn must precede `render_compose` so
-        // `apply_host_exec_config` sees the port/auth-token files (ADR-054).
+    fn build_login_exec_cmd_uses_runtime_ssot_unset_list() {
+        let cmd = build_login_exec_cmd(
+            compose::PROXY_BASE_URL,
+            compose::anthropic_login_unset_keys(),
+        );
+        let script = &cmd[2];
+        for key in compose::anthropic_login_unset_keys() {
+            assert!(script.contains(key), "unset list missing `{key}`: {script}");
+        }
+        assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
+    }
+
+    /// Login must select Anthropic active BEFORE render_compose, so a
+    /// logout-emptied project escapes the no-provider guard (avoids the dead-loop
+    /// where the login terminal closes before `claude auth login` runs).
+    #[test]
+    fn login_selects_anthropic_before_render_compose() {
         let source = include_str!("main.rs");
-        let spawn_idx = source
-            .find("maybe_spawn_host_exec_worker(&project_name")
-            .expect("the CLI must call maybe_spawn_host_exec_worker in main()");
+        let select_idx = source
+            .find("select_anthropic_after_login(&project_name)")
+            .expect("main() must select Anthropic on the login path");
         let render_idx = source
             .find("compose::render_compose(")
             .expect("the CLI must call render_compose in main()");
         assert!(
-            spawn_idx < render_idx,
-            "the host_exec worker must be spawned before render_compose"
+            select_idx < render_idx,
+            "select_anthropic_after_login must run before render_compose"
+        );
+        // It must be gated on the Login action (not run for plain `speedwave`).
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("the Anthropic-select must be gated on the Login action");
+        assert!(
+            gate_idx < select_idx && select_idx < render_idx,
+            "select must sit inside the Login gate, before render_compose"
+        );
+    }
+
+    /// A select failure on the login path must be fatal — warn-and-continue would
+    /// fall into the no-provider guard and print a misleading "Run `speedwave login`".
+    #[test]
+    fn login_select_failure_is_fatal_not_a_warning() {
+        let source = include_str!("main.rs");
+        let gate_idx = source
+            .find("if matches!(action, CliAction::Login(_)) {")
+            .expect("login gate must exist");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("render_compose must exist");
+        let block = &source[gate_idx..render_idx];
+        assert!(
+            block.contains("Login failed: could not select Anthropic")
+                && block.contains("std::process::exit(1)"),
+            "login select failure must exit non-zero, not warn-and-continue"
+        );
+    }
+
+    fn user_config_with_project(
+        project: &str,
+        claude: Option<config::ClaudeOverrides>,
+    ) -> config::SpeedwaveUserConfig {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        user_config.projects.push(config::ProjectUserEntry {
+            name: project.to_string(),
+            dir: "/tmp/proj".to_string(),
+            claude,
+            integrations: None,
+            plugin_settings: None,
+        });
+        user_config
+    }
+
+    /// Happy path: a never-configured project (no `claude` override at all)
+    /// gets an `llm` override created and Anthropic selected.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_for_fresh_project() {
+        let mut user_config = user_config_with_project("proj", None);
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        let llm = user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert!(!llm.is_unconfigured());
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            config::ANTHROPIC_PROVIDER_ID,
+            "fresh project must select anthropic, not just stop being fresh"
+        );
+    }
+
+    /// Edge case: `claude` exists but `llm` is `None` (partial override) —
+    /// same fresh-llm creation path applies.
+    #[test]
+    fn select_anthropic_in_creates_llm_override_when_claude_present_but_llm_absent() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: None,
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Explicit logout (v2 shape, providers present, active cleared) must be
+    /// reactivated — the original no-op-when-absent behavior is preserved
+    /// when there IS an llm config, just no longer the only path.
+    #[test]
+    fn select_anthropic_in_reactivates_explicit_logout() {
+        let llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.is_unconfigured(),
+            "precondition: logged-out is unconfigured"
+        );
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::None
+        ));
+        assert!(!user_config
+            .find_project_mut("proj")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .is_unconfigured());
+    }
+
+    /// Selecting Anthropic on a RAW v1 local config must lift it first —
+    /// stamping schema_version pre-lift would erase the local provider forever.
+    #[test]
+    fn select_anthropic_in_preserves_raw_v1_local_config() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some("lmstudio".into()),
+                    base_url: Some("http://localhost:1234".into()),
+                    model: Some("qwen".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        assert!(select_anthropic_in(
+            &mut user_config,
+            "proj",
+            config::AnthropicEvidence::Oauth
+        ));
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        let local = llm
+            .providers
+            .iter()
+            .find(|p| p.id == "local")
+            .expect("local entry must survive the lift");
+        assert_eq!(local.base_url.as_deref(), Some("http://localhost:1234"));
+        assert_eq!(local.model.as_deref(), Some("qwen"));
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            config::ANTHROPIC_PROVIDER_ID
+        );
+    }
+
+    /// A raw v1 anthropic config keeps its pinned model through
+    /// login (the lift runs before the entry is fabricated model-less).
+    #[test]
+    fn select_anthropic_in_preserves_v1_pinned_anthropic_model() {
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(config::LlmConfig {
+                    provider: Some(config::ANTHROPIC_PROVIDER_ID.to_string()),
+                    model: Some("claude-opus-4-6".into()),
+                    ..Default::default()
+                }),
+            }),
+        );
+        select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::Oauth);
+        let binding = user_config.find_project_mut("proj").unwrap();
+        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    /// After a self-update, the rebuild must be gated on the installed
+    /// Desktop resources version — an older tree cannot digest the new catalogue.
+    #[test]
+    fn run_self_update_checks_resources_version_before_rebuild() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let probe = fn_body
+            .find("manifest_app_version_in")
+            .expect("run_self_update must probe the installed resources version");
+        let rebuild = fn_body
+            .find("run_rebuild(")
+            .expect("run_self_update must call run_rebuild()");
+        assert!(probe < rebuild, "version gate must precede the rebuild");
+    }
+
+    /// The CLI must persist the LLM migration on startup (Desktop
+    /// heals at its own startup; CLI-first upgrades need parity).
+    #[test]
+    fn main_heals_llm_config_before_project_actions() {
+        let source = include_str!("main.rs");
+        let heal = source
+            .find("heal_llm_config_on_disk")
+            .expect("CLI must persist the LLM schema migration");
+        let audit = source
+            .find("plugin::audit_all")
+            .expect("plugin audit anchor");
+        assert!(heal < audit, "heal must run before project actions");
+    }
+
+    /// Error path: a project absent from `user_config` entirely is a no-op —
+    /// there is nothing to attach an `llm` override to.
+    #[test]
+    fn select_anthropic_in_noop_when_project_not_found() {
+        let mut user_config = config::SpeedwaveUserConfig::default();
+        assert!(!select_anthropic_in(
+            &mut user_config,
+            "ghost-project",
+            config::AnthropicEvidence::None
+        ));
+        assert!(user_config.find_project_mut("ghost-project").is_none());
+    }
+
+    /// State transition: already-active Anthropic is idempotent (no spurious
+    /// `true` that would trigger an unnecessary config write).
+    #[test]
+    fn select_anthropic_in_idempotent_when_already_anthropic() {
+        let mut llm = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: None,
+            ..Default::default()
+        };
+        assert!(
+            llm.set_active_to_anthropic(),
+            "first activation changes state"
+        );
+        // Normalize (flat-mirror sync) so only the selection itself is measured.
+        config::migrate_llm(&mut llm, config::AnthropicEvidence::None);
+        let mut user_config = user_config_with_project(
+            "proj",
+            Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+        );
+        assert!(
+            !select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::None),
+            "already-active anthropic must not report a change"
         );
     }
 
     #[test]
-    fn oauth_state_migration_runs_after_cleanup_and_before_worker_spawn() {
-        // Structural guard (ADR-060 addendum): the providerData self-heal must run
-        // after legacy_token_cleanup (both are best-effort startup sanitation) and
-        // before any worker that reads oauth.json is spawned, so the oauth worker
-        // never refreshes against a pre-migration (malformed) file.
+    fn oauth_state_migration_runs_after_cleanup_and_before_render() {
+        // Structural guard (ADR-060 addendum): self-heal must run after
+        // legacy_token_cleanup and before render_compose.
         let source = include_str!("main.rs");
         let cleanup_idx = source
             .find("run_legacy_token_cleanup_at_startup()")
@@ -1516,16 +2000,16 @@ mod tests {
         let migration_idx = source
             .find("run_oauth_state_migration_at_startup()")
             .expect("the CLI must call run_oauth_state_migration_at_startup in main()");
-        let spawn_idx = source
-            .find("maybe_spawn_host_exec_worker(&project_name")
-            .expect("the CLI must spawn workers in main()");
+        let render_idx = source
+            .find("compose::render_compose(")
+            .expect("the CLI must call render_compose in main()");
         assert!(
             cleanup_idx < migration_idx,
             "oauth_state_migration must run after legacy_token_cleanup"
         );
         assert!(
-            migration_idx < spawn_idx,
-            "oauth_state_migration must run before any worker is spawned"
+            migration_idx < render_idx,
+            "oauth_state_migration must run before render_compose"
         );
     }
 
@@ -1561,7 +2045,6 @@ mod tests {
             projects,
             active_project: active.map(str::to_string),
             selected_ide: None,
-            transcription: None,
             ui: None,
         }
     }
@@ -1902,9 +2385,8 @@ mod tests {
 
     #[test]
     fn test_check_includes_os_prereqs() {
-        // Structural test: verify that `speedwave check` calls
-        // os_prereqs::check_os_prereqs() BEFORE SecurityCheck::run,
-        // and that prereq violations are printed in the expected format.
+        // Structural test: `speedwave check` runs prereqs before SecurityCheck
+        // and prints violations in the expected format.
         let source = include_str!("main.rs");
 
         // Locate the check subcommand handler
@@ -1942,10 +2424,8 @@ mod tests {
 
     #[test]
     fn test_check_does_not_autofix_permissions() {
-        // Structural test: `speedwave check` must NOT call ensure_data_dir_permissions.
-        // Check is diagnostic-only — it reports violations without fixing them.
-        // Behavioral coverage: see
-        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        // `speedwave check` is diagnostic-only: must NOT call ensure_data_dir_permissions.
+        // Behavioral coverage: fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
         let source = include_str!("main.rs");
         let check_start = source
             .find("if action == CliAction::Check")
@@ -1995,15 +2475,11 @@ mod tests {
     }
 
     // ── plugin audit skip-list ────────────────────────────────────────────
-    // Pin which actions run with a tampered plugin on disk: a regression
-    // either way (extra runtime action skipped, or recovery action gated)
-    // is silent without these.
+    // Pin which actions run with a tampered plugin on disk.
 
     #[test]
     fn skip_plugin_audit_skips_recovery_actions() {
-        // These actions MUST run even when another plugin fails audit,
-        // otherwise a user with a bad plugin has no way to fix it from
-        // the CLI.
+        // Recovery actions must run even when another plugin fails audit.
         assert!(skip_plugin_audit(&CliAction::Init(None)));
         assert!(skip_plugin_audit(&CliAction::Init(Some("foo".into()))));
         assert!(skip_plugin_audit(&CliAction::PluginInstall(
@@ -2015,10 +2491,7 @@ mod tests {
 
     #[test]
     fn skip_plugin_audit_does_not_skip_runtime_actions() {
-        // These actions touch the runtime / config in ways that depend
-        // on every installed plugin being trusted. The audit must
-        // gate them — a regression that flips any of these to `true`
-        // silently disables the runtime-invariant promise.
+        // Runtime/config actions must be gated by the audit.
         assert!(!skip_plugin_audit(&CliAction::Run(None)));
         assert!(!skip_plugin_audit(&CliAction::Check));
         assert!(!skip_plugin_audit(&CliAction::Update(None)));
@@ -2035,9 +2508,7 @@ mod tests {
     // ── self-update rebuild structural tests ─────────────────────────────
 
     /// Extract the body of a top-level function from source, stopping at the
-    /// next top-level `fn ` definition. This prevents structural tests from
-    /// accidentally matching strings in test code that appears later in the
-    /// file.
+    /// next top-level `fn ` definition.
     fn extract_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
         let fn_start = source
             .find(signature)
@@ -2052,13 +2523,40 @@ mod tests {
     }
 
     #[test]
+    fn host_bridges_are_reconstructed_and_passed_to_render_compose() {
+        // Structural guard (ADR-074): the CLI must feed disk-reconstructed
+        // host bridges into render_compose, not an empty list.
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn main(");
+        let build_pos = fn_body.find("compose::host_bridges_from_disk()");
+        let render_pos = fn_body
+            .find("compose::render_compose(")
+            .expect("main() must call render_compose");
+        assert!(
+            build_pos.is_some_and(|b| b < render_pos),
+            "main() must build host_bridges_from_disk() before render_compose"
+        );
+        // Split needle so this assertion does not match its own source text.
+        let empty_default = format!("HostBridgesInfo::{}()", "default");
+        assert!(
+            !fn_body[..render_pos].contains(&empty_default),
+            "main() must not pass an empty HostBridgesInfo to render_compose"
+        );
+        // Assert the call site receives &host_bridges (not an inline default).
+        let call = &fn_body[render_pos..];
+        let call_end = call
+            .find(';')
+            .expect("render_compose statement must end with ;");
+        assert!(
+            call[..call_end].contains("&host_bridges"),
+            "render_compose must receive &host_bridges, not an inline default"
+        );
+    }
+
+    #[test]
     fn test_self_update_captures_exe_before_update() {
-        // Structural test: verify that run_self_update() captures current_exe()
-        // BEFORE calling .update(), and calls run_rebuild inside the
-        // status.updated() branch. On Linux, current_exe() after self-replace
-        // returns a dead /proc/self/exe path, so capture must come first.
-        // This test intentionally checks source structure — update it if
-        // the function or its callees are renamed.
+        // Structural test: run_self_update() captures current_exe() BEFORE
+        // .update() and calls run_rebuild inside the status.updated() branch.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2085,11 +2583,8 @@ mod tests {
 
     #[test]
     fn test_self_update_does_not_propagate_rebuild_error() {
-        // The rebuild error must NOT propagate via `?` because the caller
-        // prints "Self-update failed: ..." which is misleading after a
-        // successful binary replacement. Verify `if let Err` pattern is used.
-        // This test intentionally checks source structure — update it if
-        // the error handling pattern changes.
+        // The rebuild error must NOT propagate via `?` (the caller's
+        // "Self-update failed" message would be misleading); verify `if let Err`.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2101,9 +2596,8 @@ mod tests {
 
     #[test]
     fn test_run_rebuild_clears_resources_env() {
-        // The subprocess must NOT inherit SPEEDWAVE_RESOURCES_DIR from the
-        // parent, so it reads the fresh marker file instead of a stale value.
-        // This test intentionally checks source structure.
+        // The subprocess must NOT inherit SPEEDWAVE_RESOURCES_DIR so it reads
+        // the fresh marker file instead of a stale value.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_rebuild(");
 
@@ -2115,9 +2609,8 @@ mod tests {
 
     #[test]
     fn test_self_update_rebuild_only_when_updated() {
-        // run_rebuild must be called inside the `status.updated()` branch,
-        // not unconditionally. Verify it appears between the updated check
-        // and the "Already up to date" branch.
+        // run_rebuild must appear between the `status.updated()` check and the
+        // "Already up to date" branch, not unconditionally.
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
@@ -2174,8 +2667,34 @@ mod tests {
         assert!(msg.contains("Failed to run"), "unexpected error: {msg}");
     }
 
-    // No Windows equivalent of run_rebuild_failing_command: /usr/bin/false
-    // ignores args, but Windows has no built-in that exits non-zero when
-    // given an arbitrary argument. The nonexistent-binary test covers the
-    // Windows error path.
+    // No Windows equivalent of run_rebuild_failing_command; the
+    // nonexistent-binary test covers the Windows error path.
+
+    #[test]
+    fn emit_output_line_redacts_secrets() {
+        // A Bearer token leaked into an error string must never reach the
+        // terminal — every out!/err! line goes through this sanitizer.
+        let redacted = sanitize_output_line("Failed: Bearer sk-secret-value-123");
+        assert!(
+            !redacted.contains("sk-secret-value-123"),
+            "leaked: {redacted}"
+        );
+        assert!(redacted.contains("REDACTED"), "not redacted: {redacted}");
+    }
+
+    #[test]
+    fn emit_output_line_passes_normal_text_through() {
+        let out = sanitize_output_line("Project 'demo' registered at /workspace");
+        assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
+
+    #[test]
+    fn redact_err_strips_secrets_from_error_chains() {
+        // An error carrying a token must be redacted before it is interpolated
+        // into an `err!`/`out!` line (config/compose/OAuth error chains).
+        let err = anyhow::anyhow!("compose render failed: Authorization: Bearer sk-leak-xyz");
+        let red = redact_err(&err);
+        assert!(!red.contains("sk-leak-xyz"), "leaked: {red}");
+        assert!(red.contains("REDACTED"), "not redacted: {red}");
+    }
 }

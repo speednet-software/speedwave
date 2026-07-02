@@ -3,12 +3,18 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { AuthTerminalComponent } from './auth-terminal.component';
 import { TauriService } from '../services/tauri.service';
+import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('AuthTerminalComponent', () => {
   let component: AuthTerminalComponent;
   let fixture: ComponentFixture<AuthTerminalComponent>;
   let mockTauri: MockTauriService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   const SAMPLE_COMMAND = "cd '/Users/test/Projects' && speedwave login --project 'test-project'";
   const SAMPLE_COMMAND_WITH_PREFIX =
@@ -17,6 +23,7 @@ describe('AuthTerminalComponent', () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     mockTauri = new MockTauriService();
+    mockLogger = makeMockLogger();
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
@@ -27,7 +34,10 @@ describe('AuthTerminalComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [AuthTerminalComponent],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(AuthTerminalComponent);
@@ -217,8 +227,7 @@ describe('AuthTerminalComponent', () => {
     expect(note).not.toContain('On Windows');
   });
 
-  it('does not set error or crash when get_platform rejects', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('does not set error or crash when get_platform rejects (logs via LoggerService)', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
       if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
@@ -230,8 +239,9 @@ describe('AuthTerminalComponent', () => {
     await Promise.resolve();
     expect(component.error).toBe('');
     expect(component.isWindows).toBe(false);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('auth-terminal: get_platform failed: platform probe failed')
+    );
   });
 
   it('shows Windows note on Windows platform', async () => {

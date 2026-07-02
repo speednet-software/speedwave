@@ -7,11 +7,21 @@ final class RemindersTests: XCTestCase {
 
     // MARK: - CLI Argument Parsing
 
-    func testUnknownCommandExits() {
-        // Verify error message format for unknown commands
-        let availableCommands = "list_lists, list_reminders, get_reminder, create_reminder, complete_reminder"
-        XCTAssertTrue(availableCommands.contains("list_lists"))
-        XCTAssertTrue(availableCommands.contains("complete_reminder"))
+    func testCommandListAdvertisesAllCommands() {
+        // commandList drives both the usage and unknown-command messages in runCLI.
+        for cmd in ["check_permission", "list_lists", "list_reminders",
+                    "get_reminder", "create_reminder", "complete_reminder"] {
+            XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
+                          "commandList must advertise '\(cmd)'")
+        }
+    }
+
+    func testTagRegexCompilesAndMatches() {
+        // The static tagRegex is lazily compiled from a compile-time-constant
+        // pattern; this asserts the initializer succeeded (no fatalError) and
+        // that extractTags — its only consumer path — works end to end.
+        XCTAssertEqual(extractTags(from: "[#a] [#b] text"), ["a", "b"])
+        XCTAssertEqual(stripTags(from: "[#a] text"), "text")
     }
 
     func testInvalidJSONIsDetected() {

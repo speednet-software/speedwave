@@ -33,7 +33,7 @@ In a **single message**, launch exactly 13 Task agents using these parameters fo
 
 - `subagent_type: "general-purpose"`
 - `run_in_background: true`
-- `model: "sonnet"` (fast, sufficient for individual reviews)
+- `model: "opus"` (each review skill declares `model: opus` and uses ULTRATHINK; do not downgrade)
 - `name: "review-SKILL_NAME"` (for identification)
 
 Use this prompt template for each (replace `SKILL_NAME` and `DIFF_CMD`):
@@ -68,7 +68,7 @@ All 13 agents run in background. You will be notified as each completes. Wait un
 
 ### Step 4 — Launch Aggregator Agent
 
-Once all 13 are done, launch 1 final Task agent (`subagent_type: "general-purpose"`, `run_in_background: false`, `model: "sonnet"`) with this prompt:
+Once all 13 are done, launch 1 final Task agent (`subagent_type: "general-purpose"`, `run_in_background: false`, `model: "opus"`) with this prompt:
 
 ````
 You are a code review aggregator. Below are 13 review reports from specialized skills. Produce a single summary.

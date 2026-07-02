@@ -42,9 +42,12 @@ export class MockTauriService {
     return '1.0.0';
   }
 
-  /** Mock isRunningInTauri — defaults to false for tests. */
+  /** Toggle the value returned by `isRunningInTauri()` per test. Defaults to false. */
+  runningInTauri = false;
+
+  /** Mock isRunningInTauri — defaults to false; override via `runningInTauri`. */
   isRunningInTauri(): boolean {
-    return false;
+    return this.runningInTauri;
   }
 }
 

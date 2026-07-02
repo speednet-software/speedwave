@@ -3,6 +3,7 @@
 # Catches regressions where Angular output path and Tauri frontendDist diverge.
 
 TAURI_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"
+ANGULAR_JSON="$BATS_TEST_DIRNAME/../../desktop/src/angular.json"
 
 # ---------------------------------------------------------------------------
 # Static checks (no build required)
@@ -31,6 +32,26 @@ if not fd.endswith('/browser'):
     print(f'Expected /browser suffix, got: {fd}', file=sys.stderr)
     sys.exit(1)
 print(fd)
+"
+    [ "$status" -eq 0 ]
+}
+
+@test "angular.json disables CLI analytics prompt (cli.analytics must be boolean false)" {
+    # Without this setting Angular CLI shows an interactive telemetry prompt on first run
+    # (ng serve / ng test / ng build) that hangs non-interactive shells indefinitely.
+    # The value must be the boolean false — a string "false" would be treated as a user-id
+    # and would enable analytics instead of disabling it (Angular CLI uses === false check).
+    run python3 -c "
+import json, sys
+cfg = json.load(open('$ANGULAR_JSON'))
+v = cfg.get('cli', {}).get('analytics', None)
+if not isinstance(v, bool):
+    print(f'cli.analytics must be a boolean, got: {v!r}', file=sys.stderr)
+    sys.exit(1)
+if v is not False:
+    print('cli.analytics must be false to suppress the interactive analytics prompt', file=sys.stderr)
+    sys.exit(1)
+print('ok')
 "
     [ "$status" -eq 0 ]
 }

@@ -1,10 +1,6 @@
 //! Liveness probes shared by every host MCP worker manager.
-//!
-//! `is_pid_alive` is the cross-platform check used by both
-//! per-process `is_alive()` accessors and the singleton mcp-os
-//! health endpoint. `probe_tcp` provides a TCP connect with optional
-//! retry+backoff — oauth needs the retry (compose cascades on a
-//! flaky probe); host_exec uses a single attempt.
+//! `is_pid_alive` is a cross-platform PID check; `probe_tcp` is a
+//! TCP connect with optional retry+backoff.
 
 use std::net::{IpAddr, SocketAddr, TcpStream};
 #[cfg(unix)]
@@ -22,12 +18,10 @@ pub fn is_pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// `true` if a process with `pid` is currently running (Windows).
 #[cfg(windows)]
 pub fn is_pid_alive(pid: u32) -> bool {
-    // `tasklist /FI "PID eq N" /NH` prints "INFO: No tasks are running..."
-    // when the PID does not exist. Substring-matching the PID in the output
-    // is unsafe (memory/session columns may contain the same digits), so we
-    // check for absence of the "INFO:" marker instead.
+    // `tasklist /NH` prints an "INFO:" marker when no PID matches.
     crate::binary::system_command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
@@ -96,10 +90,7 @@ mod tests {
 
     #[test]
     fn is_pid_alive_false_for_definitely_dead_pid() {
-        // PID 999999 should not exist on a normal system; if it does, the
-        // test is harmless because is_pid_alive will return true and we'd
-        // skip the assertion. To keep this deterministic we just verify the
-        // function does not panic.
+        // Just verify the function does not panic for an unlikely PID.
         let _ = is_pid_alive(999_999);
     }
 

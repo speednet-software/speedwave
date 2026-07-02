@@ -16,9 +16,6 @@ describe('NATIVE_LONG_EDGE', () => {
 
 describe('limit constants', () => {
   it('per-image binary cap is 3 MiB (tidy + fast file read; ADR-065)', () => {
-    // Images go to disk under `<project>/.speedwave/pastes/` and Claude
-    // lazy-reads them through `@/workspace/...`. The cap is about keeping
-    // the project tidy and the file read fast — not about API limits.
     expect(MAX_IMAGE_BYTES).toBe(3 * 1024 * 1024);
   });
 });

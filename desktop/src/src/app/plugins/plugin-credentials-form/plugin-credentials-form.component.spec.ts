@@ -10,18 +10,18 @@ import {
 function makeAuthFields(): PluginAuthField[] {
   return [
     {
-      key: 'figma_pat',
-      label: 'Figma Personal Access Token',
+      key: 'example_pat',
+      label: 'Example Plugin Personal Access Token',
       field_type: 'password',
-      placeholder: 'figd_...',
+      placeholder: 'ex_...',
       is_secret: true,
       required: true,
     },
     {
-      key: 'figma_mcp_oauth',
-      label: 'Figma Remote MCP OAuth Token',
+      key: 'example_oauth',
+      label: 'Example Plugin Remote MCP OAuth Token',
       field_type: 'password',
-      placeholder: 'fmcp_...',
+      placeholder: 'exmcp_...',
       is_secret: true,
       required: false,
     },
@@ -64,7 +64,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
@@ -125,10 +125,10 @@ describe('PluginCredentialsFormComponent', () => {
   it('renders field.description under the label when present', () => {
     const fields: PluginAuthField[] = [
       {
-        key: 'figma_pat',
-        label: 'Figma PAT',
+        key: 'example_pat',
+        label: 'Example Plugin PAT',
         field_type: 'password',
-        placeholder: 'figd_...',
+        placeholder: 'ex_...',
         is_secret: true,
         required: false,
         description: 'Optional. Unlocks REST tools.',
@@ -152,11 +152,11 @@ describe('PluginCredentialsFormComponent', () => {
 
   it('shows the "✓ set" badge only for fields in configuredFields', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
-    fixture.componentRef.setInput('configuredFields', ['figma_pat']); // only PAT stored
+    fixture.componentRef.setInput('configuredFields', ['example_pat']); // only PAT stored
     fixture.detectChanges();
 
     const badges = fixture.nativeElement.querySelectorAll('[data-testid="cred-configured-badge"]');
-    expect(badges.length).toBe(1); // only figma_pat, not figma_mcp_oauth
+    expect(badges.length).toBe(1); // only example_pat, not example_oauth
   });
 
   it('shows no configured badges when configuredFields is empty (default)', () => {
@@ -168,10 +168,9 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('per-field clear is confirm-gated (first click stages, Yes emits)', () => {
-    // H9 — per-field clear is destructive, so it requires a confirm. First
-    // click shows inline Yes/Cancel; only Yes emits the clearField event.
+    // First click stages confirm; only Yes emits clearField.
     fixture.componentRef.setInput('authFields', makeAuthFields());
-    fixture.componentRef.setInput('configuredFields', ['figma_pat']);
+    fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
 
     const clearFieldSpy = vi.fn<(key: string) => void>();
@@ -180,37 +179,37 @@ describe('PluginCredentialsFormComponent', () => {
     // First click stages the confirm — no emit yet.
     (
       fixture.nativeElement.querySelector(
-        '[data-testid="cred-clear-figma_pat"]'
+        '[data-testid="cred-clear-example_pat"]'
       ) as HTMLButtonElement
     ).click();
     fixture.detectChanges();
     expect(clearFieldSpy).not.toHaveBeenCalled();
     const confirmBtn = fixture.nativeElement.querySelector(
-      '[data-testid="cred-clear-confirm-figma_pat"]'
+      '[data-testid="cred-clear-confirm-example_pat"]'
     ) as HTMLButtonElement;
     expect(confirmBtn).not.toBeNull();
 
     // Confirm — now emit.
     confirmBtn.click();
-    expect(clearFieldSpy).toHaveBeenCalledWith('figma_pat');
+    expect(clearFieldSpy).toHaveBeenCalledWith('example_pat');
   });
 
   it('per-field clear Cancel dismisses the confirm without emitting', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
-    fixture.componentRef.setInput('configuredFields', ['figma_pat']);
+    fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
     const clearFieldSpy = vi.fn<(key: string) => void>();
     component.clearField.subscribe(clearFieldSpy);
 
     (
       fixture.nativeElement.querySelector(
-        '[data-testid="cred-clear-figma_pat"]'
+        '[data-testid="cred-clear-example_pat"]'
       ) as HTMLButtonElement
     ).click();
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
-        '[data-testid="cred-clear-cancel-figma_pat"]'
+        '[data-testid="cred-clear-cancel-example_pat"]'
       ) as HTMLButtonElement
     ).click();
     fixture.detectChanges();
@@ -218,32 +217,32 @@ describe('PluginCredentialsFormComponent', () => {
     expect(clearFieldSpy).not.toHaveBeenCalled();
     // After cancel the confirm is gone — original "clear" link is back.
     expect(
-      fixture.nativeElement.querySelector('[data-testid="cred-clear-figma_pat"]')
+      fixture.nativeElement.querySelector('[data-testid="cred-clear-example_pat"]')
     ).not.toBeNull();
   });
 
   it('shows a "stored — type to replace" placeholder for configured fields', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
-    fixture.componentRef.setInput('configuredFields', ['figma_pat']);
+    fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
 
     const patInput = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     const oauthInput = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_mcp_oauth"]'
+      '[data-testid="cred-input-example_oauth"]'
     ) as HTMLInputElement;
     expect(patInput.placeholder).toContain('stored');
-    expect(oauthInput.placeholder).toBe('fmcp_...'); // not configured → original placeholder
+    expect(oauthInput.placeholder).toBe('exmcp_...'); // not configured → original placeholder
   });
 
   it('renders required marker for required fields and not for optional', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const labels = fixture.nativeElement.querySelectorAll('[data-testid="cred-label"]');
-    // figma_pat (required: true) → label has the "*" marker
+    // example_pat (required: true) → label has the "*" marker
     expect(labels[0].querySelector('[aria-label="required"]')).not.toBeNull();
-    // figma_mcp_oauth (required: false) → no marker
+    // example_oauth (required: false) → no marker
     expect(labels[1].querySelector('[aria-label="required"]')).toBeNull();
   });
 
@@ -254,7 +253,7 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_TEST');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_TEST');
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -263,7 +262,40 @@ describe('PluginCredentialsFormComponent', () => {
     form.dispatchEvent(new Event('submit'));
 
     expect(saveSpy).toHaveBeenCalledOnce();
-    expect(saveSpy).toHaveBeenCalledWith({ credentials: { figma_pat: 'figd_TEST' } });
+    expect(saveSpy).toHaveBeenCalledWith({ credentials: { example_pat: 'ex_TEST' } });
+  });
+
+  it('renders a typed input for oauth_flow client fields and emits their value on save', () => {
+    // An oauth_flow:true client field must be typeable and submitted.
+    fixture.componentRef.setInput('authFields', [
+      {
+        key: 'client_id',
+        label: 'Client ID',
+        field_type: 'text',
+        placeholder: 'cid',
+        is_secret: false,
+        required: true,
+        oauth_flow: true,
+      },
+    ]);
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-client_id"]'
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+
+    const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
+    component.save.subscribe(saveSpy);
+    setInputValue(fixture, '[data-testid="cred-input-client_id"]', 'cid-123');
+    fixture.detectChanges();
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="plugin-credentials-form"]'
+      ) as HTMLFormElement
+    ).dispatchEvent(new Event('submit'));
+
+    expect(saveSpy).toHaveBeenCalledWith({ credentials: { client_id: 'cid-123' } });
   });
 
   it('emits clear event when Reset all is clicked', () => {
@@ -303,7 +335,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_T');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_T');
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector(
@@ -319,8 +351,8 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', '  figd_TRIMMED  ');
-    setInputValue(fixture, '[data-testid="cred-input-figma_mcp_oauth"]', '    '); // whitespace-only
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', '  ex_TRIMMED  ');
+    setInputValue(fixture, '[data-testid="cred-input-example_oauth"]', '    '); // whitespace-only
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -329,7 +361,7 @@ describe('PluginCredentialsFormComponent', () => {
     form.dispatchEvent(new Event('submit'));
 
     expect(saveSpy).toHaveBeenCalledWith({
-      credentials: { figma_pat: 'figd_TRIMMED' },
+      credentials: { example_pat: 'ex_TRIMMED' },
     });
   });
 
@@ -340,7 +372,7 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', '   ');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', '   ');
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -355,7 +387,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     expect(input.getAttribute('maxlength')).toBe(String(MAX_PLUGIN_CREDENTIAL_BYTES));
   });
@@ -365,41 +397,43 @@ describe('PluginCredentialsFormComponent', () => {
   it('wires aria-describedby to description + error ids when present', () => {
     const fields: PluginAuthField[] = [
       {
-        key: 'figma_pat',
+        key: 'example_pat',
         label: 'PAT',
         field_type: 'password',
         placeholder: '',
         is_secret: true,
         required: true,
-        description: 'Generate at figma.com.',
-        validation: { pattern: '^figd_.+$', message: 'starts with figd_' },
+        description: 'Generate at the provider console.',
+        validation: { pattern: '^ex_.+$', message: 'starts with ex_' },
       },
     ];
     fixture.componentRef.setInput('authFields', fields);
     fixture.detectChanges();
 
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     // Description present → described-by includes it; no error yet → only desc.
-    expect(input.getAttribute('aria-describedby')).toBe('cred-desc-figma_pat');
+    expect(input.getAttribute('aria-describedby')).toBe('cred-desc-example_pat');
     expect(input.getAttribute('aria-invalid')).toBeNull();
     expect(
-      fixture.nativeElement.querySelector('#cred-desc-figma_pat'),
+      fixture.nativeElement.querySelector('#cred-desc-example_pat'),
       'description <p> must have the bound id'
     ).not.toBeNull();
 
     // Submit invalid value → error appears, both ids in described-by + aria-invalid=true.
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'ghp_wrong');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ghp_wrong');
     (
       fixture.nativeElement.querySelector(
         '[data-testid="plugin-credentials-form"]'
       ) as HTMLFormElement
     ).dispatchEvent(new Event('submit'));
     fixture.detectChanges();
-    expect(input.getAttribute('aria-describedby')).toBe('cred-desc-figma_pat cred-err-figma_pat');
+    expect(input.getAttribute('aria-describedby')).toBe(
+      'cred-desc-example_pat cred-err-example_pat'
+    );
     expect(input.getAttribute('aria-invalid')).toBe('true');
-    const errEl = fixture.nativeElement.querySelector('#cred-err-figma_pat');
+    const errEl = fixture.nativeElement.querySelector('#cred-err-example_pat');
     expect(errEl).not.toBeNull();
     expect(errEl?.getAttribute('role')).toBe('alert');
   });
@@ -408,7 +442,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields()); // no description
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     expect(input.getAttribute('aria-describedby')).toBeNull();
   });
@@ -439,20 +473,20 @@ describe('PluginCredentialsFormComponent', () => {
   it('re-validates on blur (not just on submit)', () => {
     const fields: PluginAuthField[] = [
       {
-        key: 'figma_pat',
+        key: 'example_pat',
         label: 'Token',
         field_type: 'password',
         placeholder: '',
         is_secret: true,
         required: false,
-        validation: { pattern: '^figd_.+$', message: 'must start with figd_' },
+        validation: { pattern: '^ex_.+$', message: 'must start with ex_' },
       },
     ];
     fixture.componentRef.setInput('authFields', fields);
     fixture.detectChanges();
 
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     input.value = 'ghp_bad';
     input.dispatchEvent(new Event('input'));
@@ -460,7 +494,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.detectChanges();
 
     expect(
-      fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]')
+      fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]')
     ).not.toBeNull();
   });
 
@@ -471,7 +505,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('inFlight', true);
     fixture.detectChanges();
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_x');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_x');
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="save-credentials-btn"]'
@@ -484,14 +518,13 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
 
-    // Synthetic event with a non-input target (e.g. a div). Must not
-    // write undefined into the buffer or hasAnyValue() would throw on trim.
+    // Synthetic event with a non-input target (e.g. a div).
     const fakeEvent = { target: document.createElement('div') } as unknown as Event;
-    component.onFieldInput('figma_pat', fakeEvent);
+    component.onFieldInput('example_pat', fakeEvent);
 
     expect(() => component.hasAnyValue()).not.toThrow();
     expect(component.hasAnyValue()).toBe(false);
-    expect(component.getValue('figma_pat')).toBe('');
+    expect(component.getValue('example_pat')).toBe('');
   });
 
   // ── State transitions ──────────────────────────────────────────────────
@@ -500,7 +533,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_TEMP');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_TEMP');
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -510,7 +543,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.detectChanges();
 
     // After save, getValue returns empty — buffer was wiped.
-    expect(component.getValue('figma_pat')).toBe('');
+    expect(component.getValue('example_pat')).toBe('');
     expect(component.hasAnyValue()).toBe(false);
   });
 
@@ -521,8 +554,8 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_AAA');
-    setInputValue(fixture, '[data-testid="cred-input-figma_mcp_oauth"]', 'fmcp_BBB');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_AAA');
+    setInputValue(fixture, '[data-testid="cred-input-example_oauth"]', 'exmcp_BBB');
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -531,7 +564,7 @@ describe('PluginCredentialsFormComponent', () => {
     form.dispatchEvent(new Event('submit'));
 
     expect(saveSpy).toHaveBeenCalledWith({
-      credentials: { figma_pat: 'figd_AAA', figma_mcp_oauth: 'fmcp_BBB' },
+      credentials: { example_pat: 'ex_AAA', example_oauth: 'exmcp_BBB' },
     });
   });
 
@@ -540,44 +573,44 @@ describe('PluginCredentialsFormComponent', () => {
   function validatedField(message?: string): PluginAuthField[] {
     return [
       {
-        key: 'figma_pat',
-        label: 'Figma Personal Access Token',
+        key: 'example_pat',
+        label: 'Example Plugin Personal Access Token',
         field_type: 'password',
-        placeholder: 'figd_...',
+        placeholder: 'ex_...',
         is_secret: true,
         required: false,
-        validation: { pattern: '^figd_[A-Za-z0-9_-]+$', message },
+        validation: { pattern: '^ex_[A-Za-z0-9_-]+$', message },
       },
     ];
   }
 
   it('binds the validation pattern + message to the input attributes', () => {
-    fixture.componentRef.setInput('authFields', validatedField('Must start with figd_'));
+    fixture.componentRef.setInput('authFields', validatedField('Must start with ex_'));
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
-    expect(input.getAttribute('pattern')).toBe('^figd_[A-Za-z0-9_-]+$');
-    expect(input.getAttribute('title')).toBe('Must start with figd_');
+    expect(input.getAttribute('pattern')).toBe('^ex_[A-Za-z0-9_-]+$');
+    expect(input.getAttribute('title')).toBe('Must start with ex_');
   });
 
   it('omits the pattern attribute when the field has no validation', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
-      '[data-testid="cred-input-figma_pat"]'
+      '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     expect(input.getAttribute('pattern')).toBeNull();
   });
 
   it('blocks save and shows the author message when the value fails the pattern', () => {
-    fixture.componentRef.setInput('authFields', validatedField('Must start with figd_'));
+    fixture.componentRef.setInput('authFields', validatedField('Must start with ex_'));
     fixture.detectChanges();
 
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'ghp_wrongprefix');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ghp_wrongprefix');
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
@@ -587,15 +620,15 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.detectChanges();
 
     expect(saveSpy).not.toHaveBeenCalled();
-    const err = fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]');
-    expect(err?.textContent?.trim()).toBe('Must start with figd_');
+    const err = fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]');
+    expect(err?.textContent?.trim()).toBe('Must start with ex_');
   });
 
   it('falls back to a generic message when validation has no message', () => {
     fixture.componentRef.setInput('authFields', validatedField()); // no message
     fixture.detectChanges();
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'nope');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'nope');
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
@@ -604,7 +637,7 @@ describe('PluginCredentialsFormComponent', () => {
     ).dispatchEvent(new Event('submit'));
     fixture.detectChanges();
 
-    const err = fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]');
+    const err = fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]');
     expect(err?.textContent).toContain('does not match the required format');
   });
 
@@ -615,7 +648,7 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_abc-123_XYZ');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_abc-123_XYZ');
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
@@ -623,21 +656,20 @@ describe('PluginCredentialsFormComponent', () => {
       ) as HTMLFormElement
     ).dispatchEvent(new Event('submit'));
 
-    expect(saveSpy).toHaveBeenCalledWith({ credentials: { figma_pat: 'figd_abc-123_XYZ' } });
+    expect(saveSpy).toHaveBeenCalledWith({ credentials: { example_pat: 'ex_abc-123_XYZ' } });
   });
 
   it('rejects a partial match — the pattern is anchored full-match', () => {
-    // Author pattern is intentionally un-anchored; the component wraps it in
-    // ^(?:…)$ so a value that merely contains a match is still rejected.
+    // Author pattern is un-anchored; component wraps it in ^(?:…)$.
     fixture.componentRef.setInput('authFields', [
       {
-        key: 'figma_pat',
+        key: 'example_pat',
         label: 'Token',
         field_type: 'password',
         placeholder: '',
         is_secret: true,
         required: false,
-        validation: { pattern: 'figd_[a-z]+' },
+        validation: { pattern: 'ex_[a-z]+' },
       },
     ]);
     fixture.detectChanges();
@@ -645,7 +677,7 @@ describe('PluginCredentialsFormComponent', () => {
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'x_figd_abc_y');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'x_ex_abc_y');
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
@@ -656,7 +688,7 @@ describe('PluginCredentialsFormComponent', () => {
 
     expect(saveSpy).not.toHaveBeenCalled();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]')
+      fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]')
     ).not.toBeNull();
   });
 
@@ -664,7 +696,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', validatedField('bad'));
     fixture.detectChanges();
 
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'wrong');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'wrong');
     fixture.detectChanges();
     (
       fixture.nativeElement.querySelector(
@@ -673,12 +705,14 @@ describe('PluginCredentialsFormComponent', () => {
     ).dispatchEvent(new Event('submit'));
     fixture.detectChanges();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]')
+      fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]')
     ).not.toBeNull();
 
     // Editing the field clears the error immediately.
-    setInputValue(fixture, '[data-testid="cred-input-figma_pat"]', 'figd_now_valid');
+    setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_now_valid');
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="cred-error-figma_pat"]')).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]')
+    ).toBeNull();
   });
 });

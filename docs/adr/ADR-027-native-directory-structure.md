@@ -1,81 +1,29 @@
 # ADR-027: Native Directory Structure
 
 > **Status:** Accepted
-
----
-
-## Context
-
-Speedwave's macOS-specific CLI binaries (Reminders, Calendar, Mail, Notes) were originally placed at the repository root as `swift-reminders/`, `swift-calendar/`, `swift-mail/`, and `swift-notes/`. This had two problems:
-
-1. **Root-level clutter** — four directories at the top level for a single platform, alongside `crates/`, `mcp-servers/`, `desktop/`, and other groups.
-2. **Language-specific naming** — the `swift-` prefix describes the implementation language, not the purpose. Per ADR-010, Windows will use a Rust binary for the same OS integration.[^1] A language-neutral grouping is needed.
-
-Other top-level directories in the repository already group by purpose: `crates/` for Rust libraries, `mcp-servers/` for TypeScript MCP servers, `desktop/` for the Tauri app.[^2] The native OS CLI binaries deserve the same treatment.
+> **Context:** macOS-specific native CLI binaries lived at the repo root as `swift-*/` directories — root clutter plus language-centric naming that did not fit the planned Windows Rust equivalent.
 
 ## Decision
 
-Move all platform-specific native OS CLI binaries under a `native/` directory, organized by platform:
+Group all platform-specific native OS CLI binaries under a single `native/` directory, organized by platform: `native/macos/` for the Swift binaries and `native/windows/` as a placeholder for the future Rust binary (per ADR-010). The macOS side moved from the old root-level `swift-reminders/`, `swift-calendar/`, `swift-mail/`, `swift-notes/` to `native/macos/reminders/`, `native/macos/calendar/`, `native/macos/mail/`, `native/macos/notes/`. A `native/macos/shared/` Swift library package (`SharedCLI`) holds utilities common to the binaries (error formatting, ISO-8601 date helpers, color parsing, calendar resolution, and an AppleScript runner used only by `mail` and `notes`); each CLI package depends on it by relative path. The corresponding build target was renamed from `build-swift` to `build-native-macos`.
 
-```
-native/
-├── macos/
-│   ├── shared/       # SharedCLI library — common utilities for all macOS CLIs
-│   ├── reminders/    # was swift-reminders/
-│   ├── calendar/     # was swift-calendar/
-│   ├── mail/         # was swift-mail/
-│   └── notes/        # was swift-notes/
-└── windows/          # placeholder (future Rust crate, per ADR-010)
-```
+## Why
 
-### Path mapping
-
-| Old path           | New path                  |
-| ------------------ | ------------------------- |
-| `swift-reminders/` | `native/macos/reminders/` |
-| `swift-calendar/`  | `native/macos/calendar/`  |
-| `swift-mail/`      | `native/macos/mail/`      |
-| `swift-notes/`     | `native/macos/notes/`     |
-
-The `shared/` directory is a Swift library package (`SharedCLI`) containing
-utilities common to all macOS CLIs:
-
-- `exitWithError`, `formatPermissionResult` (in `Utilities.swift`)
-- `parseISO8601`, `iso8601String` (in `DateUtils.swift`)
-- `hexColor` (in `ColorUtils.swift`)
-- `CLIError` (in `Errors.swift`)
-- `resolveCalendars` (in `CalendarResolution.swift`)
-- `ScriptRunner`, `ScriptError`, `escapeAppleScript`, `parseDelimited`
-  (in `ScriptRunner.swift`) — shared by `mail` and `notes` only; other packages
-  use EventKit and do not invoke AppleScript
-
-Unlike the other packages, `shared/` produces a library (not an executable).
-Each CLI package depends on it via `.package(path: "../shared")`.
-
-### Build target rename
-
-The Makefile target `build-swift` is renamed to `build-native-macos` to reflect the platform-centric (not language-centric) grouping. The `build-os-cli` aggregate target continues to work unchanged.
-
-## Consequences
-
-### Positive
-
-- **Scalable structure** — when Windows native CLI binaries are implemented (ADR-010), they slot into `native/windows/` with zero structural changes.
-- **Consistent naming** — directory names describe the platform and domain (e.g., `native/macos/reminders`), not the implementation language.
+- **Scalable structure** — Windows native binaries (ADR-010) slot into `native/windows/` with zero structural change; the placeholder README is already there.
+- **Consistent naming** — directory names describe platform and domain (`native/macos/reminders`), matching how `crates/`, `mcp-servers/`, and `desktop/` group by purpose rather than implementation language.
 - **Cleaner root** — four root-level directories consolidated into one.
+- **Shared library** — common Swift utilities live in one package instead of being copied per binary.
 
-### Negative
+## Where it lives in code
 
-- **One-time migration** — all references to `swift-*/` paths in Makefile, `platform-runner.ts`, tests, and `CLAUDE.md` required updating.
-- **Deeper nesting** — build artifacts are now at `native/macos/<pkg>/.build/release/` instead of `swift-<pkg>/.build/release/` (one extra directory level).
+- macOS native binaries — `native/macos/` (`reminders/`, `calendar/`, `mail/`, `notes/`, `audio-capture/`, plus the `shared/` `SharedCLI` library). The `audio-capture/` package was added after this ADR (it ships alongside the original four) and is built by the same target.
+- Shared Swift library sources — `native/macos/shared/Sources/SharedCLI/` (utilities, date/color helpers, calendar resolution, AppleScript runner).
+- Windows placeholder — `native/windows/README.md` (future `native-os-cli.exe` Rust binary, per ADR-010).
+- Build target — `build-native-macos` in `Makefile` (compiles every package under `native/macos/`); the `build-os-cli` aggregate depends on it. Swift tests run via `test-swift`.
+- Directory-grouping convention — root `CLAUDE.md`.
+- Runtime consumer rationale — `docs/adr/ADR-010-mcp-os-as-host-process-per-platform.md` (the `mcp-os` host process calls these binaries).
 
-### Neutral
+## Notes
 
-- `Package.swift` files inside each package use relative paths (`"Sources"`, `"Tests"`) and required no changes.
-- `.gitignore` patterns (`.build/`, `.swiftpm/`) match at any depth and required no changes.
-
----
-
-[^1]: ADR-010: mcp-os as Host Process Per Platform — defines that Windows uses a Rust binary (`native-os-cli.exe`) for the same OS integration purpose. See `docs/adr/ADR-010-mcp-os-as-host-process-per-platform.md`.
-
-[^2]: Speedwave repository structure overview: [`CLAUDE.md`](../../CLAUDE.md) § Repository Structure.
+- `Package.swift` files use relative source paths and needed no change; `.gitignore` patterns (`.build/`, `.swiftpm/`) match at any depth.
+- Build artifacts now sit one level deeper, at `native/macos/<pkg>/.build/release/`.

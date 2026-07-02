@@ -1,3 +1,5 @@
+//! Resolution of bundled engine binaries (limactl, nerdctl, node) on the host.
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,10 +14,8 @@ const PATH_SEP: char = ';';
 #[cfg(not(windows))]
 const PATH_SEP: char = ':';
 
-/// Windows OS commands that are never bundled, so the "falling back to system
-/// PATH" debug log is noise for them (`wsl.exe` is called on every health poll).
-/// Windows-only on purpose: on macOS resolving one of these is a real misconfig
-/// worth logging, so suppression must not apply there.
+/// Windows OS commands that are never bundled; the fallback-to-PATH debug log
+/// is suppressed for them.
 #[cfg(windows)]
 const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
 
@@ -33,21 +33,13 @@ fn is_always_system_command(cmd: &str) -> bool {
         .any(|c| c.eq_ignore_ascii_case(name))
 }
 
-/// Resolves the path to a binary command.
-///
-/// Lima (macOS), Node.js, and the native macOS CLI helpers (`reminders-cli`,
-/// `audio-capture-cli`, …) are bundled in the app resources directory. WSL2
-/// uses the nerdctl bundle installed inside the distro, not on the host.
+/// Resolves the path to a binary command via bundled resources or system PATH.
 ///
 /// Resolution order (each step only if `SPEEDWAVE_RESOURCES_DIR` is set):
 /// 1. `<dir>/lima/bin/<cmd>` (macOS Lima bundle).
-/// 2. `<dir>/nerdctl-full/bin/<cmd>` — reserved for any future host-side
-///    nerdctl-full bundle layout; not currently populated in production
-///    (kept so `command()` can set CNI_PATH + PATH for callers that *do*
-///    drop a nerdctl tree under `Resources/`, e.g. in tests).
+/// 2. `<dir>/nerdctl-full/bin/<cmd>` (reserved layout, not populated in prod).
 /// 3. `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows).
-/// 4. `<dir>/<cmd>` — native CLI helpers placed at the top of `Resources/`
-///    (matches `tauri.macos.conf.json` `bundle.resources`).
+/// 4. `<dir>/<cmd>` (native CLI helpers at the top of `Resources/`).
 /// 5. Otherwise the bare command name (system PATH lookup).
 pub fn resolve_binary(cmd: &str) -> String {
     if let Ok(resources_dir) = std::env::var(BUNDLE_RESOURCES_ENV) {
@@ -84,8 +76,7 @@ pub fn resolve_binary(cmd: &str) -> String {
             }
         }
 
-        // Native CLI helpers (reminders-cli, audio-capture-cli, …) live at the
-        // top of Resources/ per tauri.macos.conf.json `bundle.resources`.
+        // Native CLI helpers live at the top of Resources/ per tauri.macos.conf.json.
         let top_level = resources.join(cmd);
         if top_level.exists() {
             return top_level.to_string_lossy().to_string();
@@ -105,28 +96,19 @@ pub fn resolve_binary(cmd: &str) -> String {
     cmd.to_string()
 }
 
-/// Windows process creation flag that prevents a visible console window from
-/// being allocated for child processes. Applied to all background subprocesses
-/// so that `wsl.exe`, `powershell.exe`, `node.exe`, etc. do not flash a black
-/// console window over the Desktop app's UI.
-///
-/// **Warning:** `Command::creation_flags()` is a setter, not OR. Calling it
-/// twice replaces the previous value. If you need additional flags, OR them
-/// with this constant.
+/// Windows process creation flag preventing a visible console window on child
+/// processes. `Command::creation_flags()` is a setter, not OR — apply once.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Creates a `Command` for the given binary with bundled-binary resolution.
 ///
-/// - Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
+/// - Applies `CREATE_NO_WINDOW` on Windows.
 /// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
-/// - For bundled binaries, prepends their parent directory to `PATH` so that
-///   child processes (e.g. `buildctl` spawned by `nerdctl build`) can find
-///   sibling binaries in the same bundle.
+/// - For bundled binaries, prepends their parent directory to `PATH`.
 ///
-/// **Note:** `container_exec()` methods intentionally bypass this function
-/// and use raw `Command::new()` because interactive TTY sessions need a
-/// console window on Windows.
+/// `container_exec()` bypasses this and uses raw `Command::new()` (TTY needs a
+/// console window on Windows).
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
@@ -137,8 +119,7 @@ pub fn command(cmd: &str) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    // If the resolved path is absolute (= bundled), prepend its parent dir to PATH
-    // and set CNI_PATH for nerdctl-full bundles (CNI plugins live in libexec/cni/).
+    // For bundled (absolute) paths, prepend parent dir to PATH and set CNI_PATH.
     let resolved_path = std::path::Path::new(&resolved);
     if resolved_path.is_absolute() {
         if let Some(bin_dir) = resolved_path.parent() {
@@ -152,8 +133,6 @@ pub fn command(cmd: &str) -> Command {
             }
 
             // nerdctl-full bundles CNI plugins in <bundle>/libexec/cni/.
-            // Without CNI_PATH, nerdctl defaults to /opt/cni/bin which doesn't
-            // exist on systems where nerdctl-full is installed as a .deb resource.
             if let Some(bundle_root) = bin_dir.parent() {
                 let cni_dir = bundle_root.join("libexec").join("cni");
                 if cni_dir.is_dir() {
@@ -162,6 +141,8 @@ pub fn command(cmd: &str) -> Command {
             }
         }
     }
+
+    apply_wsl_utf8(&mut command, cmd);
 
     if cmd == "limactl" {
         match lima_home() {
@@ -191,23 +172,49 @@ pub fn command(cmd: &str) -> Command {
 /// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
 /// For interactive TTY commands, use raw `Command::new()` instead.
 pub fn system_command(program: &str) -> Command {
-    let command = Command::new(program);
-    #[cfg(target_os = "windows")]
-    let mut command = command;
+    let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    apply_wsl_utf8(&mut command, program);
     command
 }
 
-/// Runs a command with a timeout. Kills the process if it exceeds the deadline.
-/// Polls `child.try_wait()` every 200ms. On timeout, kills the child process
-/// (logging a warning if kill fails) and bails with a descriptive error.
-///
-/// Does not capture stdout/stderr — output goes to the parent's streams.
-/// Do not use with `Stdio::piped()` as that risks pipe-buffer deadlock.
+/// Absolute path to Windows PowerShell — a bare `powershell` PATH lookup is
+/// hijackable and inconsistent across contexts (SSOT; Desktop re-exports it).
+pub fn system_powershell_path() -> PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// `system_command` pinned to the absolute PowerShell path.
+pub fn powershell_command() -> Command {
+    system_command(&system_powershell_path().to_string_lossy())
+}
+
+/// Forces UTF-8 output from `wsl.exe` (default is UTF-16LE / localized);
+/// classifiers and logs downstream assume UTF-8. No-op for other programs.
+fn apply_wsl_utf8(command: &mut Command, program: &str) {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    if name == "wsl" || name == "wsl.exe" {
+        command.env("WSL_UTF8", "1");
+    }
+}
+
+/// Runs a command with a timeout, killing the process if it exceeds the deadline.
+/// Polls `child.try_wait()` every 200ms; does not capture stdout/stderr.
+/// Do not use with `Stdio::piped()` (pipe-buffer deadlock risk).
 pub fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -236,15 +243,14 @@ pub fn run_with_timeout(
     }
 }
 
-/// Returns the isolated LIMA_HOME directory: `~/.speedwave/lima`.
-///
-/// Speedwave uses a dedicated LIMA_HOME so that its VM data does not collide
-/// with a user-installed Lima (`~/.lima`).
+/// Returns the isolated LIMA_HOME directory `~/.speedwave/lima` (avoids
+/// collision with a user-installed Lima at `~/.lima`).
 pub fn lima_home() -> Option<PathBuf> {
     Some(consts::data_dir().join(consts::LIMA_SUBDIR))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod tests {
     use super::*;
     use std::env;
@@ -252,6 +258,40 @@ pub(crate) mod tests {
 
     /// Serialises env-var mutations across parallel test threads.
     pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// True when the built Command carries `WSL_UTF8=1`.
+    fn has_wsl_utf8(cmd: &std::process::Command) -> bool {
+        cmd.get_envs()
+            .any(|(k, v)| k == "WSL_UTF8" && v.is_some_and(|v| v == "1"))
+    }
+
+    #[test]
+    fn system_command_sets_wsl_utf8_for_wsl_only() {
+        assert!(has_wsl_utf8(&system_command("wsl.exe")));
+        assert!(has_wsl_utf8(&system_command(
+            r"C:\Windows\System32\wsl.exe"
+        )));
+        assert!(!has_wsl_utf8(&system_command("powershell.exe")));
+        assert!(!has_wsl_utf8(&system_command("tasklist")));
+    }
+
+    #[test]
+    fn system_powershell_path_is_absolute_system32() {
+        let p = system_powershell_path();
+        let s = p.to_string_lossy();
+        assert!(s.ends_with("powershell.exe"), "got: {s}");
+        assert!(
+            s.contains("System32") && s.contains("WindowsPowerShell"),
+            "must pin the System32 install, got: {s}"
+        );
+    }
+
+    #[test]
+    fn command_sets_wsl_utf8_for_wsl_only() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        assert!(has_wsl_utf8(&command("wsl.exe")));
+        assert!(!has_wsl_utf8(&command("nerdctl")));
+    }
 
     #[test]
     fn resolve_binary_without_env_returns_bare_name() {
@@ -298,8 +338,7 @@ pub(crate) mod tests {
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 
-    // Never-bundled OS commands are recognised (case-insensitive) so the
-    // fallback debug log is suppressed; everything else still logs. Windows-only.
+    // Never-bundled OS commands are recognised case-insensitively (Windows-only).
     #[cfg(windows)]
     #[test]
     fn always_system_commands_recognised() {
@@ -329,10 +368,7 @@ pub(crate) mod tests {
 
     #[test]
     fn resolve_binary_top_level_native_cli_helper() {
-        // Native CLIs (audio-capture-cli, reminders-cli, …) sit at the top of
-        // Resources/, not under lima/nerdctl-full/nodejs — resolve_binary must
-        // find them there (regression: the audio-capture backend resolves its
-        // CLI via this path in a packaged app).
+        // Native CLIs sit at the top of Resources/, not under lima/nerdctl-full/nodejs.
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
         let cli_path = tmp.path().join("audio-capture-cli");
@@ -427,10 +463,7 @@ pub(crate) mod tests {
 
     #[test]
     fn lima_home_returns_expected_path() {
-        // Assert the structural invariant (`<data_dir>/lima`) without naming the
-        // production `data_dir()` singleton: the final component is LIMA_SUBDIR
-        // and a non-empty data-dir parent precedes it. Holds under any isolated
-        // tempdir data dir, and is separator-agnostic (Path tail, not string).
+        // Structural invariant `<data_dir>/lima`, separator-agnostic (Path tail).
         let path = lima_home().expect("lima_home should resolve");
         assert!(
             path.ends_with(consts::LIMA_SUBDIR),
@@ -459,10 +492,7 @@ pub(crate) mod tests {
             .expect("LIMA_HOME env should be set for limactl");
 
         let value = lima_home_env.1.expect("LIMA_HOME should have a value");
-        // Structural invariant only (`<data_dir>/lima`), tempdir-safe — no bare
-        // `data_dir()` resolution. `command("limactl")` creates the dir, so the
-        // value is the canonicalized LIMA_HOME; checking the tail is portable
-        // and separator-agnostic (Path tail, not string).
+        // Structural invariant `<data_dir>/lima`, separator-agnostic (Path tail).
         let value_path = std::path::Path::new(value);
         assert!(
             value_path.ends_with(consts::LIMA_SUBDIR),

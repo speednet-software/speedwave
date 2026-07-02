@@ -1,60 +1,43 @@
 /**
- * Validation Helpers for Tool Parameters
- *
- * Shared validation utilities following the Speedwave MCP pattern.
+ * Validation helpers re-exporting the shared Family-A wrapper.
  */
 
-import { ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  withResultValidation,
+  notConfiguredMessage,
+  type ToolResult,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
+import type { SlackClients } from '../client.js';
+
+export type { ToolResult };
 
 /**
- * Result interface for tool operations
+ * Gate: returns NOT_CONFIGURED when clients._tokensStatus is 'missing'.
+ * @param clients - Slack client container
  */
-export interface ToolResult {
-  success: boolean;
-  data?: unknown;
-  error?: { code: string; message: string };
-}
-
-function validateParams(params: unknown): params is Record<string, unknown> {
-  return params !== null && typeof params === 'object' && !Array.isArray(params);
-}
-
-function formatResult(result: ToolResult): ToolsCallResult {
-  if (result.success) {
-    return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
-  } else {
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result.error, null, 2) }],
-      isError: true,
+export function withClients(clients: SlackClients) {
+  return <T>(handler: (c: SlackClients, p: T) => Promise<ToolResult>) =>
+    async (params: T): Promise<ToolResult> => {
+      if (clients._tokensStatus === 'missing') {
+        return {
+          success: false,
+          error: {
+            code: 'NOT_CONFIGURED',
+            message: notConfiguredMessage('Slack'),
+          },
+        };
+      }
+      return handler(clients, params);
     };
-  }
 }
 
 /**
- * Tool handler function
- * @param handler - Tool handler function
+ * Wrap handler with parameter validation (pretty-printed JSON output).
+ * @param handler - Tool handler function.
  */
 export function withValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return async (params: Record<string, unknown>) => {
-    if (!validateParams(params)) {
-      return formatResult({
-        success: false,
-        error: { code: 'INVALID_INPUT', message: 'Tool parameters must be a non-null object' },
-      });
-    }
-    try {
-      const result = await handler(params as T);
-      return formatResult(result);
-    } catch (error) {
-      return formatResult({
-        success: false,
-        error: {
-          code: 'HANDLER_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
-    }
-  };
+  return withResultValidation(handler);
 }

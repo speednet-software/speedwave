@@ -40,7 +40,7 @@ This means Claude's context window stays clean regardless of how many integratio
 ## Key Features
 
 - **Two interfaces** — Desktop app (chat UI with project management) and CLI (`speedwave` terminal command)
-- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Mail, Calendar, Reminders, Notes, plus an Office documents worker (Word/Excel/PowerPoint/PDF)
+- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Playwright, Context7, Office documents (Word/Excel/PowerPoint/PDF), plus Mail, Calendar, Reminders, Notes via OS integrations
 - **Plugin system** — extend with custom MCP services via Ed25519-signed plugins
 - **Cross-platform** — macOS and Windows with platform-native OS integrations
 - **Zero-install dependencies** — Lima, nerdctl, and containerd are bundled; no system-wide Docker or container runtime needed
@@ -56,7 +56,7 @@ graph TB
         MCP_OS[mcp-os]
     end
 
-    subgraph VM[" Lima VM / WSL2 / Native "]
+    subgraph VM[" Lima VM / WSL2 "]
         CLAUDE[Claude Code]
         HUB[MCP Hub]
         subgraph Workers[" Workers "]
@@ -104,6 +104,7 @@ graph TB
 
 | Topic                  | Link                                                                             |
 | ---------------------- | -------------------------------------------------------------------------------- |
+| Documentation index    | [docs/](docs/README.md)                                                          |
 | Getting started        | [docs/getting-started/](docs/getting-started/README.md)                          |
 | Architecture           | [docs/architecture/](docs/architecture/README.md)                                |
 | Security model         | [docs/architecture/security.md](docs/architecture/security.md)                   |

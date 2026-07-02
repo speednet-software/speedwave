@@ -9,6 +9,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PluginBridgeService } from '../../services/plugin-bridge.service';
+import { LoggerService } from '../../services/logger.service';
 
 /** Bridge connection card for any plugin whose manifest declares host_bridge. */
 @Component({
@@ -34,7 +35,7 @@ import { PluginBridgeService } from '../../services/plugin-bridge.service';
         </p>
       } @else {
         <p class="mb-2 text-[12px] leading-relaxed text-[var(--ink-dim)]">
-          Paste these into your companion app (e.g. the Figma Desktop plugin). The worker container
+          Paste these into your companion app (e.g. a design-tool desktop app). The worker container
           uses an internal address; this URL is for external clients on the same host.
         </p>
 
@@ -107,6 +108,7 @@ export class BridgeConnectionComponent implements OnInit {
   readonly slug = input.required<string>();
 
   private readonly bridgeService = inject(PluginBridgeService);
+  private readonly log = inject(LoggerService);
 
   readonly url = signal<string | null>(null);
   readonly token = signal<string | null>(null);
@@ -140,7 +142,7 @@ export class BridgeConnectionComponent implements OnInit {
       this.token.set(creds.token);
       this.error.set(null);
     } catch (err) {
-      console.error('BridgeConnectionComponent: load failed', err);
+      this.log.error(`BridgeConnectionComponent: load failed: ${String(err)}`);
       const msg = err instanceof Error ? err.message : String(err);
       this.error.set(`Bridge unavailable: ${msg}`);
     }
@@ -160,7 +162,7 @@ export class BridgeConnectionComponent implements OnInit {
         if (this.copiedField() === field) this.copiedField.set(null);
       }, 1500);
     } catch (err) {
-      console.warn('BridgeConnectionComponent: clipboard write failed', err);
+      this.log.warn(`BridgeConnectionComponent: clipboard write failed: ${String(err)}`);
       this.copyError.set('Could not copy to clipboard');
       setTimeout(() => {
         if (this.copyError() === 'Could not copy to clipboard') this.copyError.set(null);

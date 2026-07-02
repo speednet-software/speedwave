@@ -4,19 +4,24 @@
 
 import { describe, it, expect } from 'vitest';
 import { createChannelTools } from './channel-tools.js';
+import { createDmTools } from './dm-tools.js';
+import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, RefreshLock } from '@speedwave/mcp-shared';
 import type { SlackClients } from '../client.js';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
 const stubClients: SlackClients = {
-  bot: {} as any,
   user: {} as any,
+  tokenState: { accessToken: '' },
+  lock: new RefreshLock(),
   _tokensStatus: 'missing',
 };
 
 const allTools: ToolDefinition[] = [
   ...createChannelTools(stubClients),
+  ...createDmTools(stubClients),
+  ...createFileTools(stubClients),
   ...createUserTools(stubClients),
 ];
 

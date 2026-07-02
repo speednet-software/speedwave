@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ConversationsSidebarComponent } from './conversations-sidebar.component';
+import {
+  ConversationsSidebarComponent,
+  scrollActiveRowIntoView,
+} from './conversations-sidebar.component';
 import type { ConversationSummary } from '../../models/chat';
 
 @Component({
@@ -50,10 +53,8 @@ const sample: readonly ConversationSummary[] = [
 ];
 
 /**
- * Query the drawer content rendered into the CDK overlay container.
- * The component renders via CDK Overlay portal attached to `document.body`,
- * not inside the host fixture, so we query the global document.
- * @param sel CSS selector to locate the element under document.
+ * Query the CDK overlay portal under document.body.
+ * @param sel - CSS selector to locate the element under document.
  */
 function q(sel: string): HTMLElement | null {
   return document.querySelector(sel) as HTMLElement | null;
@@ -91,11 +92,7 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Drive the child input directly to bypass OnPush propagation issues
-      // when mutating the host wrapper's plain fields. Verifies that the
-      // CDK overlay portal attaches/detaches in lockstep with the open input.
-      // The shared host fixture defaults to open=true, so destroy it first to
-      // avoid having two drawers in the overlay container at the same time.
+      // Destroy the shared open=true fixture to avoid two drawers in the overlay.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);
@@ -158,8 +155,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('falls back to a dash when timestamp is null', () => {
-      // The drawer now formats timestamps as short relative labels
-      // (e.g. "2m", "1h", "3d") and uses "—" for missing values.
       host.conversations = sample;
       fixture.detectChanges();
       const drawer = q('[data-testid="conversations-sidebar"]')!;
@@ -172,8 +167,6 @@ describe('ConversationsSidebarComponent', () => {
       host.conversations = sample;
       host.currentSessionId = 's2';
       fixture.detectChanges();
-      // Row click resumes directly (single primary action), so the test-id is
-      // `conversation-resume-<sid>` rather than the legacy `view-<sid>`.
       const active = q('[data-testid="conversation-resume-s2"]');
       expect(active).not.toBeNull();
       expect(active!.getAttribute('aria-current')).toBe('true');
@@ -185,6 +178,59 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       const els = document.querySelectorAll('[aria-current="true"]');
       expect(els.length).toBe(0);
+    });
+
+    it('marks the active row with data-active so it can be scrolled into view', () => {
+      host.conversations = sample;
+      host.currentSessionId = 's3';
+      fixture.detectChanges();
+      const actives = document.querySelectorAll('[data-active="true"]');
+      expect(actives.length).toBe(1);
+      // The data-active row is the one wrapping the active session's resume button.
+      expect(actives[0].querySelector('[data-testid="conversation-resume-s3"]')).not.toBeNull();
+    });
+
+    it('sets no data-active row when nothing is active', () => {
+      host.conversations = sample;
+      host.currentSessionId = null;
+      fixture.detectChanges();
+      expect(document.querySelectorAll('[data-active="true"]').length).toBe(0);
+    });
+  });
+
+  describe('scrollActiveRowIntoView', () => {
+    it('scrolls the active row to the top of the list (block: start)', () => {
+      const root = document.createElement('div');
+      const other = document.createElement('div');
+      const active = document.createElement('div');
+      active.setAttribute('data-active', 'true');
+      root.append(other, active);
+      let calledWith: ScrollIntoViewOptions | undefined;
+      active.scrollIntoView = (arg?: boolean | ScrollIntoViewOptions) => {
+        calledWith = arg as ScrollIntoViewOptions;
+      };
+      let otherScrolled = false;
+      other.scrollIntoView = () => {
+        otherScrolled = true;
+      };
+
+      scrollActiveRowIntoView(root);
+
+      expect(calledWith).toEqual({ block: 'start' });
+      expect(otherScrolled).toBe(false);
+    });
+
+    it('is a no-op when no row is active', () => {
+      const root = document.createElement('div');
+      const row = document.createElement('div');
+      let scrolled = false;
+      row.scrollIntoView = () => {
+        scrolled = true;
+      };
+      root.append(row);
+
+      expect(() => scrollActiveRowIntoView(root)).not.toThrow();
+      expect(scrolled).toBe(false);
     });
   });
 
@@ -260,8 +306,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('clears the confirm state when the drawer is closed and reopened', () => {
-      // Drive the child input directly so we can toggle `open` without going
-      // through the host wrapper's separate fixture lifecycle.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);

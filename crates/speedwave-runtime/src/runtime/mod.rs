@@ -1,3 +1,5 @@
+//! Container runtime abstraction: `LockedRuntime` façade over Lima/WSL2 backends.
+
 use crate::binary;
 use crate::consts;
 use serde_json::Value;
@@ -36,19 +38,12 @@ where
     compose_locks::with_project_compose_lock_in(data_dir, project, f)
 }
 
-/// Serializes concurrent `ensure_ready()` calls across all runtime instances.
-///
-/// `detect_runtime()` creates a fresh runtime on every call, so instance-level
-/// locking cannot prevent two threads from racing startup. This static mutex
-/// ensures at most one thread starts the runtime at a time; the second thread
-/// waits for the lock, then sees the runtime already running and returns immediately.
+/// Serializes concurrent `ensure_ready()` across all runtime instances —
+/// `detect_runtime()` makes a fresh runtime each call, so a static lock is needed.
 static ENSURE_READY_LOCK: Mutex<()> = Mutex::new(());
 
-/// Acquires the global `ENSURE_READY_LOCK` and runs `f` under it.
-///
-/// All `ContainerRuntime::ensure_ready()` implementations delegate to this
-/// function so that concurrent callers are serialized regardless of which
-/// runtime variant they hold.
+/// Acquires the global `ENSURE_READY_LOCK` and runs `f` under it — all
+/// `ensure_ready()` impls delegate here so concurrent callers are serialized.
 pub(crate) fn with_ensure_ready_lock<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
@@ -64,36 +59,21 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Returns a Command for interactive exec (TTY allocated, suitable for TUI apps).
     /// Caller should run `.status()` to inherit the terminal.
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command;
-    /// Returns a Command for piped exec (no TTY, suitable for Stdio::piped()).
-    /// Caller should set `.stdin(Stdio::piped()).stdout(Stdio::piped())`.
-    ///
-    /// Returns `Result` so implementations can check preconditions (e.g. Lima
-    /// VM running) before constructing the command.
+    /// Command for piped exec (no TTY). `Result` so impls can check preconditions
+    /// (e.g. Lima VM running) before constructing the command.
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
-    /// Returns `true` only if the runtime is already operational (binary present,
-    /// VM/engine running). This is a lightweight, read-only probe — it does **not**
-    /// attempt to start or repair the runtime.
-    ///
-    /// Use this for status displays and optional optimisations. **Do not** use as a
-    /// gate before [`ensure_ready`] — a stopped Lima VM returns `false` here but
-    /// `ensure_ready()` can start it successfully.
+    /// `true` only if already operational (binary present, VM/engine running).
+    /// Read-only probe — never a gate before [`ensure_ready`], which can start it.
     fn is_available(&self) -> bool;
 
-    /// `true` if the VM / WSL distro exists, regardless of running state.
-    /// Used by `is_setup_complete` to detect external removal.
-    ///
-    /// WSL uses the default impl: `is_available` already checks `wsl --list`
-    /// (registration, not running). Lima overrides because its `is_available`
-    /// requires `Status == Running`.
+    /// `true` if the VM / WSL distro exists, regardless of running state
+    /// (`is_setup_complete` external-removal check). Lima overrides; WSL uses default.
     fn is_installed(&self) -> bool {
         self.is_available()
     }
 
-    /// Brings the runtime to a fully operational state, or returns a descriptive error.
-    ///
-    /// Safe to call unconditionally before any runtime operation. Implementations
-    /// may start a stopped VM, verify engine health, etc. Prefer this over
-    /// [`is_available`] whenever you need the runtime to become operational.
+    /// Brings the runtime to a fully operational state, or returns a descriptive
+    /// error. Safe to call unconditionally; prefer over [`is_available`].
     fn ensure_ready(&self) -> anyhow::Result<()>;
     fn build_image(
         &self,
@@ -102,20 +82,12 @@ pub(crate) trait ContainerRuntime: Send + Sync {
         containerfile: &str,
         build_args: &[(&str, &str)],
     ) -> anyhow::Result<()>;
-    /// Translates a host build-root path into one accessible by the container engine.
-    ///
-    /// Lima override: copies to `~/.speedwave/build-cache/` when outside `~` (VM only mounts `~`).
-    /// WSL override: converts `C:\…` → `/mnt/c/…`.
-    ///
-    /// Both supported runtimes mediate via a VM, so the default identity pass-through
-    /// is never the right answer in production — it exists only so the trait stays
-    /// implementable in tests.
+    /// Translates a host build-root into an engine-accessible path. No default —
+    /// every impl MUST translate (Lima copies outside `~`; WSL maps `C:\`→`/mnt/c/`).
     fn prepare_build_context(
         &self,
         build_root: &std::path::Path,
-    ) -> anyhow::Result<std::path::PathBuf> {
-        Ok(build_root.to_path_buf())
-    }
+    ) -> anyhow::Result<std::path::PathBuf>;
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     /// Returns `true` if the given image tag exists in the container runtime.
@@ -123,29 +95,17 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
-    /// Validates compose.yml as the container engine sees it — production
-    /// runtimes MUST override. Default body is for test stubs only.
-    fn compose_validate(&self, _project: &str) -> anyhow::Result<()> {
-        log::error!(
-            "compose_validate: default no-op called — production runtime forgot to override"
-        );
-        Ok(())
-    }
+    /// Recreates ONE compose service (`--force-recreate`, no orphan removal),
+    /// e.g. restart `proxy` mid-session (ADR-073). `service` must be built-in; impls validate.
+    fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()>;
 
-    /// Removes dangling images and build cache (not tagged images).
-    ///
-    /// Used by `build_images_for_bundle` to recover from stale overlayfs snapshotter
-    /// state on containerd (containerd bug — "failed to rename:
-    /// file exists" during layer extraction). Only removes dangling
-    /// (untagged) images and build cache, so successfully-built tagged
-    /// images survive a partial-build retry.
-    ///
-    /// This bug affects all containerd overlayfs setups, including Lima VM
-    /// (LimaRuntime) and WSL2 (WslRuntime). Both runtime implementations
-    /// override this method with `nerdctl system prune --force`.
-    fn system_prune(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
+    /// `compose config` so a silent no-op cannot mask a torn/invalid file.
+    fn compose_validate(&self, project: &str) -> anyhow::Result<()>;
+
+    /// Removes dangling images + build cache (keeps tagged), recovering from the
+    /// containerd overlayfs "failed to rename" bug. Every impl MUST actually prune.
+    fn system_prune(&self) -> anyhow::Result<()>;
 
     /// Remove image tags. `force=true` = `rmi --force` (used by
     /// `prune_old_bundle_images` and plugin-uninstall).
@@ -155,85 +115,38 @@ pub(crate) trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
-    /// Removes BuildKit build cache.
-    ///
-    /// BuildKit cache mounts (`--mount=type=cache`) are stored separately
-    /// from container images and are not affected by `remove_images()` or
-    /// `system_prune()`. This method runs `nerdctl builder prune --all --force`
-    /// to reclaim that space.
-    ///
-    /// Called by `prune_old_bundle_images()` after removing old tagged images,
-    /// before building new ones for the updated bundle.
+    /// Removes BuildKit build cache; only from the `with_build_recovery` ladder
+    /// (disk-full/corruption) — routine prunes keep the cache (ADR-072).
     fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
         log::debug!("prune_buildkit_cache: not implemented for this runtime, skipping");
         Ok(())
     }
 
-    /// Aggressive prune: removes ALL tagged images not used by a running
-    /// container, plus BuildKit cache. Recovery path for disk-full build
-    /// failures — frees images left behind by other worktrees / older bundles
-    /// that `prune_old_bundle_images` cannot see (it only knows this worktree's
-    /// last `applied_bundle_id`).
-    ///
-    /// Safe because containerd refuses to remove images backing live
-    /// containers. Running Speedwave projects survive.
+    /// Disk-full recovery: removes ALL tagged images not backing a running container
+    /// (`nerdctl system prune`); BuildKit cache is cleared via `prune_buildkit_cache`.
     fn prune_unused_images(&self) -> anyhow::Result<()> {
         log::debug!("prune_unused_images: not implemented for this runtime, skipping");
         Ok(())
     }
 
-    /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
-    ///
-    /// Implementations MUST restart containerd, MUST restart buildkit (skip
-    /// `systemctl restart buildkit` only if the unit does not exist), and MUST
-    /// wait for both `nerdctl info` and `buildctl debug workers` to succeed.
-    /// `buildctl` is part of the nerdctl-full bundle and must be available in
-    /// all environments.
-    ///
-    /// Only safe to call when no containers are running (e.g. during initial
-    /// setup). Call-sites with running containers should propagate the error
-    /// with diagnostic hints instead.
-    fn restart_container_engine(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    /// Restarts containerd + buildkitd, waiting on `nerdctl info` + `buildctl debug
+    /// workers`. Only safe with no containers running; every impl MUST actually restart.
+    fn restart_container_engine(&self) -> anyhow::Result<()>;
 
-    /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
-    ///
-    /// Default is a no-op. Windows (WSL2) has a distro managed by Speedwave, but
-    /// stopping it mid-session is not meaningful — use `reset_vm()` for destructive
-    /// teardown instead. Only `LimaRuntime` overrides this method.
-    ///
-    /// Callers MUST treat errors as non-fatal: log them and continue. Exit
-    /// cleanup must never block app termination on a VM stop failure.
+    /// Stops the underlying VM to free RAM (default no-op; only `LimaRuntime`
+    /// overrides). Callers MUST treat errors as non-fatal — never block exit cleanup.
     fn stop_vm(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Tears down the underlying VM/distro destructively (e.g.
-    /// `wsl --unregister` on Windows). Default is a no-op; only
-    /// `WslRuntime` overrides — for `LimaRuntime`, factory-reset
-    /// destroys the VM directly via `limactl stop` + `delete --force`,
-    /// not through this method.
-    ///
-    /// Callers MUST treat errors as non-fatal: log and continue, because
-    /// factory-reset's primary remediation (data-dir wipe) must still
-    /// proceed if VM removal fails.
+    /// Destructively tears down the VM/distro (`wsl --unregister`); default no-op,
+    /// only `WslRuntime` overrides. Callers MUST treat errors as non-fatal.
     fn reset_vm(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Executes a command **inside the VM (not a container)** and returns its
-    /// stdout + status. Used by host-side helpers that need the VM's network
-    /// stack — most notably the LLM discovery probe, which must run from
-    /// inside the VM to reach corporate-VPN-protected services (the host
-    /// often cannot, see `docs/architecture/platform-matrix.md`).
-    ///
-    /// - macOS: `limactl shell <vm> -- <cmd> <args...>`
-    /// - Windows: `wsl.exe -d <distro> -- <cmd> <args...>`
-    ///
-    /// `stdin` is fed to the command (empty slice for none). `timeout`
-    /// bounds the whole operation. Returns `Err` if the VM is not running
-    /// — callers that need a fallback should check `is_available()` first.
+    /// Runs a command **inside the VM (not a container)** for the VM's network
+    /// stack (e.g. LLM discovery probe). `Err` if VM not running; see platform-matrix.md.
     fn vm_exec(
         &self,
         cmd: &str,
@@ -249,26 +162,31 @@ pub(crate) trait ContainerRuntime: Send + Sync {
 /// Output of a [`ContainerRuntime::vm_exec`] call.
 #[derive(Debug, Clone)]
 pub struct VmExecOutput {
+    /// Process exit status.
     pub status: std::process::ExitStatus,
+    /// Captured stdout bytes.
     pub stdout: Vec<u8>,
+    /// Captured stderr bytes.
     pub stderr: Vec<u8>,
 }
 
 impl VmExecOutput {
+    /// `true` if the process exited successfully.
     pub fn ok(&self) -> bool {
         self.status.success()
     }
+    /// stdout as a lossy UTF-8 string.
     pub fn stdout_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stdout)
     }
+    /// stderr as a lossy UTF-8 string.
     pub fn stderr_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.stderr)
     }
 }
 
-/// Shared implementation of `vm_exec` for both `LimaRuntime` and `WslRuntime`.
-/// Spawns the prepared command, pipes `stdin`, waits with a timeout, captures
-/// stdout+stderr. Kills the child on timeout.
+/// Shared `vm_exec` impl for Lima/WSL: spawns the command, pipes `stdin`, waits
+/// with a timeout (kills child on overrun), captures stdout+stderr.
 pub(crate) fn vm_exec_run(
     mut command: Command,
     stdin: &[u8],
@@ -347,17 +265,13 @@ pub(crate) fn vm_exec_run(
     })
 }
 
+/// Runs external commands; abstracted so tests can inject a fake.
 pub trait CommandRunner: Send + Sync {
+    /// Runs `cmd args`, returning trimmed stdout on success.
     fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String>;
 
-    /// Like `run`, but merges stdout and stderr on success.
-    ///
-    /// `nerdctl logs` writes container output to stderr,
-    /// so the standard `run()` (which returns only stdout) would return
-    /// an empty string. This method captures both streams.
-    ///
-    /// Default implementation delegates to `run()` so that existing
-    /// `CommandRunner` implementations (including mocks) work unchanged.
+    /// Like `run`, but merges stdout+stderr (e.g. `nerdctl logs` writes to stderr).
+    /// Default delegates to `run()` so existing impls/mocks work unchanged.
     fn run_with_stderr(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         self.run(cmd, args)
     }
@@ -369,30 +283,8 @@ pub trait CommandRunner: Send + Sync {
         self.run(cmd, args).map(|s| s.into_bytes())
     }
 
-    /// Like `run`, but kills the process if it exceeds `timeout`.
-    ///
-    /// Captures stderr so that failure diagnostics (e.g. from `limactl start`)
-    /// appear in the Tauri log, not just in the parent's terminal streams.
-    /// Stdout is inherited (goes to parent streams). Stderr is read after the
-    /// process exits — safe because the pipe buffer (64 KB) is more than enough
-    /// for diagnostic output from lifecycle commands.
-    ///
-    /// # Pipe buffer safety
-    ///
-    /// Only use for commands that produce limited stderr (lifecycle commands
-    /// like `limactl start`, `systemctl start`, etc.). If stderr exceeds the
-    /// OS pipe buffer (64 KB on Linux/macOS), the child process will block on
-    /// write and never exit, causing a deadlock. For commands with verbose
-    /// output, use `run()` or `run_with_stderr()` instead.
-    ///
-    /// Note: `binary::run_with_timeout` deliberately avoids `Stdio::piped()`
-    /// for this reason. This method accepts the trade-off because capturing
-    /// stderr diagnostics on failure is essential for Desktop log files.
-    ///
-    /// See also: `binary::run_with_timeout` (same poll/kill loop, no capture).
-    /// Unlike `binary::run_with_timeout` which returns `Ok(ExitStatus)` and
-    /// leaves exit-code handling to the caller, this method treats non-zero
-    /// exit as `Err`.
+    /// Like `run`, but kills on `timeout`, captures stderr, treats non-zero as `Err`.
+    /// Limited-stderr commands only — verbose output deadlocks the 64 KB pipe.
     fn run_with_timeout(
         &self,
         cmd: &str,
@@ -412,13 +304,15 @@ pub trait CommandRunner: Send + Sync {
                     if status.success() {
                         return Ok(());
                     }
+                    // Bytes, not read_to_string: UTF-16LE wsl.exe stderr is
+                    // invalid UTF-8 and would drop the whole error detail.
                     let stderr = child
                         .stderr
                         .take()
                         .map(|mut s| {
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                            buf
+                            let mut buf = Vec::new();
+                            std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                            decode_wsl_output(&buf)
                         })
                         .unwrap_or_default();
                     let detail = stderr.trim();
@@ -452,6 +346,7 @@ pub trait CommandRunner: Send + Sync {
     }
 }
 
+/// Production [`CommandRunner`] that spawns real processes.
 pub struct RealRunner;
 
 /// Combines two output streams, returning whichever is non-empty (or both joined by newline).
@@ -474,26 +369,32 @@ impl RealRunner {
     }
 }
 
+/// Error for a failed child process; streams go through `decode_wsl_output`
+/// so UTF-16LE wsl.exe stderr stays readable for classifiers (no-op on UTF-8).
+fn run_failure(cmd: &str, stderr: &[u8], stdout: &[u8]) -> anyhow::Error {
+    let stderr = decode_wsl_output(stderr);
+    let stdout = decode_wsl_output(stdout);
+    anyhow::anyhow!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout))
+}
+
 impl CommandRunner for RealRunner {
     fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         let output = Self::prepare_command(cmd, args).output()?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 
     fn run_with_stderr(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         let output = Self::prepare_command(cmd, args).output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Ok(combine_outputs(&stdout, &stderr))
         } else {
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 
@@ -502,17 +403,13 @@ impl CommandRunner for RealRunner {
         if output.status.success() {
             Ok(output.stdout)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 }
 
-/// Parses `compose ps --format json` output.
-///
-/// Handles both JSON array (`[{...},{...}]`) and NDJSON (`{...}\n{...}`) formats
-/// because nerdctl may emit JSON array or NDJSON depending on version.
+/// Parses `compose ps --format json`, handling both JSON array and NDJSON
+/// (nerdctl emits either depending on version).
 pub fn parse_compose_ps_json(output: &str) -> Vec<Value> {
     let trimmed = output.trim();
     if trimmed.is_empty() {
@@ -529,10 +426,8 @@ pub fn parse_compose_ps_json(output: &str) -> Vec<Value> {
     }
 }
 
-/// Parses a semver triple from a version string.
-///
-/// Handles formats like `"nerdctl version 2.0.3"`, `"limactl version 1.2.3"`,
-/// or a bare `"2.0.3"`. Returns `(major, minor, patch)` or `None` if unparseable.
+/// Parses a semver triple from `"nerdctl version 2.0.3"`, `"limactl version 1.2.3"`,
+/// or bare `"2.0.3"`. Returns `(major, minor, patch)` or `None`.
 pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
     let version_str = version_output
         .split_whitespace()
@@ -551,15 +446,30 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
     }
 }
 
-/// Returns the path to the compose file for a given project.
-///
-/// Layout: `~/.speedwave/compose/<project>/compose.yml`
+/// Path to a project's compose file: `~/.speedwave/compose/<project>/compose.yml`.
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
     let path = consts::data_dir()
         .join("compose")
         .join(project)
         .join("compose.yml");
     Ok(path.to_string_lossy().to_string())
+}
+
+/// True when a host-side compose file is absent — a `compose_down` on it is a
+/// no-op (deferred no-provider project never rendered one), so skip the engine
+/// call that would fatally error and retry.
+pub(crate) fn compose_down_is_noop(host_compose_file: &str) -> bool {
+    !std::path::Path::new(host_compose_file).exists()
+}
+
+/// Guards a compose service name before splicing into engine argv — only built-in
+/// (runtime-managed, e.g. proxy) services qualify, never plugin/user input.
+pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()> {
+    if consts::BUILT_IN_SERVICES.contains(&service) {
+        Ok(())
+    } else {
+        anyhow::bail!("'{service}' is not a built-in compose service")
+    }
 }
 
 /// Testable variant: resolves compose file path under an explicit data directory.
@@ -644,12 +554,14 @@ pub(crate) fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
     targets
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn run_rm_force(
+/// Runs `nerdctl rm -f [--time=0] <targets...>`. `force_kill` toggles `--time=0`
+/// (hard kill) — WSL/tests pass `false`; Lima passes `true` on the final retry.
+pub(crate) fn run_rm_force(
     runner: &dyn CommandRunner,
     cmd: &str,
     nerdctl_prefix: &[&str],
     targets: &[String],
+    force_kill: bool,
 ) -> anyhow::Result<()> {
     if targets.is_empty() {
         return Ok(());
@@ -657,16 +569,17 @@ fn run_rm_force(
 
     let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
     rm_args.extend_from_slice(&["rm", "-f"]);
+    if force_kill {
+        rm_args.push("--time=0");
+    }
     for target in targets {
         rm_args.push(target.as_str());
     }
     runner.run(cmd, &rm_args).map(|_| ())
 }
 
-/// Returns `true` if the message indicates the container does not exist.
-/// Single source of truth for missing-container error patterns.
-/// Note: `probe_container_exec` runs `nerdctl exec`, so these
-/// messages always refer to containers, not images.
+/// `true` if the message indicates the container does not exist (SSOT for
+/// missing-container patterns; always containers, not images).
 fn is_missing_container_error_msg(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("no such")
@@ -679,45 +592,28 @@ pub(crate) fn is_missing_container_error(err: &anyhow::Error) -> bool {
     is_missing_container_error_msg(&err.to_string())
 }
 
-/// Returns `true` if the error indicates broken container mount namespaces,
-/// typically after macOS sleep/resume invalidating Lima VM overlayfs state.
-///
-/// After VM suspend/resume, virtiofs/9p mounts become stale while containers
-/// remain "running" in containerd state.  runc's `verifyCwd()` security check
-/// (CVE-2024-21626) detects the broken namespace and produces this error.
+/// `true` if the error indicates broken mount namespaces after VM sleep/resume —
+/// runc's `verifyCwd()` (CVE-2024-21626) detects the stale namespace.
 fn is_stale_container_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("mount namespace root") || lower.contains("container breakout detected")
 }
 
-/// Returns `true` if the error indicates the container exists but is not
-/// running (Exited/Created state).  containerd/nerdctl emits this when
-/// `nerdctl exec` is invoked against a container that has stopped after
-/// `compose up` (e.g. its entrypoint exited non-zero, or a previous
-/// interactive session ended and `compose up` left it in place without
-/// restarting it).  Recreate restores the container to a running state.
+/// `true` if the container exists but is not running (Exited/Created) — nerdctl
+/// exec emits this when `compose up` left a stopped container in place. Recreate fixes it.
 fn is_stopped_container_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("cannot exec in a stopped state")
 }
 
-/// POSIX-shell-quotes each argument and joins with spaces — for transports
-/// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
-/// `limactl shell`).
-///
-/// Without this, arguments containing `(`, `)`, `'`, `` ` ``, `$`, newlines,
-/// etc. would break remote bash with `syntax error near unexpected token`.
-/// Using `shlex::try_quote` per arg yields a string that any POSIX shell
-/// parses back into the original argv.
+/// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
+/// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
         .map(|a| match shlex::try_quote(a) {
             Ok(quoted) => quoted.into_owned(),
-            // `shlex::try_quote` only fails on null bytes, which can't
-            // legitimately appear in argv (the OS rejects them at execve).
-            // If one ever slips through anyway, drop it from the quoted
-            // string and log — silently truncating at the null would break
-            // the remote command in subtler ways.
+            // `try_quote` only fails on null bytes (OS rejects them at execve);
+            // if one slips through, strip and log rather than truncate silently.
             Err(_) => {
                 log::error!(
                     "shell_quote_argv: argv token contains a null byte; stripping nulls before quoting"
@@ -732,9 +628,8 @@ pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
         .join(" ")
 }
 
-/// Probes whether `nerdctl exec` works on the given container by running a
-/// trivial command (`true`).  Returns `Ok(())` on success, or the stderr
-/// content as an error.
+/// Probes whether `nerdctl exec` works by running `true` — `Ok(())` on success,
+/// else the stderr content as an error.
 fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Result<()> {
     let mut cmd = runtime.container_exec_piped(container, &["true"])?;
     let output = cmd.output()?;
@@ -746,22 +641,8 @@ fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Res
     }
 }
 
-/// Verifies container exec is functional.  Recovers from three failure modes:
-///
-/// 1. **Stale containers** — mount namespaces broken after macOS sleep/resume.
-/// 2. **Missing containers** — containers lost after containerd restart, VM
-///    recreation, or image loss.
-/// 3. **Stopped containers** — container exists but is in Exited/Created
-///    state; `compose up` left it in place because its config did not change.
-///
-/// In all cases, calls `compose_up_recreate` and re-probes once.
-///
-/// Call this between `compose_up()` and the real `container_exec()` to
-/// transparently recover from container failures.
-/// Logs each container's name + state from `compose_ps`. Called on the recovery
-/// path so a "cannot exec in a stopped state" failure records which containers
-/// were actually up vs stopped/created — the difference between a crashed
-/// entrypoint and a container that never started.
+/// Logs each container's name + state from `compose_ps` on the recovery path,
+/// distinguishing a crashed entrypoint from a container that never started.
 fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
     match runtime.compose_ps(project) {
         Ok(rows) => {
@@ -786,6 +667,7 @@ fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
     }
 }
 
+/// Probes a container until it can run an exec, surfacing health failures.
 pub fn ensure_exec_healthy(
     runtime: &LockedRuntime,
     project: &str,
@@ -843,14 +725,15 @@ pub fn ensure_exec_healthy(
     })
 }
 
-/// Maximum number of `compose_validate` attempts (initial try + retries).
-/// Sleeps occur between attempts: 100 ms before attempt 1, 200 ms before
-/// attempt 2. Total worst-case extra latency: 300 ms.
-const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 3;
+/// Max `compose_validate` attempts; 100/200/400/800/1600 ms backoff (~3.1 s) for
+/// the guest to see the host write through virtiofs (300 ms was too short).
+const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 6;
 
-/// Retries `compose_validate` with exponential backoff (100 ms before retry 1,
-/// 200 ms before retry 2) on errors matching `is_propagation_error` — typical
-/// of virtiofs/9p mount lag. Total `COMPOSE_VALIDATE_MAX_ATTEMPTS` attempts.
+/// Backoff cap so a higher attempt count cannot explode the delay.
+const COMPOSE_VALIDATE_MAX_DELAY_MS: u64 = 1600;
+
+/// Retries `compose_validate` with capped backoff on `is_propagation_error` —
+/// virtiofs/9p lag where the VM still sees the pre-write compose.yml.
 pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> anyhow::Result<()> {
     let mut delay_ms: u64 = 100;
     for attempt in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
@@ -867,7 +750,7 @@ pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> an
                     delay_ms
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                delay_ms *= 2;
+                delay_ms = (delay_ms * 2).min(COMPOSE_VALIDATE_MAX_DELAY_MS);
             }
         }
     }
@@ -880,24 +763,22 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     s.contains(crate::compose::UNDEFINED_NETWORK_ERROR_FRAGMENT)
         || s.contains(crate::compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT)
+        || crate::compose::COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS
+            .iter()
+            .any(|frag| s.contains(frag))
 }
 
-/// Force-remove any containers still registered in the nerdctl name-store for
-/// the given compose project.  Called after `compose down --remove-orphans` to
-/// work around a nerdctl bug where ghost name-store entries survive and cause
-/// "name already used" on the next `compose up`.
-///
-/// `nerdctl_prefix` is the command slice needed to reach nerdctl
-/// (e.g. `&["shell", "speedwave", "--", "sudo", "nerdctl"]` for Lima).
-///
-/// Best-effort: failures are logged but never propagated.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn force_remove_project_containers(
+/// Shared `force_remove_project_containers` (the `rm` closure removes a batch;
+/// Lima wraps with retry). Works around the nerdctl ghost-name-store bug; best-effort.
+pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
     runner: &dyn CommandRunner,
     cmd: &str,
     project: &str,
     nerdctl_prefix: &[&str],
-) {
+    rm: RmFn,
+) where
+    RmFn: Fn(&[String]) -> anyhow::Result<()>,
+{
     let filter = format!("label=com.docker.compose.project={project}");
     let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
     ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
@@ -920,14 +801,14 @@ pub(crate) fn force_remove_project_containers(
             "force_remove_project_containers: removing {} stale container id(s) for {project}",
             id_targets.len()
         );
-        if let Err(e) = run_rm_force(runner, cmd, nerdctl_prefix, &id_targets) {
+        if let Err(e) = rm(&id_targets) {
             log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
         }
     }
 
     for container_name in &name_targets {
         let single_target = vec![container_name.clone()];
-        match run_rm_force(runner, cmd, nerdctl_prefix, &single_target) {
+        match rm(&single_target) {
             Ok(()) => {}
             Err(e) if is_missing_container_error(&e) => {
                 log::debug!(
@@ -943,10 +824,21 @@ pub(crate) fn force_remove_project_containers(
     }
 }
 
-/// Shared `force_remove_project_networks` algorithm parameterised on a run
-/// closure so Lima can wrap each call in `retry_on_eof` while WSL/tests call
-/// the runner directly. Containers must be removed first — nerdctl refuses to
-/// drop a network with attached containers.
+/// WSL/test variant — each `rm -f` runs once (no `--time=0`), no retry.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn force_remove_project_containers(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    force_remove_project_containers_with_run_fn(runner, cmd, project, nerdctl_prefix, |targets| {
+        run_rm_force(runner, cmd, nerdctl_prefix, targets, false)
+    });
+}
+
+/// Shared `force_remove_project_networks` (Lima wraps with retry, WSL/tests call
+/// directly). Containers must be removed first — nerdctl refuses attached networks.
 pub(crate) fn force_remove_project_networks_with_run_fn<F>(
     cmd: &str,
     project: &str,
@@ -1001,6 +893,49 @@ pub(crate) fn force_remove_project_networks(
     });
 }
 
+/// Stops all running project containers in parallel before `compose down` —
+/// nerdctl stops sequentially, so this pays only the slowest container's time.
+pub(crate) fn parallel_stop_project_containers(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    let filter = format!("label=com.docker.compose.project={project}");
+    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
+    ps_args.extend_from_slice(&["ps", "-q", "--filter", &filter]);
+    let ids = match runner.run(cmd, &ps_args) {
+        Ok(output) => cleanup_targets_from_ps_output(&output),
+        Err(e) => {
+            log::debug!("parallel_stop: ps failed for {project} (down will handle): {e}");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    log::info!(
+        "parallel_stop: stopping {} container(s) for {project}",
+        ids.len()
+    );
+    // Chunked fan-out: each stop is its own ssh/wsl session; OpenSSH's
+    // default MaxSessions is 10, so cap below it with polling headroom.
+    const MAX_PARALLEL_STOPS: usize = 8;
+    for chunk in ids.chunks(MAX_PARALLEL_STOPS) {
+        std::thread::scope(|scope| {
+            for id in chunk {
+                scope.spawn(move || {
+                    let mut stop_args: Vec<&str> = nerdctl_prefix.to_vec();
+                    stop_args.extend_from_slice(&["stop", id]);
+                    if let Err(e) = runner.run(cmd, &stop_args) {
+                        log::debug!("parallel_stop: stop {id} failed (down will handle): {e}");
+                    }
+                });
+            }
+        });
+    }
+}
+
 /// Runs `compose down` and then best-effort cleanup of any stale container
 /// and network entries for the project, even if `compose down` itself fails.
 #[cfg(any(target_os = "windows", test))]
@@ -1011,6 +946,7 @@ pub(crate) fn compose_down_and_cleanup(
     compose_down_args: &[&str],
     nerdctl_prefix: &[&str],
 ) -> anyhow::Result<()> {
+    parallel_stop_project_containers(runner, cmd, project, nerdctl_prefix);
     let down_result = runner.run(cmd, compose_down_args);
     if let Err(ref e) = down_result {
         log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
@@ -1043,10 +979,8 @@ pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
 /// Default `TERM` used when the host advertises nothing usable.
 pub(crate) const FALLBACK_TERM: &str = "xterm-256color";
 
-/// Builds the `TERM=<value>` arg for interactive `nerdctl exec`, propagating the
-/// host terminal's real `TERM` so Claude Code can negotiate the keyboard protocol
-/// (e.g. Shift+Enter). Falls back to `xterm-256color` when `TERM` is unset, empty,
-/// or `dumb`.
+/// Builds `TERM=<value>` for interactive `nerdctl exec`, propagating the host's
+/// real `TERM` (keyboard protocol); falls back to `xterm-256color` if unset/dumb.
 pub(crate) fn resolved_term_env() -> String {
     let term = std::env::var("TERM")
         .ok()
@@ -1080,8 +1014,26 @@ impl Drop for TermGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod test_support {
     use super::CommandRunner;
+
+    /// Asserts `remote_cmd` round-trips through `shlex::split` to `expected_argv`.
+    /// No `bash -n` — Git Bash on Windows mangles UTF-8 (claude-code#31295).
+    pub(crate) fn assert_quoting_roundtrips(
+        remote_cmd: &str,
+        expected_argv: &[&str],
+        variant: &str,
+    ) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
+        );
+    }
 
     pub struct MockRunner {
         pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
@@ -1151,9 +1103,11 @@ pub(crate) mod test_support {
         }
     }
 
+    type RecordedCall = (String, Vec<String>, Option<std::time::Duration>);
+
     pub struct SequentialMockRunner {
         pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
-        pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
+        pub calls: std::sync::Mutex<Vec<RecordedCall>>,
     }
 
     impl SequentialMockRunner {
@@ -1207,6 +1161,43 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    /// Encodes text the way `wsl.exe` emits it by default (UTF-16LE, no BOM).
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn run_failure_decodes_utf16_wsl_stderr_for_classifiers() {
+        let stderr = utf16le("There is no distribution with the supplied name.\r\nError code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND");
+        let err = run_failure("wsl.exe", &stderr, b"");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WSL_E_DISTRO_NOT_FOUND"),
+            "classifier token must survive decoding, got: {msg}"
+        );
+        assert!(
+            !msg.contains('\u{0}'),
+            "no NUL interleaving in decoded stderr: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn run_failure_decodes_localized_utf16_stderr() {
+        // Polish WSL: diacritics are invalid UTF-8 when read as bytes.
+        let stderr = utf16le("Odmowa dostępu. Nie można otworzyć pliku konfiguracji.");
+        let err = run_failure("wsl.exe", &stderr, b"");
+        assert!(
+            err.to_string().contains("Odmowa dostępu"),
+            "localized detail must not be dropped: {err}"
+        );
+    }
+
+    #[test]
+    fn run_failure_passes_plain_utf8_through() {
+        let err = run_failure("nerdctl", b"no such container speedwave_x_claude", b"");
+        assert!(err.to_string().contains("no such container"));
+    }
+
     #[test]
     fn test_compose_file_path_format() {
         let dir = tempfile::tempdir().unwrap();
@@ -1215,6 +1206,21 @@ mod tests {
         assert!(path.contains("compose"));
         assert!(path.contains("my-project"));
         assert!(path.ends_with("compose.yml"));
+    }
+
+    #[test]
+    fn compose_down_is_noop_true_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("compose.yml");
+        assert!(compose_down_is_noop(&missing.to_string_lossy()));
+    }
+
+    #[test]
+    fn compose_down_is_noop_false_when_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("compose.yml");
+        std::fs::write(&present, "services: {}").unwrap();
+        assert!(!compose_down_is_noop(&present.to_string_lossy()));
     }
 
     #[test]
@@ -1264,9 +1270,8 @@ mod tests {
 
     #[test]
     fn parse_real_nerdctl_output() {
-        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`.
-        // Since ADR-038 every worker listens on PORT_WORKER (3000); the test only
-        // checks Name and State so the exact port is immaterial.
+        // Real `nerdctl compose ps --format json` output; the test only checks
+        // Name and State, so the exact port is immaterial (ADR-038).
         let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":3000,"PublishedPort":3000,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
         let result = parse_compose_ps_json(input);
         assert_eq!(result.len(), 2);
@@ -1476,6 +1481,10 @@ services:
             "nerdctl network ls --filter label=com.docker.compose.project={} -q",
             project
         );
+        let prestop_ps_key = format!(
+            "nerdctl ps -q --filter label=com.docker.compose.project={}",
+            project
+        );
 
         let runner = RecordingRunner {
             commands: Arc::clone(&commands),
@@ -1487,6 +1496,7 @@ services:
                 (ps_key.clone(), Ok("stale-id\n".to_string())),
                 (rm_key.clone(), Ok(String::new())),
                 (net_ls_key.clone(), Ok(String::new())),
+                (prestop_ps_key.clone(), Ok(String::new())),
             ]),
         };
 
@@ -1508,13 +1518,134 @@ services:
         .unwrap_err();
 
         assert!(err.to_string().contains("compose down failed"));
-        // Ordering invariant: down → ps → rm-containers → network-ls (and network-rm
-        // would follow if ls returned IDs). Containers MUST be removed before networks
-        // — nerdctl refuses network rm with attached containers.
+        // Ordering: down → ps → rm-containers → network-ls. Containers MUST go
+        // before networks — nerdctl refuses network rm with attached containers.
         assert_eq!(
             commands.lock().unwrap().as_slice(),
-            &[down_key, ps_key, rm_key, net_ls_key]
+            &[prestop_ps_key, down_key, ps_key, rm_key, net_ls_key]
         );
+    }
+
+    #[test]
+    fn parallel_stop_stops_every_running_container() {
+        struct StopRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for StopRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.commands.lock().unwrap().push(key.clone());
+                if args.contains(&"ps") {
+                    Ok("id-a\nid-b\nid-c\n".to_string())
+                } else {
+                    Ok(String::new())
+                }
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = StopRunner {
+            commands: Arc::clone(&commands),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-stop", &[]);
+        let recorded = commands.lock().unwrap();
+        // Stops run concurrently — assert as a set, not a sequence.
+        for id in ["id-a", "id-b", "id-c"] {
+            assert!(
+                recorded.contains(&format!("nerdctl stop {id}")),
+                "missing stop for {id}: {recorded:?}"
+            );
+        }
+        assert_eq!(recorded.len(), 4, "ps + 3 stops: {recorded:?}");
+    }
+
+    #[test]
+    fn parallel_stop_runs_stops_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ConcurrencyRunner {
+            current: AtomicUsize,
+            max_seen: AtomicUsize,
+        }
+        impl CommandRunner for ConcurrencyRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if args.contains(&"ps") {
+                    let ids: Vec<String> = (1..=20).map(|i| format!("c{i}")).collect();
+                    return Ok(ids.join("\n"));
+                }
+                let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_seen.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.current.fetch_sub(1, Ordering::SeqCst);
+                Ok(String::new())
+            }
+        }
+        let runner = ConcurrencyRunner {
+            current: AtomicUsize::new(0),
+            max_seen: AtomicUsize::new(0),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-conc", &[]);
+        let max = runner.max_seen.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            max > 1,
+            "stops must overlap in time (sequential would be 1)"
+        );
+        assert!(
+            max <= 8,
+            "fan-out must stay under sshd MaxSessions (10), got {max}"
+        );
+    }
+
+    #[test]
+    fn parallel_stop_tolerates_ps_failure() {
+        struct FailingPsRunner {
+            stops: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for FailingPsRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if args.contains(&"ps") {
+                    anyhow::bail!("ps exploded");
+                }
+                self.stops.lock().unwrap().push(args.join(" "));
+                Ok(String::new())
+            }
+        }
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingPsRunner {
+            stops: Arc::clone(&stops),
+        };
+        parallel_stop_project_containers(&runner, "nerdctl", "par-psfail", &[]);
+        assert!(
+            stops.lock().unwrap().is_empty(),
+            "no stops after ps failure"
+        );
+    }
+
+    #[test]
+    fn parallel_stop_tolerates_individual_stop_failure() {
+        struct PartialFailRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for PartialFailRunner {
+            fn run(&self, _cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = args.join(" ");
+                self.commands.lock().unwrap().push(key.clone());
+                if args.contains(&"ps") {
+                    return Ok("good-id\nbad-id\n".to_string());
+                }
+                if key.contains("bad-id") {
+                    anyhow::bail!("stop failed");
+                }
+                Ok(String::new())
+            }
+        }
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let runner = PartialFailRunner {
+            commands: Arc::clone(&commands),
+        };
+        // Must not panic or propagate — down/rm -f converge failed stops later.
+        parallel_stop_project_containers(&runner, "nerdctl", "par-partial", &[]);
+        let recorded = commands.lock().unwrap();
+        assert!(recorded.contains(&"stop good-id".to_string()));
+        assert!(recorded.contains(&"stop bad-id".to_string()));
     }
 
     #[test]
@@ -1654,10 +1785,9 @@ services:
                 .subsec_nanos()
         );
 
-        // `force_remove_project_containers` reads the compose file through the
-        // production `compose_file_path()` → OnceLock `data_dir()`; the write and
-        // the read must agree on the same dir, so we deliberately resolve it. The
-        // RAII guard below removes the uniquely-named project subdir afterward.
+        // Write and read must agree on the same OnceLock `data_dir()`; resolve it
+        // deliberately (RAII guard below cleans the uniquely-named subdir).
+
         // SSOT-allow: production read path is keyed on the OnceLock data_dir().
         let compose_dir = crate::consts::data_dir().join("compose").join(&project);
         std::fs::create_dir_all(&compose_dir).unwrap();
@@ -1715,9 +1845,74 @@ services:
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Stale container detection & recovery tests
-    // -----------------------------------------------------------------------
+    #[test]
+    fn run_rm_force_appends_time_zero_only_when_force_kill() {
+        let runner = test_support::MockRunner::new()
+            .with_response("nerdctl rm -f a b", "")
+            .with_response("nerdctl rm -f --time=0 a b", "");
+        let targets = vec!["a".to_string(), "b".to_string()];
+        // Graceful path — no --time=0.
+        run_rm_force(&runner, "nerdctl", &[], &targets, false).unwrap();
+        // Force-kill path — emits --time=0.
+        run_rm_force(&runner, "nerdctl", &[], &targets, true).unwrap();
+    }
+
+    #[test]
+    fn run_rm_force_empty_targets_is_noop() {
+        // No targets → no command issued, returns Ok. MockRunner would error
+        // on any unexpected command, so reaching Ok proves nothing ran.
+        let runner = test_support::MockRunner::new();
+        run_rm_force(&runner, "nerdctl", &[], &[], true).unwrap();
+    }
+
+    #[test]
+    fn force_remove_containers_run_fn_receives_id_batch_then_each_name() {
+        // The shared algorithm must hand the rm closure: first the id batch
+        // (all ids at once), then one single-element batch per configured name.
+        let project = format!(
+            "run-fn-batches-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
+        // SSOT-allow: production read path is keyed on the OnceLock data_dir().
+        let compose_dir = crate::consts::data_dir().join("compose").join(&project);
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_dir.clone());
+        std::fs::write(
+            compose_dir.join("compose.yml"),
+            "services:\n  claude:\n    container_name: speedwave_tmp_claude\n",
+        )
+        .unwrap();
+
+        let ps_key =
+            format!("nerdctl ps -a --filter label=com.docker.compose.project={project} -q");
+        let runner = test_support::MockRunner::new().with_response(&ps_key, "id-1\nid-2\n");
+
+        let batches: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches);
+        force_remove_project_containers_with_run_fn(&runner, "nerdctl", &project, &[], |targets| {
+            batches_clone.lock().unwrap().push(targets.to_vec());
+            Ok(())
+        });
+
+        assert_eq!(
+            batches.lock().unwrap().as_slice(),
+            &[
+                vec!["id-1".to_string(), "id-2".to_string()],
+                vec!["speedwave_tmp_claude".to_string()],
+            ]
+        );
+    }
+
+    // Stale container detection & recovery tests.
 
     #[test]
     fn test_is_stale_container_error_matches_mount_namespace() {
@@ -1770,15 +1965,11 @@ services:
         assert!(!is_stopped_container_error(""));
     }
 
-    // -----------------------------------------------------------------------
-    // ensure_exec_healthy tests — driven by `MockRuntimeBuilder`. Each probe
-    // call pops one entry from the scripted exec-piped failure queue; an
-    // empty queue means the default `Command::new("true")` (success).
-    // -----------------------------------------------------------------------
+    // ensure_exec_healthy tests via `MockRuntimeBuilder`: each probe pops one
+    // scripted exec-piped failure; empty queue → default `true` (success).
 
-    /// Stderr text the runtime classifies as a stale-mount error via
-    /// `is_stale_container_error`. Single source for the test fixture so a
-    /// classifier change reaches every `ensure_exec_healthy` test in one edit.
+    /// Stderr classified as stale-mount by `is_stale_container_error`; single
+    /// fixture so a classifier change reaches every test in one edit.
     const STALE_MOUNT_STDERR: &str = "current working directory is outside of container mount namespace root -- possible container breakout detected";
 
     #[test]
@@ -2001,6 +2192,18 @@ services:
     }
 
     #[test]
+    fn noop_runtime_required_methods_are_callable() {
+        // These four are REQUIRED trait methods (no default body); pins that every
+        // impl supplies them, so production can never silently inherit a no-op.
+        let rt = NoopRuntime;
+        assert!(rt.compose_validate("proj").is_ok());
+        assert!(rt.system_prune().is_ok());
+        assert!(rt.restart_container_engine().is_ok());
+        let root = std::path::Path::new("/some/build/root");
+        assert_eq!(rt.prepare_build_context(root).unwrap(), root.to_path_buf());
+    }
+
+    #[test]
     fn with_ensure_ready_lock_returns_closure_value() {
         let result = with_ensure_ready_lock(|| 42);
         assert_eq!(result, 42);
@@ -2047,11 +2250,8 @@ services:
         );
     }
 
-    /// `shlex::try_quote` errors only on null bytes; the fallback arm in
-    /// `shell_quote_argv` strips them and re-quotes. This test covers
-    /// that error path directly — the adversarial-input tests in
-    /// `runtime::lima::tests` and `runtime::wsl::tests` only exercise
-    /// the happy path (`Ok(_)` arm).
+    /// Covers `shell_quote_argv`'s null-byte fallback arm directly (the lima/wsl
+    /// adversarial tests only exercise the `Ok(_)` happy path).
     #[test]
     fn shell_quote_argv_strips_null_bytes() {
         let result = shell_quote_argv(&["abc\0def", "normal"]);
@@ -2067,9 +2267,7 @@ services:
             !result.contains('\0'),
             "result must not contain null bytes, got: {result:?}"
         );
-        // The cleaned argv must still parse as a valid shell argv via
-        // `shlex::split` — i.e. the fallback didn't produce broken
-        // quoting.
+        // Cleaned argv must still parse via `shlex::split` (fallback quoting valid).
         let parsed = shlex::split(&result).expect("fallback output must be parseable");
         assert_eq!(
             parsed,
@@ -2078,12 +2276,8 @@ services:
         );
     }
 
-    /// End-to-end `shell_quote_argv` round-trip on the same adversarial
-    /// inputs the lima/wsl tests use, but at the helper boundary so a
-    /// regression in the helper alone (without touching transports) is
-    /// still caught. Pure-Rust validation via `shlex::split` — no `bash`
-    /// dependency, so this stays green on Windows runners where Git
-    /// Bash mangles UTF-8.
+    /// `shell_quote_argv` round-trip on adversarial inputs at the helper boundary,
+    /// validated via `shlex::split` (no `bash` — Windows Git Bash mangles UTF-8).
     #[test]
     fn shell_quote_argv_roundtrips_adversarial_inputs() {
         let cases: &[&[&str]] = &[
@@ -2108,9 +2302,7 @@ services:
         }
     }
 
-    // -----------------------------------------------------------------------
-    // compose_validate_with_retry tests
-    // -----------------------------------------------------------------------
+    // compose_validate_with_retry tests.
 
     // `push_validate_result` is FIFO: first push -> first popped.
 
@@ -2146,14 +2338,41 @@ services:
 
     #[test]
     fn compose_validate_with_retry_bails_after_max_retries() {
-        let (rt, handles) = MockRuntimeBuilder::new()
-            .push_validate_result(Err("undefined network a".to_string()))
-            .push_validate_result(Err("undefined network b".to_string()))
-            .push_validate_result(Err("undefined network c".to_string()))
-            .build();
+        let mut b = MockRuntimeBuilder::new();
+        for i in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
+            b = b.push_validate_result(Err(format!("undefined network n{i}")));
+        }
+        let (rt, handles) = b.build();
         let err = compose_validate_with_retry(&rt, "proj").unwrap_err();
-        assert!(err.to_string().contains("undefined network c"));
-        assert_eq!(handles.validate_calls.lock().unwrap().len(), 3);
+        assert!(err
+            .to_string()
+            .contains(&format!("n{}", COMPOSE_VALIDATE_MAX_ATTEMPTS - 1)));
+        assert_eq!(
+            handles.validate_calls.lock().unwrap().len() as u32,
+            COMPOSE_VALIDATE_MAX_ATTEMPTS
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane
+    fn compose_validate_retry_window_is_long_enough_for_virtiofs_lag() {
+        // Regression: 3 attempts / 300 ms total was too short — the guest saw a
+        // stale compose.yml past the window. Pin the wider window + capped delay.
+        assert!(
+            COMPOSE_VALIDATE_MAX_ATTEMPTS >= 6,
+            "retry window shrank below the virtiofs-lag fix"
+        );
+        let mut delay_ms: u64 = 100;
+        let mut total: u64 = 0;
+        for _ in 0..COMPOSE_VALIDATE_MAX_ATTEMPTS {
+            total += delay_ms;
+            delay_ms = (delay_ms * 2).min(COMPOSE_VALIDATE_MAX_DELAY_MS);
+        }
+        assert!(total >= 3000, "total backoff window {total} ms < 3 s");
+        assert_eq!(
+            delay_ms, COMPOSE_VALIDATE_MAX_DELAY_MS,
+            "delay must hit cap"
+        );
     }
 
     #[test]
@@ -2171,11 +2390,59 @@ services:
     }
 
     #[test]
+    fn is_propagation_error_matches_schema_validation() {
+        // A truncated virtiofs read of the networks section (last in the file)
+        // surfaces as a compose-go schema error, not "undefined network".
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: networks.x_network.driver must be a string"
+        )));
+        // YAML parse symptom of a mid-line cut.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 12: could not find expected ':'"
+        )));
+        // libyaml emits the "did not find expected" variant when the cut lands
+        // at a different token position — the third schema/parse fragment.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 8: did not find expected key"
+        )));
+        // A cut at end-of-document (file truncated mid-write) — yaml-go variant.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "failed to parse compose.yml: yaml: line 365: found unexpected end of stream"
+        )));
+        // A torn `cpus:` value under deploy.resources.limits surfaces as the
+        // compose-go schema type error for that field (real-world: mcp-office).
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.mcp-office.deploy.resources.limits.cpus must be a number or string"
+        )));
+        // Same for a torn `memory:` limit value.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.mcp-office.deploy.resources.limits.memory must be a string"
+        )));
+    }
+
+    #[test]
     fn is_propagation_error_rejects_unrelated() {
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "connection refused"
         )));
         assert!(!is_propagation_error(&anyhow::anyhow!("EOF")));
+        // A bare "must be a string" on another field must NOT be retryable —
+        // the fragment is scoped to the network-driver torn-write.
+        assert!(!is_propagation_error(&anyhow::anyhow!(
+            "validating compose.yml: services.claude.image must be a string"
+        )));
+    }
+
+    #[test]
+    fn is_propagation_error_yaml_scanner_phrases_are_intentionally_retried() {
+        // libyaml SCANNER phrases (`could not/did not find expected`) signal a torn
+        // virtiofs page; worst case for a real malformed manifest is a bounded retry.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 5: could not find expected ':'"
+        )));
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "yaml: line 9: did not find expected node content"
+        )));
     }
 
     #[test]
@@ -2190,9 +2457,8 @@ services:
         )));
     }
 
-    /// Env mutation here is gated `#[serial(env_term)]` so no other test
-    /// reads/writes `TERM` concurrently. The `TermGuard` restores the prior
-    /// value on drop, even if `f` panics.
+    /// Gated `#[serial(env_term)]`; `TermGuard` restores the prior `TERM` on drop,
+    /// even if `f` panics.
     fn with_term<F: FnOnce()>(value: Option<&str>, f: F) {
         let _guard = TermGuard::set(value.unwrap_or(""));
         if value.is_none() {
@@ -2269,5 +2535,23 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn compose_up_service(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn system_prune(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn prepare_build_context(
+        &self,
+        build_root: &std::path::Path,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        Ok(build_root.to_path_buf())
     }
 }

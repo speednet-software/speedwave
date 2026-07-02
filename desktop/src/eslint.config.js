@@ -27,6 +27,13 @@ module.exports = tseslint.config(
       "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
 
+      // Webview console.* is invisible in packaged builds (no console forwarding).
+      // All diagnostics must go through LoggerService (or the plugin-log warn/error
+      // primitive it wraps) so they reach the Rust log pipeline + diagnostics ZIP.
+      // The only allowed console use is the GlobalErrorHandler fallback bridge,
+      // overridden below.
+      "no-console": "error",
+
       // JSDoc — enforce on public APIs
       "jsdoc/require-jsdoc": [
         "error",
@@ -61,6 +68,21 @@ module.exports = tseslint.config(
       "jsdoc/require-returns": "off",
       "jsdoc/require-param": "error",
     },
+  },
+
+  // The GlobalErrorHandler is the single allowed console bridge: it forwards to
+  // the Rust log pipeline AND falls back to console.error when running outside
+  // Tauri (tests / ng serve). It must stay the only exception to no-console.
+  {
+    files: ["**/error-handler.ts"],
+    rules: { "no-console": "off" },
+  },
+
+  // Spec files legitimately spy on `console` (vi.spyOn) — exempt them so the
+  // no-console rule only guards production app code.
+  {
+    files: ["**/*.spec.ts"],
+    rules: { "no-console": "off" },
   },
 
   // Angular template rules — HTML files only
