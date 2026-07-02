@@ -617,6 +617,21 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     None
 }
 
+/// True when both files exist and are byte-identical (size fast-path first).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 /// Copies the CLI binary from `source` into `target_dir` and sets executable permissions on Unix.
 pub fn copy_cli_binary(
     source: &std::path::Path,
@@ -922,10 +937,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             );
         }
 
-        // Kill any stale process holding ~/.speedwave/bin/speedwave.exe before overwrite (ADR-048).
-        run_pre_link_sweep();
-
-        copy_cli_binary(cli_source, &cli_dir)?;
+        // Already-current CLI: skip the sweep AND the copy — the runtime sweep
+        // would kill a user's live `speedwave` session for nothing (ADR-048).
+        let target = cli_dir.join("speedwave.exe");
+        if files_identical(cli_source, &target) {
+            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+        } else {
+            // Kill any stale process holding the exe before overwrite (ADR-048).
+            run_pre_link_sweep();
+            copy_cli_binary(cli_source, &cli_dir)?;
+        }
 
         let script = format!(
             r#"
@@ -2472,6 +2493,36 @@ mod tests {
 
         let content = std::fs::read_to_string(target_dir.join(binary_name)).expect("read");
         assert_eq!(content, "new-version", "should overwrite existing binary");
+    }
+
+    // ── files_identical (sweep-skip predicate) ──────────────────────────
+
+    #[test]
+    fn files_identical_true_for_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        let b = dir.path().join("b.exe");
+        std::fs::write(&a, b"same-bytes").unwrap();
+        std::fs::write(&b, b"same-bytes").unwrap();
+        assert!(files_identical(&a, &b));
+    }
+
+    #[test]
+    fn files_identical_false_on_diff_missing_or_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        std::fs::write(&a, b"one").unwrap();
+        let b = dir.path().join("b.exe");
+        std::fs::write(&b, b"two").unwrap();
+        assert!(!files_identical(&a, &b), "different bytes");
+        assert!(
+            !files_identical(&a, &dir.path().join("missing.exe")),
+            "missing target"
+        );
+        assert!(!files_identical(&a, dir.path()), "dir is not a file");
+        let c = dir.path().join("c.exe");
+        std::fs::write(&c, b"onE").unwrap();
+        assert!(!files_identical(&a, &c), "same length, different bytes");
     }
 
     // ── link_cli guard tests ────────────────────────────────────────────
