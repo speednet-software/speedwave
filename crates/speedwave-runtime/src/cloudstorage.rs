@@ -127,10 +127,43 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
     None
 }
 
-/// Detects whether `path` lives under a known cloud-storage sync root. Not yet
-/// implemented on Windows — always `None`.
+/// Windows: matches `path` against the `%OneDrive%` sync root (covers KFM —
+/// redirected Desktop/Documents live under it) plus Dropbox/Google Drive
+/// well-known component names.
 #[cfg(target_os = "windows")]
-pub fn detect_cloudstorage_provider(_path: &Path) -> Option<CloudStorageProvider> {
+pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider> {
+    detect_cloudstorage_provider_windows(path, std::env::var_os("OneDrive").map(Into::into))
+}
+
+/// Testable core of the Windows detector; `onedrive_root` = `%OneDrive%`.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn detect_cloudstorage_provider_windows(
+    path: &Path,
+    onedrive_root: Option<std::path::PathBuf>,
+) -> Option<CloudStorageProvider> {
+    fn norm(s: &std::path::Path) -> String {
+        s.to_string_lossy().replace('/', "\\").to_lowercase()
+    }
+    let p = norm(path);
+    if let Some(root) = onedrive_root {
+        let r = norm(&root);
+        if !r.is_empty() && (p == r || p.starts_with(&format!("{r}\\"))) {
+            return Some(CloudStorageProvider::OneDrive);
+        }
+    }
+    let component = |name: &str| {
+        p.split('\\')
+            .any(|c| c == name || c.starts_with(&format!("{name} -")))
+    };
+    if component("onedrive") {
+        return Some(CloudStorageProvider::OneDrive);
+    }
+    if component("dropbox") {
+        return Some(CloudStorageProvider::Dropbox);
+    }
+    if component("google drive") || component("googledrive") {
+        return Some(CloudStorageProvider::GoogleDrive);
+    }
     None
 }
 
@@ -169,7 +202,17 @@ pub fn check_cloudstorage_readability(path: &Path) -> Result<(), CloudStoragePro
 
     match check_path_readable_with_timeout(path) {
         Err(e) if is_permission_error(&e) => Err(provider),
-        _ => Ok(()),
+        _ => {
+            // Readable, but still a synced dir: placeholder hydration and sync
+            // churn can break container bind mounts — leave a breadcrumb.
+            log::warn!(
+                "project at {} is inside {} — cloud sync can stall or corrupt \
+                 container workspace mounts; prefer a local directory",
+                path.display(),
+                provider.display_name()
+            );
+            Ok(())
+        }
     }
 }
 
@@ -396,5 +439,56 @@ mod tests {
         let path = Path::new("/tmp");
         let result = check_project_readable_or_err(path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn windows_detector_matches_onedrive_env_root_and_kfm_children() {
+        let root = Some(std::path::PathBuf::from(
+            r"C:\Users\User\OneDrive - Speednet",
+        ));
+        // KFM: redirected Desktop lives under the OneDrive root.
+        for p in [
+            r"C:\Users\User\OneDrive - Speednet",
+            r"C:\Users\User\OneDrive - Speednet\Desktop\proj",
+            r"C:/Users/User/OneDrive - Speednet/Documents/x",
+        ] {
+            assert_eq!(
+                detect_cloudstorage_provider_windows(Path::new(p), root.clone()),
+                Some(CloudStorageProvider::OneDrive),
+                "path: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_detector_component_names_without_env() {
+        assert_eq!(
+            detect_cloudstorage_provider_windows(Path::new(r"D:\OneDrive\proj"), None),
+            Some(CloudStorageProvider::OneDrive)
+        );
+        assert_eq!(
+            detect_cloudstorage_provider_windows(Path::new(r"C:\Users\U\Dropbox\proj"), None),
+            Some(CloudStorageProvider::Dropbox)
+        );
+        assert_eq!(
+            detect_cloudstorage_provider_windows(Path::new(r"C:\Users\U\Google Drive\x"), None),
+            Some(CloudStorageProvider::GoogleDrive)
+        );
+    }
+
+    #[test]
+    fn windows_detector_negatives() {
+        // Substring inside a component must NOT match; unrelated paths pass.
+        for p in [
+            r"C:\Users\U\Projects\onedrive-clone-app",
+            r"C:\Users\U\Downloads\proj",
+            r"C:\dropboxes\x",
+        ] {
+            assert_eq!(
+                detect_cloudstorage_provider_windows(Path::new(p), None),
+                None,
+                "path: {p}"
+            );
+        }
     }
 }
