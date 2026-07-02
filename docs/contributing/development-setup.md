@@ -74,6 +74,23 @@ choco install -y git make rustup.install nodejs-lts cmake llvm `
 
 `make` from Chocolatey is GNU Make 4.4 — required because **GnuWin32 make 3.81** (sometimes pre-installed elsewhere) mishandles `$(VAR)` expansion in recipes and `\` line continuations.
 
+### Non-ASCII Windows username (git over SSH)
+
+If your Windows profile directory contains non-ASCII characters (for example `C:\Users\ŁukaszSzczepański`), `git clone` over SSH fails in Git Bash with a mangled path:
+
+```text
+Could not create directory '/c/Users/\243ukaszSzczepa\361ski/.ssh' (No such file or directory).
+Failed to add the host to the list of known hosts.
+```
+
+Git for Windows bundles an MSYS build of OpenSSH that resolves `HOME` through the ANSI code page, so accented characters turn into unmapped bytes. Switch git to the Unicode-aware OpenSSH that ships with Windows (one-time):
+
+```bash
+git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"
+```
+
+Plain `ssh` in the terminal keeps using the MSYS build; prefer `C:\Windows\System32\OpenSSH\ssh.exe` there too, or set `HOME` to an ASCII-only path in `~/.bashrc` before using ssh directly.
+
 ### `.cargo/config.toml`
 
 Create this file in the repo root `.cargo/` directory (gitignored — the path is in `.gitignore`) to pin the MSVC linker by absolute path. Without it, cargo on Git Bash finds `/usr/bin/link` (Cygwin's hardlink tool) before MSVC's `link.exe` and the build fails with `LNK1146` / `LNK1170` / `LNK1206`-class errors. Replace `<your-version>` with the MSVC version installed by VS Build Tools (find under `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\`):
