@@ -199,12 +199,13 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
 fn collect_host_bridges<'a>(
     entries: impl IntoIterator<Item = (&'a plugin::PluginManifest, Option<String>)>,
 ) -> HostBridgesInfo {
-    HostBridgesInfo {
-        bridges: entries
-            .into_iter()
-            .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
-            .collect(),
-    }
+    let mut bridges: Vec<HostBridgeRegistration> = entries
+        .into_iter()
+        .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
+        .collect();
+    // Deterministic order: renders must hash identically across runs/sources.
+    bridges.sort_by(|a, b| a.plugin_slug.cmp(&b.plugin_slug));
+    HostBridgesInfo { bridges }
 }
 
 /// Pure mapping from a manifest (+ pre-validated token) to a [`HostBridgeRegistration`].

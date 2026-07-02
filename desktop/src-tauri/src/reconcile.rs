@@ -57,9 +57,10 @@ pub(crate) fn current_bridges_info() -> HostBridgesInfo {
                 .collect()
         })
         .unwrap_or_default();
-    HostBridgesInfo {
-        bridges: registrations,
-    }
+    let mut bridges: Vec<HostBridgeRegistration> = registrations;
+    // Deterministic order (HashMap iteration): renders must hash identically.
+    bridges.sort_by(|a, b| a.plugin_slug.cmp(&b.plugin_slug));
+    HostBridgesInfo { bridges }
 }
 
 /// Shared handle for the mcp-os process.
