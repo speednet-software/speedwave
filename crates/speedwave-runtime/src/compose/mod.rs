@@ -11444,9 +11444,10 @@ services:
             &[vp],
         )
         .unwrap();
+        // No `{yaml}`: the bridges list carries an auth token (cleartext-logging).
         assert!(
             !yaml.contains("SOMETHING_URL"),
-            "plugin without host_bridge manifest must NOT receive bridge env, got:\n{yaml}"
+            "plugin without host_bridge manifest must NOT receive bridge env"
         );
     }
 
@@ -11488,9 +11489,10 @@ services:
             &[vp],
         )
         .unwrap();
+        // No `{yaml}`: the bridges list carries an auth token (cleartext-logging).
         assert!(
             !yaml.contains("EXAMPLE_PLUGIN_BRIDGE_URL"),
-            "example-plugin declares host_bridge but no registration matches its slug, got:\n{yaml}"
+            "example-plugin declares host_bridge but no registration matches its slug"
         );
     }
 
