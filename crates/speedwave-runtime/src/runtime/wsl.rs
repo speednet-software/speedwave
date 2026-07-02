@@ -110,18 +110,27 @@ impl WslRuntime {
         let nested = crate::engine_path::vm_path_join(&path, ".claude/ide");
         let (uid, gid) = consts::container_uid_gid();
         let uidgid = format!("{uid}:{gid}");
-        let steps: [(&str, Vec<&str>); 3] = [
-            ("mkdir", vec!["mkdir", "-p", &nested]),
-            ("chown", vec!["chown", "-R", &uidgid, &path]),
-            ("chmod", vec!["chmod", "-R", "u+rwX", &path]),
-        ];
-        for (name, args) in &steps {
+        let run_root = |name: &str, args: &[&str]| {
             let mut argv = vec!["-d", self.distro(), "-u", "root", "--"];
             argv.extend_from_slice(args);
-            if let Err(e) = self.runner.run("wsl.exe", &argv) {
+            let res = self.runner.run("wsl.exe", &argv);
+            if let Err(e) = &res {
                 log::warn!("claude-home {name} failed for '{project}' (non-fatal): {e}");
             }
+            res
+        };
+        let _ = run_root("mkdir", &["mkdir", "-p", &nested]);
+        // Fast path: only root ever creates at the mount targets (home root +
+        // deepest nested target), so correct owners there mean no -R needed.
+        let owned = run_root("stat", &["stat", "-c", "%u:%g", &path, &nested]).is_ok_and(|out| {
+            let lines: Vec<&str> = out.lines().map(str::trim).collect();
+            lines.len() == 2 && lines.iter().all(|l| *l == uidgid)
+        });
+        if owned {
+            return;
         }
+        let _ = run_root("chown", &["chown", "-R", &uidgid, &path]);
+        let _ = run_root("chmod", &["chmod", "-R", "u+rwX", &path]);
     }
 
     /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
@@ -2590,10 +2599,15 @@ mod tests {
             crate::engine_path::to_engine_path(&host).unwrap()
         }
 
-        fn chown_tail(distro: &str, project: &str) -> [Vec<String>; 3] {
-            let home = engine_home(project);
+        fn uidgid() -> String {
             let (uid, gid) = consts::container_uid_gid();
-            let uidgid = format!("{uid}:{gid}");
+            format!("{uid}:{gid}")
+        }
+
+        /// Expected argv per step: mkdir, stat probe, chown -R, chmod -R.
+        fn chown_steps(distro: &str, project: &str) -> [Vec<String>; 4] {
+            let home = engine_home(project);
+            let nested = format!("{home}/.claude/ide");
             let pre = |rest: Vec<&str>| {
                 let mut v = vec![
                     "-d".into(),
@@ -2606,51 +2620,112 @@ mod tests {
                 v
             };
             [
-                pre(vec!["mkdir", "-p", &format!("{home}/.claude/ide")]),
-                pre(vec!["chown", "-R", &uidgid, &home]),
+                pre(vec!["mkdir", "-p", &nested]),
+                pre(vec!["stat", "-c", "%u:%g", &home, &nested]),
+                pre(vec!["chown", "-R", &uidgid(), &home]),
                 pre(vec!["chmod", "-R", "u+rwX", &home]),
             ]
         }
 
-        fn ok_responses(n: usize) -> Vec<anyhow::Result<String>> {
-            (0..n).map(|_| Ok("".into())).collect()
+        /// Responses for one not-yet-owned chown pass (probe says root-owned).
+        fn unowned_pass() -> Vec<anyhow::Result<String>> {
+            vec![
+                Ok("".into()),
+                Ok("0:0\n0:0".into()),
+                Ok("".into()),
+                Ok("".into()),
+            ]
+        }
+
+        /// Responses for an already-owned pass (probe short-circuits).
+        fn owned_pass() -> Vec<anyhow::Result<String>> {
+            vec![Ok("".into()), Ok(format!("{u}\n{u}", u = uidgid()))]
         }
 
         #[test]
         fn compose_up_chowns_claude_home_before_and_after_up() {
-            // Chown BEFORE up (entrypoint must not race it) and again after
-            // (nerdctl may still root-create dirs during up). 3 + up + 3.
-            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
+            // Full pass BEFORE up (entrypoint must not race it), fast pass after.
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into())); // up
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
-            assert_eq!(calls.len(), 7, "expected mkdir/chown/chmod + up + repeat");
-            let expected = chown_tail("Speedwave-test", "acme");
-            for (i, exp) in expected.iter().enumerate() {
+            assert_eq!(calls.len(), 7, "4 pre-up + up + 2 post-up (fast path)");
+            let steps = chown_steps("Speedwave-test", "acme");
+            for (i, exp) in steps.iter().enumerate() {
                 assert_eq!(&calls[i].1, exp, "pre-up step {i} argv mismatch");
-                assert_eq!(&calls[i + 4].1, exp, "post-up step {i} argv mismatch");
             }
-            assert!(calls[3].1.contains(&"up".to_string()));
+            assert!(calls[4].1.contains(&"up".to_string()));
+            assert_eq!(&calls[5].1, &steps[0], "post-up mkdir");
+            assert_eq!(&calls[6].1, &steps[1], "post-up stat probe");
+        }
+
+        #[test]
+        fn chown_fast_path_skips_recursive_pass_when_already_owned() {
+            let mut responses = owned_pass();
+            responses.push(Ok("".into())); // up
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                5,
+                "no -R walk when both probes report the container uid"
+            );
+            assert!(!calls.iter().any(|c| c.1.contains(&"chown".to_string())));
+        }
+
+        #[test]
+        fn chown_full_pass_when_probe_fails() {
+            // stat error (e.g. path vanished) must fall back to the full pass.
+            let responses = vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!("stat: cannot stat")),
+                Ok("".into()),
+                Ok("".into()),
+                Ok("".into()), // up
+                Ok("".into()),
+                Ok(format!("{u}\n{u}", u = uidgid())),
+            ];
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert!(calls.iter().any(|c| c.1.contains(&"chown".to_string())));
         }
 
         #[test]
         fn compose_up_recreate_chowns_claude_home_before_and_after_up() {
-            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into()));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up_recreate("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
             assert_eq!(calls.len(), 7);
-            assert!(calls[3].1.contains(&"--force-recreate".to_string()));
-            assert_eq!(calls[1].1, chown_tail("Speedwave-test", "acme")[1]);
+            assert!(calls[4].1.contains(&"--force-recreate".to_string()));
+            assert_eq!(calls[2].1, chown_steps("Speedwave-test", "acme")[2]);
         }
 
         #[test]
         fn compose_up_service_claude_chowns_claude_home() {
-            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into()));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
@@ -2664,10 +2739,12 @@ mod tests {
             // provision::ensure_claude_home_owner fail-open contract).
             let mock = SequentialMockRunner::new(vec![
                 Err(anyhow::anyhow!("mkdir: I/O error")),
+                Err(anyhow::anyhow!("stat: I/O error")),
                 Err(anyhow::anyhow!("chown: I/O error")),
                 Err(anyhow::anyhow!("chmod: I/O error")),
                 Ok("".into()),
                 Err(anyhow::anyhow!("mkdir: I/O error")),
+                Err(anyhow::anyhow!("stat: I/O error")),
                 Err(anyhow::anyhow!("chown: I/O error")),
                 Err(anyhow::anyhow!("chmod: I/O error")),
             ]);
@@ -2678,15 +2755,10 @@ mod tests {
         #[test]
         fn compose_up_failure_still_runs_post_up_chown() {
             // A partial up may already have root-created dirs — hand them back.
-            let mock = Arc::new(SequentialMockRunner::new(vec![
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-                Err(anyhow::anyhow!("compose up failed")),
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-            ]));
+            let mut responses = unowned_pass();
+            responses.push(Err(anyhow::anyhow!("compose up failed")));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
