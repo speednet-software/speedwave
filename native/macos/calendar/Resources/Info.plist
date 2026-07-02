@@ -9,9 +9,9 @@
 	<key>CFBundleName</key>
 	<string>calendar-cli</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.13.3</string> <!-- x-release-please-version -->
+	<string>0.14.0</string> <!-- x-release-please-version -->
 	<key>CFBundleVersion</key>
-	<string>0.13.3</string> <!-- x-release-please-version -->
+	<string>0.14.0</string> <!-- x-release-please-version -->
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Speedwave needs full access to Calendar to view, create, and modify events via Claude Code.</string>
 	<key>NSCalendarsUsageDescription</key>
