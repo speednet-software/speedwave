@@ -33,7 +33,8 @@ pub(crate) fn apply_llm_config_in(
             // Local custom headers are unsupported by the proxy — stay on direct path.
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
-                return apply_llm_config_proxy(yaml, llm);
+                let caller_token = super::proxy::ensure_caller_token_in(data_dir, project)?;
+                return apply_llm_config_proxy(yaml, llm, &caller_token);
             }
             log::info!("llm: custom headers configured — using the direct (non-proxy) path");
         }
@@ -52,8 +53,13 @@ pub(crate) fn apply_llm_config_in(
 }
 
 /// ADR-073 proxy path: every session talks to the proxy service; the
-/// provider kind picks the route and model prefix.
-fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+/// provider kind picks the route and model prefix. `caller_token` authenticates
+/// `claude` to the proxy so co-resident workers can't relay through it.
+fn apply_llm_config_proxy(
+    yaml: &str,
+    llm: &LlmConfig,
+    caller_token: &str,
+) -> anyhow::Result<String> {
     let entry = llm
         .active_provider()
         .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
@@ -61,6 +67,12 @@ fn apply_llm_config_proxy(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String>
     let model = llm.effective_active_model().unwrap_or_default();
 
     let mut extra_env = std::collections::HashMap::new();
+    // Caller secret to the proxy's /v1 auth middleware; the proxy strips it
+    // (not in its outbound allow-list) so it never reaches the upstream.
+    extra_env.insert(
+        "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+        format!("{}: {caller_token}", super::proxy::PROXY_CALLER_AUTH_HEADER),
+    );
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
@@ -339,6 +351,7 @@ pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
         "ANTHROPIC_CUSTOM_MODEL_OPTION",
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
         "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     ]
 }
@@ -419,8 +432,12 @@ mod tests {
             proxy_enabled: Some(true),
             ..Default::default()
         };
-        let rendered =
-            apply_llm_config_proxy("services:\n  claude:\n    environment: []\n", &cfg).unwrap();
+        let rendered = apply_llm_config_proxy(
+            "services:\n  claude:\n    environment: []\n",
+            &cfg,
+            "test-caller-token",
+        )
+        .unwrap();
         let unset: std::collections::HashSet<&str> =
             anthropic_login_unset_keys().iter().copied().collect();
         for line in rendered.lines() {

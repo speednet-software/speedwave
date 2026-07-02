@@ -323,19 +323,47 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let stream = ReceiverStream::new(rx);
     let mut builder = Response::builder().status(status);
-    // Forward upstream headers (content-type, etc.) to the client.
+    // Forward upstream headers (content-type, etc.), minus hop-by-hop ones —
+    // axum re-frames the body, so relaying them corrupts the client transfer.
     for (name, value) in &response_headers {
-        builder = builder.header(name, value);
+        if !is_hop_by_hop(name.as_str()) {
+            builder = builder.header(name, value);
+        }
     }
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// Connection-specific headers that must not be relayed end-to-end (RFC 7230 §6.1).
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn hop_by_hop_headers_are_filtered_case_insensitively() {
+        assert!(is_hop_by_hop("connection"));
+        assert!(is_hop_by_hop("Transfer-Encoding"));
+        assert!(is_hop_by_hop("Keep-Alive"));
+        assert!(is_hop_by_hop("UPGRADE"));
+        assert!(!is_hop_by_hop("content-type"));
+        assert!(!is_hop_by_hop("anthropic-version"));
+    }
 
     #[test]
     fn upstream_host_strips_scheme_and_path() {

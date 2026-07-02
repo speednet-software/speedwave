@@ -90,7 +90,9 @@ function validateTokenUrl(raw: string): URL | null {
     /^169\.254\./.test(host) ||
     /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) ||
     host === '::1' ||
-    host.startsWith('::ffff:') // any IPv4-mapped IPv6 — no legit IdP uses one
+    host.startsWith('::ffff:') || // any IPv4-mapped IPv6 — no legit IdP uses one
+    /^f[cd][0-9a-f]{2}:/.test(host) || // IPv6 ULA fc00::/7 (RFC 4193)
+    /^fe[89ab][0-9a-f]:/.test(host) // IPv6 link-local fe80::/10 (RFC 4291)
   ) {
     return null;
   }

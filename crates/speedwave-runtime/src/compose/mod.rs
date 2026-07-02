@@ -354,13 +354,20 @@ pub fn render_compose_in(
     let host_tz = crate::tz::detect_host_timezone();
     yaml = inject_host_timezone(&yaml, &host_tz)?;
 
-    // Inject Anthropic API key; skipped when a local LLM provider is active (leak mitigation).
-    let provider = resolved_config
-        .llm
-        .provider
-        .as_deref()
-        .unwrap_or("anthropic");
-    if provider == "anthropic" {
+    // Gate on the v2 active entry's real kind, not the flat `provider` string
+    // (it masquerades OpenRouter as `anthropic`, which would re-inject a stale key).
+    let anthropic_active = match resolved_config.llm.active_provider() {
+        Some(entry) => entry.kind.is_anthropic(),
+        None => {
+            resolved_config
+                .llm
+                .provider
+                .as_deref()
+                .unwrap_or("anthropic")
+                == "anthropic"
+        }
+    };
+    if anthropic_active {
         yaml = apply_auth_config_in(&yaml, project_name, data_dir)?;
     }
 
@@ -1169,6 +1176,64 @@ mod tests {
         let _ = std::fs::remove_file(tokens_dir.join("api_key"));
         let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
         let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// A project with a stale `anthropic_api_key` file but an active OpenRouter
+    /// provider must NOT get `ANTHROPIC_API_KEY` re-injected into `claude` (the
+    /// flat provider string masquerades as `anthropic` for downgrade compat).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_no_anthropic_key_when_openrouter_active() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-stale-key-openrouter-{}", std::process::id());
+        // Stale Anthropic key from a prior Anthropic session.
+        let secrets = data_dir.path().join("secrets").join(&project);
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-stale").unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let llm = crate::config::LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "openrouter".to_string(),
+                kind: crate::config::LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("z-ai/glm-5.2".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: Some("z-ai/glm-5.2".to_string()),
+            }),
+            ..Default::default()
+        };
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+        };
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        assert!(
+            !yaml.contains("ANTHROPIC_API_KEY"),
+            "stale Anthropic key must not be injected while OpenRouter is active"
+        );
+        let _ = std::fs::remove_file(secrets.join("anthropic_api_key"));
     }
 
     /// Regression for the unquoted `[1m]` suffix nerdctl's Go YAML parser rejects;

@@ -88,6 +88,20 @@ describe('refreshGenericToken', () => {
     if (!result.ok) expect(result.error.code).toBe('malformed');
   });
 
+  it.each([
+    'https://[fc00::1]/token', // IPv6 ULA
+    'https://[fd12:3456::1]/token', // IPv6 ULA
+    'https://[fe80::1]/token', // IPv6 link-local
+    'https://[::1]/token', // IPv6 loopback
+    'https://10.0.0.1/token', // RFC 1918
+  ])('rejects private/reserved token URL %s (SSRF backstop)', async (tokenUrl) => {
+    const result = await refreshGenericToken(
+      refreshTokenReq({ providerData: { tokenUrl, clientId: 'cid' } })
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('malformed');
+  });
+
   it('rejects a success body with a non-positive expires_in', async () => {
     mockJson({ body: { access_token: 'a', expires_in: 0 } });
     const result = await refreshGenericToken(refreshTokenReq());

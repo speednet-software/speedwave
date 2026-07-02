@@ -2997,7 +2997,7 @@ networks:
         let anchor = source
             .find("Post-setup migrations")
             .expect("post-setup migration block must exist in main.rs");
-        let window = &source[anchor..anchor + 700];
+        let window = &source[anchor..];
         let spawn = window
             .find("std::thread::spawn")
             .expect("migration block must spawn a worker thread");
@@ -3008,7 +3008,7 @@ networks:
             .find("ensure_lima_vm_config()")
             .expect("lima migration inside the block");
         let reconcile = window
-            .find("reconcile_bundle_update")
+            .find("reconcile_bundle_update(&app_handle)")
             .expect("reconcile must follow the migrations");
         assert!(
             spawn < barrier && barrier < lima,

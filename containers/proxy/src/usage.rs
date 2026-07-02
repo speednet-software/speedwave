@@ -208,12 +208,16 @@ pub fn append_usage(path: &Path, line: &UsageLine) {
 
 fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
     use std::io::Write;
-    let json = serde_json::to_string(line).map_err(std::io::Error::other)?;
+    // One buffer, one write_all: O_APPEND is atomic per write() only, and each
+    // request appends from its own task with no lock — writeln! (json + '\n' as
+    // two writes) could interleave and corrupt a line in the usage SSOT.
+    let mut buf = serde_json::to_vec(line).map_err(std::io::Error::other)?;
+    buf.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    writeln!(file, "{json}")
+    file.write_all(&buf)
 }
 
 #[cfg(test)]
@@ -400,8 +404,38 @@ mod tests {
             parsed.get("ttft_ms").is_none(),
             "ttft_ms must be absent when None"
         );
-        // Ends with a newline (append_usage uses writeln!).
+        // Each line is a single terminated append (json + '\n', one write_all).
         assert!(written.ends_with('\n'));
+    }
+
+    /// Concurrent appends must each land as one intact newline-terminated line —
+    /// no interleaving that would corrupt the usage SSOT.
+    #[test]
+    fn concurrent_appends_produce_intact_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut line = fixture_line();
+                    line.response_id = Some(format!("msg_{i}"));
+                    for _ in 0..64 {
+                        append_usage(&path, &line);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let written = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 16 * 64, "no lines lost or merged");
+        for line in lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|e| panic!("corrupted usage line {line:?}: {e}"));
+        }
     }
 
     #[test]
