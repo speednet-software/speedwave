@@ -17,7 +17,7 @@ paths:
 
 # LLM Provider Rules
 
-Every session routes through the per-project Rust forwarder `proxy` (port 4000, compose network only), which relays native Anthropic `/v1/messages` with no translation. The legacy direct-injection path survives only behind the `llm.proxy_enabled` kill-switch and is scheduled for removal — do not build on it.
+Every session routes through the per-project Rust forwarder `proxy` (port 4000, compose network only), which relays native Anthropic `/v1/messages` with no translation. `llm.proxy_enabled` defaults to `true` (`unwrap_or(true)`), so the proxy is the primary Anthropic path for nearly everyone — the legacy direct-injection path is the fallback, scheduled for removal; do not build on it.
 
 ## Invariants (non-negotiable)
 
@@ -26,7 +26,7 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 3. **Key VALUES never land in config.json or the rendered proxy.json.** Values live in `tokens/<project>/llm/<provider_id>_api_key` (0600, atomic, `Bearer `-stripped, CRLF-rejected); configs carry presence flags and `SPW_KEY_<ID>` env-name references only. Provider ids are plugin-grade slugs (`plugin::is_valid_slug`, never a second regex).
 4. **`provider`, `base_url`, `providers`, `active`, `proxy_enabled` are user-only config.** Repo `.speedwave.json` may set `model` only — `merge_llm_repo()` strips the rest. A malicious cloned repo must not redirect traffic, add providers, or flip the kill-switch.
 5. **Anthropic model strings have one SSOT** — `defaults.rs::ANTHROPIC_MODELS`, read by the frontend via `list_anthropic_models`. No hard-coded model strings.
-6. **Usage has one source of truth for final values.** The forwarder's per-request JSONL line plus the host-side cost sidecar (`cost-cache.jsonl`, keyed by `response_id`) are the SSOT for final tokens + cost (dashboard, chat footer, CLI statusline). The Claude Code result stream is a live preview reconciled to proxy values, and the only source of context/limits the proxy cannot see. Cost enrichment never rewrites the usage JSONL; unpriced (subscription/unknown) stays `null`, never `0.0`.
+6. **Usage has one source of truth for final values.** The forwarder's per-request JSONL line plus the host-side cost sidecar (`cost-cache.jsonl`, keyed by `response_id`) are the SSOT for final tokens + cost (dashboard, chat footer, and the in-container `statusline.sh`, which reads the sidecar's `response_id`/`cost_usd` fields directly with last-write-wins dedup — the `speedwave` CLI binary has no usage command). The Claude Code result stream is a live preview reconciled to proxy values, and the only source of context/limits the proxy cannot see. Cost enrichment never rewrites the usage JSONL; unpriced (subscription/unknown) stays `null`, never `0.0`. The `CostSource` enum (`usage_cost.rs`, wire strings `catalog`/`subscription`/`free`/`actual`/`unknown`/`deferred`/`failed`) is a two-consumer contract Rust ↔ TS `models/llm.ts::CostSourceKind` (test `cost_source_ts_union_matches_rust`) — never reorder/rename; `deferred` is the only non-terminal source (OpenRouter async cost) and drives the footer re-reconcile.
 
 ## Env-var injection (compose/llm.rs)
 
@@ -38,7 +38,7 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 
 ## URLs, aliases, auth
 
-- Discovery probe and save path share `validate_llm_base_url` (`llm_cmd.rs`), parameterized by `PrivatePolicy`; render-side validation is `compose::validate_base_url` — never a third validator. The block list is fixed; changes require an ADR delta. The proxy URL (`http://proxy:4000[/anthropic]`) is compose-internal and never flows through user-facing URL fields.
+- Discovery probe and save path share `validate_llm_base_url` (`llm_cmd/discovery.rs`, re-exported through `llm_cmd.rs` — the module was split into `llm_cmd/{discovery,usage}.rs`), parameterized by `PrivatePolicy`; render-side validation is `compose::validate_base_url` — never a third validator. The block list is fixed; changes require an ADR delta. The proxy URL (`http://proxy:4000`, routed by request-body model prefix, not URL path) is compose-internal and never flows through user-facing URL fields.
 - `host.docker.internal` resolves inside containers (proxy carries `extra_hosts`) but not on the Desktop host — host-side probes call `http_util::rewrite_container_alias_to_loopback`. A saved loopback `base_url` is rewritten to the alias by `compose::canonicalize_local_base_url` (the persisted value must be reachable from inside the proxy container).
 - `check_claude_auth` short-circuits via `project_needs_anthropic_auth`: only an active `anthropic_oauth` provider runs the in-container OAuth check; api-key/local/openrouter kinds and unconfigured projects skip it (routed to provider configuration, not an OAuth wall). Any new Anthropic-auth checkpoint uses the same predicate.
 
