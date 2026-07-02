@@ -95,6 +95,19 @@ impl WslRuntime {
         &self.distro_name
     }
 
+    /// Runs `argv` in the distro through `sh -c` with POSIX quoting — wsl.exe
+    /// re-parses the post-`--` line via the default shell, so bare splicing
+    /// breaks on metacharacters in %USERPROFILE% (`'`, `(`, `$`, backtick).
+    fn run_in_distro(&self, argv: &[&str], root: bool) -> anyhow::Result<String> {
+        let remote_cmd = super::shell_quote_argv(argv);
+        let mut full: Vec<&str> = vec!["-d", self.distro()];
+        if root {
+            full.extend(["-u", "root"]);
+        }
+        full.extend(["--", "sh", "-c", &remote_cmd]);
+        self.runner.run("wsl.exe", &full)
+    }
+
     /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the
     /// container uid around every `up` — nerdctl root-creates missing
     /// bind-mount sources (ADR-052). Fail-open.
@@ -111,9 +124,7 @@ impl WslRuntime {
         let (uid, gid) = consts::container_uid_gid();
         let uidgid = format!("{uid}:{gid}");
         let run_root = |name: &str, args: &[&str]| {
-            let mut argv = vec!["-d", self.distro(), "-u", "root", "--"];
-            argv.extend_from_slice(args);
-            let res = self.runner.run("wsl.exe", &argv);
+            let res = self.run_in_distro(args, true);
             if let Err(e) = &res {
                 log::warn!("claude-home {name} failed for '{project}' (non-fatal): {e}");
             }
@@ -407,14 +418,11 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
+        let _ = distro;
         // BEFORE up: the uid-1000 entrypoint races a post-up chown (ADR-052).
         self.ensure_claude_home_writable(project);
-        let up = self.runner.run(
-            "wsl.exe",
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -425,6 +433,7 @@ impl ContainerRuntime for WslRuntime {
                 "-d",
                 "--remove-orphans",
             ],
+            false,
         );
         // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
@@ -441,23 +450,21 @@ impl ContainerRuntime for WslRuntime {
             log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
             return Ok(());
         }
+        let remote = super::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            project,
+            "down",
+            "--remove-orphans",
+        ]);
         super::compose_down_and_cleanup(
             &*self.runner,
             "wsl.exe",
             project,
-            &[
-                "-d",
-                distro,
-                "--",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "down",
-                "--remove-orphans",
-            ],
+            &["-d", distro, "--", "sh", "-c", &remote],
             &["-d", distro, "--", "nerdctl"],
         )
     }
@@ -465,12 +472,9 @@ impl ContainerRuntime for WslRuntime {
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        let output = self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        let output = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -481,6 +485,7 @@ impl ContainerRuntime for WslRuntime {
                 "--format",
                 "json",
             ],
+            false,
         )?;
         Ok(super::parse_compose_ps_json(&output))
     }
@@ -572,23 +577,14 @@ impl ContainerRuntime for WslRuntime {
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
-        let mut args: Vec<&str> = vec![
-            "-d",
-            distro,
-            "--",
-            "nerdctl",
-            "build",
-            "-t",
-            tag,
-            "-f",
-            containerfile,
-        ];
+        let _ = distro;
+        let mut args: Vec<&str> = vec!["nerdctl", "build", "-t", tag, "-f", containerfile];
         for s in &ba_strings {
             args.push("--build-arg");
             args.push(s);
         }
         args.push(context_dir);
-        self.runner.run("wsl.exe", &args)?;
+        self.run_in_distro(&args, false)?;
         Ok(())
     }
 
@@ -611,36 +607,29 @@ impl ContainerRuntime for WslRuntime {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         let tail_str = tail.to_string();
-        self.runner.run_with_stderr(
-            "wsl.exe",
-            &[
-                "-d",
-                distro,
-                "--",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "logs",
-                "--timestamps",
-                "--tail",
-                &tail_str,
-            ],
-        )
+        let remote = super::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            project,
+            "logs",
+            "--timestamps",
+            "--tail",
+            &tail_str,
+        ]);
+        self.runner
+            .run_with_stderr("wsl.exe", &["-d", distro, "--", "sh", "-c", &remote])
     }
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
+        let _ = distro;
         self.ensure_claude_home_writable(project);
-        let up = self.runner.run(
-            "wsl.exe",
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -652,6 +641,7 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 "--remove-orphans",
             ],
+            false,
         );
         self.ensure_claude_home_writable(project);
         up.map(|_| ())
@@ -661,13 +651,10 @@ impl ContainerRuntime for WslRuntime {
         super::validate_builtin_service_name(service)?;
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
+        let _ = distro;
         self.ensure_claude_home_writable(project);
-        let up = self.runner.run(
-            "wsl.exe",
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -679,6 +666,7 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 service,
             ],
+            false,
         );
         self.ensure_claude_home_writable(project);
         up.map(|_| ())
@@ -687,12 +675,9 @@ impl ContainerRuntime for WslRuntime {
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -702,6 +687,7 @@ impl ContainerRuntime for WslRuntime {
                 "config",
                 "--quiet",
             ],
+            false,
         )?;
         Ok(())
     }
@@ -1141,9 +1127,20 @@ mod tests {
         let compose_file = wsl_compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
-                "wsl.exe -d {} -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
+                "wsl.exe -d {} -- sh -c {}",
                 consts::wsl_distro_name(),
-                compose_file
+                crate::runtime::shell_quote_argv(&[
+                    "nerdctl",
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "-p",
+                    "acme",
+                    "logs",
+                    "--timestamps",
+                    "--tail",
+                    "200",
+                ])
             ),
             "hub | started\nclaude | ready",
         );
@@ -1331,10 +1328,22 @@ mod tests {
     #[test]
     fn test_compose_up_recreate_includes_force_recreate() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            "acme",
+            "up",
+            "-d",
+            "--force-recreate",
+            "--remove-orphans",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            compose_file
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1344,10 +1353,20 @@ mod tests {
     #[test]
     fn test_compose_validate_runs_nerdctl_compose_config_quiet() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            "acme",
+            "config",
+            "--quiet",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl compose -f {} -p acme config --quiet",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            compose_file
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2058,10 +2077,22 @@ mod tests {
     #[test]
     fn test_build_image_passes_build_args() {
         let version = crate::defaults::CLAUDE_VERSION;
+        let ba = format!("CLAUDE_VERSION={version}");
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "build",
+            "-t",
+            "my-image:latest",
+            "-f",
+            "/ctx/Containerfile",
+            "--build-arg",
+            &ba,
+            "/ctx",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            version
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2609,15 +2640,16 @@ mod tests {
             let home = engine_home(project);
             let nested = format!("{home}/.claude/ide");
             let pre = |rest: Vec<&str>| {
-                let mut v = vec![
+                vec![
                     "-d".into(),
                     distro.to_string(),
                     "-u".into(),
                     "root".into(),
                     "--".into(),
-                ];
-                v.extend(rest.into_iter().map(String::from));
-                v
+                    "sh".into(),
+                    "-c".into(),
+                    crate::runtime::shell_quote_argv(&rest),
+                ]
             };
             [
                 pre(vec!["mkdir", "-p", &nested]),
@@ -2659,7 +2691,7 @@ mod tests {
             for (i, exp) in steps.iter().enumerate() {
                 assert_eq!(&calls[i].1, exp, "pre-up step {i} argv mismatch");
             }
-            assert!(calls[4].1.contains(&"up".to_string()));
+            assert!(calls[4].1.last().unwrap().contains(" up "));
             assert_eq!(&calls[5].1, &steps[0], "post-up mkdir");
             assert_eq!(&calls[6].1, &steps[1], "post-up stat probe");
         }
@@ -2680,7 +2712,9 @@ mod tests {
                 5,
                 "no -R walk when both probes report the container uid"
             );
-            assert!(!calls.iter().any(|c| c.1.contains(&"chown".to_string())));
+            assert!(!calls
+                .iter()
+                .any(|c| c.1.last().is_some_and(|l| l.starts_with("chown"))));
         }
 
         #[test]
@@ -2701,7 +2735,9 @@ mod tests {
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
-            assert!(calls.iter().any(|c| c.1.contains(&"chown".to_string())));
+            assert!(calls
+                .iter()
+                .any(|c| c.1.last().is_some_and(|l| l.starts_with("chown"))));
         }
 
         #[test]
@@ -2716,7 +2752,7 @@ mod tests {
             assert!(rt.compose_up_recreate("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
             assert_eq!(calls.len(), 7);
-            assert!(calls[4].1.contains(&"--force-recreate".to_string()));
+            assert!(calls[4].1.last().unwrap().contains("--force-recreate"));
             assert_eq!(calls[2].1, chown_steps("Speedwave-test", "acme")[2]);
         }
 
