@@ -901,6 +901,17 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
+    // Cloud-storage preflight (Desktop parity): a TCC-blocked iCloud/OneDrive
+    // dir must be a clear message, not a cryptic compose failure.
+    if let Err(e) = speedwave_runtime::cloudstorage::check_project_readable_or_err(&project_dir) {
+        err!(
+            "{}",
+            speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE
+        );
+        err!("({e})");
+        std::process::exit(1);
+    }
+
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
