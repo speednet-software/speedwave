@@ -266,11 +266,13 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update
+      # only), no fixed self_update release. Keep in sync with Makefile AUDIT_IGNORE.
       - name: cargo audit (root workspace)
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
 
       - name: cargo audit (desktop)
-        run: cargo audit --file desktop/src-tauri/Cargo.lock
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --file desktop/src-tauri/Cargo.lock
 
   swift:
     if: github.event_name == 'pull_request'
