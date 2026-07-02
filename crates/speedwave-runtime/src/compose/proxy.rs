@@ -371,9 +371,10 @@ mod tests {
     fn render_embeds_caller_token_when_present_and_omits_when_none() {
         let cfg = full_provider_mix();
         let with = render_proxy_config_with(&cfg, Some("secret-abc"));
+        // No `{with}`: it embeds the caller token (cleartext-logging).
         assert!(
             with.contains(r#""caller_token":"secret-abc""#),
-            "token must be embedded: {with}"
+            "token must be embedded"
         );
         let without = render_proxy_config(&cfg);
         assert!(
