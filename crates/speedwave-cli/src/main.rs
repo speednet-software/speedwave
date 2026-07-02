@@ -838,9 +838,8 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = detect_runtime();
 
-    // Installation stays the Setup Wizard's job — but an INSTALLED runtime
-    // that is merely stopped (Lima VM after reboot, containerd down) is
-    // recovered here instead of bouncing the user to the GUI.
+    // Install stays the wizard's job; an installed-but-stopped runtime
+    // (Lima VM after reboot, containerd down) is recovered right here.
     if !runtime.is_available() {
         if !runtime.is_installed() {
             runtime_not_available();

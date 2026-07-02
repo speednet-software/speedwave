@@ -405,7 +405,54 @@ pub fn render_compose_in(
     // rootful nerdctl creates missing sources as root:root (ADR-052).
     ensure_data_dir_mount_sources(data_dir, &yaml)?;
 
+    warn_if_host_workers_unavailable(data_dir, project_name, &yaml, integrations);
+
     Ok(yaml)
+}
+
+/// Warns when the rendered stack expects a Desktop-supervised host worker
+/// (oauth refresh / mcp-os) that is not running — CLI with Desktop closed.
+fn warn_if_host_workers_unavailable(
+    data_dir: &Path,
+    project: &str,
+    yaml: &str,
+    integrations: &ResolvedIntegrationsConfig,
+) {
+    let manifests: Vec<crate::plugin::PluginManifest> = crate::plugin::list_verified_plugins()
+        .map(|ps| ps.into_iter().map(|p| p.manifest().clone()).collect())
+        .unwrap_or_default();
+    for w in host_worker_warnings(data_dir, project, yaml, integrations, &manifests) {
+        log::warn!("{w}");
+    }
+}
+
+/// Pure core of [`warn_if_host_workers_unavailable`] — testable, no I/O
+/// beyond the mcp-os token existence probe.
+fn host_worker_warnings(
+    data_dir: &Path,
+    project: &str,
+    yaml: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    manifests: &[crate::plugin::PluginManifest],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !yaml.contains("WORKER_OAUTH_URL") {
+        let consumers = oauth_consumer_service_ids(integrations, manifests);
+        if !consumers.is_empty() {
+            out.push(format!(
+                "'{project}' uses OAuth integrations ({}) but the refresh worker is not \
+                 running — tokens will expire until Speedwave Desktop is started",
+                consumers.join(", ")
+            ));
+        }
+    }
+    if !yaml.contains("WORKER_OS_URL") && data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE).exists() {
+        out.push(format!(
+            "mcp-os is not running — OS integrations (mail/calendar) are unavailable \
+             for '{project}' until Speedwave Desktop is started"
+        ));
+    }
+    out
 }
 
 /// Host-creates every volume source under `data_dir` found in the rendered
@@ -5716,6 +5763,43 @@ services:
         .unwrap();
         let ids = oauth_consumer_service_ids(&resolved, &[plain]);
         assert!(ids.is_empty(), "plugin without oauth is not a consumer");
+    }
+
+    #[test]
+    fn host_worker_warnings_fire_only_when_workers_absent_and_needed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = crate::config::ResolvedIntegrationsConfig {
+            sharepoint: true,
+            ..Default::default()
+        };
+        // OAuth consumer enabled, env missing → oauth warning.
+        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &resolved, &[]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("sharepoint") && w[0].contains("refresh worker"));
+
+        // Env injected → no oauth warning.
+        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OAUTH_URL=x", &resolved, &[]);
+        assert!(w.is_empty());
+
+        // No consumers enabled → silent even without the env.
+        let none = crate::config::ResolvedIntegrationsConfig::default();
+        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
+    }
+
+    #[test]
+    fn host_worker_warnings_mcp_os_gated_on_token_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let none = crate::config::ResolvedIntegrationsConfig::default();
+        // No token file (Desktop never ran) → silent.
+        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
+        // Token exists but env missing → mcp-os warning.
+        std::fs::write(tmp.path().join(consts::MCP_OS_AUTH_TOKEN_FILE), "t").unwrap();
+        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("mcp-os"));
+        // Env present → silent again.
+        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OS_URL=x", &none, &[]);
+        assert!(w.is_empty());
     }
 
     #[test]
