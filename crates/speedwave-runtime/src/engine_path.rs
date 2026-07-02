@@ -22,12 +22,8 @@ pub fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
     to_engine_path(Path::new(path))
 }
 
-/// Joins a child onto an already-engine-side (Linux/WSL) directory with `/`.
-/// Always `/`, never `PathBuf::join` (backslash on Windows); trailing slashes
-/// on `vm_root` collapse to one separator.
 /// Strips the `\\?\` extended-length prefix from `<drive>:\` paths (SSOT).
-/// `canonicalize` adds it; non-engine consumers (config.json, UI, scripts)
-/// choke on it. UNC/POSIX/plain input passes through unchanged.
+/// `canonicalize` adds it; non-engine consumers (config.json, UI) choke on it.
 pub fn strip_extended_length_prefix(path: &str) -> &str {
     let b = path.as_bytes();
     if b.len() >= 7
@@ -42,6 +38,8 @@ pub fn strip_extended_length_prefix(path: &str) -> &str {
     }
 }
 
+/// Joins a relative `child` onto an already-engine-side `vm_root` with `/`
+/// (never `PathBuf::join`, which mangles a `/`-rooted WSL path on Windows).
 pub fn vm_path_join(vm_root: &str, child: &str) -> String {
     debug_assert!(
         !child.starts_with('/'),
