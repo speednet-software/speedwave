@@ -137,24 +137,8 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Strips `\\?\` extended-length prefix from Windows paths when followed by `<drive>:\`.
-/// Returns input unchanged for UNC, POSIX, or already-stripped paths.
-pub(crate) fn strip_windows_extended_length_prefix(path: &str) -> &str {
-    let b = path.as_bytes();
-    if b.len() >= 7
-        && b[0] == b'\\'
-        && b[1] == b'\\'
-        && b[2] == b'?'
-        && b[3] == b'\\'
-        && b[4].is_ascii_alphabetic()
-        && b[5] == b':'
-        && (b[6] == b'\\' || b[6] == b'/')
-    {
-        &path[4..]
-    } else {
-        path
-    }
-}
+/// `\\?\` prefix stripper — re-export of the runtime SSOT.
+pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
 /// Escapes a string for safe interpolation inside a PowerShell single-quoted
 /// literal. PowerShell single-quote literals are literal — only embedded

@@ -25,6 +25,23 @@ pub fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
 /// Joins a child onto an already-engine-side (Linux/WSL) directory with `/`.
 /// Always `/`, never `PathBuf::join` (backslash on Windows); trailing slashes
 /// on `vm_root` collapse to one separator.
+/// Strips the `\\?\` extended-length prefix from `<drive>:\` paths (SSOT).
+/// `canonicalize` adds it; non-engine consumers (config.json, UI, scripts)
+/// choke on it. UNC/POSIX/plain input passes through unchanged.
+pub fn strip_extended_length_prefix(path: &str) -> &str {
+    let b = path.as_bytes();
+    if b.len() >= 7
+        && path.starts_with(r"\\?\")
+        && b[4].is_ascii_alphabetic()
+        && b[5] == b':'
+        && (b[6] == b'\\' || b[6] == b'/')
+    {
+        &path[4..]
+    } else {
+        path
+    }
+}
+
 pub fn vm_path_join(vm_root: &str, child: &str) -> String {
     debug_assert!(
         !child.starts_with('/'),
@@ -113,5 +130,29 @@ mod tests {
             str_to_engine_path("/usr/local/share/speedwave").unwrap(),
             "/usr/local/share/speedwave"
         );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_drive_paths() {
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\C:\Users\User\proj"),
+            r"C:\Users\User\proj"
+        );
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\d:/mixed/slash"),
+            r"d:/mixed/slash"
+        );
+    }
+
+    #[test]
+    fn strip_extended_length_prefix_passthrough() {
+        // UNC verbatim, plain drive, POSIX, and short strings stay unchanged.
+        assert_eq!(
+            strip_extended_length_prefix(r"\\?\UNC\server\share"),
+            r"\\?\UNC\server\share"
+        );
+        assert_eq!(strip_extended_length_prefix(r"C:\plain"), r"C:\plain");
+        assert_eq!(strip_extended_length_prefix("/unix/path"), "/unix/path");
+        assert_eq!(strip_extended_length_prefix(r"\\?\C"), r"\\?\C");
     }
 }
