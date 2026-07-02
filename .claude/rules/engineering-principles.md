@@ -1,41 +1,29 @@
 # Engineering Principles
 
-These principles govern every decision in Speedwave — from architecture to a single function. When in doubt, apply them.
+These govern every decision — from architecture to a single function. When in doubt, apply them.
 
-## KISS — Keep It Simple, Stupid
+## KISS
 
-Speedwave is a **thin orchestration layer**, not a reimplementation of Lima, nerdctl, or containerd. Prefer calling the right tool over building a custom solution. A short CLI that shells out to `nerdctl exec` beats a CLI that reimplements container exec from scratch.
+Speedwave is a **thin orchestration layer**, not a reimplementation of Lima, nerdctl, or containerd. Prefer shelling out to the right tool. If you're writing >~100 lines for something an existing CLI already does — stop and reconsider. Prefer obvious code a new contributor understands in 5 minutes.
 
-- If you're writing more than ~100 lines for something that already exists as a CLI tool — stop and reconsider
-- Avoid clever abstractions; prefer obvious code that a new contributor understands in 5 minutes
-- `speedwave` binary: starts containers, launches Claude, plus `check`/`init`/`login`/`logout`/`update`/`self-update` and the `plugin` subcommands (`install`/`list`/`remove`/`enable`/`disable`) — nothing more
+## YAGNI
 
-## YAGNI — You Aren't Gonna Need It
+Build only what's needed now — no speculative features, flags, or "future extensibility". The `speedwave` CLI stays minimal: start containers, launch Claude, `check`/`init`/`login`/`logout`/`update`/`self-update` and the `plugin` subcommands (`install`/`list`/`remove`/`enable`/`disable`) — nothing more (no `logs`/`status`/`stop`; Desktop handles those).
 
-Build only what's on the implementation plan. Do not add features "for future extensibility" unless they're explicitly required now.
+## DRY / SSOT
 
-- No `speedwave logs`, `speedwave status`, `speedwave stop` as CLI subcommands (Desktop GUI handles these). Exception: `speedwave update` and `speedwave self-update` are available because terminal users need to update without opening the GUI
-- No token migration tool (v2 is a fresh install)
-- No built-in observability unless a project explicitly configures `OTEL_EXPORTER_OTLP_ENDPOINT`
-- When tempted to add a flag/option — ask "does any user need this today?"
+`ssot-registry.md` carries the SSOT catalog and `alignments.md` every alignment pair — edit the SSOT, never a call-site copy; never hand-write a path/value/model-string where an SSOT exists; a wrong literal is fixed by calling the SSOT, not by correcting the string. Same logic in two places → extract to `speedwave-runtime` (Rust) or `mcp-servers/shared/` (TS). Generated files (per-project compose, `installer-hooks.nsh`) are never hand-edited — change the template/renderer. Rule of Three for abstractions: one occurrence — inline; two — note it; three — extract.
 
-## DRY — Don't Repeat Yourself
+## SOLID (applied here)
 
-CLAUDE.md lists every SSOT and SSOT-alignment pair — read it for the full surface. The principles here:
+`LockedRuntime` is the public façade over the crate-internal `ContainerRuntime` trait; a new platform = a new trait impl, zero changes to public callers. Keep modules single-purpose; high-level crates depend on the façade, never on Lima/WSL2 directly.
 
-- If the same logic appears in two places — extract it to `speedwave-runtime` (or `mcp-servers/shared/` for MCP code).
-- Generated files (e.g. per-project compose) are never hand-edited — change the template + renderer.
-- For Anthropic model strings, network/SSRF policy, and any other catalogue/policy with an SSOT in CLAUDE.md: edit the SSOT, do not hard-code the value at the call site.
-- SSOT-alignment pairs from CLAUDE.md (e.g. `bundle-build-context.sh` ↔ `build.rs::IMAGES`, `sign-bundled-binaries.sh` ↔ `tauri.macos.conf.json`) must be updated together in the same commit. Asymmetric edits silently break bundling/signing.
+## Code hygiene (hard rules)
 
-## SOLID (applied to this codebase)
-
-- **Single Responsibility** — `ContainerRuntime` only manages containers; `ide_bridge.rs` only handles IDE events; `setup_wizard.rs` only runs setup. Do not mix concerns.
-- **Open/Closed** — Adding a new platform = new `impl ContainerRuntime` alongside `LimaRuntime` / `WslRuntime`, zero changes to external callers
-- **Liskov Substitution** — `LimaRuntime` (macOS) and `WslRuntime` (Windows) are interchangeable; the public `LockedRuntime` façade wraps `Box<dyn ContainerRuntime>` and callers never see the trait directly
-- **Interface Segregation** — `ContainerRuntime` trait has only the methods callers actually need
-- **Dependency Inversion** — high-level modules (`speedwave-cli`, `desktop`) depend on the public `LockedRuntime` interface, not on Lima/WSL2 directly. The internal `ContainerRuntime` trait remains `pub(crate)` and is never exposed outside the runtime crate
-
-## Rule of Three
-
-Don't abstract until you see the same pattern three times. One occurrence: inline it. Two: note it. Three: extract it.
+- **Comments: max 2 lines, written for the developer.** A comment states a behavior or constraint the code itself cannot show. Never narrate what the next line does, why your change is correct, review/audit context, or change history — that is noise the moment it merges. Doc comments (`//!`, `///`, JSDoc) also stay short (≤2 lines); if you feel the need for a paragraph, the content belongs in an ADR, not the code.
+- **Every code change ships tests in the same commit**, covering four categories where applicable: happy path, edge cases (empty/null/boundary/Unicode), error paths (verify the right error, not just "doesn't crash"), and state transitions (before/after invariants; races for concurrent code). Skipping a non-applicable category is fine.
+- **Never skip or neuter tests** — no `.skip`, `xit`, `xdescribe`, no renaming/moving test files to dodge failures. Fix the code or fix the test.
+- **No marker comments** — no `TODO`/`FIXME`/`HACK`/`XXX`, no `@deprecated`. Implement the fix now or report it to the user.
+- **No lint suppression** — no `#[allow(...)]` anywhere; fix the underlying issue. Sole exception: `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests`. Dead code is removed, not silenced: test-only items go behind `#[cfg(test)]`; serde-required-but-unread fields get a `_` prefix + `#[serde(rename = "...")]`.
+- **Boy Scout Rule** — fix bugs, typos, and inconsistencies on sight; if too large for the current scope, report them, never ignore them.
+- **Documentation is a delivery requirement**, same as tests — new feature → update the guide; architectural decision → write an ADR (see `documentation.md` rules).

@@ -1,50 +1,41 @@
 ---
 paths:
   - 'crates/speedwave-runtime/src/plugin.rs'
-  - 'crates/speedwave-runtime/src/compose.rs'
+  - 'crates/speedwave-runtime/src/compose/**'
   - 'crates/speedwave-runtime/src/signing.rs'
   - 'crates/speedwave-runtime/src/consts.rs'
   - 'desktop/src-tauri/src/plugin_cmd.rs'
+  - 'desktop/src-tauri/src/plugin_oauth_cmd.rs'
+  - 'desktop/src-tauri/src/bridges/plugin_host_bridge.rs'
   - 'desktop/src/src/app/models/plugin.ts'
+  - 'mcp-servers/oauth/**'
 ---
 
 # Plugin System Rules
 
-Plugins live in a **separate repository** (`speedwave-plugins`, sibling to this repo). Anything in this repo that the plugin contract depends on is a public API — treat it that way.
+Plugins live in the **separate sibling repo `speedwave-plugins`**. Everything below is a public contract: before changing any element, search the sibling repo for usage; if breaking — land a backward-compat shim here first or ship the plugin update first, never break in one commit. In-repo tests pin schema shape only, never real-plugin compatibility (resource-cap changes can break installed plugins sitting at the cap). If you cannot verify a change is safe — ask the user.
 
-## Where the contract is defined
+## Contract surface
 
-CLAUDE.md has the full contract surface table (manifest schema, signature, blocklist, compose injection, env-var convention, mount paths, settings schema, Tauri commands, frontend models). Read it before changing any of those files. Do not duplicate the table here — it goes stale.
+- **Manifest schema:** `plugin.rs::PluginManifest`, validated by `validate_manifest()`. New manifest fields need edge-case tests (missing/empty/malformed/oversize) before plugins produce them.
+- **Slug:** regex `^[a-z][a-z0-9-]{0,63}$`, one gate in `validate_manifest()` — never a second regex (`plugin::is_valid_slug`; TS side test-aligned). Built-in service IDs (`consts::BUILT_IN_SERVICE_IDS`) are reserved; adding a built-in service = adding it to the blocklist.
+- **Ed25519 signature is a runtime invariant, not just an install gate:** every read of a plugin tree goes through `signing::verify_plugin_signature_cached`. Mutable per-plugin state (`image_pending`, the host-bridge `bridge-token`) lives at `<data_dir>/plugin-state/<slug>/` — a new mutable per-plugin file goes there, NEVER inside the signed tree (it would invalidate every fresh install's digest).
+- **Compose injection:** `compose/plugins.rs::apply_plugins()` calls `plugin.rs::generate_plugin_service()` (the generator lives in `plugin.rs`, not the compose module). Honored knobs: `Containerfile` (required for MCP plugins), `extra_env`, `mem_limit`, `cpu_limit`, `token_mount` (`read_write` rejected for plugins — `:ro` only, no exceptions). The manifest `port` field is deprecated and ignored: all workers listen on `consts::PORT_WORKER` (3000); a declared port only logs a warning.
+- **Hub discovery:** `WORKER_<ID_UPPER>_URL` where `<ID>` is the plugin's **`service_id`** (not its slug — they may differ; `apply_plugins` calls `derive_worker_env(service_id)`), hyphens → underscores. Rust SSOT `plugin::derive_worker_env`; TS mirror `mcp-servers/hub/src/worker-env.ts::deriveWorkerEnv`. NOT machine-enforced — `worker-env.test.ts` hardcodes expected outputs (no `include_str!` cross-read), so edit both sides together and update the TS expectations by hand. No parallel discovery mechanism.
+- **Mounts:** credentials `~/.speedwave/tokens/<project>/<service_id>/<key>` (0o600) at `/tokens:ro`; project dir at `/workspace:rw` — the only writable cross-boundary surface, do not add a second.
+- **Reserved env:** `consts::RESERVED_ENV_KEYS` — the single, case-insensitive list plugins cannot inject via `extra_env`: Speedwave-injected keys (`PORT`, `SPW_CREDENTIALS_DIGEST`, `SPW_PLUGIN_DIGESTS`) + hijack vectors (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PATH`, `HOME`, `IFS`, `BASH_ENV`, …). Add vectors in `consts.rs` only.
+- **auth_fields:** `description` (optional help text), `field_type` ∈ `ALLOWED_AUTH_FIELD_TYPES` (`text`/`password`/`textarea`, TS union test-aligned), `validation { pattern, message? }` compiled by `compile_anchored_pattern()` (anchored full-match, RE2 subset, ≤ `PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN` 512 B; the UI also enforces via `<input pattern>` — ECMA vs RE2 flavors differ slightly).
+- **`instructions`:** optional Markdown guide, ≤ `PLUGIN_INSTRUCTIONS_MAX_BYTES` (16 KiB); `plugin_cmd.rs::instructions_for_ui` gates on `verified` and re-checks the cap; rendered via `marked` + Angular sanitizer.
+- **`settings_schema`:** JSON Schema in the manifest; `plugin_cmd.rs::plugin_save_settings`/`plugin_load_settings`.
+- **`oauth` block:** `plugin.rs::PluginOAuthSpec` + `validate_oauth_spec` (grants gated by `consts::SUPPORTED_OAUTH_GRANT_TYPES`; per-grant endpoint requirements; SSRF via `url_validation::validate_url`; scope caps). Endpoints are static XOR derived from `base_url_field` + suffixes (`resolve_oauth_endpoints`, SSRF-validated at authorize time). Secrets live off-mount at `oauth/<project>/<slug>.json`; the `generic` provider in `mcp-servers/oauth` handles refresh; `auth_fields[].oauth_flow` marks OAuth-filled fields. Identity model: per-project state = per-human attribution. `SUPPORTED_OAUTH_GRANT_TYPES` currently accepts `authorization_code` ONLY — `device_code`/`client_credentials` exist as `OAuthGrantType` variants but `validate_oauth_spec` rejects them today; the machine-only `client_credentials` story is intended design, not shipped behavior.
+- **OAuth refresh-retry in plugins:** a plugin never writes its own refresh loop — it vendors `authedRequest` (+ trimmed `oauth-client`) from mcp-shared into `src/server/` and uses it for every authenticated request (refresh via host `oauth` worker on auth-failure status, retry once; non-standard statuses opt-in via `authFailureStatuses`). This is a manual-sync copy: changing `oauth-authed-request.ts` here means re-copying into consuming plugins.
+- **Host bridge:** manifest knobs `host_bridge.{url_env,token_env,preferred_port,persistent_token}`; token file SSOT `plugin.rs::BRIDGE_TOKEN_FILENAME` (`plugin-state/<slug>/bridge-token`). CLI parity requires `persistent_token: true` + fixed `preferred_port`.
+- **Desktop surface:** Tauri commands in `plugin_cmd.rs` (lifecycle + credentials, incl. `delete_plugin_credential_field`), `plugin_oauth_cmd.rs` (`start_plugin_oauth`/`cancel_plugin_oauth`/`forget_plugin_oauth`), `main.rs` (`plugin_bridge_get_status`/`plugin_bridge_get_credentials`). Frontend models in `models/plugin.ts` (`PluginStatusEntry`, `PluginAuthField*`, `PluginSaveCredentialsEvent`, `MAX_PLUGIN_CREDENTIAL_BYTES`, `PluginBridge*`) must match command return types — the JSON deserializer silently drops mismatched fields; update both sides in one commit and assert the shape in a frontend test.
+- **Container hardening** (`cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits) applies to plugin containers — plugins must work within it. Plugin resource envelope: defaults/caps in `consts.rs` (`PLUGIN_*` consts).
+- **Line endings:** root `.gitattributes` forces LF — plugin repos must ship LF `*.sh` in Containerfiles.
 
-## Breaking-change rule
+## Types & lifecycle
 
-Before changing **any** contract element from CLAUDE.md's "Plugins" table:
-
-1. Search the `speedwave-plugins` sibling repository for usage. If a plugin reads the field/calls the command/relies on the env var — it's load-bearing.
-2. If breaking: coordinate the change. Either land a backward-compat shim in this repo first, or ship the plugin update first. Never break the contract in a single commit.
-3. Manifest schema changes (`PluginManifest` in `plugin.rs`) require a `validate_manifest()` test for the new field's edge cases (missing, empty, malformed, oversize) **before** plugins start producing it.
-
-If you cannot verify a change is safe — ask the user.
-
-## Container constraints (non-negotiable)
-
-Plugin containers inherit Speedwave's hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits — see `.claude/rules/security.md`). When extending compose injection in `apply_plugins()` / `generate_plugin_service()`:
-
-- Token mounts are always `:ro` for plugins — no exceptions. `:rw` is reserved for built-in services only (and enforced by code; see `validate_manifest()` in `plugin.rs`). The historical precedent was SharePoint OAuth refresh, but that was moved to the host-side `oauth` worker per ADR-060.
-- Workspace mount is `/workspace:rw` — that is the only writable cross-boundary surface. Do not introduce a second one.
-- The hub→worker channel is `WORKER_<SLUG_UPPER>_URL` — uppercase, underscore-separated. Discovery and naming both depend on this; do not introduce a parallel mechanism.
-
-## Slug + service ID
-
-- Slug regex `^[a-z][a-z0-9-]{0,63}$` is enforced by `validate_manifest()`. Mirror it in any new validation path; do not write a second regex.
-- Built-in service IDs (`BUILT_IN_SERVICE_IDS` in `consts.rs`) are reserved — plugins cannot use them. When adding a new built-in service, also add it to the blocklist.
-
-## OAuth refresh-retry (vendored helper)
-
-A plugin that consumes OAuth must **not** write its own token refresh-retry loop. It vendors `authedRequest` (+ the trimmed `oauth-client`) into `src/server/` — alongside the existing `mcp-shared` copy the plugin already carries — and uses it for every authenticated request: the helper refreshes the access token via the host `oauth` worker on an auth-failure status and retries once (see ADR-060). Non-standard auth-failure statuses are opt-in via `authFailureStatuses` (GLPI adds `400` on top of the default `401`).
-
-This is a **manual-sync** copy: until `@speedwave/mcp-shared` ships as an npm package, a change to `oauth-authed-request.ts` in this repo must be re-copied into each consuming plugin. Treat it like the rest of the vendored mcp-shared surface.
-
-## Settings UI (Desktop)
-
-Frontend `PluginStatusEntry` (`desktop/src/src/app/models/plugin.ts`) must match Tauri command return types in `plugin_cmd.rs`. If you add a field on one side and not the other, the type system won't catch it — the JSON deserialiser silently drops it. Update both in the same commit and add a frontend test that asserts the shape.
+- MCP service plugin: has `service_id` + `Containerfile`; resource-only plugin: neither (skills/commands/agents/hooks only). Per-project toggle `integrations.plugins.<key>.enabled` where `<key>` = `service_id` (MCP) or `slug` (resource-only).
+- Install: verify Ed25519 → validate manifest → extract to `~/.speedwave/plugins/<slug>/` → build image. Uninstall: `plugin::remove_plugin()`; Desktop `remove_plugin` additionally cleans tokens and config entries.
+- Claude-side resources: plugin ships `claude-resources/`; `entrypoint.sh` iterates `SPEEDWAVE_PLUGINS` (comma-separated enabled slugs) and symlinks them. A second claude-container env var, `SPW_PLUGIN_DIGESTS`, carries the per-slug signature digests (integrity, separate from the enabled-slug list) — inject both together.
