@@ -16,6 +16,47 @@ import { switchToProject, activeProjectSlug } from '../helpers/projects';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
+/**
+ * Minimal raw WebDriver call against the restarted app: the wdio `browser`
+ * object holds the DEAD pre-reset session (reloadSession does not survive the
+ * embedded tauri-plugin-webdriver restart), so drive HTTP directly.
+ */
+function wdRequest(port: number, method: string, path: string, body?: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? '' : JSON.stringify(body);
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (c: Buffer) => (data += c.toString()));
+        res.on('end', () => {
+          if ((res.statusCode ?? 500) >= 400) {
+            reject(new Error(`WebDriver ${method} ${path} → ${res.statusCode}: ${data.slice(0, 200)}`));
+            return;
+          }
+          try {
+            resolve((JSON.parse(data) as { value: unknown }).value);
+          } catch {
+            reject(new Error(`unparseable WebDriver response: ${data.slice(0, 200)}`));
+          }
+        });
+      }
+    );
+    req.setTimeout(30_000, () => {
+      req.destroy();
+      reject(new Error(`WebDriver ${method} ${path} timed out`));
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
 /** Poll the WebDriver endpoint until the restarted app is listening. */
 function waitForPort(port: number, timeoutMs: number): Promise<void> {
   const start = Date.now();
@@ -109,36 +150,67 @@ describe('Factory Reset', function () {
   });
 
   it('should land on the setup wizard with all state wiped', async function () {
-    this.timeout(120_000);
+    this.timeout(180_000);
+    const port = browser.options.port ?? 4445;
+    const deadline = Date.now() + 150_000;
 
-    // The old WebDriver session died with the old process — attach a new one.
-    let lastErr: unknown = null;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await browser.reloadSession();
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
-        await new Promise((resolve) => setTimeout(resolve, 3_000));
+    // The dying pre-restart instance keeps the port bound through its exit
+    // cleanup, so requests are split between BOTH instances and sessions
+    // evaporate mid-use. Every call recreates the session on invalid-session
+    // and retries; once the old process exits, calls stabilize on the new one.
+    let sessionId: string | null = null;
+    const exec = async (endpoint: 'sync' | 'async', script: string): Promise<unknown> => {
+      let lastErr: unknown = null;
+      while (Date.now() < deadline) {
+        try {
+          if (!sessionId) {
+            const created = (await wdRequest(port, 'POST', '/session', {
+              capabilities: { alwaysMatch: {} },
+            })) as { sessionId?: string };
+            sessionId = created.sessionId ?? null;
+            if (!sessionId) throw new Error('WebDriver session response had no sessionId');
+          }
+          return await wdRequest(port, 'POST', `/session/${sessionId}/execute/${endpoint}`, {
+            script,
+            args: [],
+          });
+        } catch (err) {
+          lastErr = err;
+          if (String(err).includes('invalid session id') || String(err).includes('not found')) {
+            sessionId = null; // stale instance answered — recreate and retry
+          }
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
+      }
+      throw lastErr ?? new Error('post-reset WebDriver calls never stabilized');
+    };
+
+    try {
+      // A reset that restarts but fails to wipe ~/.speedwave skips the wizard.
+      let wizardVisible = false;
+      while (Date.now() < deadline && !wizardVisible) {
+        wizardVisible =
+          (await exec(
+            'sync',
+            'return document.querySelector(\'[data-testid="setup-wizard"]\') !== null;'
+          )) === true;
+        if (!wizardVisible) await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      expect(wizardVisible).toBe(true);
+
+      const setupComplete = (await exec(
+        'async',
+        'const done = arguments[arguments.length - 1];' +
+          'window.__TAURI_INTERNALS__.invoke("is_setup_complete")' +
+          '.then((r) => done(r)).catch(() => done(true));'
+      )) as boolean;
+      expect(setupComplete).toBe(false);
+    } finally {
+      if (sessionId) {
+        // Hand the LIVE session to wdio: its end-of-run endSession() would
+        // otherwise DELETE the dead pre-reset session and crash the runner.
+        (browser as unknown as { sessionId: string }).sessionId = sessionId;
       }
     }
-    if (lastErr) throw lastErr;
-
-    // A reset that restarts but fails to wipe ~/.speedwave would skip the wizard.
-    await $('[data-testid="setup-wizard"]').waitForExist({
-      timeout: 60_000,
-      timeoutMsg: 'setup wizard not shown after factory reset — state was not wiped',
-    });
-
-    const setupComplete: boolean = await browser.executeAsync(
-      (done: (result: boolean) => void) => {
-        (window as any).__TAURI_INTERNALS__
-          .invoke('is_setup_complete')
-          .then((result: boolean) => done(result))
-          .catch(() => done(true));
-      },
-    );
-    expect(setupComplete).toBe(false);
   });
 });
