@@ -95,8 +95,9 @@ impl WslRuntime {
         &self.distro_name
     }
 
-    /// Chowns claude-home to the container uid after every `up` — nerdctl
-    /// creates missing bind-mount sources as root (ADR-052). Fail-open.
+    /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the
+    /// container uid around every `up` — nerdctl root-creates missing
+    /// bind-mount sources (ADR-052). Fail-open.
     fn ensure_claude_home_writable(&self, project: &str) {
         let host = crate::claude_home::claude_home_dir(consts::data_dir(), project);
         let path = match crate::engine_path::to_engine_path(&host) {
@@ -106,10 +107,11 @@ impl WslRuntime {
                 return;
             }
         };
+        let nested = crate::engine_path::vm_path_join(&path, ".claude/ide");
         let (uid, gid) = consts::container_uid_gid();
         let uidgid = format!("{uid}:{gid}");
         let steps: [(&str, Vec<&str>); 3] = [
-            ("mkdir", vec!["mkdir", "-p", &path]),
+            ("mkdir", vec!["mkdir", "-p", &nested]),
             ("chown", vec!["chown", "-R", &uidgid, &path]),
             ("chmod", vec!["chmod", "-R", "u+rwX", &path]),
         ];
@@ -396,7 +398,9 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
+        // BEFORE up: the uid-1000 entrypoint races a post-up chown (ADR-052).
+        self.ensure_claude_home_writable(project);
+        let up = self.runner.run(
             "wsl.exe",
             &[
                 "-d",
@@ -412,9 +416,10 @@ impl ContainerRuntime for WslRuntime {
                 "-d",
                 "--remove-orphans",
             ],
-        )?;
+        );
+        // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
-        Ok(())
+        up.map(|_| ())
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -620,7 +625,8 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
+        self.ensure_claude_home_writable(project);
+        let up = self.runner.run(
             "wsl.exe",
             &[
                 "-d",
@@ -637,16 +643,17 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 "--remove-orphans",
             ],
-        )?;
+        );
         self.ensure_claude_home_writable(project);
-        Ok(())
+        up.map(|_| ())
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
+        self.ensure_claude_home_writable(project);
+        let up = self.runner.run(
             "wsl.exe",
             &[
                 "-d",
@@ -663,9 +670,9 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 service,
             ],
-        )?;
+        );
         self.ensure_claude_home_writable(project);
-        Ok(())
+        up.map(|_| ())
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -2599,66 +2606,56 @@ mod tests {
                 v
             };
             [
-                pre(vec!["mkdir", "-p", &home]),
+                pre(vec!["mkdir", "-p", &format!("{home}/.claude/ide")]),
                 pre(vec!["chown", "-R", &uidgid, &home]),
                 pre(vec!["chmod", "-R", "u+rwX", &home]),
             ]
         }
 
+        fn ok_responses(n: usize) -> Vec<anyhow::Result<String>> {
+            (0..n).map(|_| Ok("".into())).collect()
+        }
+
         #[test]
-        fn compose_up_chowns_claude_home_after_up() {
-            // `nerdctl compose up` creates missing bind-mount sources as root
-            // (ADR-052); every up must hand them back to the container uid.
-            let mock = Arc::new(SequentialMockRunner::new(vec![
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-            ]));
+        fn compose_up_chowns_claude_home_before_and_after_up() {
+            // Chown BEFORE up (entrypoint must not race it) and again after
+            // (nerdctl may still root-create dirs during up). 3 + up + 3.
+            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
-            assert_eq!(calls.len(), 4, "expected up + mkdir + chown + chmod");
-            assert!(calls[0].1.contains(&"up".to_string()));
+            assert_eq!(calls.len(), 7, "expected mkdir/chown/chmod + up + repeat");
             let expected = chown_tail("Speedwave-test", "acme");
             for (i, exp) in expected.iter().enumerate() {
-                assert_eq!(&calls[i + 1].1, exp, "step {i} argv mismatch");
+                assert_eq!(&calls[i].1, exp, "pre-up step {i} argv mismatch");
+                assert_eq!(&calls[i + 4].1, exp, "post-up step {i} argv mismatch");
             }
+            assert!(calls[3].1.contains(&"up".to_string()));
         }
 
         #[test]
-        fn compose_up_recreate_chowns_claude_home_after_up() {
-            let mock = Arc::new(SequentialMockRunner::new(vec![
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-            ]));
+        fn compose_up_recreate_chowns_claude_home_before_and_after_up() {
+            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up_recreate("acme").is_ok());
             let calls = mock_clone.calls.lock().unwrap();
-            assert_eq!(calls.len(), 4, "expected up + mkdir + chown + chmod");
-            assert!(calls[0].1.contains(&"--force-recreate".to_string()));
-            assert_eq!(calls[2].1, chown_tail("Speedwave-test", "acme")[1]);
+            assert_eq!(calls.len(), 7);
+            assert!(calls[3].1.contains(&"--force-recreate".to_string()));
+            assert_eq!(calls[1].1, chown_tail("Speedwave-test", "acme")[1]);
         }
 
         #[test]
         fn compose_up_service_claude_chowns_claude_home() {
-            let mock = Arc::new(SequentialMockRunner::new(vec![
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-                Ok("".into()),
-            ]));
+            let mock = Arc::new(SequentialMockRunner::new(ok_responses(7)));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up_service("acme", "claude").is_ok());
-            assert_eq!(mock_clone.calls.lock().unwrap().len(), 4);
+            assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
 
         #[test]
@@ -2666,6 +2663,9 @@ mod tests {
             // A chown hiccup must not fail the up (matches the previous
             // provision::ensure_claude_home_owner fail-open contract).
             let mock = SequentialMockRunner::new(vec![
+                Err(anyhow::anyhow!("mkdir: I/O error")),
+                Err(anyhow::anyhow!("chown: I/O error")),
+                Err(anyhow::anyhow!("chmod: I/O error")),
                 Ok("".into()),
                 Err(anyhow::anyhow!("mkdir: I/O error")),
                 Err(anyhow::anyhow!("chown: I/O error")),
@@ -2676,15 +2676,22 @@ mod tests {
         }
 
         #[test]
-        fn compose_up_failure_skips_chown() {
-            let mock = Arc::new(SequentialMockRunner::new(vec![Err(anyhow::anyhow!(
-                "compose up failed"
-            ))]));
+        fn compose_up_failure_still_runs_post_up_chown() {
+            // A partial up may already have root-created dirs — hand them back.
+            let mock = Arc::new(SequentialMockRunner::new(vec![
+                Ok("".into()),
+                Ok("".into()),
+                Ok("".into()),
+                Err(anyhow::anyhow!("compose up failed")),
+                Ok("".into()),
+                Ok("".into()),
+                Ok("".into()),
+            ]));
             let mock_clone = Arc::clone(&mock);
             let rt =
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up("acme").is_err());
-            assert_eq!(mock_clone.calls.lock().unwrap().len(), 1);
+            assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
     }
 

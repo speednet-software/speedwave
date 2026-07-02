@@ -288,6 +288,10 @@ pub fn render_compose_in(
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
 
+    // Pre-create the claude-home mount source incl. the nested .claude/ide
+    // mountpoint — otherwise rootful nerdctl creates them root:root (ADR-052).
+    std::fs::create_dir_all(claude_home.join(".claude").join("ide"))?;
+
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = data_dir.join("ide-bridge");
@@ -1176,6 +1180,44 @@ mod tests {
         let _ = std::fs::remove_file(tokens_dir.join("api_key"));
         let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
         let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// Render must host-create the claude-home source incl. the nested
+    /// .claude/ide mountpoint — else rootful nerdctl creates them root:root.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_precreates_claude_home_with_nested_ide_mountpoint() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-claude-home-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let nested = crate::claude_home::claude_home_dir(data_dir.path(), &project)
+            .join(".claude")
+            .join("ide");
+        assert!(
+            nested.is_dir(),
+            "render_compose must pre-create {nested:?} host-side"
+        );
     }
 
     /// A project with a stale `anthropic_api_key` file but an active OpenRouter
