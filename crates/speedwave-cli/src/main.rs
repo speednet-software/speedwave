@@ -838,10 +838,18 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = detect_runtime();
 
-    // CLI checks availability but does NOT install (ensure_ready).
-    // Installation is the Setup Wizard's responsibility in Speedwave.app.
+    // Installation stays the Setup Wizard's job — but an INSTALLED runtime
+    // that is merely stopped (Lima VM after reboot, containerd down) is
+    // recovered here instead of bouncing the user to the GUI.
     if !runtime.is_available() {
-        runtime_not_available();
+        if !runtime.is_installed() {
+            runtime_not_available();
+        }
+        err!("Starting the Speedwave runtime (it was stopped)...");
+        if let Err(e) = runtime.ensure_ready() {
+            err!("Failed to start the runtime: {}", redact_err(&e));
+            std::process::exit(1);
+        }
     }
 
     // Windows engine invariants (nerdctl pin + drvfs metadata automount);
