@@ -472,3 +472,59 @@ describe('initializeAtlassianClient', () => {
     await expect(initializeAtlassianClient()).resolves.toBeNull();
   });
 });
+
+describe('uploadAttachment', () => {
+  it('POSTs multipart to the attachments endpoint with the no-check token and file part', async () => {
+    requestMock.mockResolvedValueOnce({ data: [{ id: '20001' }] });
+    const client = new AtlassianClient(CONFIG);
+    const result = await client.uploadAttachment(
+      'PROJ-1',
+      'bug.png',
+      Buffer.from('png-bytes'),
+      'image/png'
+    );
+    expect(result).toEqual([{ id: '20001' }]);
+
+    const cfg = requestMock.mock.calls[0][0] as AxiosRequestConfig;
+    expect(cfg.method).toBe('POST');
+    expect(cfg.url).toBe('/rest/api/3/issue/PROJ-1/attachments');
+    const headers = cfg.headers as Record<string, string>;
+    expect(headers['X-Atlassian-Token']).toBe('no-check');
+    expect(headers['Content-Type']).toMatch(
+      /^multipart\/form-data; boundary=----speedwave[0-9a-f]+$/
+    );
+
+    const body = (cfg.data as Buffer).toString('utf-8');
+    expect(body).toContain('Content-Disposition: form-data; name="file"; filename="bug.png"');
+    expect(body).toContain('Content-Type: image/png');
+    expect(body).toContain('png-bytes');
+    const boundary = headers['Content-Type'].split('boundary=')[1];
+    expect(body.startsWith(`--${boundary}\r\n`)).toBe(true);
+    expect(body.trimEnd().endsWith(`--${boundary}--`)).toBe(true);
+  });
+
+  it('sanitises CR/LF/quote/backslash in the filename so the header cannot be broken', async () => {
+    requestMock.mockResolvedValueOnce({ data: [{ id: '1' }] });
+    const client = new AtlassianClient(CONFIG);
+    await client.uploadAttachment('PROJ-1', 'a\r\nb"c\\d.png', Buffer.from('x'), 'image/png');
+    const body = (requestMock.mock.calls[0][0].data as Buffer).toString('utf-8');
+    expect(body).toContain('filename="a__b_c_d.png"');
+    expect(body).not.toMatch(/filename="a\r\n/);
+  });
+
+  it('encodes the issue key in the URL', async () => {
+    requestMock.mockResolvedValueOnce({ data: [] });
+    const client = new AtlassianClient(CONFIG);
+    await client.uploadAttachment('A B/1', 'x', Buffer.from('x'), 'text/plain');
+    expect(requestMock.mock.calls[0][0].url).toBe('/rest/api/3/issue/A%20B%2F1/attachments');
+  });
+
+  it('does not retry a 5xx (write) — surfaces the error after one attempt', async () => {
+    requestMock.mockRejectedValue(httpError(500));
+    const client = new AtlassianClient(CONFIG);
+    await expect(
+      client.uploadAttachment('PROJ-1', 'x', Buffer.from('x'), 'text/plain')
+    ).rejects.toBeTruthy();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+});

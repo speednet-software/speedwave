@@ -15,6 +15,7 @@
  * @module mcp-atlassian/client
  */
 
+import { randomUUID } from 'node:crypto';
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import {
   ts,
@@ -221,6 +222,48 @@ export class AtlassianClient {
    */
   del<T>(url: string, params?: Record<string, unknown>): Promise<T> {
     return this.request<T>({ method: 'DELETE', url, params });
+  }
+
+  /**
+   * Upload a file as a Jira issue attachment (`POST .../attachments`, multipart).
+   * Builds the `multipart/form-data` body by hand (no `form-data` dependency) and
+   * sends the required `X-Atlassian-Token: no-check` header. Not retried (write).
+   * @template T - Expected response body type (Jira returns an array).
+   * @param issueIdOrKey - Target issue key or numeric ID.
+   * @param filename - Attachment file name (CR/LF/quote/backslash are stripped).
+   * @param data - Raw file bytes.
+   * @param contentType - MIME type for the file part.
+   * @returns The response body (array of created attachment metadata).
+   */
+  uploadAttachment<T>(
+    issueIdOrKey: string,
+    filename: string,
+    data: Buffer,
+    contentType: string
+  ): Promise<T> {
+    const boundary = `----speedwave${randomUUID().replace(/-/g, '')}`;
+    // Strip characters that would break the Content-Disposition header line.
+    const safeName = String(filename).replace(/[\r\n"\\]/g, '_');
+    const CRLF = '\r\n';
+    const preamble = Buffer.from(
+      `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="file"; filename="${safeName}"${CRLF}` +
+        `Content-Type: ${contentType}${CRLF}${CRLF}`
+    );
+    const epilogue = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
+    const body = Buffer.concat([preamble, data, epilogue]);
+    return this.request<T>(
+      {
+        method: 'POST',
+        url: `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/attachments`,
+        data: body,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'X-Atlassian-Token': 'no-check',
+        },
+      },
+      { retryable: false }
+    );
   }
 
   //═══════════════════════════════════════════════════════════════════════════

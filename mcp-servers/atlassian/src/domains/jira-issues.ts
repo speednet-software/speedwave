@@ -9,9 +9,17 @@ import {
   assertJiraIssueKeyAllowed,
   assertJiraProjectAllowed,
   filterByAllowlist,
+  ScopeError,
 } from '../scope.js';
 import { deriveBrowseUrl } from '../url.js';
-import type { AdfDoc, JiraIssue, JiraSearchResult, JiraTransition, JiraUser } from '../types.js';
+import type {
+  AdfDoc,
+  JiraAttachment,
+  JiraIssue,
+  JiraSearchResult,
+  JiraTransition,
+  JiraUser,
+} from '../types.js';
 import { mapTransition, mapUser } from './normalizers.js';
 
 /** Fields requested for issues — kept tight to keep responses small. */
@@ -93,6 +101,26 @@ export interface JiraIssuesClient {
   assign(issueIdOrKey: string, accountId: string | null): Promise<void>;
   /** Get the account the API token authenticates as. */
   getMyself(): Promise<JiraUser>;
+  /**
+   * Attach a file to an issue (`POST .../attachments`, multipart).
+   * @param issueIdOrKey - The issue key or ID (allowlist enforced).
+   * @param params - Attachment parameters.
+   * @param params.filename - File name shown in Jira.
+   * @param params.data - Raw file bytes.
+   * @param params.contentType - MIME type for the file part.
+   * @returns The created attachment, normalised.
+   */
+  addAttachment(
+    issueIdOrKey: string,
+    params: { filename: string; data: Buffer; contentType: string }
+  ): Promise<JiraAttachment>;
+  /**
+   * Delete an attachment by its global attachment ID.
+   * @param attachmentId - The attachment ID (from a created/listed attachment).
+   * @throws {ScopeError} When a Jira project allowlist is configured — a bare
+   *   attachment ID cannot be verified against the allowlist, so we fail closed.
+   */
+  deleteAttachment(attachmentId: string): Promise<void>;
 }
 
 /**
@@ -210,6 +238,44 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     async getMyself() {
       return mapUser(await client.get<unknown>('/rest/api/3/myself'));
     },
+
+    async addAttachment(issueIdOrKey, { filename, data, contentType }) {
+      enforceFromIssueKey(issueIdOrKey);
+      const res = await client.uploadAttachment<unknown>(issueIdOrKey, filename, data, contentType);
+      // Jira returns an array of created attachments; normalise the first.
+      const first = Array.isArray(res) ? res[0] : res;
+      return mapAttachment(first);
+    },
+
+    async deleteAttachment(attachmentId) {
+      // Attachment delete is by global attachment ID; when a project allowlist is
+      // configured we cannot verify the attachment's project, so fail closed.
+      if (client.jiraProjectKeys.length > 0) {
+        throw new ScopeError(
+          'Deleting attachments is not allowed while a Jira project allowlist is configured ' +
+            '(an attachment ID cannot be checked against the allowlist).'
+        );
+      }
+      await client.del<void>(`/rest/api/3/attachment/${encodeURIComponent(attachmentId)}`);
+    },
+  };
+}
+
+/**
+ * Map a raw Jira attachment object to {@link JiraAttachment}.
+ * @param raw - The raw object as returned by the Atlassian REST API.
+ * @returns The normalised attachment.
+ */
+export function mapAttachment(raw: unknown): JiraAttachment {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(o.id ?? ''),
+    filename: String(o.filename ?? ''),
+    size: typeof o.size === 'number' ? o.size : undefined,
+    mime_type: o.mimeType ? String(o.mimeType) : undefined,
+    created: o.created ? String(o.created) : undefined,
+    url: o.content ? String(o.content) : undefined,
+    author: o.author ? mapUser(o.author) : null,
   };
 }
 

@@ -1,6 +1,6 @@
 /**
- * Atlassian tools aggregator — 33 tools (camelCase names) across:
- * - Jira issues (8): searchIssues, getIssue, createIssue, updateIssue, getTransitions, transitionIssue, assignIssue, getMyself
+ * Atlassian tools aggregator — 35 tools (camelCase names) across:
+ * - Jira issues (10): searchIssues, getIssue, createIssue, updateIssue, getTransitions, transitionIssue, assignIssue, getMyself, addAttachment, deleteAttachment
  * - Jira comments (3): addComment, getComments, addWorklog
  * - Jira projects (3): listProjects, getProject, listIssueTypes
  * - Jira Agile (6): listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint
