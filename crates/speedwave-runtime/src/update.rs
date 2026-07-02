@@ -460,6 +460,33 @@ pub fn update_containers(
     })
 }
 
+/// Which compose a rollback should recreate from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackComposeChoice {
+    /// Snapshot passed the security check — restore it verbatim.
+    UseSnapshot,
+    /// Snapshot predates a new invariant; a clean fresh render supersedes it.
+    UseFreshRender,
+    /// Neither snapshot nor fresh render is safe — abort the rollback.
+    Abort,
+}
+
+/// Picks the rollback source: snapshot if it passes, else a clean fresh render
+/// (forward-fix for snapshots predating a new invariant), else abort. `fresh` is
+/// `None` when no fresh render could be produced.
+fn choose_rollback_compose(
+    snapshot_violations: &[compose::SecurityViolation],
+    fresh: Option<(&str, &[compose::SecurityViolation])>,
+) -> RollbackComposeChoice {
+    if snapshot_violations.is_empty() {
+        return RollbackComposeChoice::UseSnapshot;
+    }
+    match fresh {
+        Some((_, [])) => RollbackComposeChoice::UseFreshRender,
+        _ => RollbackComposeChoice::Abort,
+    }
+}
+
 /// Restores a project from its rollback snapshot.
 pub fn rollback_containers(
     runtime: &crate::runtime::LockedRuntime,
@@ -487,24 +514,78 @@ pub fn rollback_containers(
     let user_config = config::load_user_config()?;
     let project_dir = user_config.require_project(project)?.dir.clone();
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
-    let violations = SecurityCheck::run(
+    let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
         project,
         &snapshot.plugin_manifests,
         &expected_paths,
     );
-    if !violations.is_empty() {
-        let msgs: Vec<String> = violations
-            .iter()
-            .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
-            .collect();
-        anyhow::bail!(
-            "Rollback aborted — snapshot compose.yml failed security check:\n{}",
-            msgs.join("\n")
-        );
-    }
 
-    apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
+    // A snapshot from an older Speedwave can fail a newly added invariant;
+    // forward-fix from a clean fresh render instead of stranding the containers.
+    let fresh = if snapshot_violations.is_empty() {
+        None
+    } else {
+        render_fresh_compose_for_rollback(runtime, &user_config, project, &project_dir)
+    };
+    let fresh_check = fresh.as_ref().map(|(yml, manifests)| {
+        let v = SecurityCheck::run(yml, project, manifests, &expected_paths);
+        (yml.as_str(), v)
+    });
+
+    match choose_rollback_compose(
+        &snapshot_violations,
+        fresh_check.as_ref().map(|(yml, v)| (*yml, v.as_slice())),
+    ) {
+        RollbackComposeChoice::UseSnapshot => {
+            apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
+        }
+        RollbackComposeChoice::UseFreshRender => {
+            // The choice is UseFreshRender only when fresh rendered a clean compose.
+            let yml = fresh.map(|(yml, _)| yml).unwrap_or(snapshot.compose_yml);
+            log::warn!(
+                "rollback: snapshot compose predates a current invariant; \
+                 recovering from a freshly rendered compose instead"
+            );
+            apply_rollback_transaction(runtime, project, &yml)
+        }
+        RollbackComposeChoice::Abort => {
+            let msgs: Vec<String> = snapshot_violations
+                .iter()
+                .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
+                .collect();
+            anyhow::bail!(
+                "Rollback aborted — snapshot compose.yml failed security check:\n{}",
+                msgs.join("\n")
+            );
+        }
+    }
+}
+
+/// Renders a fresh compose from the current config for a rollback forward-fix.
+/// `None` on render failure so the caller aborts instead of applying it.
+fn render_fresh_compose_for_rollback(
+    runtime: &crate::runtime::LockedRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+    project: &str,
+    project_dir: &str,
+) -> Option<(String, Vec<crate::plugin::PluginManifest>)> {
+    let project_path = std::path::PathBuf::from(project_dir);
+    let (resolved, integrations) =
+        config::resolve_project_config(&project_path, user_config, project);
+    let host_bridges = compose::host_bridges_from_disk();
+    let compose_yml = compose::render_compose(
+        project,
+        project_dir,
+        &resolved,
+        &integrations,
+        Some(runtime),
+        &host_bridges,
+    )
+    .map_err(|e| log::warn!("rollback forward-fix: fresh render failed: {e}"))
+    .ok()?;
+    let manifests = crate::plugin::list_installed_plugins().unwrap_or_default();
+    Some((compose_yml, manifests))
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1159,94 @@ mod tests {
     fn is_torn_down_false_for_unrelated_context() {
         let err = anyhow::anyhow!("build failed").context("image rebuild error");
         assert!(!is_torn_down(&err));
+    }
+
+    const FRESH_YAML: &str = "version: '3'\nservices: {}\n";
+
+    fn slack_missing_workspace_violation() -> compose::SecurityViolation {
+        compose::SecurityViolation {
+            container: "mcp-slack".into(),
+            rule: compose::SecurityRule::SlackMissingWorkspaceMount,
+            message: "Slack service is missing required /workspace mount".into(),
+            remediation: "Slack must mount /workspace:rw (ADR-071 file downloads).",
+        }
+    }
+
+    #[test]
+    fn choose_rollback_uses_snapshot_when_snapshot_passes_check() {
+        let choice = choose_rollback_compose(&[], Some((FRESH_YAML, &[])));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::UseSnapshot,
+            "a clean snapshot must be restored verbatim"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_forward_fixes_when_snapshot_fails_but_fresh_passes() {
+        // The v0.13.3 Slack case: the snapshot compose predates the /workspace
+        // mount, so the new SecurityCheck flags it — but a freshly rendered
+        // compose is clean. Rollback must forward-fix, not abort.
+        let snap = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &[])));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::UseFreshRender,
+            "a snapshot that only fails because it predates a new invariant must \
+             be superseded by a clean fresh render, not abort the rollback"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_aborts_when_both_snapshot_and_fresh_fail() {
+        // A genuine security problem the fresh render also exhibits must still abort.
+        let snap = vec![slack_missing_workspace_violation()];
+        let fresh = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &fresh)));
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::Abort,
+            "if even the fresh render fails the check, rollback must abort (real issue)"
+        );
+    }
+
+    #[test]
+    fn choose_rollback_aborts_when_snapshot_fails_and_fresh_render_unavailable() {
+        // Fresh render could not be produced (e.g. render error) — no safe
+        // forward path, so abort rather than apply a failing snapshot.
+        let snap = vec![slack_missing_workspace_violation()];
+        let choice = choose_rollback_compose(&snap, None);
+        assert_eq!(
+            choice,
+            RollbackComposeChoice::Abort,
+            "no clean fresh render means no safe forward-fix — abort"
+        );
+    }
+
+    #[test]
+    fn rollback_containers_forward_fixes_instead_of_bailing_on_snapshot_check() {
+        // A failing snapshot must route through choose_rollback_compose
+        // (forward-fix), not an unconditional bail after the security check.
+        let source = include_str!("update.rs");
+        let fn_start = source
+            .find("pub fn rollback_containers(")
+            .expect("rollback_containers must exist");
+        let fn_body = &source[fn_start..];
+        let fn_end = fn_body[1..]
+            .find("\nfn ")
+            .or_else(|| fn_body[1..].find("\npub fn "))
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..fn_end];
+        assert!(
+            fn_body.contains("choose_rollback_compose("),
+            "rollback_containers must delegate the snapshot/fresh decision to \
+             choose_rollback_compose"
+        );
+        assert!(
+            fn_body.contains("render_fresh_compose_for_rollback("),
+            "rollback_containers must attempt a fresh render for the forward-fix path"
+        );
     }
 
     #[test]
