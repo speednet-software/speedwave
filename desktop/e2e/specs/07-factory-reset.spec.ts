@@ -150,9 +150,12 @@ describe('Factory Reset', function () {
   });
 
   it('should land on the setup wizard with all state wiped', async function () {
-    this.timeout(180_000);
+    this.timeout(300_000);
     const port = browser.options.port ?? 4445;
-    const deadline = Date.now() + 150_000;
+    // waitForPort may have latched onto the DYING pre-reset listener; give the
+    // cold post-wipe boot its own generous window before declaring death.
+    await waitForPort(port, 120_000);
+    const deadline = Date.now() + 240_000;
 
     // The dying pre-restart instance keeps the port bound through its exit
     // cleanup, so requests are split between BOTH instances and sessions
