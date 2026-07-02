@@ -2578,6 +2578,7 @@ mod tests {
 
         /// Engine-side claude-home path exactly as the runtime derives it.
         fn engine_home(project: &str) -> String {
+            // SSOT-allow: mirrors production chown (wsl.rs:101), which reads data_dir() directly.
             let host = crate::claude_home::claude_home_dir(consts::data_dir(), project);
             crate::engine_path::to_engine_path(&host).unwrap()
         }
