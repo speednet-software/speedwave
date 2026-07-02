@@ -182,6 +182,23 @@ pub fn system_command(program: &str) -> Command {
     command
 }
 
+/// Absolute path to Windows PowerShell — a bare `powershell` PATH lookup is
+/// hijackable and inconsistent across contexts (SSOT; Desktop re-exports it).
+pub fn system_powershell_path() -> PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// `system_command` pinned to the absolute PowerShell path.
+pub fn powershell_command() -> Command {
+    system_command(&system_powershell_path().to_string_lossy())
+}
+
 /// Forces UTF-8 output from `wsl.exe` (default is UTF-16LE / localized);
 /// classifiers and logs downstream assume UTF-8. No-op for other programs.
 fn apply_wsl_utf8(command: &mut Command, program: &str) {
@@ -256,6 +273,17 @@ pub(crate) mod tests {
         )));
         assert!(!has_wsl_utf8(&system_command("powershell.exe")));
         assert!(!has_wsl_utf8(&system_command("tasklist")));
+    }
+
+    #[test]
+    fn system_powershell_path_is_absolute_system32() {
+        let p = system_powershell_path();
+        let s = p.to_string_lossy();
+        assert!(s.ends_with("powershell.exe"), "got: {s}");
+        assert!(
+            s.contains("System32") && s.contains("WindowsPowerShell"),
+            "must pin the System32 install, got: {s}"
+        );
     }
 
     #[test]

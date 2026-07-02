@@ -440,7 +440,7 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
         escaped
     );
-    let output = crate::binary::system_command("powershell")
+    let output = crate::binary::powershell_command()
         .args(["-NoProfile", "-Command", &cmd])
         .output();
     match output {
@@ -662,7 +662,7 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
 /// prompt (success) or an installation failure message.
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = crate::binary::system_command("powershell")
+    let status = crate::binary::powershell_command()
         .args([
             "-Command",
             "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
@@ -733,7 +733,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             escaped_rootfs,
             expected_sha256
         );
-        let download = crate::binary::system_command("powershell")
+        let download = crate::binary::powershell_command()
             .args(["-NoProfile", "-Command", &download_and_verify])
             .status()?;
         if !download.success() {

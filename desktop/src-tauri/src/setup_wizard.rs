@@ -842,18 +842,9 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
     resolve_bundled_windows_script("sweep.ps1")
 }
 
-/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
-/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+/// Absolute system PowerShell path — re-export of the runtime SSOT.
 #[cfg(target_os = "windows")]
-pub(crate) fn system_powershell_path() -> std::path::PathBuf {
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe")
-}
+pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
 /// Kills stale Speedwave / Node / CLI processes holding binaries about to be
 /// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
@@ -955,7 +946,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::system_command("powershell")
+        let status = speedwave_runtime::binary::powershell_command()
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
