@@ -1460,6 +1460,24 @@ pub fn ensure_nerdctl_version() {
 #[cfg(not(target_os = "windows"))]
 pub fn ensure_nerdctl_version() {}
 
+/// One-stop Windows invariants for every engine consumer (Desktop AND CLI):
+/// nerdctl pin + drvfs metadata automount (uid=1000, ADR-052). Warn-only.
+#[cfg(target_os = "windows")]
+pub fn ensure_windows_invariants() {
+    ensure_nerdctl_version();
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = ensure_wsl_distro_metadata(TerminateOnChange::IfIdle) {
+            log::warn!("could not verify drvfs metadata automount: {e}");
+        }
+    });
+}
+
+/// No-op off Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_windows_invariants() {}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

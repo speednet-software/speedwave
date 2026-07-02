@@ -844,9 +844,9 @@ fn main() -> anyhow::Result<()> {
         runtime_not_available();
     }
 
-    // Align in-distro nerdctl to the pin (Windows; no-op elsewhere). Warn-only,
-    // Once-guarded inside.
-    speedwave_runtime::provision::ensure_nerdctl_version();
+    // Windows engine invariants (nerdctl pin + drvfs metadata automount);
+    // no-op elsewhere. Warn-only, Once-guarded inside.
+    speedwave_runtime::provision::ensure_windows_invariants();
 
     // Load config once — used for both project resolution and compose rendering
     let mut user_config = config::load_user_config().unwrap_or_else(|e| {
@@ -1129,14 +1129,14 @@ mod tests {
             .find("runtime_not_available();")
             .expect("availability gate must exist");
         let align = source
-            .find("ensure_nerdctl_version();")
-            .expect("CLI must align in-distro nerdctl (Windows pin)");
+            .find("ensure_windows_invariants();")
+            .expect("CLI must apply Windows invariants (nerdctl pin + metadata automount)");
         let txn = source
             .find("runtime.transaction(")
             .expect("compose transaction must exist");
         assert!(
             avail < align && align < txn,
-            "nerdctl alignment must run after availability, before compose work"
+            "Windows invariants must run after availability, before compose work"
         );
     }
 

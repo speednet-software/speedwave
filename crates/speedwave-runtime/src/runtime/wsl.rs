@@ -895,9 +895,9 @@ impl WslRuntime {
             );
         }
 
-        // Align in-distro nerdctl to the pin if drifted (ADR-072); runs before
-        // the readiness probes because a reinstall stops the daemons.
-        crate::provision::ensure_nerdctl_version();
+        // Windows invariants (nerdctl pin ADR-072 + metadata automount
+        // ADR-052) before the probes — a nerdctl reinstall stops the daemons.
+        crate::provision::ensure_windows_invariants();
 
         // Verify containerd and buildkitd are running inside the WSL distro.
         self.check_service(distro, &["nerdctl", "info"], "containerd", "containerd")?;
