@@ -17,6 +17,9 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 | Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                         |
 
 - **SSOT for secret redaction:** `crates/speedwave-runtime/src/log_sanitizer.rs` — all log output passes through `sanitize()` via `.format()` callbacks in both Desktop and CLI loggers. Secrets never reach disk or stdout.
+- **SSOT for diagnostics:** `crates/speedwave-runtime/src/diagnostic_sources.rs::DIAGNOSTIC_SOURCES` — every file surfaced in the /logs UI and packed into the diagnostics ZIP. New log file = new registry entry (non-`displayable` sources are ZIP-only); never hand-wire a path into one consumer.
+- **File helpers:** timestamped chmod-600 append + rotation live in `log_file.rs` (used by the Desktop claude-session log and the host-worker drain `host_mcp_process/drain.rs`); timestamps only via `log_ts::log_timestamp()` / mcp-shared `ts()`.
+- **Poll loops log on state change only** — never one line per iteration (follow the IDE Bridge pattern).
 - **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%LOCALAPPDATA%/<bundle-id>/logs` (Windows) — must match `tauri-plugin-log v2 TargetKind::LogDir`. Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.dev` under `make dev`; resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
 - **CLI:** `RUST_LOG=debug speedwave check` enables debug output on stderr.
 
