@@ -1035,6 +1035,22 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
     if built > 0 {
         out!("Built {built} container image(s) for this app version");
+        // Half-applied bundle bug: an image rebuild without the resource sync
+        // leaves stale skills/commands until the next Desktop launch.
+        match speedwave_runtime::build::resolve_build_root() {
+            Ok(root) => {
+                if let Err(e) = speedwave_runtime::bundle::sync_claude_resources(&root) {
+                    err!(
+                        "Warning: claude-resources sync failed: {} (skills may be stale)",
+                        redact_err(&e)
+                    );
+                }
+            }
+            Err(e) => err!(
+                "Warning: build root unavailable, claude-resources not synced: {}",
+                redact_err(&e)
+            ),
+        }
         // Prune superseded tags (warn-only) so CLI-only users don't leak a tag generation.
         speedwave_runtime::build::prune_superseded_images(
             &runtime,
@@ -1139,6 +1155,21 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_bare_run_syncs_resources_when_images_rebuilt() {
+        // Post-app-update bare run: image rebuild without the resource sync
+        // half-applies the bundle (stale skills until Desktop launches).
+        let source = include_str!("main.rs");
+        let run_flow = source
+            .find("Built {built} container image(s)")
+            .expect("bare-run rebuild message must exist");
+        let window = &source[run_flow..run_flow + 900];
+        assert!(
+            window.contains("sync_claude_resources"),
+            "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
 
     #[test]
     fn cli_aligns_nerdctl_before_compose_work() {
