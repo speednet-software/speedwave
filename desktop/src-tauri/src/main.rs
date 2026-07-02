@@ -917,29 +917,36 @@ fn main() {
             if setup_started {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    #[cfg(target_os = "macos")]
-                    if let Err(e) = setup_wizard::ensure_lima_vm_config() {
-                        log::warn!("Lima VM config migration failed: {e}");
-                    }
-
-                    #[cfg(target_os = "windows")]
-                    if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
-                        log::warn!(".wslconfig VPN-compat migration failed: {e}");
-                    }
-
-                    // Apply automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
-                    #[cfg(target_os = "windows")]
-                    {
-                        use setup_wizard::TerminateOnChange;
-                        if let Err(e) =
-                            setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
-                        {
-                            log::warn!("wsl.conf metadata migration failed: {e}");
+                    // A panic in any pre-reconcile step must still resolve
+                    // IMAGES_READY, or wait_for_images_ready hangs to timeout.
+                    let migrations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #[cfg(target_os = "macos")]
+                        if let Err(e) = setup_wizard::ensure_lima_vm_config() {
+                            log::warn!("Lima VM config migration failed: {e}");
                         }
-                    }
 
-                    if let Err(e) = setup_wizard::link_cli() {
-                        log::warn!("CLI re-link on startup failed: {e}");
+                        #[cfg(target_os = "windows")]
+                        if let Err(e) = setup_wizard::ensure_wslconfig_vpn_compat() {
+                            log::warn!(".wslconfig VPN-compat migration failed: {e}");
+                        }
+
+                        // automount=metadata for existing distros via `IfIdle`; non-fatal (ADR-052).
+                        #[cfg(target_os = "windows")]
+                        {
+                            use setup_wizard::TerminateOnChange;
+                            if let Err(e) =
+                                setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange::IfIdle)
+                            {
+                                log::warn!("wsl.conf metadata migration failed: {e}");
+                            }
+                        }
+
+                        if let Err(e) = setup_wizard::link_cli() {
+                            log::warn!("CLI re-link on startup failed: {e}");
+                        }
+                    }));
+                    if migrations.is_err() {
+                        log::error!("post-setup migrations panicked; continuing to reconcile");
                     }
                     reconcile::reconcile_bundle_update(&app_handle);
                 });

@@ -191,11 +191,6 @@ pub use speedwave_runtime::provision::TerminateOnChange;
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
 
-/// Chowns the project's claude-home tree to the container user (ADR-052).
-/// Re-exported from the runtime SSOT — used by `start_containers`.
-#[cfg(target_os = "windows")]
-pub use speedwave_runtime::provision::ensure_claude_home_owner;
-
 // ---------------------------------------------------------------------------
 // Step 4: Create project
 // ---------------------------------------------------------------------------
@@ -342,12 +337,6 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Ok(())
     })?;
     log::info!("containers started, verifying health");
-
-    // Windows: chown claude-home AFTER compose created the bind mount-points (ADR-052). Fail-open.
-    #[cfg(target_os = "windows")]
-    if let Err(e) = ensure_claude_home_owner(project) {
-        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
-    }
 
     // Verify functional before marking started: probes the claude container only.
     let claude_container = crate::chat::claude_container_name(project);
@@ -628,6 +617,21 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     None
 }
 
+/// True when both files exist and are byte-identical (size fast-path first).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 /// Copies the CLI binary from `source` into `target_dir` and sets executable permissions on Unix.
 pub fn copy_cli_binary(
     source: &std::path::Path,
@@ -853,18 +857,9 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
     resolve_bundled_windows_script("sweep.ps1")
 }
 
-/// Absolute path to the system PowerShell (`%SystemRoot%\System32\...`).
-/// Never the bare `powershell` from PATH — avoids hijack on multi-install hosts.
+/// Absolute system PowerShell path — re-export of the runtime SSOT.
 #[cfg(target_os = "windows")]
-pub(crate) fn system_powershell_path() -> std::path::PathBuf {
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe")
-}
+pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
 /// Kills stale Speedwave / Node / CLI processes holding binaries about to be
 /// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
@@ -942,10 +937,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             );
         }
 
-        // Kill any stale process holding ~/.speedwave/bin/speedwave.exe before overwrite (ADR-048).
-        run_pre_link_sweep();
-
-        copy_cli_binary(cli_source, &cli_dir)?;
+        // Already-current CLI: skip the sweep AND the copy — the runtime sweep
+        // would kill a user's live `speedwave` session for nothing (ADR-048).
+        let target = cli_dir.join("speedwave.exe");
+        if files_identical(cli_source, &target) {
+            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+        } else {
+            // Kill any stale process holding the exe before overwrite (ADR-048).
+            run_pre_link_sweep();
+            copy_cli_binary(cli_source, &cli_dir)?;
+        }
 
         let script = format!(
             r#"
@@ -966,7 +967,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::system_command("powershell")
+        let status = speedwave_runtime::binary::powershell_command()
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
@@ -2494,6 +2495,36 @@ mod tests {
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
 
+    // ── files_identical (sweep-skip predicate) ──────────────────────────
+
+    #[test]
+    fn files_identical_true_for_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        let b = dir.path().join("b.exe");
+        std::fs::write(&a, b"same-bytes").unwrap();
+        std::fs::write(&b, b"same-bytes").unwrap();
+        assert!(files_identical(&a, &b));
+    }
+
+    #[test]
+    fn files_identical_false_on_diff_missing_or_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        std::fs::write(&a, b"one").unwrap();
+        let b = dir.path().join("b.exe");
+        std::fs::write(&b, b"two").unwrap();
+        assert!(!files_identical(&a, &b), "different bytes");
+        assert!(
+            !files_identical(&a, &dir.path().join("missing.exe")),
+            "missing target"
+        );
+        assert!(!files_identical(&a, dir.path()), "dir is not a file");
+        let c = dir.path().join("c.exe");
+        std::fs::write(&c, b"onE").unwrap();
+        assert!(!files_identical(&a, &c), "same length, different bytes");
+    }
+
     // ── link_cli guard tests ────────────────────────────────────────────
 
     #[test]
@@ -3008,16 +3039,26 @@ networks:
         let anchor = source
             .find("Post-setup migrations")
             .expect("post-setup migration block must exist in main.rs");
-        let window = &source[anchor..anchor + 700];
+        let window = &source[anchor..];
         let spawn = window
             .find("std::thread::spawn")
             .expect("migration block must spawn a worker thread");
+        let barrier = window
+            .find("catch_unwind")
+            .expect("pre-reconcile migrations must run under a panic barrier");
         let lima = window
             .find("ensure_lima_vm_config()")
             .expect("lima migration inside the block");
+        let reconcile = window
+            .find("reconcile_bundle_update(&app_handle)")
+            .expect("reconcile must follow the migrations");
         assert!(
-            spawn < lima,
-            "VM migrations must run inside the spawned thread, not on the main thread"
+            spawn < barrier && barrier < lima,
+            "VM migrations must run inside the spawned thread under catch_unwind"
+        );
+        assert!(
+            lima < reconcile,
+            "reconcile (the only step that flips IMAGES_READY) must run after migrations"
         );
     }
 

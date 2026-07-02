@@ -57,15 +57,30 @@ pub(crate) async fn wait_for_callback(
                 .await
                 .map_err(|e| format!("callback accept failed: {e}"))?;
             match read_callback_request(&mut stream).await {
-                Ok(Some(query)) => {
-                    let result = parse_callback_query(&query, expected_state);
-                    let body = match &result {
-                        Ok(_) => "Authorization complete. You can close this tab.",
-                        Err(_) => "Authorization failed. You can close this tab.",
-                    };
-                    let _ = write_http_response(&mut stream, body).await;
-                    return result;
-                }
+                Ok(Some(query)) => match parse_callback_query(&query, expected_state) {
+                    CallbackOutcome::Code(code) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            "Authorization complete. You can close this tab.",
+                        )
+                        .await;
+                        return Ok(code);
+                    }
+                    CallbackOutcome::Denied(e) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            "Authorization failed. You can close this tab.",
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    // Forged/stray request on a fixed loopback port — keep waiting
+                    // for the real IdP redirect instead of failing the flow.
+                    CallbackOutcome::StateMismatch => {
+                        log::debug!("oauth callback with wrong state ignored");
+                        let _ = write_http_response(&mut stream, "Waiting…").await;
+                    }
+                },
                 // Ignore non-callback requests (favicon, etc.) and keep waiting.
                 Ok(None) => {
                     let _ = write_http_response(&mut stream, "Waiting…").await;
@@ -136,8 +151,18 @@ pub(crate) async fn read_callback_request(
     }
 }
 
-/// Verifies CSRF `state` and extracts `code` from the callback query.
-pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> Result<String, String> {
+/// Outcome of parsing a `/callback` query against the expected CSRF state.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CallbackOutcome {
+    /// State matched and an authorization code was present.
+    Code(String),
+    /// State matched but the provider denied or omitted the code — terminal.
+    Denied(String),
+    /// State absent or mismatched — a forged/stray request; keep waiting.
+    StateMismatch,
+}
+
+pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> CallbackOutcome {
     let mut code = None;
     let mut state = None;
     let mut err = None;
@@ -149,16 +174,17 @@ pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> Result<
             _ => {}
         }
     }
-    // Verify CSRF state before the error branch (RFC 6749 §10.12).
+    // Verify CSRF state before the error branch (RFC 6749 §10.12). A mismatch is
+    // not terminal — an unauthenticated page can hit a fixed loopback port.
     if state.as_deref() != Some(expected_state) {
-        return Err("state mismatch (possible CSRF)".to_string());
+        return CallbackOutcome::StateMismatch;
     }
     if let Some(e) = err {
-        return Err(format!("authorization denied: {e}"));
+        return CallbackOutcome::Denied(format!("authorization denied: {e}"));
     }
     match code {
-        Some(c) if !c.is_empty() => Ok(c),
-        _ => Err("callback missing authorization code".to_string()),
+        Some(c) if !c.is_empty() => CallbackOutcome::Code(c),
+        _ => CallbackOutcome::Denied("callback missing authorization code".to_string()),
     }
 }
 
@@ -243,39 +269,87 @@ mod tests {
 
     #[test]
     fn parse_callback_query_extracts_code_on_state_match() {
-        let code = parse_callback_query("code=abc&state=xyz", "xyz").unwrap();
-        assert_eq!(code, "abc");
+        assert_eq!(
+            parse_callback_query("code=abc&state=xyz", "xyz"),
+            CallbackOutcome::Code("abc".to_string())
+        );
     }
 
     #[test]
-    fn parse_callback_query_rejects_state_mismatch() {
-        let err = parse_callback_query("code=abc&state=evil", "xyz").unwrap_err();
-        assert!(err.contains("state mismatch"));
+    fn parse_callback_query_state_mismatch_is_not_terminal() {
+        // A mismatched state is a forged/stray hit — the caller keeps waiting.
+        assert_eq!(
+            parse_callback_query("code=abc&state=evil", "xyz"),
+            CallbackOutcome::StateMismatch
+        );
     }
 
     #[test]
     fn parse_callback_query_surfaces_provider_error() {
-        let err = parse_callback_query("error=access_denied&state=xyz", "xyz").unwrap_err();
-        assert!(err.contains("access_denied"));
+        match parse_callback_query("error=access_denied&state=xyz", "xyz") {
+            CallbackOutcome::Denied(e) => assert!(e.contains("access_denied")),
+            other => panic!("expected Denied, got {other:?}"),
+        }
     }
 
     #[test]
     fn parse_callback_query_rejects_missing_code() {
-        let err = parse_callback_query("state=xyz", "xyz").unwrap_err();
-        assert!(err.contains("missing authorization code"));
+        match parse_callback_query("state=xyz", "xyz") {
+            CallbackOutcome::Denied(e) => assert!(e.contains("missing authorization code")),
+            other => panic!("expected Denied, got {other:?}"),
+        }
     }
 
     #[test]
     fn parse_callback_query_checks_state_before_error() {
-        // A forged ?error= without a valid state is a CSRF mismatch, not "provider denied".
-        let err = parse_callback_query("error=access_denied", "xyz").unwrap_err();
-        assert!(err.contains("state mismatch"), "got: {err}");
+        // A forged ?error= without a valid state is a mismatch, not "provider denied".
+        assert_eq!(
+            parse_callback_query("error=access_denied", "xyz"),
+            CallbackOutcome::StateMismatch
+        );
     }
 
     #[test]
-    fn parse_callback_query_rejects_empty_code() {
-        let err = parse_callback_query("code=&state=xyz", "xyz").unwrap_err();
-        assert!(err.contains("missing authorization code"), "got: {err}");
+    fn parse_callback_query_empty_code_with_valid_state_is_terminal() {
+        match parse_callback_query("code=&state=xyz", "xyz") {
+            CallbackOutcome::Denied(e) => assert!(e.contains("missing authorization code")),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// A forged mismatched-state request arriving BEFORE the legitimate redirect
+    /// must not fail the flow: `wait_for_callback` keeps listening and returns
+    /// the real code.
+    #[tokio::test]
+    async fn wait_for_callback_ignores_forged_state_then_accepts_real_code() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+
+        let client = tokio::spawn(async move {
+            // Forged cross-origin GET with a wrong state (loses the race normally).
+            let mut c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            c1.write_all(b"GET /callback?code=evil&state=wrong HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = [0u8; 64];
+            use tokio::io::AsyncReadExt;
+            let _ = c1.read(&mut buf).await; // drain the "Waiting…" response
+                                             // The real IdP redirect with the expected state.
+            let mut c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            c2.write_all(b"GET /callback?code=real&state=good HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let code = wait_for_callback(&listener, None, "good", &cancel)
+            .await
+            .expect("legitimate callback must win despite the forged one");
+        assert_eq!(code, "real");
+        client.await.unwrap();
     }
 
     // read_callback_request must accumulate a request line split across TCP segments.

@@ -137,24 +137,8 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Strips `\\?\` extended-length prefix from Windows paths when followed by `<drive>:\`.
-/// Returns input unchanged for UNC, POSIX, or already-stripped paths.
-pub(crate) fn strip_windows_extended_length_prefix(path: &str) -> &str {
-    let b = path.as_bytes();
-    if b.len() >= 7
-        && b[0] == b'\\'
-        && b[1] == b'\\'
-        && b[2] == b'?'
-        && b[3] == b'\\'
-        && b[4].is_ascii_alphabetic()
-        && b[5] == b':'
-        && (b[6] == b'\\' || b[6] == b'/')
-    {
-        &path[4..]
-    } else {
-        path
-    }
-}
+/// `\\?\` prefix stripper — re-export of the runtime SSOT.
+pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
 /// Escapes a string for safe interpolation inside a PowerShell single-quoted
 /// literal. PowerShell single-quote literals are literal — only embedded
@@ -195,26 +179,44 @@ pub(crate) fn build_auth_command_for_platform(
                 ps_escape_single_quoted(project),
             )
         } else {
+            // Absolute path always: a shell spawned right after the wizard
+            // (before any PATH refresh) has no `speedwave` on PATH yet.
+            let cli_path = format!(
+                "{}\\{}\\speedwave.exe",
+                ddir,
+                speedwave_runtime::consts::CLI_BIN_SUBDIR
+            );
             format!(
-                "Set-Location '{}'; speedwave login --project '{}'",
+                "Set-Location '{}'; & '{}' login --project '{}'",
                 ps_escape_single_quoted(pdir),
+                ps_escape_single_quoted(&cli_path),
                 ps_escape_single_quoted(project),
             )
         }
-    } else if needs_env_pin {
-        format!(
-            "export {}='{}' && cd '{}' && speedwave login --project '{}'",
-            speedwave_runtime::consts::DATA_DIR_ENV,
-            shell_escape_single_quoted(&data_dir_str),
-            shell_escape_single_quoted(project_dir),
-            shell_escape_single_quoted(project),
-        )
     } else {
-        format!(
-            "cd '{}' && speedwave login --project '{}'",
-            shell_escape_single_quoted(project_dir),
-            shell_escape_single_quoted(project),
-        )
+        // Path::join normalizes a trailing slash on data_dir (no `…/.speedwave//bin`).
+        let cli_path = data_dir
+            .join(speedwave_runtime::consts::CLI_BIN_SUBDIR)
+            .join("speedwave")
+            .to_string_lossy()
+            .into_owned();
+        if needs_env_pin {
+            format!(
+                "export {}='{}' && cd '{}' && '{}' login --project '{}'",
+                speedwave_runtime::consts::DATA_DIR_ENV,
+                shell_escape_single_quoted(&data_dir_str),
+                shell_escape_single_quoted(project_dir),
+                shell_escape_single_quoted(&cli_path),
+                shell_escape_single_quoted(project),
+            )
+        } else {
+            format!(
+                "cd '{}' && '{}' login --project '{}'",
+                shell_escape_single_quoted(project_dir),
+                shell_escape_single_quoted(&cli_path),
+                shell_escape_single_quoted(project),
+            )
+        }
     }
 }
 
@@ -624,7 +626,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "cd '/Users/test/Projects' && speedwave login --project 'myproj'"
+            "cd '/Users/test/Projects' && '/Users/test/.speedwave/bin/speedwave' login --project 'myproj'"
         );
         assert!(!cmd.contains("export"));
     }
@@ -643,7 +645,7 @@ mod tests {
         )));
         assert!(cmd.contains("/Users/test/.speedwave-dev"));
         assert!(cmd.contains("cd '/Users/test/Projects'"));
-        assert!(cmd.ends_with("speedwave login --project 'myproj'"));
+        assert!(cmd.ends_with("speedwave' login --project 'myproj'"));
     }
 
     #[test]
@@ -665,7 +667,10 @@ mod tests {
             std::path::Path::new("/data/.speedwave"),
             None,
         );
-        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
+        assert_eq!(
+            cmd,
+            "cd '/projects' && '/data/.speedwave/bin/speedwave' login --project 'p'"
+        );
     }
 
     #[test]
@@ -689,7 +694,7 @@ mod tests {
         );
         assert!(cmd.contains("O'\\''Brien"));
         assert!(cmd.contains("cd '"));
-        assert!(cmd.ends_with("speedwave login --project 'p'"));
+        assert!(cmd.ends_with("speedwave' login --project 'p'"));
     }
 
     #[test]
@@ -739,7 +744,10 @@ mod tests {
             !cmd.contains("export"),
             "trailing slash should not trigger export prefix (Path normalizes)"
         );
-        assert_eq!(cmd, "cd '/projects' && speedwave login --project 'p'");
+        assert_eq!(
+            cmd,
+            "cd '/projects' && '/Users/test/.speedwave/bin/speedwave' login --project 'p'"
+        );
     }
 
     #[test]
@@ -765,7 +773,7 @@ mod tests {
             std::path::Path::new("/data"),
             Some(std::path::Path::new("/data")),
         );
-        assert_eq!(cmd, "cd '' && speedwave login --project 'p'");
+        assert_eq!(cmd, "cd '' && '/data/bin/speedwave' login --project 'p'");
     }
 
     #[test]
@@ -912,7 +920,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-Location 'C:\Users\test\Projects'; speedwave login --project 'myproj'"
+            r"Set-Location 'C:\Users\test\Projects'; & 'C:\Users\test\.speedwave\bin\speedwave.exe' login --project 'myproj'"
         );
         assert!(!cmd.contains("&&"));
         assert!(!cmd.contains("export"));
@@ -973,7 +981,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-Location 'C:\Users\NikodemDeja\testproject'; speedwave login --project 'p'"
+            r"Set-Location 'C:\Users\NikodemDeja\testproject'; & 'C:\Users\NikodemDeja\.speedwave\bin\speedwave.exe' login --project 'p'"
         );
         assert!(!cmd.contains(r"\\?\"));
         assert!(!cmd.contains(" && "));

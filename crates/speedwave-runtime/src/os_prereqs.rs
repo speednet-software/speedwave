@@ -121,7 +121,7 @@ fn check_wsl_mirrored_mode_supported() -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_build_number() -> Option<u32> {
-    let output = crate::binary::system_command("powershell")
+    let output = crate::binary::powershell_command()
         .args([
             "-NoProfile",
             "-Command",
@@ -185,7 +185,7 @@ fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
 fn check_nested_virt() -> Vec<String> {
     use crate::binary;
 
-    let mut cmd = binary::system_command("powershell.exe");
+    let mut cmd = binary::powershell_command();
     cmd.args([
         "-NoProfile",
         "-Command",

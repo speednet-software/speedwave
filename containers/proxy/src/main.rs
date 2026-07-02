@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
 };
@@ -14,14 +18,45 @@ pub(crate) mod usage;
 
 use config::Config;
 
+/// Header the `claude` container sends with the per-project caller secret.
+const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
+
+/// Rejects `/v1/*` callers lacking the per-project secret — the proxy shares the
+/// network with every worker, which could else relay the real key (confused deputy).
+async fn require_caller_auth(
+    State(cfg): State<Arc<Config>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let Some(expected) = cfg.caller_token.as_deref() else {
+        return Ok(next.run(request).await);
+    };
+    let presented = headers
+        .get(CALLER_AUTH_HEADER)
+        .and_then(|v| v.to_str().ok());
+    if presented == Some(expected) {
+        Ok(next.run(request).await)
+    } else {
+        log::warn!("rejected /v1 request with missing or invalid caller auth");
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
 fn build_router(cfg: Arc<Config>) -> Router {
+    let guarded = Router::new()
+        .route("/v1/messages", post(forward::messages))
+        .route("/v1/messages/count_tokens", post(count_tokens::shim))
+        .route_layer(middleware::from_fn_with_state(
+            cfg.clone(),
+            require_caller_auth,
+        ));
     Router::new()
         .route(
             "/health",
             get(|| async { ([("content-type", "application/json")], r#"{"status":"ok"}"#) }),
         )
-        .route("/v1/messages", post(forward::messages))
-        .route("/v1/messages/count_tokens", post(count_tokens::shim))
+        .merge(guarded)
         .with_state(cfg)
 }
 
@@ -174,6 +209,89 @@ mod tests {
             "completion_tokens must be non-zero: {}",
             lines[0]
         );
+    }
+
+    #[tokio::test]
+    async fn v1_rejected_without_caller_token_when_configured() {
+        let cfg = Arc::new(Config {
+            caller_token: Some("secret-abc".to_string()),
+            ..Config::default()
+        });
+        let app = build_router(cfg);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .body(Body::from(r#"{"model":"local/x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "missing caller auth must be rejected");
+    }
+
+    #[tokio::test]
+    async fn v1_rejected_with_wrong_caller_token() {
+        let cfg = Arc::new(Config {
+            caller_token: Some("secret-abc".to_string()),
+            ..Config::default()
+        });
+        let app = build_router(cfg);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CALLER_AUTH_HEADER, "wrong")
+                    .body(Body::from(r#"{"model":"local/x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn health_needs_no_caller_token() {
+        let cfg = Arc::new(Config {
+            caller_token: Some("secret-abc".to_string()),
+            ..Config::default()
+        });
+        let app = build_router(cfg);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "health probe must not require auth");
+    }
+
+    #[tokio::test]
+    async fn v1_allowed_with_correct_caller_token() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let addr = spawn_mock_sse_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.caller_token = Some("secret-abc".to_string());
+        let app = build_router(Arc::new(cfg));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header(CALLER_AUTH_HEADER, "secret-abc")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "correct caller token must pass");
     }
 
     #[tokio::test]

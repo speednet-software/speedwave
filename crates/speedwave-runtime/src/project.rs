@@ -141,7 +141,11 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
                     canonical.display()
                 );
             }
-            let canonical_str = canonical.to_string_lossy().to_string();
+            // Store without `\\?\`: config.json feeds UI/scripts, not just the engine.
+            let lossy = canonical.to_string_lossy();
+            let canonical_str =
+                crate::engine_path::strip_extended_length_prefix(&lossy).to_string();
+            let canonical = std::path::PathBuf::from(&canonical_str);
             (canonical, canonical_str)
         }
     };

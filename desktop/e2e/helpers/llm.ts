@@ -153,7 +153,7 @@ export async function openIntegrations(): Promise<void> {
 
 /** The status pill text for a service row (running / starting / disabled). */
 export async function rowStatus(service: string): Promise<string> {
-  const status = await $(`[data-testid="integrations-row-"]`).$(
+  const status = await $(`[data-testid="integrations-row-${service}"]`).$(
     '[data-testid="integrations-row-status"]'
   );
   return (await status.getText()).trim();

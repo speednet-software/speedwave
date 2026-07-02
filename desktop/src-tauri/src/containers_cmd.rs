@@ -846,15 +846,6 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         })
         .map_err(|e| e.to_string())?;
 
-        // Windows: `compose up` recreates the root-owned claude-home mount;
-        // chown it back to uid-1000 after compose (ADR-052). Fail-open.
-        #[cfg(target_os = "windows")]
-        if let Err(e) = crate::setup_wizard::ensure_claude_home_owner(&project) {
-            log::warn!(
-                "recreate_project_containers: ensure_claude_home_owner failed (non-fatal): {e}"
-            );
-        }
-
         log::info!("recreate_project_containers: done for project={project}");
         Ok(())
     })

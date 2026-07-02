@@ -304,13 +304,15 @@ pub trait CommandRunner: Send + Sync {
                     if status.success() {
                         return Ok(());
                     }
+                    // Bytes, not read_to_string: UTF-16LE wsl.exe stderr is
+                    // invalid UTF-8 and would drop the whole error detail.
                     let stderr = child
                         .stderr
                         .take()
                         .map(|mut s| {
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut s, &mut buf).ok();
-                            buf
+                            let mut buf = Vec::new();
+                            std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                            decode_wsl_output(&buf)
                         })
                         .unwrap_or_default();
                     let detail = stderr.trim();
@@ -367,26 +369,32 @@ impl RealRunner {
     }
 }
 
+/// Error for a failed child process; streams go through `decode_wsl_output`
+/// so UTF-16LE wsl.exe stderr stays readable for classifiers (no-op on UTF-8).
+fn run_failure(cmd: &str, stderr: &[u8], stdout: &[u8]) -> anyhow::Error {
+    let stderr = decode_wsl_output(stderr);
+    let stdout = decode_wsl_output(stdout);
+    anyhow::anyhow!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout))
+}
+
 impl CommandRunner for RealRunner {
     fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         let output = Self::prepare_command(cmd, args).output()?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 
     fn run_with_stderr(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         let output = Self::prepare_command(cmd, args).output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Ok(combine_outputs(&stdout, &stderr))
         } else {
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 
@@ -395,9 +403,7 @@ impl CommandRunner for RealRunner {
         if output.status.success() {
             Ok(output.stdout)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
     }
 }
@@ -1154,6 +1160,43 @@ mod tests {
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    /// Encodes text the way `wsl.exe` emits it by default (UTF-16LE, no BOM).
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn run_failure_decodes_utf16_wsl_stderr_for_classifiers() {
+        let stderr = utf16le("There is no distribution with the supplied name.\r\nError code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND");
+        let err = run_failure("wsl.exe", &stderr, b"");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WSL_E_DISTRO_NOT_FOUND"),
+            "classifier token must survive decoding, got: {msg}"
+        );
+        assert!(
+            !msg.contains('\u{0}'),
+            "no NUL interleaving in decoded stderr: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn run_failure_decodes_localized_utf16_stderr() {
+        // Polish WSL: diacritics are invalid UTF-8 when read as bytes.
+        let stderr = utf16le("Odmowa dostępu. Nie można otworzyć pliku konfiguracji.");
+        let err = run_failure("wsl.exe", &stderr, b"");
+        assert!(
+            err.to_string().contains("Odmowa dostępu"),
+            "localized detail must not be dropped: {err}"
+        );
+    }
+
+    #[test]
+    fn run_failure_passes_plain_utf8_through() {
+        let err = run_failure("nerdctl", b"no such container speedwave_x_claude", b"");
+        assert!(err.to_string().contains("no such container"));
+    }
 
     #[test]
     fn test_compose_file_path_format() {

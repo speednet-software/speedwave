@@ -747,10 +747,15 @@ check-angular-lint:
 audit: audit-rust audit-mcp audit-desktop
 	@echo "\n✅ No known vulnerabilities"
 
+# quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update only,
+# parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
+# Remove both when self_update bumps quick-xml to >=0.41.
+AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
-	cargo audit
-	cargo audit --file desktop/src-tauri/Cargo.lock
+	cargo audit $(AUDIT_IGNORE)
+	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
 audit-mcp:

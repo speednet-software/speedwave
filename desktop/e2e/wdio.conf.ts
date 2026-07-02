@@ -22,6 +22,7 @@ export const config = {
     './specs/15-integration-toggle.spec.ts',
     './specs/16-restart-deferral.spec.ts',
     './specs/17-logs-diagnostics.spec.ts',
+    './specs/18-anthropic-oauth-login.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,

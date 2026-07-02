@@ -199,12 +199,13 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
 fn collect_host_bridges<'a>(
     entries: impl IntoIterator<Item = (&'a plugin::PluginManifest, Option<String>)>,
 ) -> HostBridgesInfo {
-    HostBridgesInfo {
-        bridges: entries
-            .into_iter()
-            .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
-            .collect(),
-    }
+    let mut bridges: Vec<HostBridgeRegistration> = entries
+        .into_iter()
+        .filter_map(|(manifest, token)| build_host_bridge_registration(manifest, token))
+        .collect();
+    // Deterministic order: renders must hash identically across runs/sources.
+    bridges.sort_by(|a, b| a.plugin_slug.cmp(&b.plugin_slug));
+    HostBridgesInfo { bridges }
 }
 
 /// Pure mapping from a manifest (+ pre-validated token) to a [`HostBridgeRegistration`].
@@ -260,6 +261,14 @@ pub fn render_compose_in(
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
+    // A vanished workspace must be a clear error, not a root-owned re-create
+    // by nerdctl at `up` time (ADR-052).
+    if !Path::new(project_dir).is_dir() {
+        anyhow::bail!(
+            "project directory '{project_dir}' for '{project_name}' no longer exists — \
+             restore it or remove the project"
+        );
+    }
     // Windows: WSL adapter IP can drift; re-detect before it lands in extra_hosts.
     #[cfg(target_os = "windows")]
     invalidate_host_addressing_cache();
@@ -287,6 +296,10 @@ pub fn render_compose_in(
     for (placeholder, image_name) in IMAGE_PLACEHOLDERS {
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
+
+    // Pre-create the claude-home mount source incl. the nested .claude/ide
+    // mountpoint — otherwise rootful nerdctl creates them root:root (ADR-052).
+    std::fs::create_dir_all(claude_home.join(".claude").join("ide"))?;
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -354,13 +367,20 @@ pub fn render_compose_in(
     let host_tz = crate::tz::detect_host_timezone();
     yaml = inject_host_timezone(&yaml, &host_tz)?;
 
-    // Inject Anthropic API key; skipped when a local LLM provider is active (leak mitigation).
-    let provider = resolved_config
-        .llm
-        .provider
-        .as_deref()
-        .unwrap_or("anthropic");
-    if provider == "anthropic" {
+    // Gate on the v2 active entry's real kind, not the flat `provider` string
+    // (it masquerades OpenRouter as `anthropic`, which would re-inject a stale key).
+    let anthropic_active = match resolved_config.llm.active_provider() {
+        Some(entry) => entry.kind.is_anthropic(),
+        None => {
+            resolved_config
+                .llm
+                .provider
+                .as_deref()
+                .unwrap_or("anthropic")
+                == "anthropic"
+        }
+    };
+    if anthropic_active {
         yaml = apply_auth_config_in(&yaml, project_name, data_dir)?;
     }
 
@@ -382,7 +402,84 @@ pub fn render_compose_in(
     // Re-quote env values with YAML flow indicators (e.g. `[1m]` suffix); must run after all env-injection.
     yaml = harden_env_scalar_quoting(&yaml)?;
 
+    // Every data_dir-rooted mount source must exist host-side BEFORE `up` —
+    // rootful nerdctl creates missing sources as root:root (ADR-052).
+    ensure_data_dir_mount_sources(data_dir, &yaml)?;
+
+    warn_if_host_workers_unavailable(data_dir, project_name, &yaml, integrations);
+
     Ok(yaml)
+}
+
+/// Warns when the rendered stack expects a Desktop-supervised host worker
+/// (oauth refresh / mcp-os) that is not running — CLI with Desktop closed.
+fn warn_if_host_workers_unavailable(
+    data_dir: &Path,
+    project: &str,
+    yaml: &str,
+    integrations: &ResolvedIntegrationsConfig,
+) {
+    let manifests: Vec<crate::plugin::PluginManifest> = crate::plugin::list_verified_plugins()
+        .map(|ps| ps.into_iter().map(|p| p.manifest().clone()).collect())
+        .unwrap_or_default();
+    for w in host_worker_warnings(data_dir, project, yaml, integrations, &manifests) {
+        log::warn!("{w}");
+    }
+}
+
+/// Pure core of [`warn_if_host_workers_unavailable`] — testable, no I/O
+/// beyond the mcp-os token existence probe.
+fn host_worker_warnings(
+    data_dir: &Path,
+    project: &str,
+    yaml: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    manifests: &[crate::plugin::PluginManifest],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !yaml.contains("WORKER_OAUTH_URL") {
+        let consumers = oauth_consumer_service_ids(integrations, manifests);
+        if !consumers.is_empty() {
+            out.push(format!(
+                "'{project}' uses OAuth integrations ({}) but the refresh worker is not \
+                 running — tokens will expire until Speedwave Desktop is started",
+                consumers.join(", ")
+            ));
+        }
+    }
+    if !yaml.contains("WORKER_OS_URL") && data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE).exists() {
+        out.push(format!(
+            "mcp-os is not running — OS integrations (mail/calendar) are unavailable \
+             for '{project}' until Speedwave Desktop is started"
+        ));
+    }
+    out
+}
+
+/// Host-creates every volume source under `data_dir` found in the rendered
+/// YAML (tokens, resources, usage, plugin mounts). Existing paths untouched.
+fn ensure_data_dir_mount_sources(data_dir: &Path, yaml: &str) -> anyhow::Result<()> {
+    let engine_prefix = to_engine_path(data_dir)?;
+    for line in yaml.lines() {
+        let Some(entry) = line.trim_start().strip_prefix("- ") else {
+            continue;
+        };
+        if !entry.starts_with(&engine_prefix) {
+            continue;
+        }
+        let src = entry.split_once(':').map_or(entry, |(s, _)| s);
+        let rel = src[engine_prefix.len()..].trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let host = rel
+            .split('/')
+            .fold(data_dir.to_path_buf(), |p, seg| p.join(seg));
+        if !host.exists() {
+            std::fs::create_dir_all(&host)?;
+        }
+    }
+    Ok(())
 }
 
 /// Canonical memory/tmpfs/shm rendering — MiB as `Nm` (e.g. `512m`).
@@ -1059,6 +1156,12 @@ mod tests {
             .to_path_buf()
     }
 
+    /// Existing project dir for render tests (validation rejects vanished dirs).
+    fn tmp_project_dir() -> &'static str {
+        std::fs::create_dir_all("/tmp/speedwave-test-project").unwrap();
+        "/tmp/speedwave-test-project"
+    }
+
     /// Isolated `render_compose` for tests: roots data-dir paths at the caller's tempdir
     /// and resolves the bundle manifest via `TEST_BUILD_ROOT` — no global `~/.speedwave` or env.
     fn render_compose_isolated(
@@ -1169,6 +1272,148 @@ mod tests {
         let _ = std::fs::remove_file(tokens_dir.join("api_key"));
         let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
         let _ = std::fs::remove_dir(&tokens_dir);
+    }
+
+    /// Render must host-create the claude-home source incl. the nested
+    /// .claude/ide mountpoint — else rootful nerdctl creates them root:root.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_precreates_claude_home_with_nested_ide_mountpoint() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-claude-home-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let nested = crate::claude_home::claude_home_dir(data_dir.path(), &project)
+            .join(".claude")
+            .join("ide");
+        assert!(
+            nested.is_dir(),
+            "render_compose must pre-create {nested:?} host-side"
+        );
+        // Umbrella (ADR-052): every data_dir-rooted mount source pre-created.
+        let llm_tokens = data_dir.path().join("tokens").join(&project).join("llm");
+        assert!(
+            llm_tokens.is_dir(),
+            "render_compose must pre-create the proxy token mount source"
+        );
+        assert!(data_dir.path().join("claude-resources").is_dir());
+    }
+
+    #[test]
+    fn ensure_data_dir_mount_sources_creates_only_data_dir_paths() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let prefix = to_engine_path(data_dir.path()).unwrap();
+        let yaml = format!(
+            "services:\n  x:\n    volumes:\n      - {prefix}/tokens/p/llm:/tokens:ro\n      - {prefix}/claude-resources:/speedwave/resources:ro\n      - /workspace-elsewhere:/workspace:rw\n    environment:\n      - FOO=bar\n"
+        );
+        ensure_data_dir_mount_sources(data_dir.path(), &yaml).unwrap();
+        assert!(data_dir.path().join("tokens/p/llm").is_dir());
+        assert!(data_dir.path().join("claude-resources").is_dir());
+        assert!(!Path::new("/workspace-elsewhere").exists());
+    }
+
+    #[test]
+    fn render_compose_rejects_missing_project_dir() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+        };
+        let err = render_compose_isolated(
+            data_dir.path(),
+            "ghost-project",
+            "/definitely/not/a/real/dir-e2e",
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no longer exists"),
+            "vanished workspace must be a clear error, got: {err}"
+        );
+    }
+
+    /// A project with a stale `anthropic_api_key` file but an active OpenRouter
+    /// provider must NOT get `ANTHROPIC_API_KEY` re-injected into `claude` (the
+    /// flat provider string masquerades as `anthropic` for downgrade compat).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_no_anthropic_key_when_openrouter_active() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-stale-key-openrouter-{}", std::process::id());
+        // Stale Anthropic key from a prior Anthropic session.
+        let secrets = data_dir.path().join("secrets").join(&project);
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-stale").unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let llm = crate::config::LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "openrouter".to_string(),
+                kind: crate::config::LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("z-ai/glm-5.2".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: Some("z-ai/glm-5.2".to_string()),
+            }),
+            ..Default::default()
+        };
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+        };
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        assert!(
+            !yaml.contains("ANTHROPIC_API_KEY"),
+            "stale Anthropic key must not be injected while OpenRouter is active"
+        );
+        let _ = std::fs::remove_file(secrets.join("anthropic_api_key"));
     }
 
     /// Regression for the unquoted `[1m]` suffix nerdctl's Go YAML parser rejects;
@@ -1843,7 +2088,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -1919,7 +2164,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &all_enabled_integrations(),
             None,
@@ -1965,7 +2210,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &all_enabled_integrations(),
             None,
@@ -1973,7 +2218,7 @@ services:
         )
         .unwrap();
         assert!(
-            yaml.contains("/home/user/projects/test:/workspace:rw"),
+            yaml.contains(&format!("{}:/workspace:rw", tmp_project_dir())),
             "Rendered compose must contain workspace mount for mcp-sharepoint.\nGot:\n{}",
             yaml.lines()
                 .filter(|l| l.contains("/workspace"))
@@ -2000,7 +2245,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2079,7 +2324,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2140,7 +2385,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2180,7 +2425,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2221,7 +2466,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2259,7 +2504,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2344,7 +2589,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -2432,7 +2677,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2462,7 +2707,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2492,7 +2737,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2521,7 +2766,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &all_enabled_integrations(),
             None,
@@ -2570,7 +2815,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &all_enabled_integrations(),
             None,
@@ -2632,7 +2877,7 @@ services:
             "test-project",
             "speedwave_test-project_network",
             tokens_dir,
-            "/home/user/projects/test",
+            tmp_project_dir(),
         )
         .unwrap();
 
@@ -2673,7 +2918,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2791,7 +3036,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2889,7 +3134,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -2903,10 +3148,7 @@ services:
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(
-                "/home/user/projects/test",
-                &tokens_dir.to_string_lossy(),
-            ),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
             tmp.path(),
         );
         assert!(
@@ -3287,7 +3529,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3324,7 +3566,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3356,7 +3598,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3425,7 +3667,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3470,7 +3712,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3546,7 +3788,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3599,7 +3841,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3672,7 +3914,7 @@ services:
         let err = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3710,7 +3952,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3756,7 +3998,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3859,7 +4101,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -3921,7 +4163,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -4858,7 +5100,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -4897,7 +5139,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "testproj",
-            "/tmp/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -5525,6 +5767,43 @@ services:
     }
 
     #[test]
+    fn host_worker_warnings_fire_only_when_workers_absent_and_needed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = crate::config::ResolvedIntegrationsConfig {
+            sharepoint: true,
+            ..Default::default()
+        };
+        // OAuth consumer enabled, env missing → oauth warning.
+        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &resolved, &[]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("sharepoint") && w[0].contains("refresh worker"));
+
+        // Env injected → no oauth warning.
+        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OAUTH_URL=x", &resolved, &[]);
+        assert!(w.is_empty());
+
+        // No consumers enabled → silent even without the env.
+        let none = crate::config::ResolvedIntegrationsConfig::default();
+        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
+    }
+
+    #[test]
+    fn host_worker_warnings_mcp_os_gated_on_token_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let none = crate::config::ResolvedIntegrationsConfig::default();
+        // No token file (Desktop never ran) → silent.
+        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
+        // Token exists but env missing → mcp-os warning.
+        std::fs::write(tmp.path().join(consts::MCP_OS_AUTH_TOKEN_FILE), "t").unwrap();
+        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("mcp-os"));
+        // Env present → silent again.
+        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OS_URL=x", &none, &[]);
+        assert!(w.is_empty());
+    }
+
+    #[test]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
@@ -5983,7 +6262,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6050,7 +6329,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/workspace",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6085,7 +6364,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/workspace",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6124,7 +6403,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/workspace",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6171,7 +6450,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6209,7 +6488,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6247,7 +6526,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -6758,7 +7037,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-e2e",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -6983,7 +7262,7 @@ services:
         let result = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/workspace",
+            tmp_project_dir(),
             &config,
             &integrations,
             None,
@@ -7285,7 +7564,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -7293,10 +7572,8 @@ services:
         )
         .unwrap();
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
-        let expected = SecurityExpectedPaths::from_raw(
-            "/home/user/projects/test",
-            &tokens_dir.to_string_lossy(),
-        );
+        let expected =
+            SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy());
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
@@ -7730,7 +8007,7 @@ services:
             "test",
             "speedwave_test_network",
             &tokens_dir,
-            "/test/project",
+            tmp_project_dir(),
         )
         .unwrap();
 
@@ -7781,7 +8058,7 @@ services:
             "proj",
             "net",
             std::path::Path::new("/tokens/proj"),
-            "/workspace",
+            tmp_project_dir(),
         )
         .unwrap();
         let policy = svc
@@ -7882,7 +8159,7 @@ services:
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
-            "/test/project",
+            tmp_project_dir(),
         )
         .unwrap();
 
@@ -10193,7 +10470,7 @@ services:
         let yaml = render_compose_isolated(
             data_dir.path(),
             "test-project",
-            "/home/user/projects/test",
+            tmp_project_dir(),
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
@@ -10685,7 +10962,7 @@ services:
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),
@@ -10723,7 +11000,7 @@ services:
             yaml,
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),
@@ -10750,7 +11027,7 @@ services:
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),
@@ -10802,7 +11079,7 @@ services:
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),
@@ -10858,10 +11135,8 @@ services:
             yaml.contains("54321"),
             "port must appear in URL, got:\n{yaml}"
         );
-        assert!(
-            yaml.contains("test-token-abc"),
-            "token must appear in env, got:\n{yaml}"
-        );
+        // No `{yaml}` here: a token-bearing render must not land in panic output.
+        assert!(yaml.contains("test-token-abc"), "token must appear in env");
     }
 
     // ── Local LLM: tokens_path / ensure_token_dir / read_local_llm_token /
@@ -11161,7 +11436,7 @@ services:
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),
@@ -11205,7 +11480,7 @@ services:
             fixture_compose_yaml(),
             &super::ApplyPluginsCtx {
                 project_name: "test-project",
-                project_dir: "/tmp/test",
+                project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
                 tokens_dir: tmp.path(),

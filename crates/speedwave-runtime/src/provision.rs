@@ -440,7 +440,7 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
         escaped
     );
-    let output = crate::binary::system_command("powershell")
+    let output = crate::binary::powershell_command()
         .args(["-NoProfile", "-Command", &cmd])
         .output();
     match output {
@@ -501,7 +501,9 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
     let existing = read_existing_wslconfig(std::fs::read_to_string(&path), &path)?;
     let updated = merge_wslconfig_vpn_keys(&existing);
     if updated != existing {
-        crate::fs_perms::write_restricted_file_atomic(&path, &updated)?;
+        // Shared write: the WSL service must read this file — an owner-only
+        // protected DACL breaks it ("access denied" in non-user contexts).
+        crate::fs_perms::write_shared_file_atomic(&path, &updated)?;
         log::info!(
             "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
             path.display()
@@ -513,7 +515,33 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
              services on a corporate VPN from inside Speedwave's WSL distro)"
         );
     }
+    heal_wslconfig_dacl(&path);
     Ok(())
+}
+
+/// Resets a legacy owner-only protected DACL on `.wslconfig` back to the
+/// inherited profile ACL (earlier releases tightened it). Warn-only.
+#[cfg(target_os = "windows")]
+fn heal_wslconfig_dacl(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    let icacls = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows")),
+    )
+    .join("System32")
+    .join("icacls.exe");
+    match crate::binary::system_command(&icacls.to_string_lossy())
+        .args([path.as_os_str(), std::ffi::OsStr::new("/reset")])
+        .output()
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => log::warn!(
+            ".wslconfig DACL reset failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!(".wslconfig DACL reset spawn failed (non-fatal): {e}"),
+    }
 }
 
 /// Classifies a `.wslconfig` read: only `NotFound` maps to empty (fresh
@@ -662,7 +690,7 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
 /// prompt (success) or an installation failure message.
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = crate::binary::system_command("powershell")
+    let status = crate::binary::powershell_command()
         .args([
             "-Command",
             "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
@@ -733,7 +761,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             escaped_rootfs,
             expected_sha256
         );
-        let download = crate::binary::system_command("powershell")
+        let download = crate::binary::powershell_command()
             .args(["-NoProfile", "-Command", &download_and_verify])
             .status()?;
         if !download.success() {
@@ -1045,58 +1073,6 @@ pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
         out.push_str(&format!("[automount]{nl}options = \"{opts}\"{nl}"));
     }
     out
-}
-
-/// Chowns the project's `claude-home` tree to [`consts::container_uid_gid`] so
-/// the uid-1000 entrypoint can write `/home/speedwave`. MUST run after
-/// `compose_up_recreate`. Idempotent; fail-open (a chown failure only logs).
-#[cfg(target_os = "windows")]
-pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
-    let distro = consts::wsl_distro_name();
-    let (uid, gid) = consts::container_uid_gid();
-    let host_path = crate::claude_home::claude_home_dir(consts::data_dir(), project);
-    let wsl_path = crate::engine_path::to_engine_path(&host_path)?;
-    let uidgid = format!("{uid}:{gid}");
-    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
-    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
-    // string and drops the `$d` variable, so inlining via argv (the way compose
-    // passes mount paths) is the reliable form. Three small invocations.
-    let run = |args: &[&str]| {
-        crate::binary::system_command("wsl.exe")
-            .args(["-d", distro, "-u", "root", "--"])
-            .args(args)
-            .output()
-    };
-    let steps: [(&str, Vec<&str>); 3] = [
-        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
-        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
-        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
-    ];
-    let mut all_ok = true;
-    for (name, args) in &steps {
-        match run(args) {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                all_ok = false;
-                log::warn!(
-                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) => {
-                all_ok = false;
-                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
-            }
-        }
-    }
-    if all_ok {
-        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
-    } else {
-        log::warn!(
-            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
-        );
-    }
-    Ok(())
 }
 
 /// `true` if a `nerdctl --version` line reports exactly `NERDCTL_FULL_VERSION`.
@@ -1511,6 +1487,28 @@ pub fn ensure_nerdctl_version() {
 /// No-op off Windows: macOS gets nerdctl from Lima (`.lima-version`).
 #[cfg(not(target_os = "windows"))]
 pub fn ensure_nerdctl_version() {}
+
+/// One-stop Windows invariants for every engine consumer (Desktop AND CLI):
+/// nerdctl pin, drvfs metadata automount (uid=1000, ADR-052) and the
+/// `.wslconfig` VPN-compat keys. Warn-only.
+#[cfg(target_os = "windows")]
+pub fn ensure_windows_invariants() {
+    ensure_nerdctl_version();
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = ensure_wsl_distro_metadata(TerminateOnChange::IfIdle) {
+            log::warn!("could not verify drvfs metadata automount: {e}");
+        }
+        if let Err(e) = ensure_wslconfig_vpn_compat() {
+            log::warn!("could not verify .wslconfig VPN compat: {e}");
+        }
+    });
+}
+
+/// No-op off Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_windows_invariants() {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

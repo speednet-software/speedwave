@@ -142,6 +142,8 @@ pub fn command(cmd: &str) -> Command {
         }
     }
 
+    apply_wsl_utf8(&mut command, cmd);
+
     if cmd == "limactl" {
         match lima_home() {
             Some(home) => {
@@ -170,15 +172,44 @@ pub fn command(cmd: &str) -> Command {
 /// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
 /// For interactive TTY commands, use raw `Command::new()` instead.
 pub fn system_command(program: &str) -> Command {
-    let command = Command::new(program);
-    #[cfg(target_os = "windows")]
-    let mut command = command;
+    let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    apply_wsl_utf8(&mut command, program);
     command
+}
+
+/// Absolute path to Windows PowerShell — a bare `powershell` PATH lookup is
+/// hijackable and inconsistent across contexts (SSOT; Desktop re-exports it).
+pub fn system_powershell_path() -> PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+    PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// `system_command` pinned to the absolute PowerShell path.
+pub fn powershell_command() -> Command {
+    system_command(&system_powershell_path().to_string_lossy())
+}
+
+/// Forces UTF-8 output from `wsl.exe` (default is UTF-16LE / localized);
+/// classifiers and logs downstream assume UTF-8. No-op for other programs.
+fn apply_wsl_utf8(command: &mut Command, program: &str) {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    if name == "wsl" || name == "wsl.exe" {
+        command.env("WSL_UTF8", "1");
+    }
 }
 
 /// Runs a command with a timeout, killing the process if it exceeds the deadline.
@@ -227,6 +258,40 @@ pub(crate) mod tests {
 
     /// Serialises env-var mutations across parallel test threads.
     pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// True when the built Command carries `WSL_UTF8=1`.
+    fn has_wsl_utf8(cmd: &std::process::Command) -> bool {
+        cmd.get_envs()
+            .any(|(k, v)| k == "WSL_UTF8" && v.is_some_and(|v| v == "1"))
+    }
+
+    #[test]
+    fn system_command_sets_wsl_utf8_for_wsl_only() {
+        assert!(has_wsl_utf8(&system_command("wsl.exe")));
+        assert!(has_wsl_utf8(&system_command(
+            r"C:\Windows\System32\wsl.exe"
+        )));
+        assert!(!has_wsl_utf8(&system_command("powershell.exe")));
+        assert!(!has_wsl_utf8(&system_command("tasklist")));
+    }
+
+    #[test]
+    fn system_powershell_path_is_absolute_system32() {
+        let p = system_powershell_path();
+        let s = p.to_string_lossy();
+        assert!(s.ends_with("powershell.exe"), "got: {s}");
+        assert!(
+            s.contains("System32") && s.contains("WindowsPowerShell"),
+            "must pin the System32 install, got: {s}"
+        );
+    }
+
+    #[test]
+    fn command_sets_wsl_utf8_for_wsl_only() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        assert!(has_wsl_utf8(&command("wsl.exe")));
+        assert!(!has_wsl_utf8(&command("nerdctl")));
+    }
 
     #[test]
     fn resolve_binary_without_env_returns_bare_name() {

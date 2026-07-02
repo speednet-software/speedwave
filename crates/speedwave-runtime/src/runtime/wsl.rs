@@ -95,6 +95,55 @@ impl WslRuntime {
         &self.distro_name
     }
 
+    /// Runs `argv` in the distro through `sh -c` with POSIX quoting — wsl.exe
+    /// re-parses the post-`--` line via the default shell, so bare splicing
+    /// breaks on metacharacters in %USERPROFILE% (`'`, `(`, `$`, backtick).
+    fn run_in_distro(&self, argv: &[&str], root: bool) -> anyhow::Result<String> {
+        let remote_cmd = super::shell_quote_argv(argv);
+        let mut full: Vec<&str> = vec!["-d", self.distro()];
+        if root {
+            full.extend(["-u", "root"]);
+        }
+        full.extend(["--", "sh", "-c", &remote_cmd]);
+        self.runner.run("wsl.exe", &full)
+    }
+
+    /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the
+    /// container uid around every `up` — nerdctl root-creates missing
+    /// bind-mount sources (ADR-052). Fail-open.
+    fn ensure_claude_home_writable(&self, project: &str) {
+        let host = crate::claude_home::claude_home_dir(consts::data_dir(), project);
+        let path = match crate::engine_path::to_engine_path(&host) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("claude-home chown skipped for '{project}': {e}");
+                return;
+            }
+        };
+        let nested = crate::engine_path::vm_path_join(&path, ".claude/ide");
+        let (uid, gid) = consts::container_uid_gid();
+        let uidgid = format!("{uid}:{gid}");
+        let run_root = |name: &str, args: &[&str]| {
+            let res = self.run_in_distro(args, true);
+            if let Err(e) = &res {
+                log::warn!("claude-home {name} failed for '{project}' (non-fatal): {e}");
+            }
+            res
+        };
+        let _ = run_root("mkdir", &["mkdir", "-p", &nested]);
+        // Fast path: only root ever creates at the mount targets (home root +
+        // deepest nested target), so correct owners there mean no -R needed.
+        let owned = run_root("stat", &["stat", "-c", "%u:%g", &path, &nested]).is_ok_and(|out| {
+            let lines: Vec<&str> = out.lines().map(str::trim).collect();
+            lines.len() == 2 && lines.iter().all(|l| *l == uidgid)
+        });
+        if owned {
+            return;
+        }
+        let _ = run_root("chown", &["chown", "-R", &uidgid, &path]);
+        let _ = run_root("chmod", &["chmod", "-R", "u+rwX", &path]);
+    }
+
     /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
     #[cfg(test)]
     fn with_zero_delay(mut self) -> Self {
@@ -369,12 +418,11 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        // BEFORE up: the uid-1000 entrypoint races a post-up chown (ADR-052).
+        self.ensure_claude_home_writable(project);
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -385,8 +433,11 @@ impl ContainerRuntime for WslRuntime {
                 "-d",
                 "--remove-orphans",
             ],
-        )?;
-        Ok(())
+            false,
+        );
+        // AFTER up (even a failed one): hand back anything nerdctl root-created.
+        self.ensure_claude_home_writable(project);
+        up.map(|_| ())
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -399,23 +450,21 @@ impl ContainerRuntime for WslRuntime {
             log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
             return Ok(());
         }
+        let remote = super::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            project,
+            "down",
+            "--remove-orphans",
+        ]);
         super::compose_down_and_cleanup(
             &*self.runner,
             "wsl.exe",
             project,
-            &[
-                "-d",
-                distro,
-                "--",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "down",
-                "--remove-orphans",
-            ],
+            &["-d", distro, "--", "sh", "-c", &remote],
             &["-d", distro, "--", "nerdctl"],
         )
     }
@@ -423,12 +472,9 @@ impl ContainerRuntime for WslRuntime {
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        let output = self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        let output = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -439,6 +485,7 @@ impl ContainerRuntime for WslRuntime {
                 "--format",
                 "json",
             ],
+            false,
         )?;
         Ok(super::parse_compose_ps_json(&output))
     }
@@ -530,23 +577,14 @@ impl ContainerRuntime for WslRuntime {
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
-        let mut args: Vec<&str> = vec![
-            "-d",
-            distro,
-            "--",
-            "nerdctl",
-            "build",
-            "-t",
-            tag,
-            "-f",
-            containerfile,
-        ];
+        let _ = distro;
+        let mut args: Vec<&str> = vec!["nerdctl", "build", "-t", tag, "-f", containerfile];
         for s in &ba_strings {
             args.push("--build-arg");
             args.push(s);
         }
         args.push(context_dir);
-        self.runner.run("wsl.exe", &args)?;
+        self.run_in_distro(&args, false)?;
         Ok(())
     }
 
@@ -569,35 +607,29 @@ impl ContainerRuntime for WslRuntime {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
         let tail_str = tail.to_string();
-        self.runner.run_with_stderr(
-            "wsl.exe",
-            &[
-                "-d",
-                distro,
-                "--",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "logs",
-                "--timestamps",
-                "--tail",
-                &tail_str,
-            ],
-        )
+        let remote = super::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            project,
+            "logs",
+            "--timestamps",
+            "--tail",
+            &tail_str,
+        ]);
+        self.runner
+            .run_with_stderr("wsl.exe", &["-d", distro, "--", "sh", "-c", &remote])
     }
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        self.ensure_claude_home_writable(project);
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -609,20 +641,20 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 "--remove-orphans",
             ],
-        )?;
-        Ok(())
+            false,
+        );
+        self.ensure_claude_home_writable(project);
+        up.map(|_| ())
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        self.ensure_claude_home_writable(project);
+        let up = self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -634,19 +666,18 @@ impl ContainerRuntime for WslRuntime {
                 "--force-recreate",
                 service,
             ],
-        )?;
-        Ok(())
+            false,
+        );
+        self.ensure_claude_home_writable(project);
+        up.map(|_| ())
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
-            "wsl.exe",
+        let _ = distro;
+        self.run_in_distro(
             &[
-                "-d",
-                distro,
-                "--",
                 "nerdctl",
                 "compose",
                 "-f",
@@ -656,6 +687,7 @@ impl ContainerRuntime for WslRuntime {
                 "config",
                 "--quiet",
             ],
+            false,
         )?;
         Ok(())
     }
@@ -858,9 +890,9 @@ impl WslRuntime {
             );
         }
 
-        // Align in-distro nerdctl to the pin if drifted (ADR-072); runs before
-        // the readiness probes because a reinstall stops the daemons.
-        crate::provision::ensure_nerdctl_version();
+        // Windows invariants (nerdctl pin ADR-072 + metadata automount
+        // ADR-052) before the probes — a nerdctl reinstall stops the daemons.
+        crate::provision::ensure_windows_invariants();
 
         // Verify containerd and buildkitd are running inside the WSL distro.
         self.check_service(distro, &["nerdctl", "info"], "containerd", "containerd")?;
@@ -1095,9 +1127,20 @@ mod tests {
         let compose_file = wsl_compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
-                "wsl.exe -d {} -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
+                "wsl.exe -d {} -- sh -c {}",
                 consts::wsl_distro_name(),
-                compose_file
+                crate::runtime::shell_quote_argv(&[
+                    "nerdctl",
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "-p",
+                    "acme",
+                    "logs",
+                    "--timestamps",
+                    "--tail",
+                    "200",
+                ])
             ),
             "hub | started\nclaude | ready",
         );
@@ -1285,10 +1328,22 @@ mod tests {
     #[test]
     fn test_compose_up_recreate_includes_force_recreate() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            "acme",
+            "up",
+            "-d",
+            "--force-recreate",
+            "--remove-orphans",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            compose_file
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -1298,10 +1353,20 @@ mod tests {
     #[test]
     fn test_compose_validate_runs_nerdctl_compose_config_quiet() {
         let compose_file = wsl_compose_file_path("acme").unwrap();
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            "acme",
+            "config",
+            "--quiet",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl compose -f {} -p acme config --quiet",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            compose_file
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2012,10 +2077,22 @@ mod tests {
     #[test]
     fn test_build_image_passes_build_args() {
         let version = crate::defaults::CLAUDE_VERSION;
+        let ba = format!("CLAUDE_VERSION={version}");
+        let remote = crate::runtime::shell_quote_argv(&[
+            "nerdctl",
+            "build",
+            "-t",
+            "my-image:latest",
+            "-f",
+            "/ctx/Containerfile",
+            "--build-arg",
+            &ba,
+            "/ctx",
+        ]);
         let expected_key = format!(
-            "wsl.exe -d {} -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            version
+            remote
         );
         let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2523,6 +2600,207 @@ mod tests {
             result.unwrap_err().to_string().contains("not ready"),
             "should report not ready after retries"
         );
+    }
+
+    mod claude_home_chown_tests {
+        use super::*;
+        use crate::runtime::test_support::SequentialMockRunner;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct ArcRunner(Arc<SequentialMockRunner>);
+        impl crate::runtime::CommandRunner for ArcRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                self.0.run(cmd, args)
+            }
+            fn run_with_timeout(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: Duration,
+            ) -> anyhow::Result<()> {
+                self.0.run_with_timeout(cmd, args, timeout)
+            }
+        }
+
+        /// Engine-side claude-home path exactly as the runtime derives it.
+        fn engine_home(project: &str) -> String {
+            // SSOT-allow: mirrors production chown (wsl.rs:101), which reads data_dir() directly.
+            let host = crate::claude_home::claude_home_dir(consts::data_dir(), project);
+            crate::engine_path::to_engine_path(&host).unwrap()
+        }
+
+        fn uidgid() -> String {
+            let (uid, gid) = consts::container_uid_gid();
+            format!("{uid}:{gid}")
+        }
+
+        /// Expected argv per step: mkdir, stat probe, chown -R, chmod -R.
+        fn chown_steps(distro: &str, project: &str) -> [Vec<String>; 4] {
+            let home = engine_home(project);
+            let nested = format!("{home}/.claude/ide");
+            let pre = |rest: Vec<&str>| {
+                vec![
+                    "-d".into(),
+                    distro.to_string(),
+                    "-u".into(),
+                    "root".into(),
+                    "--".into(),
+                    "sh".into(),
+                    "-c".into(),
+                    crate::runtime::shell_quote_argv(&rest),
+                ]
+            };
+            [
+                pre(vec!["mkdir", "-p", &nested]),
+                pre(vec!["stat", "-c", "%u:%g", &home, &nested]),
+                pre(vec!["chown", "-R", &uidgid(), &home]),
+                pre(vec!["chmod", "-R", "u+rwX", &home]),
+            ]
+        }
+
+        /// Responses for one not-yet-owned chown pass (probe says root-owned).
+        fn unowned_pass() -> Vec<anyhow::Result<String>> {
+            vec![
+                Ok("".into()),
+                Ok("0:0\n0:0".into()),
+                Ok("".into()),
+                Ok("".into()),
+            ]
+        }
+
+        /// Responses for an already-owned pass (probe short-circuits).
+        fn owned_pass() -> Vec<anyhow::Result<String>> {
+            vec![Ok("".into()), Ok(format!("{u}\n{u}", u = uidgid()))]
+        }
+
+        #[test]
+        fn compose_up_chowns_claude_home_before_and_after_up() {
+            // Full pass BEFORE up (entrypoint must not race it), fast pass after.
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into())); // up
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(calls.len(), 7, "4 pre-up + up + 2 post-up (fast path)");
+            let steps = chown_steps("Speedwave-test", "acme");
+            for (i, exp) in steps.iter().enumerate() {
+                assert_eq!(&calls[i].1, exp, "pre-up step {i} argv mismatch");
+            }
+            assert!(calls[4].1.last().unwrap().contains(" up "));
+            assert_eq!(&calls[5].1, &steps[0], "post-up mkdir");
+            assert_eq!(&calls[6].1, &steps[1], "post-up stat probe");
+        }
+
+        #[test]
+        fn chown_fast_path_skips_recursive_pass_when_already_owned() {
+            let mut responses = owned_pass();
+            responses.push(Ok("".into())); // up
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                5,
+                "no -R walk when both probes report the container uid"
+            );
+            assert!(!calls
+                .iter()
+                .any(|c| c.1.last().is_some_and(|l| l.starts_with("chown"))));
+        }
+
+        #[test]
+        fn chown_full_pass_when_probe_fails() {
+            // stat error (e.g. path vanished) must fall back to the full pass.
+            let responses = vec![
+                Ok("".into()),
+                Err(anyhow::anyhow!("stat: cannot stat")),
+                Ok("".into()),
+                Ok("".into()),
+                Ok("".into()), // up
+                Ok("".into()),
+                Ok(format!("{u}\n{u}", u = uidgid())),
+            ];
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert!(calls
+                .iter()
+                .any(|c| c.1.last().is_some_and(|l| l.starts_with("chown"))));
+        }
+
+        #[test]
+        fn compose_up_recreate_chowns_claude_home_before_and_after_up() {
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into()));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up_recreate("acme").is_ok());
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(calls.len(), 7);
+            assert!(calls[4].1.last().unwrap().contains("--force-recreate"));
+            assert_eq!(calls[2].1, chown_steps("Speedwave-test", "acme")[2]);
+        }
+
+        #[test]
+        fn compose_up_service_claude_chowns_claude_home() {
+            let mut responses = unowned_pass();
+            responses.push(Ok("".into()));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up_service("acme", "claude").is_ok());
+            assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
+        }
+
+        #[test]
+        fn compose_up_survives_chown_failure_fail_open() {
+            // A chown hiccup must not fail the up (matches the previous
+            // provision::ensure_claude_home_owner fail-open contract).
+            let mock = SequentialMockRunner::new(vec![
+                Err(anyhow::anyhow!("mkdir: I/O error")),
+                Err(anyhow::anyhow!("stat: I/O error")),
+                Err(anyhow::anyhow!("chown: I/O error")),
+                Err(anyhow::anyhow!("chmod: I/O error")),
+                Ok("".into()),
+                Err(anyhow::anyhow!("mkdir: I/O error")),
+                Err(anyhow::anyhow!("stat: I/O error")),
+                Err(anyhow::anyhow!("chown: I/O error")),
+                Err(anyhow::anyhow!("chmod: I/O error")),
+            ]);
+            let rt = WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(mock));
+            assert!(rt.compose_up("acme").is_ok());
+        }
+
+        #[test]
+        fn compose_up_failure_still_runs_post_up_chown() {
+            // A partial up may already have root-created dirs — hand them back.
+            let mut responses = unowned_pass();
+            responses.push(Err(anyhow::anyhow!("compose up failed")));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up("acme").is_err());
+            assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
+        }
     }
 
     mod reset_vm_tests {

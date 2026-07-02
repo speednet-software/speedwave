@@ -388,6 +388,7 @@ describe('LlmProviderComponent', () => {
     fixture.componentRef.setInput('activeProject', 'proj-from-input');
     const projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject.set('wrong-project');
+    projectState.status.set('ready'); // hot-reload requires a live stack
 
     let restartProject: unknown = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -2731,6 +2732,7 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
     const projectState = TestBed.inject(ProjectStateService);
+    projectState.status.set('ready'); // hot-reload requires a live stack
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     // The active project comes from the input signal (not projectState).
     fixture.componentRef.setInput('activeProject', 'proj');
@@ -2752,6 +2754,34 @@ describe('LlmProviderComponent', () => {
     calls.length = 0;
     component.model.set('claude-opus-4-8');
     await component.saveConfig();
+    expect(calls).not.toContain('restart_llm_proxy');
+    expect(restartSpy).toHaveBeenCalled();
+  });
+
+  it('base-url-only save on a DOWN stack requests a restart, not a hot-reload', async () => {
+    // A lone proxy would accept the reload while claude stays dead — the
+    // save must route through requestRestart (which also starts containers).
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.status.set('no_provider'); // containers down
+    const restartSpy = vi.spyOn(projectState, 'requestRestart');
+    fixture.componentRef.setInput('activeProject', 'proj');
+
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component['loadedActiveKey'] = component['computeActiveKey'](
+      'anthropic',
+      null,
+      component['buildProviderSet'](false)
+    );
+    await component.saveConfig();
+
     expect(calls).not.toContain('restart_llm_proxy');
     expect(restartSpy).toHaveBeenCalled();
   });

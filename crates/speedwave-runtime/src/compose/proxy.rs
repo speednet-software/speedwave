@@ -31,6 +31,8 @@ struct RenderRoute {
 #[derive(Serialize)]
 struct RenderConfig {
     routes: Vec<RenderRoute>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_token: Option<String>,
 }
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
@@ -59,9 +61,44 @@ pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     proxy_config_dir_in(data_dir, project).join("proxy.json")
 }
 
+/// Header carrying the per-project caller secret; mirror of the proxy's
+/// `CALLER_AUTH_HEADER` in `containers/proxy/src/main.rs`.
+pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
+
+/// Path of the persisted per-project caller secret: `<config_dir>/caller-token`.
+fn caller_token_path_in(data_dir: &Path, project: &str) -> PathBuf {
+    proxy_config_dir_in(data_dir, project).join("caller-token")
+}
+
+/// Reads the stable per-project caller secret, creating it (0600) on first use.
+/// Stable across renders so it doesn't churn the proxy state digest every start.
+pub fn ensure_caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
+    crate::validation::validate_project_name(project)?;
+    let path = caller_token_path_in(data_dir, project);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        crate::fs_perms::ensure_owner_only_dir(parent)?;
+    }
+    let token = crate::pkce::generate_state();
+    crate::fs_perms::write_restricted_file_atomic(&path, &token)?;
+    Ok(token)
+}
+
 /// Renders the proxy routing config (a `routes` array consumed by the forwarder
 /// `containers/proxy/src/router.rs`). Pure; `write_proxy_config_in` persists it.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
+    render_proxy_config_with(llm, None)
+}
+
+/// [`render_proxy_config`] plus the optional per-project `caller_token` the
+/// proxy's auth middleware requires on `/v1/*`.
+pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
     let mut routes = Vec::new();
 
     // OAuth vs API key render the same passthrough route; the kind is learned
@@ -140,7 +177,11 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
 
     // serde guarantees valid JSON + the golden field order; serialization of a
     // plain struct cannot fail, so the fallback is unreachable.
-    serde_json::to_string(&RenderConfig { routes }).unwrap_or_else(|_| r#"{"routes":[]}"#.into())
+    serde_json::to_string(&RenderConfig {
+        routes,
+        caller_token: caller_token.map(str::to_string),
+    })
+    .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
 /// Renders + atomically persists the config (0600 + fsync) under
@@ -156,7 +197,8 @@ pub fn write_proxy_config_in(
         std::fs::create_dir_all(parent)?;
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
-    let content = render_proxy_config(llm);
+    let token = ensure_caller_token_in(data_dir, project)?;
+    let content = render_proxy_config_with(llm, Some(&token));
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
@@ -323,6 +365,52 @@ mod tests {
         assert!(!out.contains("ANTHROPIC_API_KEY") && !out.contains("ANTHROPIC_AUTH_TOKEN"));
         assert!(out.contains("SPW_KEY_OPENROUTER")); // env NAME only
         assert!(!out.contains("callbacks")); // litellm callback machinery gone
+    }
+
+    #[test]
+    fn render_embeds_caller_token_when_present_and_omits_when_none() {
+        let cfg = full_provider_mix();
+        let with = render_proxy_config_with(&cfg, Some("secret-abc"));
+        assert!(
+            with.contains(r#""caller_token":"secret-abc""#),
+            "token must be embedded: {with}"
+        );
+        let without = render_proxy_config(&cfg);
+        assert!(
+            !without.contains("caller_token"),
+            "no token field when absent: {without}"
+        );
+    }
+
+    #[test]
+    fn ensure_caller_token_is_stable_and_restricted() {
+        let dir = tempfile::tempdir().unwrap();
+        let t1 = ensure_caller_token_in(dir.path(), "proj").unwrap();
+        let t2 = ensure_caller_token_in(dir.path(), "proj").unwrap();
+        assert_eq!(t1, t2, "token must be stable across renders");
+        assert!(!t1.is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(caller_token_path_in(dir.path(), "proj"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "token file must be 0600");
+        }
+    }
+
+    #[test]
+    fn write_proxy_config_embeds_the_caller_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = full_provider_mix();
+        write_proxy_config_in(dir.path(), "proj", &cfg).unwrap();
+        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
+        let token = ensure_caller_token_in(dir.path(), "proj").unwrap();
+        assert!(
+            written.contains(&format!(r#""caller_token":"{token}""#)),
+            "written proxy.json must carry the caller token"
+        );
     }
 
     #[test]

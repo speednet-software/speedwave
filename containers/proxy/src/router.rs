@@ -62,6 +62,10 @@ pub struct Route {
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
+    /// Per-project caller secret only the `claude` container holds; the auth
+    /// middleware requires it on `/v1/*`. Absent ⇒ legacy config, checks skip.
+    #[serde(default)]
+    pub caller_token: Option<String>,
     #[serde(skip)]
     pub usage_path: PathBuf,
     /// Shared outbound client (cloned per request — cheap, Arc-backed). Built
@@ -83,6 +87,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             routes: Vec::new(),
+            caller_token: None,
             usage_path: PathBuf::from(
                 std::env::var("SPW_USAGE_PATH")
                     .unwrap_or_else(|_| "/usage/usage.jsonl".to_string()),
@@ -92,10 +97,12 @@ impl Default for Config {
     }
 }
 
-/// Holds only `routes`; `usage_path` is resolved from env, not the file.
+/// File-backed fields; `usage_path`/`client` come from env/default, not the file.
 #[derive(Deserialize)]
 struct RoutesFile {
     routes: Vec<Route>,
+    #[serde(default)]
+    caller_token: Option<String>,
 }
 
 impl Config {
@@ -108,6 +115,7 @@ impl Config {
             serde_json::from_str(&raw).map_err(|e| format!("parsing {}: {e}", path.display()))?;
         Ok(Self {
             routes: parsed.routes,
+            caller_token: parsed.caller_token,
             ..Self::default()
         })
     }

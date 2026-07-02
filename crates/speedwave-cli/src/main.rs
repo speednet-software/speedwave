@@ -838,15 +838,22 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = detect_runtime();
 
-    // CLI checks availability but does NOT install (ensure_ready).
-    // Installation is the Setup Wizard's responsibility in Speedwave.app.
+    // Install stays the wizard's job; an installed-but-stopped runtime
+    // (Lima VM after reboot, containerd down) is recovered right here.
     if !runtime.is_available() {
-        runtime_not_available();
+        if !runtime.is_installed() {
+            runtime_not_available();
+        }
+        err!("Starting the Speedwave runtime (it was stopped)...");
+        if let Err(e) = runtime.ensure_ready() {
+            err!("Failed to start the runtime: {}", redact_err(&e));
+            std::process::exit(1);
+        }
     }
 
-    // Align in-distro nerdctl to the pin (Windows; no-op elsewhere). Warn-only,
-    // Once-guarded inside.
-    speedwave_runtime::provision::ensure_nerdctl_version();
+    // Windows engine invariants (nerdctl pin + drvfs metadata automount);
+    // no-op elsewhere. Warn-only, Once-guarded inside.
+    speedwave_runtime::provision::ensure_windows_invariants();
 
     // Load config once — used for both project resolution and compose rendering
     let mut user_config = config::load_user_config().unwrap_or_else(|e| {
@@ -893,6 +900,17 @@ fn main() -> anyhow::Result<()> {
                 "project '{project_name}' not found in config. Available projects: {available}"
             )
         })?;
+
+    // Cloud-storage preflight (Desktop parity): a TCC-blocked iCloud/OneDrive
+    // dir must be a clear message, not a cryptic compose failure.
+    if let Err(e) = speedwave_runtime::cloudstorage::check_project_readable_or_err(&project_dir) {
+        err!(
+            "{}",
+            speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE
+        );
+        err!("({e})");
+        std::process::exit(1);
+    }
 
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
@@ -1017,6 +1035,22 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
     if built > 0 {
         out!("Built {built} container image(s) for this app version");
+        // Half-applied bundle bug: an image rebuild without the resource sync
+        // leaves stale skills/commands until the next Desktop launch.
+        match speedwave_runtime::build::resolve_build_root() {
+            Ok(root) => {
+                if let Err(e) = speedwave_runtime::bundle::sync_claude_resources(&root) {
+                    err!(
+                        "Warning: claude-resources sync failed: {} (skills may be stale)",
+                        redact_err(&e)
+                    );
+                }
+            }
+            Err(e) => err!(
+                "Warning: build root unavailable, claude-resources not synced: {}",
+                redact_err(&e)
+            ),
+        }
         // Prune superseded tags (warn-only) so CLI-only users don't leak a tag generation.
         speedwave_runtime::build::prune_superseded_images(
             &runtime,
@@ -1123,20 +1157,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_bare_run_syncs_resources_when_images_rebuilt() {
+        // Post-app-update bare run: image rebuild without the resource sync
+        // half-applies the bundle (stale skills until Desktop launches).
+        let source = include_str!("main.rs");
+        let run_flow = source
+            .find("Built {built} container image(s)")
+            .expect("bare-run rebuild message must exist");
+        let window = &source[run_flow..run_flow + 900];
+        assert!(
+            window.contains("sync_claude_resources"),
+            "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
+
+    #[test]
     fn cli_aligns_nerdctl_before_compose_work() {
         let source = include_str!("main.rs");
         let avail = source
             .find("runtime_not_available();")
             .expect("availability gate must exist");
         let align = source
-            .find("ensure_nerdctl_version();")
-            .expect("CLI must align in-distro nerdctl (Windows pin)");
+            .find("ensure_windows_invariants();")
+            .expect("CLI must apply Windows invariants (nerdctl pin + metadata automount)");
         let txn = source
             .find("runtime.transaction(")
             .expect("compose transaction must exist");
         assert!(
             avail < align && align < txn,
-            "nerdctl alignment must run after availability, before compose work"
+            "Windows invariants must run after availability, before compose work"
         );
     }
 
