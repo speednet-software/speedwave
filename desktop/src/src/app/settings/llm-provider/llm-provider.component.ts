@@ -1634,7 +1634,10 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       // Changes to claude-env (kind / custom-headers → proxy-vs-direct path)
       // need a full restart; proxy-path-only changes (base_url) = proxy reload.
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      if (!forceRestart && activeKey === this.loadedActiveKey && project) {
+      // Hot-reload only against a LIVE stack; a lone proxy on a down project
+      // would "succeed" while claude stays dead — route through requestRestart.
+      const stackReady = this.projectState.status() === 'ready';
+      if (!forceRestart && activeKey === this.loadedActiveKey && project && stackReady) {
         // Only base_url changed (same provider/model/kind) — hot-reload the
         // proxy instead of a full claude restart.
         try {
