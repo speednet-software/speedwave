@@ -501,7 +501,9 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
     let existing = read_existing_wslconfig(std::fs::read_to_string(&path), &path)?;
     let updated = merge_wslconfig_vpn_keys(&existing);
     if updated != existing {
-        crate::fs_perms::write_restricted_file_atomic(&path, &updated)?;
+        // Shared write: the WSL service must read this file — an owner-only
+        // protected DACL breaks it ("access denied" in non-user contexts).
+        crate::fs_perms::write_shared_file_atomic(&path, &updated)?;
         log::info!(
             "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
             path.display()
@@ -513,7 +515,33 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
              services on a corporate VPN from inside Speedwave's WSL distro)"
         );
     }
+    heal_wslconfig_dacl(&path);
     Ok(())
+}
+
+/// Resets a legacy owner-only protected DACL on `.wslconfig` back to the
+/// inherited profile ACL (earlier releases tightened it). Warn-only.
+#[cfg(target_os = "windows")]
+fn heal_wslconfig_dacl(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    let icacls = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows")),
+    )
+    .join("System32")
+    .join("icacls.exe");
+    match crate::binary::system_command(&icacls.to_string_lossy())
+        .args([path.as_os_str(), std::ffi::OsStr::new("/reset")])
+        .output()
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => log::warn!(
+            ".wslconfig DACL reset failed (non-fatal): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!(".wslconfig DACL reset spawn failed (non-fatal): {e}"),
+    }
 }
 
 /// Classifies a `.wslconfig` read: only `NotFound` maps to empty (fresh
@@ -1461,7 +1489,8 @@ pub fn ensure_nerdctl_version() {
 pub fn ensure_nerdctl_version() {}
 
 /// One-stop Windows invariants for every engine consumer (Desktop AND CLI):
-/// nerdctl pin + drvfs metadata automount (uid=1000, ADR-052). Warn-only.
+/// nerdctl pin, drvfs metadata automount (uid=1000, ADR-052) and the
+/// `.wslconfig` VPN-compat keys. Warn-only.
 #[cfg(target_os = "windows")]
 pub fn ensure_windows_invariants() {
     ensure_nerdctl_version();
@@ -1470,6 +1499,9 @@ pub fn ensure_windows_invariants() {
     ONCE.call_once(|| {
         if let Err(e) = ensure_wsl_distro_metadata(TerminateOnChange::IfIdle) {
             log::warn!("could not verify drvfs metadata automount: {e}");
+        }
+        if let Err(e) = ensure_wslconfig_vpn_compat() {
+            log::warn!("could not verify .wslconfig VPN compat: {e}");
         }
     });
 }

@@ -284,6 +284,29 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
     Ok(())
 }
 
+/// Atomic write WITHOUT permission tightening — for shared, non-secret files
+/// other principals must read (e.g. `.wslconfig`, read by the WSL service).
+pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Tempfiles default to 0600; a shared file must stay world-readable.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))?;
+    }
+    fsync_file_durable(tmp.as_file())
+        .map_err(|e| anyhow::anyhow!("fsync tempfile for {}: {}", path.display(), e))?;
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("failed to persist tempfile to {}: {}", path.display(), e))?;
+    fsync_parent_dir(parent);
+    Ok(())
+}
+
 /// Creates `path` (if missing) and sets it to owner-only perms. Unix: `chmod
 /// 0o700`. Windows: DACL with a single `GENERIC_ALL` ACE for the current user.
 /// Idempotent.
@@ -327,6 +350,24 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn shared_atomic_write_replaces_content_without_tightening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".wslconfig");
+        write_shared_file_atomic(&path, "[wsl2]\n").unwrap();
+        write_shared_file_atomic(&path, "[wsl2]\nnetworkingMode=mirrored\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[wsl2]\nnetworkingMode=mirrored\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "shared write must stay world-readable");
+        }
     }
 
     #[cfg(unix)]
