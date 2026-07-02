@@ -1047,58 +1047,6 @@ pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     out
 }
 
-/// Chowns the project's `claude-home` tree to [`consts::container_uid_gid`] so
-/// the uid-1000 entrypoint can write `/home/speedwave`. MUST run after
-/// `compose_up_recreate`. Idempotent; fail-open (a chown failure only logs).
-#[cfg(target_os = "windows")]
-pub fn ensure_claude_home_owner(project: &str) -> anyhow::Result<()> {
-    let distro = consts::wsl_distro_name();
-    let (uid, gid) = consts::container_uid_gid();
-    let host_path = crate::claude_home::claude_home_dir(consts::data_dir(), project);
-    let wsl_path = crate::engine_path::to_engine_path(&host_path)?;
-    let uidgid = format!("{uid}:{gid}");
-    // Pass the path as its OWN argv token to each tool (mkdir/chown/chmod) — no
-    // `sh -c` wrapper, no shell variable. `wsl.exe` re-parses a `sh -c "<script>"`
-    // string and drops the `$d` variable, so inlining via argv (the way compose
-    // passes mount paths) is the reliable form. Three small invocations.
-    let run = |args: &[&str]| {
-        crate::binary::system_command("wsl.exe")
-            .args(["-d", distro, "-u", "root", "--"])
-            .args(args)
-            .output()
-    };
-    let steps: [(&str, Vec<&str>); 3] = [
-        ("mkdir", vec!["mkdir", "-p", &wsl_path]),
-        ("chown", vec!["chown", "-R", &uidgid, &wsl_path]),
-        ("chmod", vec!["chmod", "-R", "u+rwX", &wsl_path]),
-    ];
-    let mut all_ok = true;
-    for (name, args) in &steps {
-        match run(args) {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                all_ok = false;
-                log::warn!(
-                    "ensure_claude_home_owner: {name} failed (non-fatal): {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) => {
-                all_ok = false;
-                log::warn!("ensure_claude_home_owner: {name} spawn failed (non-fatal): {e}");
-            }
-        }
-    }
-    if all_ok {
-        log::info!("ensure_claude_home_owner: chowned {wsl_path} to {uidgid}");
-    } else {
-        log::warn!(
-            "ensure_claude_home_owner: {wsl_path} NOT fully chowned to {uidgid} (see warnings)"
-        );
-    }
-    Ok(())
-}
-
 /// `true` if a `nerdctl --version` line reports exactly `NERDCTL_FULL_VERSION`.
 /// Output shape is `nerdctl version 2.2.2` (tokens after "version").
 #[cfg(any(target_os = "windows", test))]

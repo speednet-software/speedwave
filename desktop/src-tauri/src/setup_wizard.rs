@@ -191,11 +191,6 @@ pub use speedwave_runtime::provision::TerminateOnChange;
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
 
-/// Chowns the project's claude-home tree to the container user (ADR-052).
-/// Re-exported from the runtime SSOT — used by `start_containers`.
-#[cfg(target_os = "windows")]
-pub use speedwave_runtime::provision::ensure_claude_home_owner;
-
 // ---------------------------------------------------------------------------
 // Step 4: Create project
 // ---------------------------------------------------------------------------
@@ -342,12 +337,6 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Ok(())
     })?;
     log::info!("containers started, verifying health");
-
-    // Windows: chown claude-home AFTER compose created the bind mount-points (ADR-052). Fail-open.
-    #[cfg(target_os = "windows")]
-    if let Err(e) = ensure_claude_home_owner(project) {
-        log::warn!("ensure_claude_home_owner failed (non-fatal): {e}");
-    }
 
     // Verify functional before marking started: probes the claude container only.
     let claude_container = crate::chat::claude_container_name(project);
@@ -3012,12 +3001,22 @@ networks:
         let spawn = window
             .find("std::thread::spawn")
             .expect("migration block must spawn a worker thread");
+        let barrier = window
+            .find("catch_unwind")
+            .expect("pre-reconcile migrations must run under a panic barrier");
         let lima = window
             .find("ensure_lima_vm_config()")
             .expect("lima migration inside the block");
+        let reconcile = window
+            .find("reconcile_bundle_update")
+            .expect("reconcile must follow the migrations");
         assert!(
-            spawn < lima,
-            "VM migrations must run inside the spawned thread, not on the main thread"
+            spawn < barrier && barrier < lima,
+            "VM migrations must run inside the spawned thread under catch_unwind"
+        );
+        assert!(
+            lima < reconcile,
+            "reconcile (the only step that flips IMAGES_READY) must run after migrations"
         );
     }
 
