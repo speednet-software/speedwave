@@ -10858,10 +10858,8 @@ services:
             yaml.contains("54321"),
             "port must appear in URL, got:\n{yaml}"
         );
-        assert!(
-            yaml.contains("test-token-abc"),
-            "token must appear in env, got:\n{yaml}"
-        );
+        // No `{yaml}` here: a token-bearing render must not land in panic output.
+        assert!(yaml.contains("test-token-abc"), "token must appear in env");
     }
 
     // ── Local LLM: tokens_path / ensure_token_dir / read_local_llm_token /
