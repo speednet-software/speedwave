@@ -32,6 +32,8 @@ runs:
 
         tar -xzf /tmp/lima.tar.gz -C desktop/src-tauri/lima/ --strip-components=1
 
+        bash scripts/prune-bundled-lima.sh desktop/src-tauri
+
         # Apache 2.0 compliance
         cp desktop/src-tauri/lima/share/doc/lima/LICENSE desktop/src-tauri/THIRD-PARTY-LICENSES/lima-LICENSE
         curl -fsSL "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/NOTICE" \
