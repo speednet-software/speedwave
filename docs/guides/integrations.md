@@ -633,7 +633,7 @@ Some built-in integrations ship a companion Claude resource — a skill, command
 containers/claude-resources/
 ├── skills/
 │   ├── code-review-basic/        # core skill — always linked
-│   ├── code-review-…/            # 13 other code-review-* skills
+│   ├── code-review-…/            # the other code-review-* worker skills
 │   ├── speedwave-code-review/    # core orchestrator
 │   └── integrations/             # integration-bound bucket
 │       ├── office/               # MCP — linked when `office` ∈ ENABLED_SERVICES
