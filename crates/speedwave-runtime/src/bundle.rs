@@ -1682,4 +1682,21 @@ mod tests {
             "bundle-state.json should be 0o600, got {mode:#05o}"
         );
     }
+
+    #[test]
+    fn windows_bundle_cli_asset_matches_filename_ssot() {
+        let expected = format!("cli/{}", crate::consts::cli_binary_filename(true));
+        let assets = required_bundled_assets("windows").expect("windows assets");
+        assert!(
+            assets.iter().any(|a| a.path == expected),
+            "WINDOWS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
+             the const literal and the SSOT drifted"
+        );
+        // The Tauri Windows resource map must carry the same bundle path.
+        let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
+        assert!(
+            tauri_cfg.contains(&expected),
+            "tauri.windows.conf.json must bundle {expected}; rename it there too"
+        );
+    }
 }
