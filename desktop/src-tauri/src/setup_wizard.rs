@@ -519,11 +519,10 @@ pub fn factory_reset() -> anyhow::Result<()> {
     // 3. Remove CLI binary (Unix: ~/.local/bin/speedwave — outside data dir)
     #[cfg(unix)]
     {
-        let target = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-            .join(".local")
-            .join("bin")
-            .join(consts::CLI_BINARY);
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        let target =
+            speedwave_runtime::consts::cli_install_path_for(false, &home, consts::data_dir());
         let _ = std::fs::remove_file(&target);
     }
     // Windows CLI lives inside data_dir/bin/ — wipe_data_dir handles it.
@@ -644,7 +643,7 @@ pub fn copy_cli_binary(
     std::fs::create_dir_all(target_dir)?;
 
     #[cfg(target_os = "windows")]
-    let dest = target_dir.join("speedwave.exe");
+    let dest = target_dir.join(format!("{}.exe", consts::CLI_BINARY));
     #[cfg(not(target_os = "windows"))]
     let dest = target_dir.join(consts::CLI_BINARY);
 
@@ -768,22 +767,6 @@ fn ensure_local_bin_on_path_for_shell(
     }
 
     Ok(())
-}
-
-/// CLI install path (Unix: `~/.local/bin/speedwave`, Windows:
-/// `<data_dir>/bin/speedwave.exe`).
-#[cfg(test)]
-fn cli_install_path_in(_data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    #[cfg(unix)]
-    let path = dirs::home_dir()?
-        .join(".local")
-        .join("bin")
-        .join(consts::CLI_BINARY);
-
-    #[cfg(target_os = "windows")]
-    let path = _data_dir.join(consts::CLI_BIN_SUBDIR).join("speedwave.exe");
-
-    Some(path)
 }
 
 /// Copies the CLI binary into PATH, updates shell config, and marks
@@ -2245,22 +2228,24 @@ mod tests {
 
     #[test]
     fn cli_install_path_returns_platform_specific_path() {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let path = cli_install_path_in(data_dir.path()).expect("should return a path");
-
-        #[cfg(unix)]
-        assert!(
-            path.to_string_lossy().contains(".local/bin/speedwave"),
-            "Unix path should contain .local/bin/speedwave: {}",
-            path.display()
+        let unix_home = std::path::Path::new("/home/u");
+        assert_eq!(
+            speedwave_runtime::consts::cli_install_path_for(
+                false,
+                unix_home,
+                std::path::Path::new("/home/u/.speedwave"),
+            ),
+            "/home/u/.local/bin/speedwave"
         );
-
-        #[cfg(target_os = "windows")]
-        assert!(
-            path.to_string_lossy()
-                .contains(".speedwave\\bin\\speedwave.exe"),
-            "Windows path should contain .speedwave\\bin\\speedwave.exe: {}",
-            path.display()
+        // Windows path is a backslash string built from a Windows-shaped data_dir.
+        let win_home = std::path::Path::new(r"C:\Users\u");
+        assert_eq!(
+            speedwave_runtime::consts::cli_install_path_for(
+                true,
+                win_home,
+                std::path::Path::new(r"C:\Users\u\.speedwave"),
+            ),
+            r"C:\Users\u\.speedwave\bin\speedwave.exe"
         );
     }
 
@@ -2607,6 +2592,23 @@ mod tests {
             .permissions()
             .mode();
         assert!(mode & 0o111 != 0, "binary should be executable");
+
+        // Producer↔SSOT guard (unix): installed path must equal the login SSOT.
+        // data_dir is ignored by the unix SSOT branch, so any value works — and a
+        // literal keeps the `no_raw_data_dir_in_tests` drift detector green.
+        #[cfg(unix)]
+        {
+            let expected = speedwave_runtime::consts::cli_install_path_for(
+                false,
+                &home,
+                &home.join(".speedwave-test"),
+            );
+            assert_eq!(
+                dest.to_string_lossy(),
+                expected,
+                "installer dest must match cli_install_path_for so login never drifts"
+            );
+        }
     }
 
     #[cfg(unix)]
