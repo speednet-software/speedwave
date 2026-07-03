@@ -811,6 +811,7 @@ download-lima:
 	echo "  Checksum OK" && \
 	tar -xzf "/tmp/$$TARBALL" -C desktop/src-tauri/lima/ --strip-components=1 && \
 	rm -f "/tmp/$$TARBALL" /tmp/lima-SHA256SUMS
+	@bash scripts/prune-bundled-lima.sh desktop/src-tauri
 	@cp desktop/src-tauri/lima/share/doc/lima/LICENSE \
 		desktop/src-tauri/THIRD-PARTY-LICENSES/lima-LICENSE 2>/dev/null || true
 	@curl -fsSL "https://raw.githubusercontent.com/lima-vm/lima/v$(LIMA_VERSION)/NOTICE" \

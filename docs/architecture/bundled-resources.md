@@ -115,8 +115,9 @@ Desktop packaging now treats the staged Tauri resources as a validated runtime c
 - bundled `build-context/` and `mcp-os/` trees exist and are non-empty
 - the platform runtime is present (`node`, CLI, Lima or nerdctl/WSL assets)
 - macOS bundles include `reminders-cli`, `calendar-cli`, `mail-cli`, and `notes-cli`
+- no unsigned Mach-O survives under `lima/share`, including one wrapped in gzip, which Apple notarization unpacks and rejects (the unused Lima Darwin guest-agent is pruned at download time by `scripts/prune-bundled-lima.sh`)
 
-The gate (`scripts/verify-bundled-assets.sh`) is a filesystem presence/shape check — file exists, non-empty, and (for binaries) executable. It does not verify file contents, signatures, or that `tauri.<platform>.conf.json` declares each resource (that SSOT alignment is enforced separately).
+The gate (`scripts/verify-bundled-assets.sh`) is mostly a filesystem presence/shape check: file exists, non-empty, and (for binaries) executable. The one content check is the `lima/share` Mach-O scan above; it does not otherwise verify signatures or that `tauri.<platform>.conf.json` declares each resource (that SSOT alignment is enforced separately).
 
 This closes the failure mode where a release could build successfully even though a runtime helper was missing from the final app bundle.
 
