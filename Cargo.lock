@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-cli"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "base64",
