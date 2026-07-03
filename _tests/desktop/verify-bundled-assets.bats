@@ -88,3 +88,31 @@ populate_macos() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"mcp-shared"* ]]
 }
+
+@test "verify-bundled-assets rejects a Mach-O gzip under lima/share" {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        skip "needs a Mach-O source binary (Darwin host)"
+    fi
+    populate_common
+    populate_macos
+    mkdir -p "$ROOT/lima/share/lima"
+    gzip -c /bin/ls > "$ROOT/lima/share/lima/lima-guestagent.Darwin-aarch64.gz"
+
+    run "$SCRIPT" macos "$ROOT"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Mach-O"* ]]
+    [[ "$output" == *"lima/share"* ]]
+}
+
+@test "verify-bundled-assets accepts a non-Mach-O gzip under lima/share" {
+    populate_common
+    populate_macos
+    mkdir -p "$ROOT/lima/share/lima"
+    printf '\x7fELF fake linux guestagent' | gzip -c \
+        > "$ROOT/lima/share/lima/lima-guestagent.Linux-aarch64.gz"
+
+    run "$SCRIPT" macos "$ROOT"
+
+    [ "$status" -eq 0 ]
+}
