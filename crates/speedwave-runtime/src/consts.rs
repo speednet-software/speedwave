@@ -1128,6 +1128,39 @@ pub fn data_dir() -> &'static std::path::PathBuf {
     })
 }
 
+/// CLI install path as a platform-shaped string (Windows backslashes, not
+/// `PathBuf::join`, so it is host-independent). Unix ignores `data_dir`. ADR-016.
+pub fn cli_install_path_for(
+    is_windows: bool,
+    home: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> String {
+    if is_windows {
+        format!(
+            "{}\\{}\\{}.exe",
+            data_dir.to_string_lossy(),
+            CLI_BIN_SUBDIR,
+            CLI_BINARY
+        )
+    } else {
+        home.join(".local")
+            .join("bin")
+            .join(CLI_BINARY)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Production shim: resolves the install path for the host platform.
+/// `None` only if the home directory cannot be determined.
+pub fn cli_install_path() -> Option<String> {
+    Some(cli_install_path_for(
+        cfg!(target_os = "windows"),
+        &dirs::home_dir()?,
+        data_dir(),
+    ))
+}
+
 /// Instance name from a data-dir path: strips leading dots, panics unless the
 /// basename matches `^[a-z][a-z0-9-]{0,63}$`. Shell SSOT: `scripts/e2e-vm.sh`.
 pub fn derive_instance_name_from(data_dir: &std::path::Path) -> String {
@@ -2071,6 +2104,39 @@ mod tests {
         let result = data_dir_from(Some("/tmp/foo/"), home);
         // PathBuf preserves trailing slash but path resolution works the same
         assert!(result.starts_with("/tmp/foo"));
+    }
+
+    #[test]
+    fn cli_install_path_for_unix_ignores_data_dir() {
+        let home = std::path::Path::new("/Users/alice");
+        let expected = "/Users/alice/.local/bin/speedwave";
+        assert_eq!(
+            cli_install_path_for(false, home, std::path::Path::new("/Users/alice/.speedwave")),
+            expected
+        );
+        assert_eq!(
+            cli_install_path_for(
+                false,
+                home,
+                std::path::Path::new("/Users/alice/.speedwave-dev")
+            ),
+            expected,
+            "unix path must ignore data_dir (install is ~/.local/bin regardless)"
+        );
+    }
+
+    #[test]
+    fn cli_install_path_for_windows_uses_backslashes() {
+        let home = std::path::Path::new("C:\\Users\\alice");
+        assert_eq!(
+            cli_install_path_for(
+                true,
+                home,
+                std::path::Path::new("C:\\Users\\alice\\.speedwave")
+            ),
+            "C:\\Users\\alice\\.speedwave\\bin\\speedwave.exe",
+            "windows path must use backslashes so it is host-independent on the CI host"
+        );
     }
 
     #[test]
