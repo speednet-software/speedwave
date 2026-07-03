@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.14.1](https://github.com/speednet-software/speedwave/compare/v0.14.0...v0.14.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **desktop:** drop unused Lima Darwin guest-agent so macOS notarization passes ([#872](https://github.com/speednet-software/speedwave/issues/872)) ([5d259c4](https://github.com/speednet-software/speedwave/commit/5d259c404aff9a795d5b236aa5bb898cb80de50c))
+
 ## [0.14.0](https://github.com/speednet-software/speedwave/compare/v0.13.3...v0.14.0) (2026-07-02)
 
 
