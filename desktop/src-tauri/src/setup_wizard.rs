@@ -558,16 +558,13 @@ pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
 /// Inner implementation that resolves the CLI binary relative to a given exe directory.
 /// Separated from `resolve_cli_source()` to allow unit testing with mock filesystem layouts.
 fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    #[cfg(not(target_os = "windows"))]
-    let binary_name = consts::CLI_BINARY;
-    #[cfg(target_os = "windows")]
-    let binary_name = "speedwave.exe";
+    let binary_name = consts::cli_binary_filename(cfg!(target_os = "windows"));
 
     // SPEEDWAVE_RESOURCES_DIR — set by Tauri in production builds.
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("cli")
-            .join(binary_name);
+            .join(&binary_name);
         if bundled.exists() {
             return Some(bundled);
         }
@@ -581,7 +578,7 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
             .parent()?
             .join("Resources")
             .join("cli")
-            .join(binary_name);
+            .join(&binary_name);
         if resources.exists() {
             return Some(resources);
         }
@@ -589,7 +586,7 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
 
     #[cfg(target_os = "windows")]
     {
-        let resources = exe_dir.join("resources").join("cli").join(binary_name);
+        let resources = exe_dir.join("resources").join("cli").join(&binary_name);
         if resources.exists() {
             return Some(resources);
         }
@@ -600,7 +597,7 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     let dev_cli_dir = exe_dir
         .parent()
         .and_then(|p| p.parent())
-        .map(|p| p.join("cli").join(binary_name));
+        .map(|p| p.join("cli").join(&binary_name));
     if let Some(ref path) = dev_cli_dir {
         if path.exists() {
             return Some(path.clone());
@@ -608,7 +605,7 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     }
 
     // Dev mode fallback: CLI binary next to the exe
-    let dev_path = exe_dir.join(binary_name);
+    let dev_path = exe_dir.join(&binary_name);
     if dev_path.exists() {
         return Some(dev_path);
     }
@@ -642,10 +639,7 @@ pub fn copy_cli_binary(
 
     std::fs::create_dir_all(target_dir)?;
 
-    #[cfg(target_os = "windows")]
-    let dest = target_dir.join(format!("{}.exe", consts::CLI_BINARY));
-    #[cfg(not(target_os = "windows"))]
-    let dest = target_dir.join(consts::CLI_BINARY);
+    let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
 
     // On Windows, the target may be locked by a running CLI process.
     // Treat as non-fatal: keep the old binary until the user closes the CLI.
@@ -922,7 +916,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 
         // Already-current CLI: skip the sweep AND the copy — the runtime sweep
         // would kill a user's live `speedwave` session for nothing (ADR-048).
-        let target = cli_dir.join("speedwave.exe");
+        let target = cli_dir.join(consts::cli_binary_filename(true));
         if files_identical(cli_source, &target) {
             log::info!("link_cli: installed CLI already current — sweep/copy skipped");
         } else {

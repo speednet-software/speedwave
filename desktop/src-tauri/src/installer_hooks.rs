@@ -163,9 +163,14 @@ mod tests {
             SWEEP_PS1.contains(r"\nodejs\"),
             "sweep.ps1 must target $instDir\\nodejs\\ workers"
         );
+        let cli_target = format!(
+            r"\{}\{}",
+            speedwave_runtime::consts::CLI_BIN_SUBDIR,
+            speedwave_runtime::consts::cli_binary_filename(true)
+        );
         assert!(
-            SWEEP_PS1.contains(r"\bin\speedwave.exe"),
-            "sweep.ps1 must target $dataDir\\bin\\speedwave.exe (CLI)"
+            SWEEP_PS1.contains(&cli_target),
+            "sweep.ps1 must target $dataDir{cli_target} (CLI)"
         );
     }
 
