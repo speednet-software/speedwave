@@ -31,6 +31,18 @@ require_non_empty_dir() {
   find "$path" -mindepth 1 -print -quit | grep -q . || fail "Bundled directory is empty: $path"
 }
 
+# Any Mach-O under the tree — including one wrapped in gzip — fails Apple
+# notarization if unsigned. `file -z` inspects compressed payloads directly.
+require_no_macho_under() {
+  local root_dir="$1"
+  local f
+  while IFS= read -r f; do
+    if file -z "$f" 2>/dev/null | grep -q "Mach-O"; then
+      fail "Bundled Mach-O found under $root_dir (breaks notarization): $f"
+    fi
+  done < <(find "$root_dir" -type f)
+}
+
 platform="${1:-}"
 root="${2:-$(cd "$(dirname "$0")/.." && pwd)/desktop/src-tauri}"
 
@@ -61,6 +73,7 @@ case "$platform" in
   macos)
     require_exec "$root/lima/bin/limactl"
     require_non_empty_dir "$root/lima/share"
+    require_no_macho_under "$root/lima/share"
     require_exec "$root/nodejs/bin/node"
     require_exec "$root/cli/speedwave"
     require_exec "$root/reminders-cli"
