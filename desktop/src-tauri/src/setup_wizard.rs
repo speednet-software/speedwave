@@ -2594,8 +2594,7 @@ mod tests {
         assert!(mode & 0o111 != 0, "binary should be executable");
 
         // Producer↔SSOT guard (unix): installed path must equal the login SSOT.
-        // data_dir is ignored by the unix SSOT branch, so any value works — and a
-        // literal keeps the `no_raw_data_dir_in_tests` drift detector green.
+        // Unix SSOT ignores data_dir; a literal avoids the data_dir()-in-tests drift ban.
         #[cfg(unix)]
         {
             let expected = speedwave_runtime::consts::cli_install_path_for(
