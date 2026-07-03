@@ -9,9 +9,9 @@
 	<key>CFBundleName</key>
 	<string>reminders-cli</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.14.0</string> <!-- x-release-please-version -->
+	<string>0.14.1</string> <!-- x-release-please-version -->
 	<key>CFBundleVersion</key>
-	<string>0.14.0</string> <!-- x-release-please-version -->
+	<string>0.14.1</string> <!-- x-release-please-version -->
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>Speedwave needs full access to Reminders to view, create, and complete reminders via Claude Code.</string>
 	<key>NSRemindersUsageDescription</key>

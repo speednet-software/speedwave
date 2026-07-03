@@ -5086,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-desktop"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5126,7 +5126,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
