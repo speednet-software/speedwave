@@ -1787,6 +1787,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn otlp_protocol_matches_ts() {
+        let all = [
+            OtlpProtocol::Grpc,
+            OtlpProtocol::HttpProtobuf,
+            OtlpProtocol::HttpJson,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for p in all {
+            match p {
+                OtlpProtocol::Grpc | OtlpProtocol::HttpProtobuf | OtlpProtocol::HttpJson => {}
+            }
+        }
+        let mut rust: Vec<String> = all
+            .iter()
+            .map(|p| {
+                serde_json::to_value(p)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust.sort();
+
+        let src = include_str!("../../../desktop/src/src/app/models/telemetry.ts");
+        let re = regex::Regex::new(r"export\s+type\s+OtlpProtocol\s*=\s*([^;]+);").unwrap();
+        let cap = re
+            .captures(src)
+            .expect("telemetry.ts must declare `export type OtlpProtocol`");
+        let mut ts: Vec<String> = cap[1]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS OtlpProtocol union must match Rust OtlpProtocol serde strings"
+        );
+    }
+
+    #[test]
+    fn telemetry_locks_field_set_matches_ts() {
+        // Every TelemetryField's snake_case name must appear as a key in the TS
+        // TelemetryLocks interface, so a renamed/added field can't silently drift.
+        use crate::telemetry_env::TelemetryField as F;
+        let field_names = [
+            (F::Enabled, "enabled"),
+            (F::Endpoint, "endpoint"),
+            (F::Protocol, "protocol"),
+            (F::ExportMetrics, "export_metrics"),
+            (F::ExportLogs, "export_logs"),
+            (F::Headers, "headers"),
+            (F::ResourceAttributes, "resource_attributes"),
+            (F::IncludeAccountUuid, "include_account_uuid"),
+            (F::LogUserPrompts, "log_user_prompts"),
+            (F::LogAssistantResponses, "log_assistant_responses"),
+            (F::LogToolDetails, "log_tool_details"),
+            (F::LogRawApiBodies, "log_raw_api_bodies"),
+            (F::MetricExportInterval, "metric_export_interval_ms"),
+            (F::LogsExportInterval, "logs_export_interval_ms"),
+        ];
+        // Exhaustiveness: covers every variant (compile error if one is missing).
+        assert_eq!(field_names.len(), F::ALL.len());
+
+        let src = include_str!("../../../desktop/src/src/app/models/telemetry.ts");
+        let re = regex::Regex::new(r"export\s+interface\s+TelemetryLocks\s*\{([^}]*)\}").unwrap();
+        let body = re
+            .captures(src)
+            .expect("telemetry.ts must declare `export interface TelemetryLocks`")[1]
+            .to_string();
+        for (_f, name) in field_names {
+            assert!(
+                body.contains(&format!("{name}:")),
+                "TelemetryLocks in telemetry.ts is missing field '{name}'"
+            );
+        }
+    }
+
     // ---- Transcription config retired (ADR-056) -----------------------------
 
     #[test]

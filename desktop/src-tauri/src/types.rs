@@ -157,6 +157,85 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) proxy_enabled: Option<bool>,
 }
 
+/// Which telemetry fields MDM locked, by semantic name — mirrors `TelemetryConfig`'s
+/// field set so the UI greys the right controls without knowing any `OTEL_*` key.
+#[derive(Serialize, Default)]
+pub(crate) struct TelemetryLocks {
+    pub(crate) enabled: bool,
+    pub(crate) endpoint: bool,
+    pub(crate) protocol: bool,
+    pub(crate) export_metrics: bool,
+    pub(crate) export_logs: bool,
+    pub(crate) headers: bool,
+    pub(crate) resource_attributes: bool,
+    pub(crate) include_account_uuid: bool,
+    pub(crate) log_user_prompts: bool,
+    pub(crate) log_assistant_responses: bool,
+    pub(crate) log_tool_details: bool,
+    pub(crate) log_raw_api_bodies: bool,
+    pub(crate) metric_export_interval_ms: bool,
+    pub(crate) logs_export_interval_ms: bool,
+}
+
+/// Effective telemetry the frontend renders. Never carries the headers value —
+/// only `has_headers` — so the secret stays on the host.
+#[derive(Serialize)]
+pub(crate) struct TelemetryConfigResponse {
+    pub(crate) enabled: bool,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) protocol: speedwave_runtime::config::OtlpProtocol,
+    pub(crate) export_metrics: bool,
+    pub(crate) export_logs: bool,
+    /// True when a headers secret is set (the value itself is never sent).
+    pub(crate) has_headers: bool,
+    pub(crate) resource_attributes: Option<String>,
+    pub(crate) include_account_uuid: bool,
+    pub(crate) log_user_prompts: bool,
+    pub(crate) log_assistant_responses: bool,
+    pub(crate) log_tool_details: bool,
+    pub(crate) log_raw_api_bodies: bool,
+    pub(crate) metric_export_interval_ms: Option<u64>,
+    pub(crate) logs_export_interval_ms: Option<u64>,
+    /// Per-field lock flags so the UI greys locked fields.
+    pub(crate) locks: TelemetryLocks,
+    pub(crate) any_locked: bool,
+    pub(crate) kill_switch: bool,
+}
+
+/// User-supplied telemetry update. `headers` is tri-state (omit = keep, null =
+/// clear, string = replace). MDM-locked fields are ignored server-side.
+#[derive(Deserialize, Default)]
+pub(crate) struct TelemetryConfigUpdate {
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) endpoint: Option<String>,
+    #[serde(default)]
+    pub(crate) protocol: Option<speedwave_runtime::config::OtlpProtocol>,
+    #[serde(default)]
+    pub(crate) export_metrics: Option<bool>,
+    #[serde(default)]
+    pub(crate) export_logs: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) headers: Option<Option<String>>,
+    #[serde(default)]
+    pub(crate) resource_attributes: Option<String>,
+    #[serde(default)]
+    pub(crate) include_account_uuid: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_user_prompts: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_assistant_responses: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_tool_details: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_raw_api_bodies: Option<bool>,
+    #[serde(default)]
+    pub(crate) metric_export_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) logs_export_interval_ms: Option<u64>,
+}
+
 #[derive(Serialize, Clone)]
 pub(crate) struct AuthField {
     pub(crate) key: String,

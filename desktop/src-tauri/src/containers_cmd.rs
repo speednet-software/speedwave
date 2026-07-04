@@ -5,7 +5,10 @@ use speedwave_runtime::config;
 
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
-use crate::types::{check_project, LlmConfigResponse, LlmConfigUpdate};
+use crate::types::{
+    check_project, LlmConfigResponse, LlmConfigUpdate, TelemetryConfigResponse,
+    TelemetryConfigUpdate, TelemetryLocks,
+};
 
 /// Max bytes for the local-LLM `api_key` token file; larger is almost
 /// certainly a paste error or hostile input.
@@ -949,6 +952,161 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
+/// Builds the frontend telemetry response from a resolved config. Never copies
+/// the headers value — only sets `has_headers`. `TelemetryLocks` are derived
+/// per-field via `is_field_locked` so no `OTEL_*` string reaches the frontend.
+fn build_telemetry_response(
+    resolved: &config::ResolvedTelemetry,
+    has_headers: bool,
+) -> TelemetryConfigResponse {
+    use speedwave_runtime::telemetry_env::TelemetryField as F;
+    let locks = TelemetryLocks {
+        enabled: resolved.is_field_locked(F::Enabled),
+        endpoint: resolved.is_field_locked(F::Endpoint),
+        protocol: resolved.is_field_locked(F::Protocol),
+        export_metrics: resolved.is_field_locked(F::ExportMetrics),
+        export_logs: resolved.is_field_locked(F::ExportLogs),
+        headers: resolved.is_field_locked(F::Headers),
+        resource_attributes: resolved.is_field_locked(F::ResourceAttributes),
+        include_account_uuid: resolved.is_field_locked(F::IncludeAccountUuid),
+        log_user_prompts: resolved.is_field_locked(F::LogUserPrompts),
+        log_assistant_responses: resolved.is_field_locked(F::LogAssistantResponses),
+        log_tool_details: resolved.is_field_locked(F::LogToolDetails),
+        log_raw_api_bodies: resolved.is_field_locked(F::LogRawApiBodies),
+        metric_export_interval_ms: resolved.is_field_locked(F::MetricExportInterval),
+        logs_export_interval_ms: resolved.is_field_locked(F::LogsExportInterval),
+    };
+    TelemetryConfigResponse {
+        enabled: resolved.enabled,
+        endpoint: resolved.endpoint.clone(),
+        protocol: resolved.protocol,
+        export_metrics: resolved.export_metrics,
+        export_logs: resolved.export_logs,
+        has_headers,
+        resource_attributes: resolved.resource_attributes.clone(),
+        include_account_uuid: resolved.include_account_uuid,
+        log_user_prompts: resolved.log_user_prompts,
+        log_assistant_responses: resolved.log_assistant_responses,
+        log_tool_details: resolved.log_tool_details,
+        log_raw_api_bodies: resolved.log_raw_api_bodies,
+        metric_export_interval_ms: resolved.metric_export_interval_ms,
+        logs_export_interval_ms: resolved.logs_export_interval_ms,
+        locks,
+        any_locked: resolved.any_locked,
+        kill_switch: resolved.kill_switch,
+    }
+}
+
+/// Applies a telemetry update to the user config, writing each field ONLY when
+/// MDM has not locked it. `resolved` is the current merge (for lock lookup).
+fn apply_telemetry_update_with(
+    user: &mut config::TelemetryConfig,
+    update: TelemetryConfigUpdate,
+    resolved: &config::ResolvedTelemetry,
+) {
+    use speedwave_runtime::telemetry_env::TelemetryField as F;
+    if update.enabled.is_some() && !resolved.is_field_locked(F::Enabled) {
+        user.enabled = update.enabled;
+    }
+    if update.endpoint.is_some() && !resolved.is_field_locked(F::Endpoint) {
+        user.endpoint = update.endpoint;
+    }
+    if update.protocol.is_some() && !resolved.is_field_locked(F::Protocol) {
+        user.protocol = update.protocol;
+    }
+    if update.export_metrics.is_some() && !resolved.is_field_locked(F::ExportMetrics) {
+        user.export_metrics = update.export_metrics;
+    }
+    if update.export_logs.is_some() && !resolved.is_field_locked(F::ExportLogs) {
+        user.export_logs = update.export_logs;
+    }
+    if let Some(h) = update.headers {
+        if !resolved.is_field_locked(F::Headers) {
+            // Tri-state: Some(None) clears, Some(Some) sets.
+            user.headers = h;
+        }
+    }
+    if update.resource_attributes.is_some() && !resolved.is_field_locked(F::ResourceAttributes) {
+        user.resource_attributes = update.resource_attributes;
+    }
+    if update.include_account_uuid.is_some() && !resolved.is_field_locked(F::IncludeAccountUuid) {
+        user.include_account_uuid = update.include_account_uuid;
+    }
+    if update.log_user_prompts.is_some() && !resolved.is_field_locked(F::LogUserPrompts) {
+        user.log_user_prompts = update.log_user_prompts;
+    }
+    if update.log_assistant_responses.is_some()
+        && !resolved.is_field_locked(F::LogAssistantResponses)
+    {
+        user.log_assistant_responses = update.log_assistant_responses;
+    }
+    if update.log_tool_details.is_some() && !resolved.is_field_locked(F::LogToolDetails) {
+        user.log_tool_details = update.log_tool_details;
+    }
+    if update.log_raw_api_bodies.is_some() && !resolved.is_field_locked(F::LogRawApiBodies) {
+        user.log_raw_api_bodies = update.log_raw_api_bodies;
+    }
+    if update.metric_export_interval_ms.is_some()
+        && !resolved.is_field_locked(F::MetricExportInterval)
+    {
+        user.metric_export_interval_ms = update.metric_export_interval_ms;
+    }
+    if update.logs_export_interval_ms.is_some() && !resolved.is_field_locked(F::LogsExportInterval)
+    {
+        user.logs_export_interval_ms = update.logs_export_interval_ms;
+    }
+}
+
+/// Returns the effective telemetry the container will use (user + MDM merge),
+/// so the Settings UI shows exactly what reaches Claude Code.
+#[tauri::command]
+pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    let managed = speedwave_runtime::managed_config::load_managed_config()
+        .map_err(|e| e.to_string())?
+        .and_then(|m| m.telemetry);
+    let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())
+        .map_err(|e| e.to_string())?;
+    let has_headers = user_config
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.headers.as_ref())
+        .is_some_and(|h| !h.is_empty())
+        || managed.as_ref().and_then(|m| m.headers.as_ref()).is_some();
+    Ok(build_telemetry_response(&resolved, has_headers))
+}
+
+/// Persists user telemetry fields (skipping MDM-locked ones) to the user config.
+#[tauri::command]
+pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), String> {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let managed =
+            speedwave_runtime::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
+        let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())
+            .unwrap_or_else(|_| config::ResolvedTelemetry::disabled());
+        let mut telemetry = user_config.telemetry.take().unwrap_or_default();
+        apply_telemetry_update_with(&mut telemetry, update, &resolved);
+        user_config.telemetry = Some(telemetry);
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Probes whether an OTLP endpoint is reachable from the host (best-effort;
+/// warns instead of letting Claude Code hang on an unreachable collector).
+#[tauri::command]
+pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
+    let client = crate::http_util::build_hardened_client(None)?;
+    // A HEAD to the base endpoint; any HTTP response means reachable. A collector
+    // may 404/405 the path — that still proves the host/port is up.
+    match client.head(&endpoint).send().await {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Applies LLM config to the active project in-memory; enforces the local-
 /// provider-needs-model invariant for callers bypassing `update_llm_config`.
 fn apply_llm_config(
@@ -1481,6 +1639,7 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         }
     }
 
@@ -1582,6 +1741,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         // Use a non-local provider so the new local-provider+model guard
@@ -1608,6 +1768,7 @@ mod tests {
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         // Anthropic skips the local-provider+model guard so the project-not-
@@ -1641,6 +1802,7 @@ mod tests {
             active_project: Some("proj".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None)).unwrap();
@@ -3105,5 +3267,60 @@ mod tests {
             }
         }
         panic!("closing brace not found for {fn_signature}")
+    }
+
+    // ── telemetry command helpers ───────────────────────────────────────────
+
+    #[test]
+    fn update_telemetry_ignores_locked_field_but_persists_unlocked() {
+        use speedwave_runtime::config::{
+            resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
+        };
+        // MDM locks `endpoint`; user tries to change endpoint (locked) + resource_attributes (free).
+        let managed = ManagedTelemetryConfig {
+            endpoint: Some("https://corp:4318".into()),
+            ..Default::default()
+        };
+        let mut user = TelemetryConfig {
+            endpoint: Some("https://old-user:4318".into()),
+            ..Default::default()
+        };
+        let resolved = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        let update = TelemetryConfigUpdate {
+            endpoint: Some("https://user-evil:4318".into()),
+            resource_attributes: Some("team=x".into()),
+            ..Default::default()
+        };
+        apply_telemetry_update_with(&mut user, update, &resolved);
+        assert_eq!(
+            user.endpoint.as_deref(),
+            Some("https://old-user:4318"),
+            "locked endpoint must not change"
+        );
+        assert_eq!(
+            user.resource_attributes.as_deref(),
+            Some("team=x"),
+            "unlocked field must persist"
+        );
+    }
+
+    #[test]
+    fn get_telemetry_never_returns_headers_value() {
+        use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c:4318".into()),
+            headers: Some("Authorization=Bearer SUPER_SECRET".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let resolved = resolve_telemetry(Some(&user), None).unwrap();
+        let resp = build_telemetry_response(&resolved, user.headers.is_some());
+        assert!(resp.has_headers);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("SUPER_SECRET"),
+            "headers value must never reach the frontend"
+        );
     }
 }
