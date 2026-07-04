@@ -341,6 +341,28 @@ pub fn render_compose_in(
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
+    // Native managed-settings.json (MDM telemetry): fail-closed on a resolve error,
+    // then mount it :ro only when MDM locked at least one telemetry key.
+    if let Some(err) = &resolved_config.telemetry_error {
+        anyhow::bail!("telemetry configuration invalid: {err}");
+    }
+    if resolved_config.telemetry.any_locked {
+        crate::claude_managed::write_managed_settings(
+            data_dir,
+            project_name,
+            &resolved_config.telemetry,
+        )?;
+        let src = crate::claude_managed::managed_settings_path(data_dir, project_name);
+        let mount = format!(
+            "{}:/etc/claude-code/{}:ro",
+            to_engine_path(&src)?,
+            crate::consts::MANAGED_SETTINGS_FILE
+        );
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)?;
+        add_claude_volume(&mut doc, &mount);
+        yaml = serde_yaml_ng::to_string(&doc)?;
+    }
+
     // Handle LLM provider switching
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
 
@@ -1144,7 +1166,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 39;
+    const SECURITY_RULE_COUNT: usize = 40;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1192,6 +1214,108 @@ mod tests {
             runtime,
             bridges,
         )
+    }
+
+    /// Builds a minimal ResolvedClaudeConfig whose telemetry is resolved from the
+    /// given user/MDM layers, for the managed-settings mount tests.
+    fn resolved_with_telemetry(
+        user: Option<&crate::config::TelemetryConfig>,
+        managed: Option<&crate::config::ManagedTelemetryConfig>,
+    ) -> ResolvedClaudeConfig {
+        let (telemetry, telemetry_error) = match crate::config::resolve_telemetry(user, managed) {
+            Ok(t) => (t, None),
+            Err(e) => (
+                crate::config::ResolvedTelemetry::disabled(),
+                Some(e.to_string()),
+            ),
+        };
+        let mut llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test/model".to_string()),
+            base_url: Some("http://100.74.182.88:8888".to_string()),
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            telemetry,
+            telemetry_error,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn managed_settings_mount_present_only_when_locked() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("mdm-mount-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let managed = crate::config::ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            ..Default::default()
+        };
+        let resolved = resolved_with_telemetry(None, Some(&managed));
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+        assert!(yaml.contains("/etc/claude-code/managed-settings.json:ro"));
+
+        // Without MDM: no mount.
+        let resolved_none = resolved_with_telemetry(None, None);
+        let yaml_none = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved_none,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+        assert!(!yaml_none.contains("/etc/claude-code/managed-settings.json"));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_hard_errors_on_invalid_telemetry_endpoint() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("mdm-badurl-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let user = crate::config::TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("ftp://evil/".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let resolved = resolved_with_telemetry(Some(&user), None);
+        let err = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        );
+        assert!(
+            err.is_err(),
+            "invalid OTLP endpoint must abort render/start"
+        );
     }
 
     /// Renders via `render_compose` with a local LLM provider + multi-line

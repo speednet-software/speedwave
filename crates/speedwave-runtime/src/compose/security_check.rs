@@ -248,6 +248,14 @@ pub enum SecurityRule {
     ))]
     SpeedwaveProxyVolumes,
 
+    /// The native managed-settings.json mount on claude is :ro from the
+    /// per-project managed dir at the exact `/etc/claude-code/` target (MDM telemetry).
+    #[strum(to_string = "MANAGED_SETTINGS_MOUNT")]
+    #[strum(props(
+        description = "claude managed-settings.json mount is :ro from the managed dir at the exact path"
+    ))]
+    ManagedSettingsMount,
+
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -394,6 +402,8 @@ impl SecurityCheck {
             Self::check_builtin_slack_volumes(&doc, expected_paths),
             // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
+            // MDM telemetry managed-settings mount profile
+            Self::check_claude_managed_settings(&doc, data_dir, project),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1012,6 +1022,59 @@ impl SecurityCheck {
         violations
     }
 
+    /// When present, the claude managed-settings mount must be `:ro`, at the exact
+    /// `/etc/claude-code/managed-settings.json` target, and sourced from
+    /// `<data_dir>/claude-managed/<project>/managed-settings.json` (never a
+    /// user-editable dir). Absent is fine (no MDM policy).
+    fn check_claude_managed_settings(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let Some(vols) = claude.get("volumes").and_then(|v| v.as_sequence()) else {
+            return violations;
+        };
+        let target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
+        let expected_source = match to_engine_path(&crate::claude_managed::managed_settings_path(
+            data_dir, project,
+        )) {
+            Ok(p) => p,
+            Err(_) => return violations,
+        };
+        for vol in vols {
+            let Some(s) = vol.as_str() else { continue };
+            if let Some((host, mode)) = extract_volume_for_target(s, &target) {
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ManagedSettingsMount,
+                        message: "managed-settings.json mount must be :ro".into(),
+                        remediation: "The MDM managed-settings mount must be read-only.",
+                    });
+                }
+                if host != expected_source {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ManagedSettingsMount,
+                        message: format!(
+                            "managed-settings source '{host}' != expected '{expected_source}'"
+                        ),
+                        remediation:
+                            "managed-settings must come from <data_dir>/claude-managed/<project>/.",
+                    });
+                }
+            }
+        }
+        violations
+    }
+
     /// Validates volumes for built-in mcp-sharepoint service (not a plugin).
     fn check_builtin_sharepoint_volumes(
         doc: &serde_yaml_ng::Value,
@@ -1507,5 +1570,83 @@ mod tests {
             SecurityRule::SpeedwaveProxyVolumes.to_string(),
             "PROXY_VOLUMES",
         );
+    }
+
+    #[test]
+    fn managed_settings_mount_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::ManagedSettingsMount.to_string(),
+            "MANAGED_SETTINGS_MOUNT",
+        );
+    }
+
+    /// Builds a compose doc whose claude service carries a single given volume.
+    fn claude_doc_with_volume(mount: &str) -> serde_yaml_ng::Value {
+        let yaml = format!("services:\n  claude:\n    volumes:\n      - {mount}\n");
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    fn managed_source(data_dir: &std::path::Path, project: &str) -> String {
+        to_engine_path(&crate::claude_managed::managed_settings_path(
+            data_dir, project,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn managed_settings_ro_at_exact_path_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:ro",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        assert!(v.is_empty(), "correct mount must pass, got: {v:?}");
+    }
+
+    #[test]
+    fn managed_settings_rw_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:rw",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            ":rw managed-settings mount must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_wrong_source_fails() {
+        let data_dir = std::path::Path::new("/data");
+        // Sourced from the user-editable claude-home instead of claude-managed.
+        let bad = to_engine_path(
+            &data_dir
+                .join("claude-home")
+                .join("p")
+                .join("managed-settings.json"),
+        )
+        .unwrap();
+        let mount = format!("{bad}:/etc/claude-code/managed-settings.json:ro");
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "source outside claude-managed must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_absent_is_ok() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        assert!(v.is_empty(), "no managed-settings mount = no violation");
     }
 }
