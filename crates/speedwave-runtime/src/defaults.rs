@@ -29,7 +29,7 @@ pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
     /// `ANTHROPIC_MODEL`.
     pub id: &'static str,
-    /// Display label shown in the dropdown ("Opus 4.7", "Sonnet 4.6", …).
+    /// Display label shown in the dropdown ("Opus 4.8", "Sonnet 5", …).
     pub family: &'static str,
     /// Context window in tokens (1_000_000 for 1M-context models).
     pub context_tokens: u32,
@@ -37,9 +37,9 @@ pub struct AnthropicModelInfo {
     pub latest: bool,
     /// Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint.
     pub premium: bool,
-    /// Price of the base model id (e.g. `claude-sonnet-4-6`).
+    /// Price of the base model id (e.g. `claude-sonnet-5`).
     pub pricing: ModelPricing,
-    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
+    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-5[1m]`),
     /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
     pub pricing_1m: Option<ModelPricing>,
 }
