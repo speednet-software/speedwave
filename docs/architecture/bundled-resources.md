@@ -24,32 +24,33 @@ The **Editable in place?** column is about the user-scope copy in the container:
 
 ## Bundled Skills
 
-The `skills/` directory ships the `speedwave-code-review` orchestrator and its 13 specialized worker skills, plus the standalone web-authoring skills `speedwave-sitemap`, `speedwave-site-audit`, and `speedwave-product-showcase`. Every production Speedwave install exposes them inside the Claude container, with no per-project setup required.
+The `skills/` directory ships the `speedwave-code-review` orchestrator and its specialized worker skills, plus the standalone web-authoring skills `speedwave-sitemap`, `speedwave-site-audit`, and `speedwave-product-showcase`. Every production Speedwave install exposes them inside the Claude container, with no per-project setup required.
 
-| Skill                               | Purpose                                                                     |
-| ----------------------------------- | --------------------------------------------------------------------------- |
-| `speedwave-code-review`             | Orchestrator — runs the 13 workers in parallel and aggregates results       |
-| `code-review-basic`                 | Project guidelines and style-guide compliance                               |
-| `code-review-security-checker`      | Injection, auth bypass, crypto weaknesses, data exposure                    |
-| `code-review-silent-failure-hunter` | Silent failures, inadequate error handling, inappropriate fallback behavior |
-| `code-review-kiss-detector`         | Over-engineering and unnecessary complexity                                 |
-| `code-review-yagni-detector`        | Speculative features, unused code, premature optimization                   |
-| `code-review-duplication-detector`  | DRY violations and refactoring opportunities                                |
-| `code-review-ssot-detector`         | Single-Source-of-Truth violations (scattered configs, constants)            |
-| `code-review-solid-detector`        | SRP, OCP, LSP, ISP, DIP violations                                          |
-| `code-review-type-design-analyzer`  | Type design, encapsulation, invariant expression                            |
-| `code-review-comment-analyzer`      | Comment accuracy, completeness, long-term maintainability                   |
-| `code-review-documentation-checker` | Code ↔ documentation synchronization                                        |
-| `code-review-test-analyzer`         | Test coverage quality and critical gaps                                     |
-| `code-review-simplifier`            | Clarity, consistency, and simplification opportunities                      |
+| Skill                                 | Purpose                                                                                   |
+| ------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `speedwave-code-review`               | Orchestrator — runs every worker skill in parallel and aggregates verified results        |
+| `code-review-basic`                   | Project-guideline compliance and general bug detection                                    |
+| `code-review-security-checker`        | Injection, auth bypass, crypto weaknesses, data exposure                                  |
+| `code-review-silent-failure-hunter`   | Silent failures, inadequate error handling, inappropriate fallback behavior               |
+| `code-review-kiss-detector`           | Over-engineering, unnecessary complexity, and concrete simplification suggestions         |
+| `code-review-yagni-detector`          | Speculative features, unused code, premature optimization                                 |
+| `code-review-duplication-detector`    | Duplicated logic and refactoring opportunities                                            |
+| `code-review-ssot-detector`           | Single-Source-of-Truth violations (scattered configs, constants, schemas)                 |
+| `code-review-solid-detector`          | SRP, OCP, LSP, ISP, DIP violations                                                        |
+| `code-review-type-design-analyzer`    | Type design, encapsulation, invariant expression                                          |
+| `code-review-comment-analyzer`        | Comment accuracy, completeness, long-term maintainability                                 |
+| `code-review-documentation-checker`   | Code ↔ documentation synchronization                                                      |
+| `code-review-test-analyzer`           | Test coverage quality and critical gaps                                                   |
+| `code-review-performance-concurrency` | Performance and concurrency defects — complexity, N+1, unbounded growth, races, deadlocks |
+| `code-review-change-impact`           | Breaking API/contract changes, data-migration safety, dependency risk                     |
 
-These skills mirror the review workflow developers use on this repo via `.claude/skills/`. The two trees are maintained manually — when editing one copy, update the other (they are not auto-synced, and may drift, as the orchestrator currently does).
+These skills are the single source — the repo carries no separate development copy. Guard tests in `crates/speedwave-runtime/tests/bundled_skills_guards.rs` enforce that no skill pins a `model:` in frontmatter, that the orchestrator's worker list matches the `code-review-*` directories, and that the shared Review Scope / Project Conventions / Output Contract blocks stay byte-identical across workers.
 
 | Skill                        | Purpose                                                                                                                                                                                                                                    |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `speedwave-sitemap`          | URL-inventory provider for other skills. Extracts an existing `sitemap.xml` (robots.txt + common paths, expanding indexes) or, failing that, crawls the site via Playwright. Returns JSON only — no analysis.                              |
 | `speedwave-site-audit`       | Audits a site against a bundled best-practice checklist (`rules.json`) spanning 10 categories. Pairs with `speedwave-sitemap` for whole-site scope; always runs a final verifier pass. Reports pass/fail/skip with evidence — never fixes. |
-| `speedwave-product-showcase` | Builds a self-contained, dependency-free animated "live product" demo (HTML + scoped CSS + one inline rAF script) recreating the real app UI for a landing page. Pins `model: opus` for UI fidelity.                                       |
+| `speedwave-product-showcase` | Builds a self-contained, dependency-free animated "live product" demo (HTML + scoped CSS + one inline rAF script) recreating the real app UI for a landing page.                                                                           |
 
 `speedwave-sitemap` is a data source, not an auditor: it answers "what are the pages of this site?" for any skill that needs a page list. `speedwave-site-audit` is the consumer that closes the loop — it asks the user for scope (one URL or the whole sitemap) and categories, evaluates each page against the rules, and writes a verified report to `/workspace/.speedwave/site-audit/`. Both skills gate browser-dependent work on the `playwright` integration: 13 of the audit rules need a live browser (contrast, focus, Core Web Vitals, …) and are marked `skipped` when Playwright is off; the other 115 run via `WebFetch` (including DNS checks over DNS-over-HTTPS). When Playwright is disabled, both skills degrade rather than guess.
 
