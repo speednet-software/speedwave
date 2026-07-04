@@ -31,9 +31,9 @@ import type {
       class="border-t border-[var(--line)] pt-6"
       data-testid="settings-section-telemetry"
     >
-      <h2 class="view-title view-title-section text-[var(--ink)]">Telemetry (OTLP)</h2>
+      <h2 class="view-title view-title-section text-[var(--ink)]">Telemetry</h2>
       <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Send Claude Code usage telemetry to your own OpenTelemetry collector.
+        Send Speedwave usage telemetry to your own OpenTelemetry (OTLP) collector.
       </p>
 
       @if (error()) {
@@ -42,192 +42,204 @@ import type {
 
       @if (config(); as c) {
         @if (c.kill_switch) {
-          <p
-            class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3 text-[12px] text-[var(--ink-mute)]"
+          <div
+            class="mt-4 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3 text-[12px] text-[var(--ink-mute)]"
             data-testid="telemetry-killswitch"
           >
-            Telemetry has been disabled by your organization.
-          </p>
+            <span aria-hidden="true">🔒</span>
+            Telemetry is managed by your organization and cannot be changed here.
+          </div>
         } @else {
-          <div
-            class="mt-4 space-y-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
-          >
-            <!-- Enable -->
-            <label class="flex items-center gap-2 text-[12px] text-[var(--ink)]">
-              <input
-                type="checkbox"
-                [checked]="enabled()"
-                [disabled]="c.locks.enabled"
-                (change)="enabled.set(inputChecked($event))"
-                data-testid="telemetry-enabled"
-              />
-              Send telemetry to your own OTLP collector
-              @if (c.locks.enabled) {
-                <span class="text-[10px] text-[var(--ink-mute)]"
-                  >🔒 managed by your organization</span
-                >
-              }
-            </label>
+          <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)]">
+            <!-- Enable: label + toggle on one line, like an integration row -->
+            <div class="flex items-center justify-between gap-3 px-4 py-3">
+              <div class="min-w-0">
+                <div class="text-[13px] text-[var(--ink)]">Send telemetry</div>
+                <div class="text-[11px] text-[var(--ink-dim)]">
+                  @if (c.locks.enabled) {
+                    <span class="text-[var(--ink-mute)]">🔒 Managed by your organization</span>
+                  } @else {
+                    Off means no data leaves this machine.
+                  }
+                </div>
+              </div>
+              <label class="relative inline-block h-[24px] w-[44px] shrink-0" data-testid="toggle">
+                <input
+                  type="checkbox"
+                  class="peer sr-only"
+                  [checked]="enabled()"
+                  [disabled]="c.locks.enabled"
+                  (change)="enabled.set(inputChecked($event))"
+                  data-testid="telemetry-enabled"
+                />
+                <span
+                  class="absolute inset-0 rounded-full bg-[var(--line-strong)] transition-all duration-300 peer-checked:bg-[var(--accent)] peer-disabled:opacity-40 peer-disabled:cursor-not-allowed before:absolute before:bottom-[3px] before:left-[3px] before:h-[18px] before:w-[18px] before:rounded-full before:bg-white before:transition-all before:duration-300 before:content-[''] peer-checked:before:translate-x-[20px]"
+                  [class.cursor-pointer]="!c.locks.enabled"
+                ></span>
+              </label>
+            </div>
 
             @if (enabled()) {
-              <!-- Endpoint -->
-              <div>
-                <div class="text-[11px] text-[var(--ink-mute)]">
-                  Collector endpoint
-                  @if (c.locks.endpoint) {
-                    <span class="text-[10px]">🔒 managed</span>
+              <div class="space-y-4 border-t border-[var(--line)] px-4 py-4">
+                <!-- Endpoint -->
+                <div>
+                  <div class="text-[11px] text-[var(--ink-mute)]">
+                    Collector endpoint
+                    @if (c.locks.endpoint) {
+                      <span class="text-[10px]">🔒 managed</span>
+                    }
+                  </div>
+                  <input
+                    type="url"
+                    class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    placeholder="https://collector.example.com:4318"
+                    [value]="endpoint()"
+                    [readonly]="c.locks.endpoint"
+                    (input)="endpoint.set(inputValue($event))"
+                    data-testid="telemetry-endpoint"
+                  />
+                  <button
+                    type="button"
+                    class="mono mt-1 rounded border border-[var(--line-strong)] px-2 py-0.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                    [disabled]="!endpoint() || probing()"
+                    (click)="testConnection()"
+                    data-testid="telemetry-probe"
+                  >
+                    {{ probing() ? 'testing…' : 'Test connection' }}
+                  </button>
+                  @if (probeResult()) {
+                    <span
+                      class="ml-2 text-[11px] text-[var(--ink-mute)]"
+                      data-testid="telemetry-probe-result"
+                    >
+                      {{ probeResult() }}
+                    </span>
                   }
                 </div>
-                <input
-                  type="url"
-                  class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  placeholder="https://collector.example.com:4318"
-                  [value]="endpoint()"
-                  [readonly]="c.locks.endpoint"
-                  (input)="endpoint.set(inputValue($event))"
-                  data-testid="telemetry-endpoint"
-                />
-                <button
-                  type="button"
-                  class="mono mt-1 rounded border border-[var(--line-strong)] px-2 py-0.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
-                  [disabled]="!endpoint() || probing()"
-                  (click)="testConnection()"
-                  data-testid="telemetry-probe"
-                >
-                  {{ probing() ? 'testing…' : 'Test connection' }}
-                </button>
-                @if (probeResult()) {
-                  <span
-                    class="ml-2 text-[11px] text-[var(--ink-mute)]"
-                    data-testid="telemetry-probe-result"
-                  >
-                    {{ probeResult() }}
-                  </span>
-                }
-              </div>
 
-              <!-- Protocol + exporters -->
-              <div class="flex flex-wrap items-center gap-3 text-[11px] text-[var(--ink)]">
-                <label class="flex items-center gap-1">
-                  Protocol
-                  <select
-                    class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-1 py-0.5"
-                    [value]="protocol()"
-                    [disabled]="c.locks.protocol"
-                    (change)="setProtocol($event)"
-                    data-testid="telemetry-protocol"
-                  >
-                    <option value="grpc">gRPC</option>
-                    <option value="http/protobuf">HTTP protobuf</option>
-                    <option value="http/json">HTTP JSON</option>
-                  </select>
-                </label>
-                <label class="flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    [checked]="exportMetrics()"
-                    [disabled]="c.locks.export_metrics"
-                    (change)="exportMetrics.set(inputChecked($event))"
-                  />
-                  Metrics
-                </label>
-                <label class="flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    [checked]="exportLogs()"
-                    [disabled]="c.locks.export_logs"
-                    (change)="exportLogs.set(inputChecked($event))"
-                  />
-                  Logs
-                </label>
-              </div>
-
-              <!-- Auth headers (masked secret) -->
-              <div>
-                <div class="text-[11px] text-[var(--ink-mute)]">
-                  Auth headers
-                  @if (c.locks.headers) {
-                    <span class="text-[10px]">🔒 managed</span>
-                  }
-                </div>
-                <input
-                  type="password"
-                  autocomplete="off"
-                  class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  [value]="headers()"
-                  [readonly]="c.locks.headers"
-                  [placeholder]="
-                    c.has_headers
-                      ? '••••• (saved — type to replace, clear to remove)'
-                      : 'Authorization=Bearer …'
-                  "
-                  (input)="onHeadersInput(inputValue($event))"
-                  data-testid="telemetry-headers"
-                />
-              </div>
-
-              <!-- Privacy gates -->
-              <details class="mt-1">
-                <summary class="cursor-pointer text-[11px] text-[var(--ink-mute)]">
-                  Privacy (advanced)
-                </summary>
-                <p class="mt-2 text-[11px] text-red-300" data-testid="telemetry-privacy-warning">
-                  Enabling these sends the content of your conversations and code to the collector.
-                  Off by default.
-                </p>
-                <div class="mt-2 space-y-1 text-[11px] text-[var(--ink)]">
+                <!-- Protocol + exporters -->
+                <div class="flex flex-wrap items-center gap-3 text-[11px] text-[var(--ink)]">
                   <label class="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      [checked]="logUserPrompts()"
-                      [disabled]="c.locks.log_user_prompts"
-                      (change)="onPrivacyToggle('logUserPrompts', $event)"
-                      data-testid="telemetry-log-prompts"
-                    />
-                    Log user prompts
+                    Protocol
+                    <select
+                      class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-1 py-0.5"
+                      [value]="protocol()"
+                      [disabled]="c.locks.protocol"
+                      (change)="setProtocol($event)"
+                      data-testid="telemetry-protocol"
+                    >
+                      <option value="grpc">gRPC</option>
+                      <option value="http/protobuf">HTTP protobuf</option>
+                      <option value="http/json">HTTP JSON</option>
+                    </select>
                   </label>
                   <label class="flex items-center gap-1">
                     <input
                       type="checkbox"
-                      [checked]="logAssistantResponses()"
-                      [disabled]="c.locks.log_assistant_responses"
-                      (change)="onPrivacyToggle('logAssistantResponses', $event)"
+                      [checked]="exportMetrics()"
+                      [disabled]="c.locks.export_metrics"
+                      (change)="exportMetrics.set(inputChecked($event))"
                     />
-                    Log assistant responses
+                    Metrics
                   </label>
                   <label class="flex items-center gap-1">
                     <input
                       type="checkbox"
-                      [checked]="logToolDetails()"
-                      [disabled]="c.locks.log_tool_details"
-                      (change)="onPrivacyToggle('logToolDetails', $event)"
+                      [checked]="exportLogs()"
+                      [disabled]="c.locks.export_logs"
+                      (change)="exportLogs.set(inputChecked($event))"
                     />
-                    Log tool details
-                  </label>
-                  <label class="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      [checked]="logRawApiBodies()"
-                      [disabled]="c.locks.log_raw_api_bodies"
-                      (change)="onPrivacyToggle('logRawApiBodies', $event)"
-                    />
-                    Log raw API bodies
+                    Logs
                   </label>
                 </div>
-              </details>
+
+                <!-- Auth headers (masked secret) -->
+                <div>
+                  <div class="text-[11px] text-[var(--ink-mute)]">
+                    Auth headers
+                    @if (c.locks.headers) {
+                      <span class="text-[10px]">🔒 managed</span>
+                    }
+                  </div>
+                  <input
+                    type="password"
+                    autocomplete="off"
+                    class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    [value]="headers()"
+                    [readonly]="c.locks.headers"
+                    [placeholder]="
+                      c.has_headers
+                        ? '••••• (saved — type to replace, clear to remove)'
+                        : 'Authorization=Bearer …'
+                    "
+                    (input)="onHeadersInput(inputValue($event))"
+                    data-testid="telemetry-headers"
+                  />
+                </div>
+
+                <!-- Privacy gates -->
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-[11px] text-[var(--ink-mute)]">
+                    Privacy (advanced)
+                  </summary>
+                  <p class="mt-2 text-[11px] text-red-300" data-testid="telemetry-privacy-warning">
+                    Enabling these sends the content of your conversations and code to the
+                    collector. Off by default.
+                  </p>
+                  <div class="mt-2 space-y-1 text-[11px] text-[var(--ink)]">
+                    <label class="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="logUserPrompts()"
+                        [disabled]="c.locks.log_user_prompts"
+                        (change)="onPrivacyToggle('logUserPrompts', $event)"
+                        data-testid="telemetry-log-prompts"
+                      />
+                      Log user prompts
+                    </label>
+                    <label class="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="logAssistantResponses()"
+                        [disabled]="c.locks.log_assistant_responses"
+                        (change)="onPrivacyToggle('logAssistantResponses', $event)"
+                      />
+                      Log assistant responses
+                    </label>
+                    <label class="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="logToolDetails()"
+                        [disabled]="c.locks.log_tool_details"
+                        (change)="onPrivacyToggle('logToolDetails', $event)"
+                      />
+                      Log tool details
+                    </label>
+                    <label class="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="logRawApiBodies()"
+                        [disabled]="c.locks.log_raw_api_bodies"
+                        (change)="onPrivacyToggle('logRawApiBodies', $event)"
+                      />
+                      Log raw API bodies
+                    </label>
+                  </div>
+                </details>
+
+                <div class="flex justify-end">
+                  <button
+                    type="button"
+                    class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-4 py-1.5 text-[12px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                    [disabled]="saving()"
+                    (click)="save()"
+                    data-testid="telemetry-save"
+                  >
+                    {{ saving() ? 'Saving…' : 'Save' }}
+                  </button>
+                </div>
+              </div>
             }
-
-            <div class="flex justify-end">
-              <button
-                type="button"
-                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
-                [disabled]="saving()"
-                (click)="save()"
-                data-testid="telemetry-save"
-              >
-                {{ saving() ? 'saving…' : 'Save' }}
-              </button>
-            </div>
           </div>
         }
       }

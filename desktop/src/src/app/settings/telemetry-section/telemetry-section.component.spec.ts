@@ -97,6 +97,18 @@ describe('TelemetrySectionComponent', () => {
     ).not.toBeNull();
   });
 
+  it('renders the enable control as a toggle (like integrations), not a bare checkbox', async () => {
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    // The switch: a sr-only checkbox inside the toggle wrapper used across the app.
+    const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
+    expect(toggle).not.toBeNull();
+    const input = fixture.nativeElement.querySelector('[data-testid="telemetry-enabled"]');
+    expect(input.classList.contains('peer')).toBe(true);
+    expect(input.classList.contains('sr-only')).toBe(true);
+  });
+
   it('save() invokes update_telemetry_config with { update }', async () => {
     await create();
     await component.ngOnInit();
