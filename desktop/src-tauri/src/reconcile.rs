@@ -1016,10 +1016,12 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
     };
 
     // Check for bundled files to distinguish a resource dir from an empty exe_parent.
-    // Windows: check cli/speedwave.exe (the binary); Unix: check cli/ dir.
+    // Windows: check cli/<cli_binary_filename> (the binary); Unix: check cli/ dir.
     candidates.into_iter().find(|p| {
         let has_cli = if cfg!(target_os = "windows") {
-            p.join("cli").join("speedwave.exe").exists()
+            p.join("cli")
+                .join(speedwave_runtime::consts::cli_binary_filename(true))
+                .exists()
         } else {
             p.join("cli").exists()
         };

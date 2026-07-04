@@ -1137,10 +1137,10 @@ pub fn cli_install_path_for(
 ) -> String {
     if is_windows {
         format!(
-            "{}\\{}\\{}.exe",
+            "{}\\{}\\{}",
             data_dir.to_string_lossy(),
             CLI_BIN_SUBDIR,
-            CLI_BINARY
+            cli_binary_filename(true)
         )
     } else {
         home.join(".local")
@@ -1159,6 +1159,16 @@ pub fn cli_install_path() -> Option<String> {
         &dirs::home_dir()?,
         data_dir(),
     ))
+}
+
+/// CLI binary filename for the platform: `<CLI_BINARY>.exe` on Windows,
+/// `CLI_BINARY` otherwise. Single-sourced from `CLI_BINARY`.
+pub fn cli_binary_filename(is_windows: bool) -> String {
+    if is_windows {
+        format!("{CLI_BINARY}.exe")
+    } else {
+        CLI_BINARY.to_string()
+    }
 }
 
 /// Instance name from a data-dir path: strips leading dots, panics unless the
@@ -2137,6 +2147,15 @@ mod tests {
             "C:\\Users\\alice\\.speedwave\\bin\\speedwave.exe",
             "windows path must use backslashes so it is host-independent on the CI host"
         );
+    }
+
+    #[test]
+    fn cli_binary_filename_is_single_sourced_from_cli_binary() {
+        assert_eq!(cli_binary_filename(false), CLI_BINARY);
+        assert_eq!(cli_binary_filename(true), format!("{CLI_BINARY}.exe"));
+        // Concrete values today, so a rename that breaks the format is visible.
+        assert_eq!(cli_binary_filename(false), "speedwave");
+        assert_eq!(cli_binary_filename(true), "speedwave.exe");
     }
 
     #[test]
