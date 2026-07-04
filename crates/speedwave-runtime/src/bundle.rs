@@ -1699,4 +1699,21 @@ mod tests {
             "tauri.windows.conf.json must bundle {expected}; rename it there too"
         );
     }
+
+    #[test]
+    fn macos_bundle_cli_asset_matches_filename_ssot() {
+        let expected = format!("cli/{}", crate::consts::cli_binary_filename(false));
+        let assets = required_bundled_assets("macos").expect("macos assets");
+        assert!(
+            assets.iter().any(|a| a.path == expected),
+            "MACOS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
+             the const literal and the SSOT drifted"
+        );
+        // The Tauri macOS resource map must carry the same bundle path.
+        let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.macos.conf.json");
+        assert!(
+            tauri_cfg.contains(&expected),
+            "tauri.macos.conf.json must bundle {expected}; rename it there too"
+        );
+    }
 }
