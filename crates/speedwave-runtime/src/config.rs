@@ -930,26 +930,16 @@ pub fn resolve_telemetry(
     // Kill-switch = MDM set enabled=false (presence is the lock).
     let kill_switch = managed.and_then(|m| m.enabled) == Some(false);
 
-    // Cross-field gate: enabled=false suppresses ALL output.
+    // Cross-field gate: enabled=false suppresses ALL output — everything off
+    // (via `disabled()`) except the resolved lock bookkeeping and cardinality.
     if !enabled {
         return Ok(ResolvedTelemetry {
-            enabled: false,
-            endpoint: None,
             protocol,
-            export_metrics: false,
-            export_logs: false,
-            headers: None,
-            resource_attributes: None,
             include_account_uuid,
-            log_user_prompts: false,
-            log_assistant_responses: false,
-            log_tool_details: false,
-            log_raw_api_bodies: false,
-            metric_export_interval_ms: None,
-            logs_export_interval_ms: None,
             locked_keys,
             any_locked,
             kill_switch,
+            ..ResolvedTelemetry::disabled()
         });
     }
 
@@ -1113,11 +1103,15 @@ pub(crate) fn resolve_project_config_in_with_managed(
     // Telemetry baseline goes in BEFORE the repo/user merge so a user `claude.env`
     // still wins for a non-locked key; MDM-locked keys are re-forced AFTER the user
     // layer below. A resolve error is recorded and surfaced to the renderer.
+    // Build the env map ONCE and reuse it for both the baseline and the re-force.
     let resolved_tel = resolve_telemetry(user_config.telemetry.as_ref(), managed_telemetry);
-    if let Ok(tel) = &resolved_tel {
-        for (k, v) in crate::telemetry_env::telemetry_env_map(tel) {
-            env.insert(k, v);
-        }
+    let tel_env = resolved_tel
+        .as_ref()
+        .ok()
+        .map(crate::telemetry_env::telemetry_env_map)
+        .unwrap_or_default();
+    for (k, v) in &tel_env {
+        env.insert(k.clone(), v.clone());
     }
 
     // Layer 1: repo config (.speedwave.json)
@@ -1150,11 +1144,14 @@ pub(crate) fn resolve_project_config_in_with_managed(
     }
 
     // Telemetry re-force: strip any user value for an MDM-locked key, then set the
-    // locked value. This is what the user cannot beat (master switch included).
+    // locked value from the already-built map. This is what the user cannot beat
+    // (master switch included).
     if let Ok(tel) = &resolved_tel {
         env.retain(|k, _| !tel.locked_keys.contains(k));
-        for (k, v) in crate::telemetry_env::locked_env_map(tel) {
-            env.insert(k, v);
+        for (k, v) in &tel_env {
+            if tel.locked_keys.contains(k) {
+                env.insert(k.clone(), v.clone());
+            }
         }
     }
 

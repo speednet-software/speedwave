@@ -3,7 +3,6 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
-  computed,
   inject,
   output,
   signal,
@@ -258,9 +257,6 @@ export class TelemetrySectionComponent implements OnInit {
   readonly logToolDetails = signal(false);
   readonly logRawApiBodies = signal(false);
 
-  /** True when the endpoint field should be disabled for editing. */
-  readonly endpointLocked = computed(() => this.config()?.locks.endpoint ?? false);
-
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 
@@ -384,14 +380,14 @@ export class TelemetrySectionComponent implements OnInit {
    * The `.value` of an input/select event target (cast kept out of the template).
    * @param ev - the DOM event.
    */
-  inputValue(ev: Event): string {
+  protected inputValue(ev: Event): string {
     return (ev.target as HTMLInputElement | HTMLSelectElement).value;
   }
   /**
    * The `.checked` of a checkbox event target.
    * @param ev - the DOM event.
    */
-  inputChecked(ev: Event): boolean {
+  protected inputChecked(ev: Event): boolean {
     return (ev.target as HTMLInputElement).checked;
   }
 }

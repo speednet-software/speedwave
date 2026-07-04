@@ -25,8 +25,7 @@ pub fn write_managed_settings(
     telemetry: &ResolvedTelemetry,
 ) -> anyhow::Result<()> {
     let dir = claude_managed_dir(data_dir, project);
-    std::fs::create_dir_all(&dir)?;
-    crate::fs_perms::set_owner_only_dir(&dir).map_err(|e| anyhow::anyhow!(e))?;
+    crate::fs_perms::ensure_owner_only_dir(&dir)?;
     let env = crate::telemetry_env::locked_env_map(telemetry);
     let doc = serde_json::json!({ "env": env });
     let content = serde_json::to_string_pretty(&doc)?;

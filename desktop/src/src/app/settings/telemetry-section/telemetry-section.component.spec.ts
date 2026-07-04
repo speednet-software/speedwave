@@ -84,7 +84,7 @@ describe('TelemetrySectionComponent', () => {
     await component.ngOnInit();
     await fixture.whenStable();
     expect(component.endpoint()).toBe('https://corp:4318');
-    expect(component.endpointLocked()).toBe(true);
+    expect(component.config()?.locks.endpoint).toBe(true);
   });
 
   it('greys the whole section when kill_switch is set', async () => {
