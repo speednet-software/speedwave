@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.191";
+pub const CLAUDE_VERSION: &str = "2.1.201";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -98,8 +98,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
-        id: "claude-sonnet-4-6",
-        family: "Sonnet 4.6",
+        id: "claude-sonnet-5",
+        family: "Sonnet 5",
         context_tokens: 1_000_000,
         latest: true,
         premium: false,
@@ -132,6 +132,15 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+    },
+    AnthropicModelInfo {
+        id: "claude-sonnet-4-6",
+        family: "Sonnet 4.6",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: false,
+        pricing: SONNET_PRICING,
+        pricing_1m: Some(SONNET_PRICING_1M),
     },
 ];
 
