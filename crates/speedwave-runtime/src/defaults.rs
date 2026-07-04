@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.191";
+pub const CLAUDE_VERSION: &str = "2.1.201";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -29,7 +29,7 @@ pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
     /// `ANTHROPIC_MODEL`.
     pub id: &'static str,
-    /// Display label shown in the dropdown ("Opus 4.7", "Sonnet 4.6", …).
+    /// Display label shown in the dropdown ("Opus 4.8", "Sonnet 5", …).
     pub family: &'static str,
     /// Context window in tokens (1_000_000 for 1M-context models).
     pub context_tokens: u32,
@@ -37,9 +37,9 @@ pub struct AnthropicModelInfo {
     pub latest: bool,
     /// Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint.
     pub premium: bool,
-    /// Price of the base model id (e.g. `claude-sonnet-4-6`).
+    /// Price of the base model id (e.g. `claude-sonnet-5`).
     pub pricing: ModelPricing,
-    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-4-6[1m]`),
+    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-5[1m]`),
     /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
     pub pricing_1m: Option<ModelPricing>,
 }
@@ -98,8 +98,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
-        id: "claude-sonnet-4-6",
-        family: "Sonnet 4.6",
+        id: "claude-sonnet-5",
+        family: "Sonnet 5",
         context_tokens: 1_000_000,
         latest: true,
         premium: false,
@@ -132,6 +132,15 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+    },
+    AnthropicModelInfo {
+        id: "claude-sonnet-4-6",
+        family: "Sonnet 4.6",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: false,
+        pricing: SONNET_PRICING,
+        pricing_1m: Some(SONNET_PRICING_1M),
     },
 ];
 
