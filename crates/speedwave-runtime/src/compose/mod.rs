@@ -1227,6 +1227,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig::default();
 
@@ -1291,6 +1292,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         render_compose_isolated(
             data_dir.path(),
@@ -1341,6 +1343,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let err = render_compose_isolated(
             data_dir.path(),
@@ -1396,6 +1399,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
 
         let yaml = render_compose_isolated(
@@ -1443,6 +1447,7 @@ mod tests {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
 
         let yaml = render_compose_isolated(
@@ -1527,6 +1532,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2084,6 +2090,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -2158,6 +2165,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let manifest = bundle::load_current_bundle_manifest_from(&test_build_root()).unwrap();
 
@@ -2206,6 +2214,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2237,6 +2246,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2316,6 +2326,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             office: true,
@@ -2377,6 +2388,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2417,6 +2429,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2458,6 +2471,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2496,6 +2510,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2581,6 +2596,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2673,6 +2689,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2703,6 +2720,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2733,6 +2751,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2762,6 +2781,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2811,6 +2831,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2914,6 +2935,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3032,6 +3054,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3130,6 +3153,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3525,6 +3549,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3562,6 +3587,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -3594,6 +3620,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3663,6 +3690,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: v2_llm("anthropic", None, None),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3708,6 +3736,7 @@ services:
                 Some("qwen3"),
                 Some("http://host.docker.internal:9000"),
             ),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3784,6 +3813,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3837,6 +3867,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3910,6 +3941,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let err = render_compose_isolated(
             data_dir.path(),
@@ -3948,6 +3980,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3994,6 +4027,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -4097,6 +4131,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -4159,6 +4194,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -5096,6 +5132,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -5135,6 +5172,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6258,6 +6296,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6325,6 +6364,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6360,6 +6400,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6399,6 +6440,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6446,6 +6488,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6484,6 +6527,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6522,6 +6566,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6692,6 +6737,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig::default();
         assert!(render_compose_isolated(
@@ -7023,6 +7069,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             sharepoint: true,
@@ -7245,6 +7292,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         // Enable all integrations so no services are filtered out
         let integrations = ResolvedIntegrationsConfig {
@@ -7560,6 +7608,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -10466,6 +10515,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),

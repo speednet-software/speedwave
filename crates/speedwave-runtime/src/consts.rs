@@ -11,6 +11,17 @@ pub const DATA_DIR: &str = ".speedwave";
 /// Per-project Claude Code home (`<data_dir>/claude-home/<project>/`) — SSOT;
 /// don't hard-code the `"claude-home"` literal at call sites.
 pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
+/// Per-project native Claude Code managed-settings dir
+/// (`<data_dir>/claude-managed/<project>/`) — SSOT; don't hard-code the literal.
+pub const CLAUDE_MANAGED_SUBDIR: &str = "claude-managed";
+/// Native Claude Code managed-settings filename — SSOT for both the host file
+/// and the container mount-target basename (`/etc/claude-code/<this>`).
+pub const MANAGED_SETTINGS_FILE: &str = "managed-settings.json";
+/// Vendor dir name under the OS system-config root holding the MDM-deployed
+/// `managed-config.json` — SSOT; don't hard-code "Speedwave" at call sites.
+pub const MANAGED_CONFIG_VENDOR_DIR: &str = "Speedwave";
+/// MDM managed-config filename — SSOT.
+pub const MANAGED_CONFIG_FILE: &str = "managed-config.json";
 /// CLI binary name.
 pub const CLI_BINARY: &str = "speedwave";
 /// Prefix for per-project compose project names and networks.

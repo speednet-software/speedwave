@@ -141,6 +141,55 @@ pub fn validate_url(url: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
+/// Validates an OTLP collector URL: http(s), no embedded credentials, no
+/// backslashes; a private/loopback host is allowed only under `AllowLoopback`.
+/// An on-prem collector is a legitimate target, unlike a general SSRF sink.
+pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::Url, String> {
+    if url.contains('\\') {
+        return Err("URL must not contain backslashes".to_string());
+    }
+    let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(format!(
+                "Blocked URL scheme '{s}': only http and https are allowed"
+            ))
+        }
+    }
+    if parsed.password().is_some() || !parsed.username().is_empty() {
+        return Err("URL must not contain embedded credentials".to_string());
+    }
+    if host_allowed(&parsed, policy) {
+        Ok(parsed)
+    } else {
+        Err("Blocked URL host: private/reserved or loopback not permitted by policy".to_string())
+    }
+}
+
+/// True if `url`'s host is permitted under `policy`. Public hosts always pass;
+/// private/reserved/loopback pass only under `AllowLoopback`. Mirrors
+/// [`validate_url`]'s host rules so the two validators cannot diverge:
+/// `localhost`/`*.localhost` DNS names stay blocked even under `AllowLoopback`.
+fn host_allowed(url: &url::Url, policy: PrivatePolicy) -> bool {
+    use std::net::IpAddr;
+    let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);
+    match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let l = d.to_lowercase();
+            l != "localhost" && !l.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(v4)) => !is_private_or_reserved(IpAddr::V4(v4)) || allow_loopback,
+        Some(url::Host::Ipv6(v6)) => {
+            let mapped_private = v6
+                .to_ipv4_mapped()
+                .is_some_and(|m| is_private_or_reserved(IpAddr::V4(m)));
+            (!is_private_or_reserved(IpAddr::V6(v6)) && !mapped_private) || allow_loopback
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -733,5 +782,81 @@ mod tests {
         let url: url::Url = "http://100.128.0.1:8080/".parse().unwrap();
         assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
         assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    // -- validate_collector_url (OTLP endpoint) --
+
+    #[test]
+    fn collector_url_allows_public_host() {
+        assert!(validate_collector_url(
+            "https://collector.example.com:4318",
+            PrivatePolicy::AllowLoopback
+        )
+        .is_ok());
+        assert!(validate_collector_url(
+            "https://collector.example.com:4318",
+            PrivatePolicy::BlockLoopback
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn collector_url_loopback_gated_by_policy() {
+        assert!(
+            validate_collector_url("http://127.0.0.1:4318", PrivatePolicy::AllowLoopback).is_ok()
+        );
+        assert!(
+            validate_collector_url("http://127.0.0.1:4318", PrivatePolicy::BlockLoopback).is_err()
+        );
+    }
+
+    #[test]
+    fn collector_url_private_gated_by_policy() {
+        assert!(
+            validate_collector_url("http://10.0.0.5:4318", PrivatePolicy::AllowLoopback).is_ok()
+        );
+        assert!(
+            validate_collector_url("http://10.0.0.5:4318", PrivatePolicy::BlockLoopback).is_err()
+        );
+    }
+
+    #[test]
+    fn collector_url_localhost_dns_rejected_even_under_allow_loopback() {
+        // A `*.localhost` DNS name is NOT the loopback literal — stays blocked.
+        assert!(
+            validate_collector_url("http://localhost:4318", PrivatePolicy::AllowLoopback).is_err()
+        );
+        assert!(
+            validate_collector_url("http://x.localhost/", PrivatePolicy::AllowLoopback).is_err()
+        );
+    }
+
+    #[test]
+    fn collector_url_rejects_non_http_and_credentials() {
+        assert!(validate_collector_url("ftp://x/", PrivatePolicy::AllowLoopback).is_err());
+        assert!(validate_collector_url(
+            "https://user:pass@collector.example.com/",
+            PrivatePolicy::AllowLoopback
+        )
+        .is_err());
+        assert!(validate_collector_url(
+            "https://collector.example.com\\x",
+            PrivatePolicy::AllowLoopback
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn collector_url_ipv6_mapped_private_gated_by_policy() {
+        assert!(validate_collector_url(
+            "http://[::ffff:10.0.0.1]:4318",
+            PrivatePolicy::BlockLoopback
+        )
+        .is_err());
+        assert!(validate_collector_url(
+            "http://[::ffff:10.0.0.1]:4318",
+            PrivatePolicy::AllowLoopback
+        )
+        .is_ok());
     }
 }

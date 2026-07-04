@@ -508,6 +508,7 @@ mod tests {
             active_project: Some("existing".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
@@ -586,6 +587,7 @@ mod tests {
             active_project: Some("existing".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
@@ -650,6 +652,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 

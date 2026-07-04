@@ -650,6 +650,347 @@ pub struct UiPrefsConfig {
     pub beta_enabled: Option<bool>,
 }
 
+/// OTLP transport protocol for the telemetry exporter.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OtlpProtocol {
+    /// gRPC (default), typically on port 4317.
+    #[default]
+    #[serde(rename = "grpc")]
+    Grpc,
+    /// HTTP with protobuf payloads, typically on port 4318.
+    #[serde(rename = "http/protobuf")]
+    HttpProtobuf,
+    /// HTTP with JSON payloads.
+    #[serde(rename = "http/json")]
+    HttpJson,
+}
+
+/// User-layer OTLP telemetry config. Top-level user-only, like `ui`. Field
+/// semantics mirror [`TelemetryField`](crate::telemetry_env::TelemetryField).
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct TelemetryConfig {
+    /// Master switch: emit telemetry at all.
+    pub enabled: Option<bool>,
+    /// OTLP collector endpoint URL.
+    pub endpoint: Option<String>,
+    /// OTLP transport protocol.
+    pub protocol: Option<OtlpProtocol>,
+    /// Export the metrics signal.
+    pub export_metrics: Option<bool>,
+    /// Export the logs/events signal.
+    pub export_logs: Option<bool>,
+    /// Collector auth headers (`Key=Value,…`; secret).
+    pub headers: Option<String>,
+    /// Custom resource attributes (`key=value,…`).
+    pub resource_attributes: Option<String>,
+    /// Include the account UUID attribute in metrics.
+    pub include_account_uuid: Option<bool>,
+    /// Privacy gate: include user prompt content.
+    pub log_user_prompts: Option<bool>,
+    /// Privacy gate: include assistant response content.
+    pub log_assistant_responses: Option<bool>,
+    /// Privacy gate: include tool command/parameter details.
+    pub log_tool_details: Option<bool>,
+    /// Privacy gate: include raw API request/response bodies.
+    pub log_raw_api_bodies: Option<bool>,
+    /// Metrics export interval in milliseconds.
+    pub metric_export_interval_ms: Option<u64>,
+    /// Logs export interval in milliseconds.
+    pub logs_export_interval_ms: Option<u64>,
+}
+
+/// MDM-layer telemetry policy. Presence IS the lock — any field the MDM sets is
+/// authoritative and the user cannot override it; there is no `locked` flag (MDM
+/// always wins in the merge). To leave a field user-editable, MDM omits it.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct ManagedTelemetryConfig {
+    /// Force the master switch (kill-switch when `false`).
+    pub enabled: Option<bool>,
+    /// Force the collector endpoint.
+    pub endpoint: Option<String>,
+    /// Force the transport protocol.
+    pub protocol: Option<OtlpProtocol>,
+    /// Force the metrics signal on/off.
+    pub export_metrics: Option<bool>,
+    /// Force the logs signal on/off.
+    pub export_logs: Option<bool>,
+    /// Force the collector auth headers.
+    pub headers: Option<String>,
+    /// Force the resource attributes.
+    pub resource_attributes: Option<String>,
+    /// Force the account-UUID attribute.
+    pub include_account_uuid: Option<bool>,
+    /// Force the user-prompt privacy gate.
+    pub log_user_prompts: Option<bool>,
+    /// Force the assistant-response privacy gate.
+    pub log_assistant_responses: Option<bool>,
+    /// Force the tool-details privacy gate.
+    pub log_tool_details: Option<bool>,
+    /// Force the raw-API-bodies privacy gate.
+    pub log_raw_api_bodies: Option<bool>,
+    /// Force the metrics export interval (ms).
+    pub metric_export_interval_ms: Option<u64>,
+    /// Force the logs export interval (ms).
+    pub logs_export_interval_ms: Option<u64>,
+}
+
+/// Fully resolved telemetry after the per-field merge + cross-field gates.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResolvedTelemetry {
+    /// Resolved master switch.
+    pub enabled: bool,
+    /// Resolved collector endpoint (`None` when disabled).
+    pub endpoint: Option<String>,
+    /// Resolved transport protocol.
+    pub protocol: OtlpProtocol,
+    /// Whether the metrics signal is exported.
+    pub export_metrics: bool,
+    /// Whether the logs signal is exported.
+    pub export_logs: bool,
+    /// Resolved collector auth headers (secret; `None` when disabled).
+    pub headers: Option<String>,
+    /// Resolved resource attributes.
+    pub resource_attributes: Option<String>,
+    /// Whether the account-UUID attribute is included.
+    pub include_account_uuid: bool,
+    /// Privacy gate: user prompt content.
+    pub log_user_prompts: bool,
+    /// Privacy gate: assistant response content.
+    pub log_assistant_responses: bool,
+    /// Privacy gate: tool command/parameter details.
+    pub log_tool_details: bool,
+    /// Privacy gate: raw API request/response bodies.
+    pub log_raw_api_bodies: bool,
+    /// Resolved metrics export interval (ms).
+    pub metric_export_interval_ms: Option<u64>,
+    /// Resolved logs export interval (ms).
+    pub logs_export_interval_ms: Option<u64>,
+    /// Env-var keys MDM locked (user cannot override these).
+    pub locked_keys: std::collections::BTreeSet<String>,
+    /// True when MDM locked at least one field.
+    pub any_locked: bool,
+    /// True when MDM forced telemetry off (kill-switch).
+    pub kill_switch: bool,
+}
+
+impl ResolvedTelemetry {
+    /// All-off value used as the placeholder when resolution fails (the error is
+    /// carried separately in `ResolvedClaudeConfig::telemetry_error`).
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// True when MDM locked the given field. `Enabled` maps to the master switch
+    /// (`ENABLE_KEY`), not an OTEL_* key, so it is special-cased.
+    pub fn is_field_locked(&self, field: crate::telemetry_env::TelemetryField) -> bool {
+        use crate::telemetry_env::{env_key_for, TelemetryField, ENABLE_KEY};
+        match field {
+            TelemetryField::Enabled => self.locked_keys.contains(ENABLE_KEY),
+            f => env_key_for(f).is_some_and(|k| self.locked_keys.contains(k)),
+        }
+    }
+}
+
+/// Merges the user and MDM telemetry layers into a `ResolvedTelemetry`.
+///
+/// Per-field, an MDM value (present ⇒ authoritative + locked) wins over the user
+/// value over the default. `Enabled` locks the master switch (`ENABLE_KEY`).
+/// Two cross-field gates follow: `enabled=false` suppresses all output; an
+/// `enabled=true` with no endpoint (or an invalid endpoint / control-char header)
+/// is a fail-closed error.
+pub fn resolve_telemetry(
+    user: Option<&TelemetryConfig>,
+    managed: Option<&ManagedTelemetryConfig>,
+) -> anyhow::Result<ResolvedTelemetry> {
+    use crate::telemetry_env::{env_key_for, TelemetryField, ENABLE_KEY};
+    use std::collections::BTreeSet;
+    let mut locked_keys: BTreeSet<String> = BTreeSet::new();
+    let mut any_locked = false;
+
+    // A macro (not a closure) so it doesn't hold a long-lived borrow of
+    // any_locked/locked_keys that would conflict with the `enabled` branch below.
+    macro_rules! note_lock {
+        ($field:expr) => {{
+            any_locked = true;
+            if let Some(k) = env_key_for($field) {
+                locked_keys.insert(k.to_string());
+            }
+        }};
+    }
+
+    macro_rules! merge {
+        ($field:expr, $mval:expr, $umf:expr, $default:expr) => {{
+            match $mval {
+                Some(v) => {
+                    note_lock!($field);
+                    v.clone()
+                }
+                None => $umf.clone().unwrap_or($default),
+            }
+        }};
+    }
+    macro_rules! merge_opt {
+        ($field:expr, $mval:expr, $uval:expr) => {{
+            match $mval {
+                Some(v) => {
+                    note_lock!($field);
+                    Some(v.clone())
+                }
+                None => $uval,
+            }
+        }};
+    }
+
+    use TelemetryField as F;
+    // `enabled` locks the CLAUDE_CODE_* master switch (not an OTEL_* key), so lock
+    // it by inserting ENABLE_KEY directly — it is then re-forced over the user
+    // layer AND written into managed-settings.json (master switch un-bypassable).
+    let enabled = match managed.and_then(|m| m.enabled) {
+        Some(v) => {
+            any_locked = true;
+            locked_keys.insert(ENABLE_KEY.to_string());
+            v
+        }
+        None => user.and_then(|u| u.enabled).unwrap_or(false),
+    };
+    let endpoint_opt = merge_opt!(
+        F::Endpoint,
+        managed.and_then(|m| m.endpoint.as_ref()),
+        user.and_then(|u| u.endpoint.clone())
+    );
+    let protocol = merge!(
+        F::Protocol,
+        managed.and_then(|m| m.protocol.as_ref()),
+        user.and_then(|u| u.protocol),
+        OtlpProtocol::default()
+    );
+    let export_metrics = merge!(
+        F::ExportMetrics,
+        managed.and_then(|m| m.export_metrics.as_ref()),
+        user.and_then(|u| u.export_metrics),
+        true
+    );
+    let export_logs = merge!(
+        F::ExportLogs,
+        managed.and_then(|m| m.export_logs.as_ref()),
+        user.and_then(|u| u.export_logs),
+        false
+    );
+    let headers_opt = merge_opt!(
+        F::Headers,
+        managed.and_then(|m| m.headers.as_ref()),
+        user.and_then(|u| u.headers.clone())
+    );
+    let resource_attributes_opt = merge_opt!(
+        F::ResourceAttributes,
+        managed.and_then(|m| m.resource_attributes.as_ref()),
+        user.and_then(|u| u.resource_attributes.clone())
+    );
+    let include_account_uuid = merge!(
+        F::IncludeAccountUuid,
+        managed.and_then(|m| m.include_account_uuid.as_ref()),
+        user.and_then(|u| u.include_account_uuid),
+        true
+    );
+    let log_user_prompts = merge!(
+        F::LogUserPrompts,
+        managed.and_then(|m| m.log_user_prompts.as_ref()),
+        user.and_then(|u| u.log_user_prompts),
+        false
+    );
+    let log_assistant_responses = merge!(
+        F::LogAssistantResponses,
+        managed.and_then(|m| m.log_assistant_responses.as_ref()),
+        user.and_then(|u| u.log_assistant_responses),
+        false
+    );
+    let log_tool_details = merge!(
+        F::LogToolDetails,
+        managed.and_then(|m| m.log_tool_details.as_ref()),
+        user.and_then(|u| u.log_tool_details),
+        false
+    );
+    let log_raw_api_bodies = merge!(
+        F::LogRawApiBodies,
+        managed.and_then(|m| m.log_raw_api_bodies.as_ref()),
+        user.and_then(|u| u.log_raw_api_bodies),
+        false
+    );
+    let metric_export_interval_ms = merge_opt!(
+        F::MetricExportInterval,
+        managed.and_then(|m| m.metric_export_interval_ms.as_ref()),
+        user.and_then(|u| u.metric_export_interval_ms)
+    );
+    let logs_export_interval_ms = merge_opt!(
+        F::LogsExportInterval,
+        managed.and_then(|m| m.logs_export_interval_ms.as_ref()),
+        user.and_then(|u| u.logs_export_interval_ms)
+    );
+
+    // Kill-switch = MDM set enabled=false (presence is the lock).
+    let kill_switch = managed.and_then(|m| m.enabled) == Some(false);
+
+    // Cross-field gate: enabled=false suppresses ALL output.
+    if !enabled {
+        return Ok(ResolvedTelemetry {
+            enabled: false,
+            endpoint: None,
+            protocol,
+            export_metrics: false,
+            export_logs: false,
+            headers: None,
+            resource_attributes: None,
+            include_account_uuid,
+            log_user_prompts: false,
+            log_assistant_responses: false,
+            log_tool_details: false,
+            log_raw_api_bodies: false,
+            metric_export_interval_ms: None,
+            logs_export_interval_ms: None,
+            locked_keys,
+            any_locked,
+            kill_switch,
+        });
+    }
+
+    // Cross-field gate: enabled=true needs a valid endpoint (fail-closed).
+    match &endpoint_opt {
+        Some(ep) => {
+            crate::url_validation::validate_collector_url(
+                ep,
+                crate::url_validation::PrivatePolicy::AllowLoopback,
+            )
+            .map_err(|e| anyhow::anyhow!("invalid OTLP endpoint: {e}"))?;
+        }
+        None => anyhow::bail!("telemetry enabled but no OTLP endpoint configured"),
+    }
+    if let Some(h) = &headers_opt {
+        if h.chars().any(|c| c.is_control()) {
+            anyhow::bail!("OTLP headers must not contain control characters");
+        }
+    }
+
+    Ok(ResolvedTelemetry {
+        enabled: true,
+        endpoint: endpoint_opt,
+        protocol,
+        export_metrics,
+        export_logs,
+        headers: headers_opt,
+        resource_attributes: resource_attributes_opt,
+        include_account_uuid,
+        log_user_prompts,
+        log_assistant_responses,
+        log_tool_details,
+        log_raw_api_bodies,
+        metric_export_interval_ms,
+        logs_export_interval_ms,
+        locked_keys,
+        any_locked,
+        kill_switch,
+    })
+}
+
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
@@ -661,6 +1002,8 @@ pub struct SpeedwaveUserConfig {
     pub selected_ide: Option<SelectedIde>,
     /// UI preferences (ADR-058). Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
+    /// OTLP telemetry config. Top-level, user-only.
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 impl SpeedwaveUserConfig {
@@ -698,7 +1041,7 @@ impl SpeedwaveUserConfig {
 }
 
 /// Fully resolved Claude container config after the layered merge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedClaudeConfig {
     /// Environment variables for the Claude container.
     pub env: HashMap<String, String>,
@@ -706,6 +1049,10 @@ pub struct ResolvedClaudeConfig {
     pub flags: Vec<String>,
     /// Resolved LLM provider/model configuration.
     pub llm: LlmConfig,
+    /// Merged telemetry the renderer reads for the managed-settings mount.
+    pub telemetry: ResolvedTelemetry,
+    /// Some = telemetry failed to resolve (fail-closed); the renderer bails.
+    pub telemetry_error: Option<String>,
 }
 
 /// Resolves both Claude config and integrations in a single pass,
@@ -732,11 +1079,46 @@ pub(crate) fn resolve_project_config_in(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    // A malformed MDM policy is fail-closed at the load boundary; a load Err here
+    // is swallowed (config layer must not panic mid-merge) but the invalid state
+    // is surfaced as telemetry_error, which the renderer turns into a hard error.
+    let managed = crate::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.telemetry);
+    resolve_project_config_in_with_managed(
+        data_dir,
+        project_dir,
+        user_config,
+        project_name,
+        managed.as_ref(),
+    )
+}
+
+/// Core of [`resolve_project_config_in`] with the MDM telemetry policy injected
+/// explicitly (tests supply it without touching the system path).
+pub(crate) fn resolve_project_config_in_with_managed(
+    data_dir: &Path,
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+    managed_telemetry: Option<&ManagedTelemetryConfig>,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
     let mut env = defaults::base_env();
     let mut llm = LlmConfig::default();
     let mut integrations = ResolvedIntegrationsConfig::default();
+
+    // Telemetry baseline goes in BEFORE the repo/user merge so a user `claude.env`
+    // still wins for a non-locked key; MDM-locked keys are re-forced AFTER the user
+    // layer below. A resolve error is recorded and surfaced to the renderer.
+    let resolved_tel = resolve_telemetry(user_config.telemetry.as_ref(), managed_telemetry);
+    if let Ok(tel) = &resolved_tel {
+        for (k, v) in crate::telemetry_env::telemetry_env_map(tel) {
+            env.insert(k, v);
+        }
+    }
 
     // Layer 1: repo config (.speedwave.json)
     // provider and base_url are ignored from repo config (SSRF prevention — ADR-040)
@@ -767,6 +1149,15 @@ pub(crate) fn resolve_project_config_in(
         }
     }
 
+    // Telemetry re-force: strip any user value for an MDM-locked key, then set the
+    // locked value. This is what the user cannot beat (master switch included).
+    if let Ok(tel) = &resolved_tel {
+        env.retain(|k, _| !tel.locked_keys.contains(k));
+        for (k, v) in crate::telemetry_env::locked_env_map(tel) {
+            env.insert(k, v);
+        }
+    }
+
     // Migrate to the current LLM schema (ADR-073).
     migrate_llm(
         &mut llm,
@@ -790,7 +1181,18 @@ pub(crate) fn resolve_project_config_in(
         .map(|s| s.to_string())
         .collect();
 
-    let claude = ResolvedClaudeConfig { env, flags, llm };
+    let (telemetry, telemetry_error) = match resolved_tel {
+        Ok(t) => (t, None),
+        Err(e) => (ResolvedTelemetry::disabled(), Some(e.to_string())),
+    };
+
+    let claude = ResolvedClaudeConfig {
+        env,
+        flags,
+        llm,
+        telemetry,
+        telemetry_error,
+    };
     (claude, integrations)
 }
 
@@ -1636,6 +2038,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -1648,6 +2051,285 @@ mod tests {
             resolved.env.get("WAYLAND_DISPLAY"),
             Some(&"".to_string()),
             "user config must be able to override the base_env WAYLAND_DISPLAY default"
+        );
+    }
+
+    // ── telemetry: resolve_telemetry ────────────────────────────────────────
+
+    #[test]
+    fn telemetry_defaults_off_when_no_config() {
+        let r = resolve_telemetry(None, None).unwrap();
+        assert!(!r.enabled);
+        assert!(!r.any_locked);
+        assert!(!r.kill_switch);
+        assert!(r.endpoint.is_none());
+    }
+
+    #[test]
+    fn telemetry_user_values_pass_through_when_no_mdm() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://collector.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let r = resolve_telemetry(Some(&user), None).unwrap();
+        assert!(r.enabled);
+        assert_eq!(
+            r.endpoint.as_deref(),
+            Some("https://collector.example.com:4318")
+        );
+        assert!(!r.any_locked);
+    }
+
+    #[test]
+    fn telemetry_mdm_wins_per_field_and_locks() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://user.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            endpoint: Some("https://corp.example.com:4318".into()),
+            ..Default::default()
+        };
+        let r = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        assert_eq!(r.endpoint.as_deref(), Some("https://corp.example.com:4318"));
+        assert!(r.any_locked);
+        assert!(r.locked_keys.contains("OTEL_EXPORTER_OTLP_ENDPOINT"));
+        assert!(r.enabled);
+    }
+
+    #[test]
+    fn telemetry_kill_switch_suppresses_all_output() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://user.example.com:4318".into()),
+            headers: Some("Authorization=Bearer x".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let r = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        assert!(r.kill_switch);
+        assert!(!r.enabled);
+        assert!(r.endpoint.is_none());
+        assert!(r.headers.is_none());
+        assert!(!r.export_metrics);
+        // P0: the master switch itself is locked, so it is re-forced / written to managed-settings.
+        assert!(r.locked_keys.contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
+    }
+
+    #[test]
+    fn telemetry_locked_enabled_without_endpoint_is_error() {
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            resolve_telemetry(None, Some(&managed)).is_err(),
+            "locked enabled=true with no endpoint must fail-closed"
+        );
+    }
+
+    #[test]
+    fn telemetry_mdm_enabled_lock_is_in_locked_keys_both_directions() {
+        let off = ManagedTelemetryConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(None, Some(&off))
+            .unwrap()
+            .locked_keys
+            .contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
+        let on = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(None, Some(&on))
+            .unwrap()
+            .locked_keys
+            .contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
+    }
+
+    #[test]
+    fn telemetry_rejects_non_http_endpoint() {
+        let u = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("ftp://x/".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&u), None).is_err());
+    }
+
+    #[test]
+    fn telemetry_allows_onprem_loopback_endpoint() {
+        let u = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://localhost:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        // localhost DNS name is NOT loopback; the loopback literal 127.0.0.1 is.
+        assert!(resolve_telemetry(Some(&u), None).is_err());
+        let u2 = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://127.0.0.1:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&u2), None).is_ok());
+    }
+
+    #[test]
+    fn telemetry_rejects_headers_with_control_chars() {
+        let u = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            headers: Some("Authorization=Bearer x\r\nInjected: y".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&u), None).is_err());
+    }
+
+    #[test]
+    fn telemetry_preserves_bearer_token_with_equals_padding() {
+        let u = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            headers: Some("Authorization=Bearer abc==".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let r = resolve_telemetry(Some(&u), None).unwrap();
+        assert_eq!(r.headers.as_deref(), Some("Authorization=Bearer abc=="));
+    }
+
+    #[test]
+    fn mdm_locked_telemetry_key_overrides_user_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(HashMap::from([(
+                        "OTEL_EXPORTER_OTLP_ENDPOINT".into(),
+                        "https://user-evil.example.com:4318".into(),
+                    )])),
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://corp.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let resolved = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Some(&managed),
+        )
+        .0;
+        assert_eq!(
+            resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            Some(&"https://corp.example.com:4318".to_string()),
+            "user claude.env must NOT override an MDM-locked telemetry key"
+        );
+        assert_eq!(
+            resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn mdm_kill_switch_overrides_user_enable_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(HashMap::from([(
+                        "CLAUDE_CODE_ENABLE_TELEMETRY".into(),
+                        "1".into(),
+                    )])),
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let resolved = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Some(&managed),
+        )
+        .0;
+        assert_eq!(
+            resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
+            Some(&"0".to_string()),
+            "MDM kill-switch must win over a user claude.env CLAUDE_CODE_ENABLE_TELEMETRY=1"
+        );
+    }
+
+    #[test]
+    fn user_telemetry_endpoint_reaches_env_without_mdm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+                endpoint: Some("https://mine.example.com:4318".into()),
+                export_metrics: Some(true),
+                ..Default::default()
+            }),
+        };
+        let resolved =
+            resolve_project_config_in_with_managed(tmp.path(), tmp.path(), &user_config, "p", None)
+                .0;
+        assert_eq!(
+            resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            Some(&"https://mine.example.com:4318".to_string())
         );
     }
 
@@ -1692,6 +2374,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
@@ -2655,6 +3338,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         assert_eq!(
@@ -2732,6 +3416,7 @@ mod tests {
             active_project: Some("acme".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SpeedwaveUserConfig = serde_json::from_str(&json).unwrap();
@@ -2756,6 +3441,7 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -2777,6 +3463,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -2799,6 +3486,7 @@ mod tests {
             active_project: Some("test".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         save_user_config_to(&config, &config_path).unwrap();
@@ -2858,6 +3546,7 @@ mod tests {
             active_project: Some("durable".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config, &config_path).unwrap();
         // Durable helper writes owner-only perms.
@@ -2888,6 +3577,7 @@ mod tests {
             active_project: Some("v1".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
 
@@ -2903,6 +3593,7 @@ mod tests {
             active_project: Some("v2".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         save_user_config_to(&config_v2, &config_path).unwrap();
 
@@ -2945,6 +3636,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         }
     }
 
@@ -2989,6 +3681,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
@@ -3212,6 +3905,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -3284,6 +3978,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3321,6 +4016,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3616,6 +4312,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
@@ -3650,6 +4347,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         }
     }
 
@@ -3724,6 +4422,7 @@ mod tests {
             active_project: Some("beta".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let entry = config.active_project_entry();
         assert!(entry.is_some());
@@ -3749,6 +4448,7 @@ mod tests {
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         assert!(
             config.active_project_entry().is_none(),
@@ -4041,6 +4741,7 @@ mod plugin_order_tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let (resolved, _) =
