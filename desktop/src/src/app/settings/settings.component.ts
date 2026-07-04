@@ -18,6 +18,7 @@ import { BetaService } from '../services/beta.service';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
+import { TelemetrySectionComponent } from './telemetry-section/telemetry-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
@@ -69,6 +70,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     LlmProviderComponent,
     AdvancedSectionComponent,
     TranscriptionSectionComponent,
+    TelemetrySectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
   ],
@@ -184,6 +186,8 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
             }
           </div>
         </section>
+
+        <app-telemetry-section (errorOccurred)="error = $event" />
 
         <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 

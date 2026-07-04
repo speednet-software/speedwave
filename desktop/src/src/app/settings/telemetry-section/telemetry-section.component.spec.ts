@@ -1,0 +1,109 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { TelemetrySectionComponent } from './telemetry-section.component';
+import { TauriService } from '../../services/tauri.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
+import type { TelemetryConfigResponse } from '../../models/telemetry';
+
+function baseResponse(overrides: Partial<TelemetryConfigResponse> = {}): TelemetryConfigResponse {
+  return {
+    enabled: true,
+    endpoint: 'https://corp:4318',
+    protocol: 'grpc',
+    export_metrics: true,
+    export_logs: false,
+    has_headers: false,
+    resource_attributes: null,
+    include_account_uuid: true,
+    log_user_prompts: false,
+    log_assistant_responses: false,
+    log_tool_details: false,
+    log_raw_api_bodies: false,
+    metric_export_interval_ms: null,
+    logs_export_interval_ms: null,
+    locks: {
+      enabled: false,
+      endpoint: false,
+      protocol: false,
+      export_metrics: false,
+      export_logs: false,
+      headers: false,
+      resource_attributes: false,
+      include_account_uuid: false,
+      log_user_prompts: false,
+      log_assistant_responses: false,
+      log_tool_details: false,
+      log_raw_api_bodies: false,
+      metric_export_interval_ms: false,
+      logs_export_interval_ms: false,
+    },
+    any_locked: false,
+    kill_switch: false,
+    ...overrides,
+  };
+}
+
+describe('TelemetrySectionComponent', () => {
+  let component: TelemetrySectionComponent;
+  let fixture: ComponentFixture<TelemetrySectionComponent>;
+  let mockTauri: MockTauriService;
+
+  function setup(resp: TelemetryConfigResponse): void {
+    mockTauri = new MockTauriService();
+    mockTauri.invokeHandler = async (cmd: string) =>
+      cmd === 'get_telemetry_config' ? resp : undefined;
+  }
+
+  async function create(): Promise<void> {
+    await TestBed.configureTestingModule({
+      imports: [TelemetrySectionComponent],
+      providers: [{ provide: TauriService, useValue: mockTauri }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(TelemetrySectionComponent);
+    component = fixture.componentInstance;
+  }
+
+  beforeEach(() => {
+    setup(baseResponse());
+  });
+
+  it('should create', async () => {
+    await create();
+    expect(component).toBeTruthy();
+  });
+
+  it('reads telemetry config on init and reflects a locked endpoint', async () => {
+    setup(
+      baseResponse({
+        endpoint: 'https://corp:4318',
+        locks: { ...baseResponse().locks, endpoint: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.endpoint()).toBe('https://corp:4318');
+    expect(component.endpointLocked()).toBe(true);
+  });
+
+  it('greys the whole section when kill_switch is set', async () => {
+    setup(baseResponse({ kill_switch: true, enabled: false }));
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-killswitch"]')
+    ).not.toBeNull();
+  });
+
+  it('save() invokes update_telemetry_config with { update }', async () => {
+    await create();
+    await component.ngOnInit();
+    const spy = vi.spyOn(mockTauri, 'invoke');
+    await component.save();
+    const call = spy.mock.calls.find((c) => c[0] === 'update_telemetry_config');
+    expect(call).toBeDefined();
+    expect(call?.[1]).toHaveProperty('update');
+  });
+});
