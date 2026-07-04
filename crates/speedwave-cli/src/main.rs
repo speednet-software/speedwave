@@ -2050,6 +2050,7 @@ mod tests {
             active_project: active.map(str::to_string),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         }
     }
 

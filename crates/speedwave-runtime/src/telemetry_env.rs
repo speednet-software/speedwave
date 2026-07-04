@@ -91,10 +91,6 @@ fn protocol_wire(p: OtlpProtocol) -> &'static str {
     }
 }
 
-fn key(f: TelemetryField) -> String {
-    env_key_for(f).expect("field is env-mapped").to_string()
-}
-
 /// Full telemetry env for the resolved config. When disabled, only the master
 /// switch (`0`) is emitted — no endpoint, headers, or exporters.
 pub fn telemetry_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
@@ -105,35 +101,42 @@ pub fn telemetry_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
         return m;
     }
     m.insert(ENABLE_KEY.to_string(), "1".into());
-    if let Some(ep) = &t.endpoint {
-        m.insert(key(F::Endpoint), ep.clone());
+    // Inserts `<env_key_for(field)> = value` when the field has an env key. A
+    // macro (not a closure) so it doesn't hold a long-lived mutable borrow of `m`.
+    macro_rules! put {
+        ($field:expr, $value:expr) => {{
+            if let Some(k) = env_key_for($field) {
+                m.insert(k.to_string(), $value);
+            }
+        }};
     }
-    m.insert(key(F::Protocol), protocol_wire(t.protocol).into());
+
+    if let Some(ep) = &t.endpoint {
+        put!(F::Endpoint, ep.clone());
+    }
+    put!(F::Protocol, protocol_wire(t.protocol).into());
     if t.export_metrics {
-        m.insert(key(F::ExportMetrics), "otlp".into());
+        put!(F::ExportMetrics, "otlp".into());
     }
     if t.export_logs {
-        m.insert(key(F::ExportLogs), "otlp".into());
+        put!(F::ExportLogs, "otlp".into());
     }
     if let Some(h) = &t.headers {
-        m.insert(key(F::Headers), h.clone());
+        put!(F::Headers, h.clone());
     }
     if let Some(ra) = &t.resource_attributes {
-        m.insert(key(F::ResourceAttributes), ra.clone());
+        put!(F::ResourceAttributes, ra.clone());
     }
-    m.insert(key(F::IncludeAccountUuid), bool_str(t.include_account_uuid));
-    m.insert(key(F::LogUserPrompts), bool01(t.log_user_prompts));
-    m.insert(
-        key(F::LogAssistantResponses),
-        bool01(t.log_assistant_responses),
-    );
-    m.insert(key(F::LogToolDetails), bool01(t.log_tool_details));
-    m.insert(key(F::LogRawApiBodies), bool01(t.log_raw_api_bodies));
+    put!(F::IncludeAccountUuid, bool_str(t.include_account_uuid));
+    put!(F::LogUserPrompts, bool01(t.log_user_prompts));
+    put!(F::LogAssistantResponses, bool01(t.log_assistant_responses));
+    put!(F::LogToolDetails, bool01(t.log_tool_details));
+    put!(F::LogRawApiBodies, bool01(t.log_raw_api_bodies));
     if let Some(v) = t.metric_export_interval_ms {
-        m.insert(key(F::MetricExportInterval), v.to_string());
+        put!(F::MetricExportInterval, v.to_string());
     }
     if let Some(v) = t.logs_export_interval_ms {
-        m.insert(key(F::LogsExportInterval), v.to_string());
+        put!(F::LogsExportInterval, v.to_string());
     }
     m
 }
@@ -155,6 +158,7 @@ fn bool_str(b: bool) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::OtlpProtocol;

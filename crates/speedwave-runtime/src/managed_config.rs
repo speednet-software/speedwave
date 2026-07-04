@@ -51,6 +51,7 @@ pub(crate) fn load_managed_config_from(path: &Path) -> anyhow::Result<Option<Man
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

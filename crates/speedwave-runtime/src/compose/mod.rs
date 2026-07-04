@@ -1318,6 +1318,37 @@ mod tests {
         );
     }
 
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_hard_errors_on_crlf_header() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("mdm-crlf-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let managed = crate::config::ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c:4318".into()),
+            headers: Some("Authorization=Bearer x\r\nInjected: y".into()),
+            ..Default::default()
+        };
+        let resolved = resolved_with_telemetry(None, Some(&managed));
+        let err = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        );
+        assert!(
+            err.is_err(),
+            "CRLF-bearing MDM header must abort render/start"
+        );
+    }
+
     /// Renders via `render_compose` with a local LLM provider + multi-line
     /// custom_headers and checks the result re-parses (production code path).
     #[test]
