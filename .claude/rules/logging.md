@@ -38,4 +38,4 @@ When adding a new secret pattern to `log_sanitizer.rs`:
 
 1. Add the regex + replacement to the `RULES` `LazyLock` initialization
 2. Add at least one positive test (secret is redacted) and one false-positive test (normal text is unchanged)
-3. Run `make test` — all sanitizer tests are in `crates/speedwave-runtime/src/log_sanitizer.rs`
+3. Run `make test-rust` — the sanitizer tests are in `crates/speedwave-runtime/src/log_sanitizer.rs`

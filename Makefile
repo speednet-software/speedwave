@@ -731,6 +731,8 @@ check-angular:
 
 check-fmt:
 	cargo fmt --all -- --check
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all -- --check
 	$(NPX) prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 	@echo "✅ Format check passed"
 
@@ -775,6 +777,8 @@ check-all: check test coverage audit
 
 fmt:
 	cargo fmt --all
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all
 	$(NPX) prettier --write 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 	@echo "✅ Formatted"
 

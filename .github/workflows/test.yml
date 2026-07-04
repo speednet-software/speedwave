@@ -62,11 +62,10 @@ jobs:
       - name: Rust clippy
         run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
 
-      - name: Rust format check
-        run: cargo fmt --all -- --check
-
-      - name: Prettier format check
-        run: npx prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+      # `make check-fmt` covers all three Rust workspaces (root, desktop/src-tauri,
+      # containers/proxy) plus Prettier — the same gate pre-push runs.
+      - name: Format check
+        run: make check-fmt
 
       - name: MCP type-check (build shared first)
         working-directory: mcp-servers
@@ -124,14 +123,19 @@ jobs:
       - name: Install cmake
         run: brew install cmake
 
-      - name: Rust tests
+      - name: Rust tests (incl. transcription)
         run: make test-rust
 
-      - name: Transcription tests (audio-transcription feature)
-        run: make test-transcription
+      - name: Proxy tests
+        run: make test-proxy
 
       - name: MCP tests + coverage
         run: make coverage-mcp
+
+      # Unix-only upgrade-path test against the real bundled mcp-os worker;
+      # reached locally only via `make test-desktop`, so CI is its sole gate.
+      - name: mcp-os bundle upgrade-path test
+        run: make test-mcp-os-bundle
 
       # vitest above mocks the office worker's subprocesses; this is the only
       # gate that actually runs the Python scripts against the real libraries.
@@ -149,7 +153,7 @@ jobs:
     # naturally. Linux runners would need a special-case linux-bundle path
     # purely for CI — see ADR-059.
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -198,6 +202,13 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo clippy -- -D warnings
+
+      # CI compiles this crate (clippy above, Windows cargo check) but nothing
+      # else executes its unit tests — this step is their only gate.
+      - name: Desktop tests
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: make test-desktop-run
 
       - name: Angular ESLint
         working-directory: desktop/src
@@ -287,18 +298,13 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Runtime exec-transport tests on Windows — locks in the WSL path
-  # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
-  # `runtime::wsl::container_exec` shell-quoting could regress silently —
-  # `lint` and `test` run on `macos-latest` and don't exercise the Windows
-  # shell-quoting path. We deliberately restrict the
-  # test set to `runtime::lima` and `runtime::wsl` modules: the rest of
-  # `speedwave-runtime` (binary resolution, build context, compose
-  # rendering, consts) uses `/`-rooted paths in fixtures, which fail on
-  # Windows for reasons unrelated to this PR. Git Bash ships on the
-  # windows-latest image, so the `bash -nc` shell-roundtrip regression in
-  # those modules runs as-is. Lima/SSH shell-quoting is exercised by the
-  # macOS `desktop` job above.
+  # Windows-only unit tests — `lint`/`test` run on macos-latest and never
+  # compile `#[cfg(windows)]` code or exercise the Windows shell-quoting path.
+  # We run the modules whose Windows behaviour needs guarding: runtime::lima /
+  # runtime::wsl (WSL exec shell-quoting), build, host_mcp_process::job_object
+  # (kill-on-close, ADR-048), binary (binary resolution + system commands), and
+  # speedwave-cli. Compose/consts fixtures use `/`-rooted paths that don't hold
+  # on Windows, so they stay on the macOS jobs. Git Bash ships on the image.
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -336,6 +342,14 @@ jobs:
         # Windows-only kill-on-close end-to-end — see ADR-048.
         shell: bash
         run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
+
+      - name: cargo test binary
+        shell: bash
+        run: cargo test -p speedwave-runtime --lib "binary::"
+
+      - name: cargo test speedwave-cli
+        shell: bash
+        run: cargo test -p speedwave-cli --bins
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash
@@ -400,6 +414,15 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
 
-      # installer_hooks tests run on macOS (cargo check above already
-      # validates Windows compile); linking the test bin here clashes
-      # with whisper-rs CRT (ADR-061).
+      # Runs the crate's one `#[cfg(windows)]` unit test by name — the only place
+      # it runs, since the macOS desktop job never compiles it. A bare `--bins`
+      # would also pull in cross-platform tests whose fixtures assume POSIX paths
+      # and fail on Windows, so the filter is deliberately narrow.
+      - name: cargo test speedwave-desktop (windows-only)
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo test --bins desktop_log_dir_windows_path_under_local_appdata_logs
+
+      # installer_hooks tests run on macOS; cargo check above already validates
+      # the Windows compile of every target.

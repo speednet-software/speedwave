@@ -29,6 +29,8 @@ make fmt            # format all code
 make status         # quick health check
 ```
 
+The `pre-push` git hook runs only `make check-fmt` (a fast format check across the root, `desktop/src-tauri`, and `containers/proxy` workspaces plus Prettier — no builds or tests). Running the full `make test` / `make check` locally is optional; the required CI checks on every PR to `dev`/`main` (macOS + Windows) are the merge gate. See [Testing → Local vs CI](testing.md#local-vs-ci).
+
 ### Granular targets
 
 - **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-swift`, `test-desktop`, `test-e2e`, `test-e2e-plugin-tamper-release`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
