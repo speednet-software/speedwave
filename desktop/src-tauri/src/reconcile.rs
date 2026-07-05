@@ -1120,22 +1120,20 @@ mod tests {
         );
     }
 
+    /// The no-provider guard lives in restore_skip_reason — the single skip
+    /// decision restore_projects consults before any restore render.
     #[test]
     fn restore_projects_skips_unconfigured_projects_before_restoring() {
         let source = include_str!("reconcile.rs");
-        let fn_start = source
+        let skip_start = source
+            .find("fn restore_skip_reason(")
+            .expect("restore_skip_reason must exist");
+        let restore_start = source
             .find("pub(crate) fn restore_projects(")
             .expect("restore_projects must exist");
-        let body = &source[fn_start..fn_start + 1200];
-        let guard_pos = body
-            .find("project_llm_configured_in")
-            .expect("restore must guard on a configured provider (reconcile must not wedge)");
-        let restore_pos = body
-            .find("restore_one_project")
-            .expect("restore must call restore_one_project");
         assert!(
-            guard_pos < restore_pos,
-            "no-provider guard must run before the restore render"
+            source[skip_start..restore_start].contains("project_llm_configured_in"),
+            "no-provider guard must live in restore_skip_reason (reconcile must not wedge)"
         );
     }
 
