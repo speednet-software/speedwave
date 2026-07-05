@@ -87,6 +87,11 @@ windows-sys = { version = "0.61", features = [
     # Win32_System_Threading in windows-sys 0.61 (compiler hint:
     # "the item is gated behind the `Win32_System_Threading` feature").
     "Win32_System_Threading",
+    # SHGetKnownFolderPath resolves ProgramData from the OS, not the spoofable
+    # env var, so MDM policy cannot be hidden (ADR-076). Com gates CoTaskMemFree.
+    "Win32_UI_Shell",
+    "Win32_Globalization",
+    "Win32_System_Com",
 ] }
 
 [target.'cfg(unix)'.dependencies]

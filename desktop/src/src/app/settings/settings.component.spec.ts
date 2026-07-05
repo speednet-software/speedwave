@@ -121,6 +121,17 @@ describe('SettingsComponent', () => {
     expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
   });
 
+  it('renders TelemetrySectionComponent when beta is enabled', () => {
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).not.toBeNull();
+  });
+
+  it('hides TelemetrySectionComponent when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).toBeNull();
+  });
+
   it('smooth-scrolls a section into view for a matching URL fragment', () => {
     fixture.detectChanges();
     const section = fixture.nativeElement.querySelector('#section-transcription') as Element;

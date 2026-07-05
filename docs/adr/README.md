@@ -82,6 +82,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-073](ADR-073-embedded-per-project-speedwave-proxy.md)             | Embedded per-project Speedwave proxy — Rust Anthropic-passthrough forwarder, multi-provider routing + usage accounting | Accepted                      |
 | [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)                   | Reconstruct host-bridge env from disk for off-Desktop compose renders                                                  | Accepted                      |
 | [ADR-075](ADR-075-remove-speaker-diarization.md)                       | Remove speaker diarization — clean timestamped transcript, full sherpa-onnx removal                                    | Accepted                      |
+| [ADR-076](ADR-076-mdm-enforceable-otlp-telemetry.md)                   | MDM-enforceable OTLP telemetry — user self-service + org policy via a system managed-config file                       | Accepted                      |
 
 ## Creating a New ADR
 

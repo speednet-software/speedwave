@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { JsonSchema } from '../../models/plugin';
+import { eventChecked, eventValue } from '../../shared/dom-event';
 
 /** Renders a settings form dynamically from a JSON Schema definition. */
 @Component({
@@ -38,7 +39,7 @@ import { JsonSchema } from '../../models/plugin';
                 <input
                   type="checkbox"
                   [id]="'setting-' + key"
-                  class="accent-sw-accent"
+                  class="accent-[var(--accent)]"
                   [checked]="getValue(key) === true"
                   (change)="onCheckboxChange(key, $event)"
                   [attr.data-testid]="'setting-' + key"
@@ -118,12 +119,12 @@ export class PluginSettingsFormComponent {
    * @param event - the DOM input event
    */
   onFieldChange(key: string, event: Event): void {
-    const target = event.target as HTMLInputElement | HTMLSelectElement;
+    const value = eventValue(event);
     const prop = this.schema()?.properties[key];
     if (prop && (prop.type === 'number' || prop.type === 'integer')) {
-      this.editedValues[key] = Number(target.value);
+      this.editedValues[key] = Number(value);
     } else {
-      this.editedValues[key] = target.value;
+      this.editedValues[key] = value;
     }
   }
 
@@ -133,7 +134,7 @@ export class PluginSettingsFormComponent {
    * @param event - the checkbox change event
    */
   onCheckboxChange(key: string, event: Event): void {
-    this.editedValues[key] = (event.target as HTMLInputElement).checked;
+    this.editedValues[key] = eventChecked(event);
   }
 
   /**

@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { DeviceCodeInfo, IntegrationStatusEntry, OAuthFlowStatus } from '../../models/integration';
 import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
+import { ToggleComponent } from '../../shared/toggle.component';
 
 /** Semantic states the header status dot can reflect. */
 export type ServiceStatusDot = 'connected' | 'configuring' | 'error' | 'disabled';
@@ -15,7 +16,7 @@ export interface SaveCredentialsEvent {
 /** Reusable card for a single MCP integration service. */
 @Component({
   selector: 'app-service-card',
-  imports: [OauthConnectComponent],
+  imports: [OauthConnectComponent, ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -57,18 +58,12 @@ export interface SaveCredentialsEvent {
           </span>
         </button>
         <div class="flex items-center gap-3">
-          <label class="relative inline-block w-[44px] h-[24px]" data-testid="toggle">
-            <input
-              type="checkbox"
-              class="peer sr-only"
-              [checked]="svc().enabled"
-              (change)="onToggle($event)"
-              [attr.data-testid]="'integrations-toggle-' + svc().service"
-            />
-            <span
-              class="absolute inset-0 bg-[var(--line-strong)] rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-[var(--accent)] before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
-            ></span>
-          </label>
+          <app-toggle
+            [checked]="svc().enabled"
+            [testId]="'integrations-toggle-' + svc().service"
+            [ariaLabel]="'Enable ' + svc().service"
+            (changed)="onToggle($event)"
+          />
         </div>
       </div>
       <p

@@ -14,6 +14,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Desktop App](guides/desktop.md) — chat UI, project management, system integrations
 - [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Office documents, OS services (Calendar, Mail, Reminders, Notes)
 - [IDE Bridge](guides/ide-bridge.md) — VS Code / JetBrains integration
+- [Telemetry (OTLP)](guides/telemetry.md) — send Claude Code telemetry to your own collector; organization enforcement via MDM
 
 ## Troubleshooting
 
