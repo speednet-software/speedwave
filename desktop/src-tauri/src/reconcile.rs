@@ -252,8 +252,29 @@ pub(crate) fn list_running_projects(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     user_config: &config::SpeedwaveUserConfig,
 ) -> Result<Vec<String>, String> {
+    list_running_projects_with(rt, user_config, |p| {
+        speedwave_runtime::runtime::project_has_compose_file(p)
+    })
+}
+
+/// Core with an injectable compose.yml-presence probe so tests drive it
+/// against a mock runtime without touching the real data dir.
+fn list_running_projects_with(
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+    has_compose_file: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
     let mut running = Vec::new();
     for project in &user_config.projects {
+        // No rendered compose.yml (deferred start / interrupted init) means the
+        // project cannot be running — compose_ps would fatally error on it.
+        if !has_compose_file(&project.name) {
+            log::debug!(
+                "list_running_projects: no compose.yml for '{}' — not running",
+                project.name
+            );
+            continue;
+        }
         let containers = rt
             .compose_ps(&project.name)
             .map_err(|e| format!("compose_ps failed for '{}': {}", project.name, e))?;
@@ -287,21 +308,70 @@ fn restore_one_project(
     .map_err(|e| e.to_string())
 }
 
-pub(crate) fn restore_projects(
+/// Skip verdict for one project in a restore batch: `Permanent` drops it from
+/// the pending list, `Deferred` keeps it there for the next reconcile.
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreSkip {
+    Permanent(String),
+    Deferred(String),
+}
+
+fn restore_skip_reason(
+    user_config: &config::SpeedwaveUserConfig,
+    data_dir: &std::path::Path,
+    project: &str,
+) -> Option<RestoreSkip> {
+    let Some(entry) = user_config.projects.iter().find(|p| p.name == project) else {
+        return Some(RestoreSkip::Permanent("not in config".to_string()));
+    };
+    // NotFound may be a deletion OR an unmounted volume — defer, never drop;
+    // permission errors don't skip (restore surfaces the TCC remediation).
+    match std::fs::metadata(&entry.dir) {
+        Ok(meta) if !meta.is_dir() => {
+            return Some(RestoreSkip::Deferred(format!(
+                "project dir '{}' is not a directory",
+                entry.dir
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(RestoreSkip::Deferred(format!(
+                "project dir '{}' not found (deleted or volume not mounted)",
+                entry.dir
+            )));
+        }
+        _ => {}
+    }
+    if !crate::auth_commands::project_llm_configured_in(data_dir, user_config, project) {
+        return Some(RestoreSkip::Permanent(
+            "no LLM provider configured".to_string(),
+        ));
+    }
+    None
+}
+
+/// Restore loop core: skips per the verdict, returns the Deferred projects so
+/// callers persist them as still-pending; restore errors abort for retry.
+fn restore_batch(
     projects: &[String],
-    rt: &speedwave_runtime::runtime::LockedRuntime,
-) -> Result<(), String> {
-    let user_config = config::load_user_config().unwrap_or_default();
-    let data_dir = speedwave_runtime::consts::data_dir();
+    skip_of: impl Fn(&str) -> Option<RestoreSkip>,
+    mut restore_one: impl FnMut(&str) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    let mut retained = Vec::new();
     for project in projects {
-        // No-provider guard (mirrors the deferred start paths): a restore render
-        // would hard-fail and wedge the whole reconcile in a failing loop.
-        if !crate::auth_commands::project_llm_configured_in(data_dir, &user_config, project) {
-            log::warn!("restore_projects: skipping '{project}' — no LLM provider configured");
-            continue;
+        match skip_of(project) {
+            Some(RestoreSkip::Permanent(reason)) => {
+                log::warn!("restore_projects: dropping '{project}' — {reason}");
+                continue;
+            }
+            Some(RestoreSkip::Deferred(reason)) => {
+                log::warn!("restore_projects: deferring '{project}' — {reason}");
+                retained.push(project.clone());
+                continue;
+            }
+            None => {}
         }
         // Substitute CloudStorage TCC prefix before the error escapes this function.
-        if let Err(e) = restore_one_project(project, rt) {
+        if let Err(e) = restore_one(project) {
             if e.starts_with(speedwave_runtime::consts::CLOUDSTORAGE_TCC_PREFIX) {
                 log::warn!("restore_projects: CloudStorage TCC required (raw prefix): {e}");
                 return Err(
@@ -311,7 +381,24 @@ pub(crate) fn restore_projects(
             return Err(e);
         }
     }
-    Ok(())
+    Ok(retained)
+}
+
+pub(crate) fn restore_projects(
+    projects: &[String],
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+) -> Result<Vec<String>, String> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    // Fresh config per probe: a project removed mid-batch drops out instead
+    // of aborting the remaining restores.
+    restore_batch(
+        projects,
+        |p| {
+            let cfg = config::load_user_config().unwrap_or_default();
+            restore_skip_reason(&cfg, data_dir, p)
+        },
+        |p| restore_one_project(p, rt),
+    )
 }
 
 pub(crate) fn stop_projects(
@@ -430,6 +517,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     } else {
         // Id matches and previous reconcile completed (phase=Done). Restore stopped
         // projects, open the gate, then repair missing images (needs a running VM, ADR-072).
+        let mut retained: Vec<String> = Vec::new();
         if !state.pending_running_projects.is_empty() {
             match rt.ensure_ready() {
                 Ok(()) => {
@@ -438,7 +526,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                         "reconcile_bundle: bundle unchanged, restoring {} stopped project(s)",
                         pending.len()
                     );
-                    restore_projects(&pending, &rt).map_err(|e| {
+                    retained = restore_projects(&pending, &rt).map_err(|e| {
                         let msg = format!("Project restore failed: {e}");
                         log::error!("reconcile_bundle: {msg}");
                         set_bundle_error(&mut state, msg)
@@ -457,12 +545,12 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 }
             }
         }
-        // Pending projects (if any) were restored just above; this clears and
-        // persists them along with any stale phase/error left by a prior run.
-        if state.last_error.is_some() || !state.pending_running_projects.is_empty() {
+        // Persist the deferred remainder (e.g. unmounted volume) so the next
+        // launch retries it; drop the rest along with any stale error.
+        if state.last_error.is_some() || state.pending_running_projects != retained {
             log::info!("reconcile_bundle: bundle matches but state dirty, cleaning up");
             state.last_error = None;
-            state.pending_running_projects.clear();
+            state.pending_running_projects = retained;
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         }
         // Open the gate immediately: nothing needs rebuilding, and auth/chat
@@ -667,6 +755,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     projects.dedup();
     log::info!("reconcile_bundle: projects to restore: {:?}", projects,);
 
+    let mut deferred: Vec<String> = Vec::new();
     if state
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
@@ -676,7 +765,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         state.pending_running_projects = projects.clone();
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
-        restore_projects(&projects, &rt).map_err(|e| {
+        deferred = restore_projects(&projects, &rt).map_err(|e| {
             let msg = format!("Project restore failed: {e}");
             log::error!("reconcile_bundle: {msg}");
             set_bundle_error(&mut state, msg)
@@ -700,7 +789,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     state.applied_bundle_id = Some(manifest.bundle_id.clone());
     state.applied_image_hashes = manifest.image_hashes.clone();
     state.phase = bundle::BundleReconcilePhase::Done;
-    state.pending_running_projects.clear();
+    // Deferred restores (e.g. unmounted volume) stay pending for the next launch.
+    state.pending_running_projects = deferred;
     state.last_error = None;
     bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
     emit_bundle_status(app_handle);
@@ -1072,22 +1162,20 @@ mod tests {
         );
     }
 
+    /// The no-provider guard lives in restore_skip_reason — the single skip
+    /// decision restore_projects consults before any restore render.
     #[test]
     fn restore_projects_skips_unconfigured_projects_before_restoring() {
         let source = include_str!("reconcile.rs");
-        let fn_start = source
+        let skip_start = source
+            .find("fn restore_skip_reason(")
+            .expect("restore_skip_reason must exist");
+        let restore_start = source
             .find("pub(crate) fn restore_projects(")
             .expect("restore_projects must exist");
-        let body = &source[fn_start..fn_start + 1200];
-        let guard_pos = body
-            .find("project_llm_configured_in")
-            .expect("restore must guard on a configured provider (reconcile must not wedge)");
-        let restore_pos = body
-            .find("restore_one_project")
-            .expect("restore must call restore_one_project");
         assert!(
-            guard_pos < restore_pos,
-            "no-provider guard must run before the restore render"
+            source[skip_start..restore_start].contains("project_llm_configured_in"),
+            "no-provider guard must live in restore_skip_reason (reconcile must not wedge)"
         );
     }
 
@@ -1415,6 +1503,339 @@ mod tests {
         }
     }
 
+    mod list_running_projects_tests {
+        use super::list_running_projects_with;
+        use speedwave_runtime::config::{ProjectUserEntry, SpeedwaveUserConfig};
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+
+        fn config_with(names: &[&str]) -> SpeedwaveUserConfig {
+            SpeedwaveUserConfig {
+                projects: names
+                    .iter()
+                    .map(|n| ProjectUserEntry {
+                        name: n.to_string(),
+                        dir: "/tmp/fake".to_string(),
+                        claude: None,
+                        integrations: None,
+                        plugin_settings: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        /// Regression: a project whose compose.yml was never rendered
+        /// (interrupted init) must be skipped, not fail the whole listing.
+        #[test]
+        fn skips_project_without_compose_file_instead_of_failing() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_ps_error("limactl failed: open compose.yml: no such file or directory")
+                .build();
+            let cfg = config_with(&["orphaned"]);
+
+            let running = list_running_projects_with(&rt, &cfg, |_| false)
+                .expect("project without compose.yml must be skipped, not fatal");
+
+            assert!(running.is_empty());
+            assert!(
+                handles.ps_projects().is_empty(),
+                "compose_ps must not be called for a project without compose.yml"
+            );
+        }
+
+        #[test]
+        fn lists_only_projects_with_containers_and_probes_only_rendered_ones() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_ps_response("active", vec![serde_json::json!({"Name": "claude"})])
+                .build();
+            let cfg = config_with(&["orphaned", "active", "idle"]);
+
+            let running =
+                list_running_projects_with(&rt, &cfg, |p| p != "orphaned").expect("must succeed");
+
+            assert_eq!(running, vec!["active"]);
+            assert_eq!(
+                handles.ps_projects(),
+                vec!["active", "idle"],
+                "only projects with a rendered compose.yml may be probed"
+            );
+        }
+
+        /// A compose_ps failure on a project WITH compose.yml still propagates.
+        #[test]
+        fn propagates_compose_ps_error_for_rendered_project() {
+            let (rt, _handles) = MockRuntimeBuilder::new()
+                .with_ps_error("engine down")
+                .build();
+            let cfg = config_with(&["active"]);
+
+            let err = list_running_projects_with(&rt, &cfg, |_| true)
+                .expect_err("real compose_ps failures must propagate");
+
+            assert!(err.contains("compose_ps failed for 'active'"));
+            assert!(err.contains("engine down"));
+        }
+
+        #[test]
+        fn empty_config_yields_empty_list() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let cfg = config_with(&[]);
+            let running = list_running_projects_with(&rt, &cfg, |_| true).expect("must succeed");
+            assert!(running.is_empty());
+            assert!(handles.ps_projects().is_empty());
+        }
+
+        /// Wiring: the public wrapper must probe compose.yml presence via the
+        /// runtime SSOT helper, not a hand-rolled path check.
+        #[test]
+        fn wrapper_wires_runtime_compose_file_probe() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn list_running_projects(")
+                .expect("list_running_projects must exist");
+            let core_start = source
+                .find("fn list_running_projects_with(")
+                .expect("list_running_projects_with must exist");
+            let wrapper = &source[fn_start..core_start];
+            assert!(
+                wrapper.contains("speedwave_runtime::runtime::project_has_compose_file"),
+                "wrapper must pass the runtime project_has_compose_file probe"
+            );
+            assert!(
+                !wrapper.contains("!speedwave_runtime::runtime::project_has_compose_file"),
+                "the probe must keep positive polarity — a negation resurrects the fatal-update bug"
+            );
+        }
+    }
+
+    mod restore_skip_reason_tests {
+        use super::restore_skip_reason;
+        use speedwave_runtime::config::{
+            ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
+        };
+
+        fn config_with_project(
+            name: &str,
+            dir: &str,
+            provider: Option<&str>,
+        ) -> SpeedwaveUserConfig {
+            SpeedwaveUserConfig {
+                projects: vec![ProjectUserEntry {
+                    name: name.to_string(),
+                    dir: dir.to_string(),
+                    claude: provider.map(|p| ClaudeOverrides {
+                        env: None,
+                        settings: None,
+                        llm: Some(LlmConfig {
+                            provider: Some(p.to_string()),
+                            ..Default::default()
+                        }),
+                    }),
+                    integrations: None,
+                    plugin_settings: None,
+                }],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn allows_fully_initialized_project() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let proj = tempfile::tempdir().expect("tempdir");
+            let cfg =
+                config_with_project("acme", &proj.path().to_string_lossy(), Some("anthropic"));
+            assert_eq!(restore_skip_reason(&cfg, data.path(), "acme"), None);
+        }
+
+        #[test]
+        fn skips_project_missing_from_config() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let cfg = SpeedwaveUserConfig::default();
+            match restore_skip_reason(&cfg, data.path(), "ghost") {
+                Some(super::super::RestoreSkip::Permanent(reason)) => {
+                    assert!(reason.contains("not in config"), "got: {reason}");
+                }
+                other => panic!("config-less project must be a Permanent skip, got {other:?}"),
+            }
+        }
+
+        /// Regression: NotFound may be an unmounted volume, not a deletion —
+        /// the project must stay pending (Deferred), never drop permanently.
+        #[test]
+        fn defers_project_whose_dir_is_not_found() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let gone = data.path().join("deleted-project");
+            let cfg = config_with_project("acme", &gone.to_string_lossy(), Some("anthropic"));
+            match restore_skip_reason(&cfg, data.path(), "acme") {
+                Some(super::super::RestoreSkip::Deferred(reason)) => {
+                    assert!(reason.contains("not found"), "got: {reason}");
+                }
+                other => panic!("NotFound dir must be a Deferred skip, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn defers_project_whose_dir_is_a_file() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let file = data.path().join("not-a-dir");
+            std::fs::write(&file, b"x").expect("write");
+            let cfg = config_with_project("acme", &file.to_string_lossy(), Some("anthropic"));
+            match restore_skip_reason(&cfg, data.path(), "acme") {
+                Some(super::super::RestoreSkip::Deferred(reason)) => {
+                    assert!(reason.contains("not a directory"), "got: {reason}");
+                }
+                other => panic!("non-directory path must be a Deferred skip, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn skips_project_without_llm_provider() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let proj = tempfile::tempdir().expect("tempdir");
+            let cfg = config_with_project("acme", &proj.path().to_string_lossy(), None);
+            match restore_skip_reason(&cfg, data.path(), "acme") {
+                Some(super::super::RestoreSkip::Permanent(reason)) => {
+                    assert!(reason.contains("no LLM provider"), "got: {reason}");
+                }
+                other => panic!("provider-less project must be a Permanent skip, got {other:?}"),
+            }
+        }
+
+        /// Permission errors must NOT skip: the restore attempt surfaces the
+        /// CloudStorage TCC remediation instead of silently dropping the project.
+        #[cfg(unix)]
+        #[test]
+        fn does_not_skip_on_permission_denied() {
+            use std::os::unix::fs::PermissionsExt;
+            let data = tempfile::tempdir().expect("tempdir");
+            let parent = data.path().join("locked");
+            let proj = parent.join("proj");
+            std::fs::create_dir_all(&proj).expect("mkdir");
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod");
+            let cfg = config_with_project("acme", &proj.to_string_lossy(), Some("anthropic"));
+            let result = restore_skip_reason(&cfg, data.path(), "acme");
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod back");
+            assert_eq!(result, None, "permission-denied dir must attempt restore");
+        }
+
+        /// Wiring: restore_projects must consult the skip guard before any
+        /// restore attempt — one dead project must not abort the batch.
+        #[test]
+        fn restore_projects_wires_skip_guard_before_restore() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn restore_projects(")
+                .expect("restore_projects must exist");
+            let body = &source[fn_start..];
+            let skip_pos = body
+                .find("restore_skip_reason(")
+                .expect("restore_projects must call restore_skip_reason");
+            let restore_pos = body
+                .find("restore_one_project(")
+                .expect("restore_projects must call restore_one_project");
+            assert!(
+                skip_pos < restore_pos,
+                "skip guard must run before restore_one_project"
+            );
+        }
+    }
+
+    mod restore_batch_tests {
+        use super::{restore_batch, RestoreSkip};
+        use std::cell::RefCell;
+
+        #[test]
+        fn deferred_projects_are_retained_not_restored() {
+            let restored = RefCell::new(Vec::<String>::new());
+            let retained = restore_batch(
+                &["unmounted".to_string(), "healthy".to_string()],
+                |p| (p == "unmounted").then(|| RestoreSkip::Deferred("volume gone".to_string())),
+                |p| {
+                    restored.borrow_mut().push(p.to_string());
+                    Ok(())
+                },
+            )
+            .expect("batch must succeed");
+            assert_eq!(
+                retained,
+                vec!["unmounted"],
+                "deferred project must stay pending"
+            );
+            assert_eq!(*restored.borrow(), vec!["healthy"]);
+        }
+
+        #[test]
+        fn permanent_skips_are_dropped_from_pending() {
+            let restored = RefCell::new(Vec::<String>::new());
+            let retained = restore_batch(
+                &["stale".to_string()],
+                |_| Some(RestoreSkip::Permanent("not in config".to_string())),
+                |p| {
+                    restored.borrow_mut().push(p.to_string());
+                    Ok(())
+                },
+            )
+            .expect("batch must succeed");
+            assert!(retained.is_empty(), "permanent skip must not stay pending");
+            assert!(restored.borrow().is_empty());
+        }
+
+        #[test]
+        fn healthy_projects_restore_and_do_not_linger() {
+            let restored = RefCell::new(Vec::<String>::new());
+            let retained = restore_batch(
+                &["a".to_string(), "b".to_string()],
+                |_| None,
+                |p| {
+                    restored.borrow_mut().push(p.to_string());
+                    Ok(())
+                },
+            )
+            .expect("batch must succeed");
+            assert!(retained.is_empty());
+            assert_eq!(*restored.borrow(), vec!["a", "b"]);
+        }
+
+        /// Transient restore failures still abort so the persisted pending
+        /// list keeps every not-yet-restored project for the next attempt.
+        #[test]
+        fn restore_error_aborts_and_propagates() {
+            let attempted = RefCell::new(Vec::<String>::new());
+            let err = restore_batch(
+                &["a".to_string(), "b".to_string()],
+                |_| None,
+                |p| {
+                    attempted.borrow_mut().push(p.to_string());
+                    Err("engine down".to_string())
+                },
+            )
+            .expect_err("transient failure must propagate");
+            assert!(err.contains("engine down"));
+            assert_eq!(*attempted.borrow(), vec!["a"], "abort must stop the batch");
+        }
+
+        #[test]
+        fn tcc_prefixed_error_maps_to_remediation_message() {
+            let err = restore_batch(
+                &["cloud".to_string()],
+                |_| None,
+                |_| {
+                    Err(format!(
+                        "{}Odmowa dostępu",
+                        speedwave_runtime::consts::CLOUDSTORAGE_TCC_PREFIX
+                    ))
+                },
+            )
+            .expect_err("TCC failure must propagate");
+            assert_eq!(
+                err,
+                speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE
+            );
+        }
+    }
+
     mod reconcile_id_tests {
         use super::*;
 
@@ -1472,13 +1893,13 @@ mod tests {
             let restore_pos = branch
                 .find("restore_projects(")
                 .expect("unchanged branch must call restore_projects");
-            let clear_pos = branch
-                .find("pending_running_projects.clear()")
-                .expect("unchanged branch clears pending after restore");
+            let persist_pos = branch
+                .find("pending_running_projects = retained")
+                .expect("unchanged branch persists the deferred remainder after restore");
             assert!(
-                restore_pos < clear_pos,
-                "restore_projects (at {restore_pos}) must run before \
-                 pending_running_projects.clear() (at {clear_pos})"
+                restore_pos < persist_pos,
+                "restore_projects (at {restore_pos}) must run before the pending \
+                 list is rewritten (at {persist_pos})"
             );
         }
 
@@ -1495,16 +1916,16 @@ mod tests {
                 .find("pending restore but runtime not ready")
                 .expect("unchanged branch must handle runtime-not-ready");
             let branch = &inner_fn[branch_pos..];
-            // The not-ready arm returns Ok before reaching the dirty-clear.
+            // The not-ready arm returns Ok before the pending list is rewritten.
             let return_pos = branch
                 .find("return Ok(())")
                 .expect("not-ready arm must return early");
-            let clear_pos = branch
-                .find("pending_running_projects.clear()")
-                .expect("dirty-clear exists later in the branch");
+            let persist_pos = branch
+                .find("pending_running_projects = retained")
+                .expect("pending rewrite exists later in the branch");
             assert!(
-                return_pos < clear_pos,
-                "not-ready arm must return (keeping pending) before the clear"
+                return_pos < persist_pos,
+                "not-ready arm must return (keeping pending) before the rewrite"
             );
         }
 
