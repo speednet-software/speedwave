@@ -3,10 +3,19 @@
  * handler success cases (domain client mocked), and error handling.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  mkdirSync,
+  mkdtempSync,
+  promises as nodeFsPromises,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createJiraIssueTools } from './jira-issue-tools.js';
+import type { AtlassianClient } from '../client.js';
 
 // Mock the domain factory: `createJiraIssuesClient` returns our scripted stub.
 const issuesStub = {
@@ -24,9 +33,6 @@ const issuesStub = {
 vi.mock('../domains/jira-issues.js', () => ({
   createJiraIssuesClient: () => issuesStub,
 }));
-
-import { createJiraIssueTools } from './jira-issue-tools.js';
-import type { AtlassianClient } from '../client.js';
 
 /** A non-null AtlassianClient-shaped value (its methods aren't used — domains are mocked). */
 const FAKE_CLIENT = {} as AtlassianClient;
@@ -345,6 +351,33 @@ describe('addAttachment handler via filePath', () => {
     const res = await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1', filePath: 'shot.png' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/boom-attach/);
+  });
+
+  it('errors when filePath points to a directory', async () => {
+    mkdirSync(join(ws, 'subdir'));
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: join(ws, 'subdir'),
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/Not a regular file/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+
+  it('errors when the file exceeds the size limit', async () => {
+    writeFileSync(join(ws, 'big.bin'), Buffer.from('x'));
+    const statSpy = vi.spyOn(nodeFsPromises, 'stat').mockResolvedValueOnce({
+      isFile: () => true,
+      size: 26 * 1024 * 1024,
+    } as Awaited<ReturnType<(typeof nodeFsPromises)['stat']>>);
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: join(ws, 'big.bin'),
+    });
+    statSpy.mockRestore();
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/exceeds/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });
 });
 
