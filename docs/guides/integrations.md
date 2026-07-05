@@ -406,6 +406,16 @@ This allows MCP workers and Claude to share files through identical paths — `/
 
 The SharePoint worker's path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in the SharePoint worker's `mcp-servers/sharepoint/src/path-validator.ts`, ensuring that worker cannot read or write protected files even though the full project directory is mounted. This denylist is SharePoint-worker-specific — it is not a shared validator automatically applied to other built-in workers or plugins.
 
+## Bundled Anthropic plugins
+
+Speedwave ships a curated set of official Anthropic Claude Code plugins and installs them the first time a project's container starts. They are enabled by default:
+
+- `frontend-design`, `feature-dev`, `claude-md-management` (skills, agents, commands)
+- `superpowers` (skills plus a session-start hook)
+- `typescript-lsp` (its `typescript-language-server` is pre-baked into the claude image)
+
+The list lives in `defaults::BUNDLED_PLUGINS`; `containers/entrypoint.sh` installs each one via `claude plugin install <name>@claude-plugins-official`, skipping any already present so an install never re-enables a plugin you turned off. To disable one, run `/plugin` inside a Claude session and toggle it off; the choice persists across restarts and updates. This mechanism is separate from the sibling-repo plugin system described below (`SPEEDWAVE_PLUGINS`). See [ADR-077](../adr/ADR-077-bundled-official-anthropic-plugins.md) for the design and licensing rationale (`php-lsp` is excluded because its Intelephense server is not redistributable).
+
 ## Adding New Integrations
 
 Speedwave supports extending integrations via the plugin system:

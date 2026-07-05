@@ -290,6 +290,11 @@ pub fn render_compose_in(
     yaml = yaml.replace("${TOKENS_DIR}", &to_engine_path(&tokens_dir)?);
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
+    yaml = yaml.replace("${BUNDLED_PLUGINS}", &defaults::BUNDLED_PLUGINS.join(","));
+    yaml = yaml.replace(
+        "${BUNDLED_PLUGIN_MARKETPLACE}",
+        defaults::BUNDLED_PLUGIN_MARKETPLACE,
+    );
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
     yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
     // Per-image build-input hash tags (ADR-072) — one placeholder per service.
@@ -6545,6 +6550,61 @@ services:
             .and_then(|u| u.as_str())
             .expect("claude service must have user field");
         assert_eq!(claude_user, container_user());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_render_compose_injects_bundled_plugins_from_ssot() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: vec![],
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("${BUNDLED_PLUGINS}") && !yaml.contains("${BUNDLED_PLUGIN_MARKETPLACE}"),
+            "render must substitute the bundled-plugin placeholders"
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .expect("claude.environment must be a sequence");
+        let plugins_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("SPEEDWAVE_BUNDLED_PLUGINS="))
+            .expect("SPEEDWAVE_BUNDLED_PLUGINS entry present");
+        assert_eq!(
+            plugins_entry,
+            format!(
+                "SPEEDWAVE_BUNDLED_PLUGINS={}",
+                defaults::BUNDLED_PLUGINS.join(",")
+            ),
+            "env must carry the SSOT plugin list"
+        );
+        let mp_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="))
+            .expect("marketplace entry present");
+        assert_eq!(
+            mp_entry,
+            format!(
+                "SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE={}",
+                defaults::BUNDLED_PLUGIN_MARKETPLACE
+            )
+        );
     }
 
     #[test]

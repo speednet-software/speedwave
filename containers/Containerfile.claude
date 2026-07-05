@@ -76,6 +76,14 @@ RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/clip.exe && \
     ln -s osc52-copy.sh /usr/local/bin/powershell.exe
 
+# TypeScript language server for the typescript-lsp plugin (Apache-2.0). The
+# plugin ships only an lspServers metadata entry pointing at the bare command;
+# baking it into /usr/local (still USER root here) puts it on PATH for UID 1000.
+ARG TS_LANGUAGE_SERVER_VERSION=5.3.0
+ARG TYPESCRIPT_VERSION=6.0.3
+RUN npm install -g "typescript-language-server@${TS_LANGUAGE_SERVER_VERSION}" "typescript@${TYPESCRIPT_VERSION}" \
+    && npm cache clean --force
+
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 

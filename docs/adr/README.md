@@ -83,6 +83,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)                   | Reconstruct host-bridge env from disk for off-Desktop compose renders                                                  | Accepted                      |
 | [ADR-075](ADR-075-remove-speaker-diarization.md)                       | Remove speaker diarization — clean timestamped transcript, full sherpa-onnx removal                                    | Accepted                      |
 | [ADR-076](ADR-076-mdm-enforceable-otlp-telemetry.md)                   | MDM-enforceable OTLP telemetry — user self-service + org policy via a system managed-config file                       | Accepted                      |
+| [ADR-077](ADR-077-bundled-official-anthropic-plugins.md)               | Bundle official Anthropic Claude Code plugins (runtime install at start + pre-baked TS server)                         | Accepted                      |
 
 ## Creating a New ADR
 
