@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.15.0](https://github.com/speednet-software/speedwave/compare/v0.14.1...v0.15.0) (2026-07-04)
+
+
+### Features
+
+* **runtime:** bump Claude Code to 2.1.201, add Sonnet 5 to the model catalog ([#880](https://github.com/speednet-software/speedwave/issues/880)) ([9023354](https://github.com/speednet-software/speedwave/commit/90233548260d8e9a7f218c478b692c3580249c74))
+
 ## [0.14.1](https://github.com/speednet-software/speedwave/compare/v0.14.0...v0.14.1) (2026-07-03)
 
 
