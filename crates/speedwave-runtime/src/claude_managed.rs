@@ -1,6 +1,5 @@
-//! Per-project native Claude Code managed-settings.json. Speedwave generates it
-//! from the MDM-locked telemetry keys and mounts it `:ro` at
-//! `/etc/claude-code/managed-settings.json` — the un-bypassable enforcement layer.
+//! Per-project native `managed-settings.json`, generated from the MDM-locked keys
+//! and mounted `:ro` at `/etc/claude-code/` — the enforcement layer (ADR-076).
 
 use crate::config::ResolvedTelemetry;
 use std::path::{Path, PathBuf};

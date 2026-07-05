@@ -1,6 +1,5 @@
-//! MDM-deployed managed policy. Read-only from Speedwave's view: an admin/MDM
-//! writes a system-level `managed-config.json`; a malformed file is a hard error
-//! (fail-closed) so an org policy never silently vanishes.
+//! MDM-deployed managed policy (read-only, fail-closed): a malformed
+//! `managed-config.json` is a hard error so a policy never silently vanishes.
 
 use crate::config::ManagedTelemetryConfig;
 use std::path::{Path, PathBuf};
@@ -12,28 +11,61 @@ pub struct ManagedConfig {
     pub telemetry: Option<ManagedTelemetryConfig>,
 }
 
-/// System-level managed-config path: macOS `/Library/Application Support/Speedwave/…`,
-/// Windows `%ProgramData%\Speedwave\…`. `None` on other platforms or if `%ProgramData%` is unset.
-pub fn managed_config_path() -> Option<PathBuf> {
+/// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,
+/// `Err` when the Windows ProgramData cannot be resolved (fail-closed).
+pub fn managed_config_path() -> anyhow::Result<Option<PathBuf>> {
     let vendor = crate::consts::MANAGED_CONFIG_VENDOR_DIR;
     let file = crate::consts::MANAGED_CONFIG_FILE;
-    if cfg!(target_os = "macos") {
-        Some(
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Some(
             PathBuf::from("/Library/Application Support")
                 .join(vendor)
                 .join(file),
-        )
-    } else if cfg!(target_os = "windows") {
-        let program_data = std::env::var_os("ProgramData")?;
-        Some(PathBuf::from(program_data).join(vendor).join(file))
-    } else {
-        None
+        ))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Some(program_data_dir()?.join(vendor).join(file)))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (vendor, file);
+        Ok(None)
     }
 }
 
-/// Loads the MDM policy from the system path; `Ok(None)` if absent, `Err` if malformed.
+/// Resolves the system ProgramData directory via `SHGetKnownFolderPath`, never the
+/// user-controllable `%ProgramData%` env var (which could hide MDM policy).
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn program_data_dir() -> anyhow::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Globalization::lstrlenW;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+
+    // SAFETY: FOLDERID_ProgramData is a valid known-folder id; on S_OK `raw` points
+    // at a CoTaskMem-allocated NUL-terminated wide string, freed before returning.
+    unsafe {
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw);
+        if hr < 0 || raw.is_null() {
+            return Err(anyhow::anyhow!(
+                "SHGetKnownFolderPath(ProgramData) failed: 0x{hr:08x}"
+            ));
+        }
+        let len = lstrlenW(raw as *const u16) as usize;
+        let path = std::ffi::OsString::from_wide(std::slice::from_raw_parts(raw, len));
+        CoTaskMemFree(raw as *const _);
+        Ok(PathBuf::from(path))
+    }
+}
+
+/// Loads the MDM policy from the system path; `Ok(None)` if absent, `Err` if the
+/// path cannot be resolved or the file is malformed (fail-closed).
 pub fn load_managed_config() -> anyhow::Result<Option<ManagedConfig>> {
-    match managed_config_path() {
+    match managed_config_path()? {
         Some(p) => load_managed_config_from(&p),
         None => Ok(None),
     }

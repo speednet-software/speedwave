@@ -208,8 +208,8 @@ pub(crate) struct TelemetryConfigResponse {
 pub(crate) struct TelemetryConfigUpdate {
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
-    #[serde(default)]
-    pub(crate) endpoint: Option<String>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) endpoint: Option<Option<String>>,
     #[serde(default)]
     pub(crate) protocol: Option<speedwave_runtime::config::OtlpProtocol>,
     #[serde(default)]
@@ -218,8 +218,8 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) export_logs: Option<bool>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub(crate) headers: Option<Option<String>>,
-    #[serde(default)]
-    pub(crate) resource_attributes: Option<String>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) resource_attributes: Option<Option<String>>,
     #[serde(default)]
     pub(crate) include_account_uuid: Option<bool>,
     #[serde(default)]

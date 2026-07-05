@@ -699,9 +699,8 @@ pub struct TelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
-/// MDM-layer telemetry policy. Presence IS the lock — any field the MDM sets is
-/// authoritative and the user cannot override it; there is no `locked` flag (MDM
-/// always wins in the merge). To leave a field user-editable, MDM omits it.
+/// MDM-layer telemetry policy. Presence IS the lock (no `locked` flag); a field
+/// the MDM omits stays user-editable. Rationale in ADR-076.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct ManagedTelemetryConfig {
     /// Force the master switch (kill-switch when `false`).
@@ -791,13 +790,8 @@ impl ResolvedTelemetry {
     }
 }
 
-/// Merges the user and MDM telemetry layers into a `ResolvedTelemetry`.
-///
-/// Per-field, an MDM value (present ⇒ authoritative + locked) wins over the user
-/// value over the default. `Enabled` locks the master switch (`ENABLE_KEY`).
-/// Two cross-field gates follow: `enabled=false` suppresses all output; an
-/// `enabled=true` with no endpoint (or an invalid endpoint / control-char header)
-/// is a fail-closed error.
+/// Merges the user and MDM telemetry layers per-field (MDM wins + locks), then
+/// gates: `enabled=false` suppresses output, `enabled=true` w/o endpoint fails closed.
 pub fn resolve_telemetry(
     user: Option<&TelemetryConfig>,
     managed: Option<&ManagedTelemetryConfig>,
@@ -842,9 +836,8 @@ pub fn resolve_telemetry(
     }
 
     use TelemetryField as F;
-    // `enabled` locks the CLAUDE_CODE_* master switch (not an OTEL_* key), so lock
-    // it by inserting ENABLE_KEY directly — it is then re-forced over the user
-    // layer AND written into managed-settings.json (master switch un-bypassable).
+    // `enabled` locks the CLAUDE_CODE_* master switch (not an OTEL_* key) by
+    // inserting ENABLE_KEY directly, so MDM can force it un-bypassably.
     let enabled = match managed.and_then(|m| m.enabled) {
         Some(v) => {
             any_locked = true;
@@ -1069,9 +1062,8 @@ pub(crate) fn resolve_project_config_in(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
-    // A malformed MDM policy is fail-closed at the load boundary; a load Err here
-    // is swallowed (config layer must not panic mid-merge) but the invalid state
-    // is surfaced as telemetry_error, which the renderer turns into a hard error.
+    // Load Err is swallowed here (config layer must not panic mid-merge); the
+    // renderer re-surfaces it as telemetry_error and fails closed.
     let managed = crate::managed_config::load_managed_config()
         .ok()
         .flatten()
@@ -1100,10 +1092,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
     let mut llm = LlmConfig::default();
     let mut integrations = ResolvedIntegrationsConfig::default();
 
-    // Telemetry baseline goes in BEFORE the repo/user merge so a user `claude.env`
-    // still wins for a non-locked key; MDM-locked keys are re-forced AFTER the user
-    // layer below. A resolve error is recorded and surfaced to the renderer.
-    // Build the env map ONCE and reuse it for both the baseline and the re-force.
+    // Baseline goes in BEFORE the user merge (user wins for non-locked keys);
+    // locked keys are re-forced AFTER, below. Map built ONCE and reused.
     let resolved_tel = resolve_telemetry(user_config.telemetry.as_ref(), managed_telemetry);
     let tel_env = resolved_tel
         .as_ref()
@@ -1143,9 +1133,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
         }
     }
 
-    // Telemetry re-force: strip any user value for an MDM-locked key, then set the
-    // locked value from the already-built map. This is what the user cannot beat
-    // (master switch included).
+    // Re-force: strip any user value for an MDM-locked key, then set the locked
+    // value from the built map — this is what the user cannot beat.
     if let Ok(tel) = &resolved_tel {
         env.retain(|k, _| !tel.locked_keys.contains(k));
         for (k, v) in &tel_env {
@@ -1438,11 +1427,19 @@ fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<Str
     })
 }
 
-/// True when `key` matches (case-insensitively) a repo-layer deny-list entry.
+/// True when `key` matches (case-insensitively) a repo-layer deny-list entry;
+/// telemetry keys come from the `telemetry_env` SSOT (ADR-076).
 fn repo_env_key_is_denied(key: &str) -> bool {
+    let telemetry_denied = std::iter::once(crate::telemetry_env::ENABLE_KEY).chain(
+        crate::telemetry_env::TelemetryField::ALL
+            .iter()
+            .filter_map(|f| crate::telemetry_env::env_key_for(*f)),
+    );
     REPO_ENV_DENY_ANTHROPIC
         .iter()
-        .chain(crate::consts::RESERVED_ENV_KEYS.iter())
+        .copied()
+        .chain(crate::consts::RESERVED_ENV_KEYS.iter().copied())
+        .chain(telemetry_denied)
         .any(|denied| denied.eq_ignore_ascii_case(key))
 }
 
@@ -2074,9 +2071,11 @@ mod tests {
             resolved.env.get("ANTHROPIC_MODEL"),
             Some(&"claude-opus-4-6".to_string())
         );
+        // A repo `.speedwave.json` cannot enable telemetry (deny-listed, ADR-076);
+        // the compiled default stays off.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
-            Some(&"1".to_string())
+            Some(&"0".to_string())
         );
     }
 
@@ -2234,6 +2233,21 @@ mod tests {
             .unwrap()
             .locked_keys
             .contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
+    }
+
+    #[test]
+    fn telemetry_kill_switch_still_records_co_locked_fields() {
+        // MDM turns telemetry off AND separately locks a privacy gate; the
+        // early-return path must still carry both locks.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(false),
+            log_user_prompts: Some(true),
+            ..Default::default()
+        };
+        let r = resolve_telemetry(None, Some(&managed)).unwrap();
+        assert!(r.kill_switch);
+        assert!(r.locked_keys.contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
+        assert!(r.locked_keys.contains("OTEL_LOG_USER_PROMPTS"));
     }
 
     #[test]
@@ -3446,8 +3460,38 @@ mod tests {
                 "Anthropic key {k} must be denied"
             );
         }
+        // Every telemetry env key (SSOT) must be denied so a repo cannot enable or
+        // redirect telemetry (ADR-076).
+        assert!(repo_env_key_is_denied(crate::telemetry_env::ENABLE_KEY));
+        for f in crate::telemetry_env::TelemetryField::ALL {
+            if let Some(k) = crate::telemetry_env::env_key_for(*f) {
+                assert!(
+                    repo_env_key_is_denied(k),
+                    "telemetry key {k} must be denied"
+                );
+            }
+        }
+        assert!(repo_env_key_is_denied("otel_exporter_otlp_endpoint"));
         assert!(!repo_env_key_is_denied("ANTHROPIC_MODEL"));
         assert!(!repo_env_key_is_denied("SAFE_VAR"));
+    }
+
+    #[test]
+    fn repo_env_cannot_enable_or_redirect_telemetry() {
+        let cleaned = sanitize_repo_env(Some(HashMap::from([
+            ("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), "1".to_string()),
+            (
+                "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
+                "https://attacker.example.com".to_string(),
+            ),
+            ("OTEL_LOG_USER_PROMPTS".to_string(), "1".to_string()),
+            ("KEEP".to_string(), "y".to_string()),
+        ])))
+        .unwrap();
+        assert!(!cleaned.contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"));
+        assert!(!cleaned.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"));
+        assert!(!cleaned.contains_key("OTEL_LOG_USER_PROMPTS"));
+        assert_eq!(cleaned.get("KEEP"), Some(&"y".to_string()));
     }
 
     /// `sanitize_repo_env(None)` is a no-op (no env block present).

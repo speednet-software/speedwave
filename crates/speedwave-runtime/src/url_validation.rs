@@ -141,9 +141,8 @@ pub fn validate_url(url: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
-/// Validates an OTLP collector URL: http(s), no embedded credentials, no
-/// backslashes; a private/loopback host is allowed only under `AllowLoopback`.
-/// An on-prem collector is a legitimate target, unlike a general SSRF sink.
+/// Validates an OTLP collector URL (http(s), no credentials, no backslashes);
+/// a private/loopback host is allowed only under `AllowLoopback` (on-prem is valid).
 pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::Url, String> {
     if url.contains('\\') {
         return Err("URL must not contain backslashes".to_string());
@@ -167,10 +166,8 @@ pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::U
     }
 }
 
-/// True if `url`'s host is permitted under `policy`. Public hosts always pass;
-/// private/reserved/loopback pass only under `AllowLoopback`. Mirrors
-/// [`validate_url`]'s host rules so the two validators cannot diverge:
-/// `localhost`/`*.localhost` DNS names stay blocked even under `AllowLoopback`.
+/// True if `url`'s host is permitted under `policy`, mirroring [`validate_url`]'s
+/// host rules. `localhost`/`*.localhost` stay blocked even under `AllowLoopback`.
 fn host_allowed(url: &url::Url, policy: PrivatePolicy) -> bool {
     use std::net::IpAddr;
     let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);

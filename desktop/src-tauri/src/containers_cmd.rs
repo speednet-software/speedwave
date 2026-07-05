@@ -952,9 +952,8 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
-/// Builds the frontend telemetry response from a resolved config. Never copies
-/// the headers value — only sets `has_headers`. `TelemetryLocks` are derived
-/// per-field via `is_field_locked` so no `OTEL_*` string reaches the frontend.
+/// Builds the frontend telemetry response. Never copies the headers value (only
+/// `has_headers`); locks derived per-field so no `OTEL_*` string reaches the UI.
 fn build_telemetry_response(
     resolved: &config::ResolvedTelemetry,
     has_headers: bool,
@@ -997,64 +996,110 @@ fn build_telemetry_response(
     }
 }
 
-/// Applies a telemetry update to the user config, writing each field ONLY when
-/// MDM has not locked it. `resolved` is the current merge (for lock lookup).
+/// Applies each set field unless MDM locked it; returns the names of any locked
+/// fields the update tried to set (caller rejects the write when non-empty).
 fn apply_telemetry_update_with(
     user: &mut config::TelemetryConfig,
     update: TelemetryConfigUpdate,
     resolved: &config::ResolvedTelemetry,
-) {
+) -> Vec<&'static str> {
     use speedwave_runtime::telemetry_env::TelemetryField as F;
-    if update.enabled.is_some() && !resolved.is_field_locked(F::Enabled) {
-        user.enabled = update.enabled;
+    let mut rejected: Vec<&'static str> = Vec::new();
+    macro_rules! set_field {
+        ($name:literal, $field:expr, $present:expr, $assign:expr) => {
+            if $present {
+                if resolved.is_field_locked($field) {
+                    rejected.push($name);
+                } else {
+                    $assign;
+                }
+            }
+        };
     }
-    if update.endpoint.is_some() && !resolved.is_field_locked(F::Endpoint) {
-        user.endpoint = update.endpoint;
+    set_field!(
+        "enabled",
+        F::Enabled,
+        update.enabled.is_some(),
+        user.enabled = update.enabled
+    );
+    // endpoint tri-state: Some(None) clears, Some(Some) sets.
+    if let Some(e) = update.endpoint {
+        set_field!("endpoint", F::Endpoint, true, user.endpoint = e);
     }
-    if update.protocol.is_some() && !resolved.is_field_locked(F::Protocol) {
-        user.protocol = update.protocol;
-    }
-    if update.export_metrics.is_some() && !resolved.is_field_locked(F::ExportMetrics) {
-        user.export_metrics = update.export_metrics;
-    }
-    if update.export_logs.is_some() && !resolved.is_field_locked(F::ExportLogs) {
-        user.export_logs = update.export_logs;
-    }
+    set_field!(
+        "protocol",
+        F::Protocol,
+        update.protocol.is_some(),
+        user.protocol = update.protocol
+    );
+    set_field!(
+        "export_metrics",
+        F::ExportMetrics,
+        update.export_metrics.is_some(),
+        user.export_metrics = update.export_metrics
+    );
+    set_field!(
+        "export_logs",
+        F::ExportLogs,
+        update.export_logs.is_some(),
+        user.export_logs = update.export_logs
+    );
+    // Headers tri-state: Some(None) clears, Some(Some) sets.
     if let Some(h) = update.headers {
-        if !resolved.is_field_locked(F::Headers) {
-            // Tri-state: Some(None) clears, Some(Some) sets.
-            user.headers = h;
-        }
+        set_field!("headers", F::Headers, true, user.headers = h);
     }
-    if update.resource_attributes.is_some() && !resolved.is_field_locked(F::ResourceAttributes) {
-        user.resource_attributes = update.resource_attributes;
+    // resource_attributes tri-state: Some(None) clears, Some(Some) sets.
+    if let Some(ra) = update.resource_attributes {
+        set_field!(
+            "resource_attributes",
+            F::ResourceAttributes,
+            true,
+            user.resource_attributes = ra
+        );
     }
-    if update.include_account_uuid.is_some() && !resolved.is_field_locked(F::IncludeAccountUuid) {
-        user.include_account_uuid = update.include_account_uuid;
-    }
-    if update.log_user_prompts.is_some() && !resolved.is_field_locked(F::LogUserPrompts) {
-        user.log_user_prompts = update.log_user_prompts;
-    }
-    if update.log_assistant_responses.is_some()
-        && !resolved.is_field_locked(F::LogAssistantResponses)
-    {
-        user.log_assistant_responses = update.log_assistant_responses;
-    }
-    if update.log_tool_details.is_some() && !resolved.is_field_locked(F::LogToolDetails) {
-        user.log_tool_details = update.log_tool_details;
-    }
-    if update.log_raw_api_bodies.is_some() && !resolved.is_field_locked(F::LogRawApiBodies) {
-        user.log_raw_api_bodies = update.log_raw_api_bodies;
-    }
-    if update.metric_export_interval_ms.is_some()
-        && !resolved.is_field_locked(F::MetricExportInterval)
-    {
-        user.metric_export_interval_ms = update.metric_export_interval_ms;
-    }
-    if update.logs_export_interval_ms.is_some() && !resolved.is_field_locked(F::LogsExportInterval)
-    {
-        user.logs_export_interval_ms = update.logs_export_interval_ms;
-    }
+    set_field!(
+        "include_account_uuid",
+        F::IncludeAccountUuid,
+        update.include_account_uuid.is_some(),
+        user.include_account_uuid = update.include_account_uuid
+    );
+    set_field!(
+        "log_user_prompts",
+        F::LogUserPrompts,
+        update.log_user_prompts.is_some(),
+        user.log_user_prompts = update.log_user_prompts
+    );
+    set_field!(
+        "log_assistant_responses",
+        F::LogAssistantResponses,
+        update.log_assistant_responses.is_some(),
+        user.log_assistant_responses = update.log_assistant_responses
+    );
+    set_field!(
+        "log_tool_details",
+        F::LogToolDetails,
+        update.log_tool_details.is_some(),
+        user.log_tool_details = update.log_tool_details
+    );
+    set_field!(
+        "log_raw_api_bodies",
+        F::LogRawApiBodies,
+        update.log_raw_api_bodies.is_some(),
+        user.log_raw_api_bodies = update.log_raw_api_bodies
+    );
+    set_field!(
+        "metric_export_interval_ms",
+        F::MetricExportInterval,
+        update.metric_export_interval_ms.is_some(),
+        user.metric_export_interval_ms = update.metric_export_interval_ms
+    );
+    set_field!(
+        "logs_export_interval_ms",
+        F::LogsExportInterval,
+        update.logs_export_interval_ms.is_some(),
+        user.logs_export_interval_ms = update.logs_export_interval_ms
+    );
+    rejected
 }
 
 /// Returns the effective telemetry the container will use (user + MDM merge),
@@ -1076,17 +1121,25 @@ pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
     Ok(build_telemetry_response(&resolved, has_headers))
 }
 
-/// Persists user telemetry fields (skipping MDM-locked ones) to the user config.
+/// Persists user telemetry fields to the user config. Rejects (does not persist)
+/// a write that targets an MDM-locked field; a fail-closed MDM policy also rejects.
 #[tauri::command]
 pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), String> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let managed =
             speedwave_runtime::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
-        let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())
-            .unwrap_or_else(|_| config::ResolvedTelemetry::disabled());
+        // Propagate a resolve error instead of masking it as "nothing locked",
+        // which would let a user overwrite fields MDM meant to lock.
+        let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())?;
         let mut telemetry = user_config.telemetry.take().unwrap_or_default();
-        apply_telemetry_update_with(&mut telemetry, update, &resolved);
+        let rejected = apply_telemetry_update_with(&mut telemetry, update, &resolved);
+        if !rejected.is_empty() {
+            anyhow::bail!(
+                "cannot change organization-managed telemetry field(s): {}",
+                rejected.join(", ")
+            );
+        }
         user_config.telemetry = Some(telemetry);
         config::save_user_config(&user_config)?;
         Ok(())
@@ -1098,10 +1151,16 @@ pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), Stri
 /// warns instead of letting Claude Code hang on an unreachable collector).
 #[tauri::command]
 pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
+    // Validate before dialing so this is not an SSRF reachability oracle; on-prem
+    // and loopback collectors are legitimate, so allow loopback.
+    let validated = crate::url_validation::validate_collector_url(
+        &endpoint,
+        crate::url_validation::PrivatePolicy::AllowLoopback,
+    )?;
     let client = crate::http_util::build_hardened_client(None)?;
     // A HEAD to the base endpoint; any HTTP response means reachable. A collector
     // may 404/405 the path — that still proves the host/port is up.
-    match client.head(&endpoint).send().await {
+    match client.head(validated).send().await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
@@ -3272,7 +3331,7 @@ mod tests {
     // ── telemetry command helpers ───────────────────────────────────────────
 
     #[test]
-    fn update_telemetry_ignores_locked_field_but_persists_unlocked() {
+    fn apply_update_rejects_locked_field_and_leaves_it_unchanged() {
         use speedwave_runtime::config::{
             resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
         };
@@ -3287,20 +3346,49 @@ mod tests {
         };
         let resolved = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
         let update = TelemetryConfigUpdate {
-            endpoint: Some("https://user-evil:4318".into()),
-            resource_attributes: Some("team=x".into()),
+            endpoint: Some(Some("https://user-evil:4318".into())),
+            resource_attributes: Some(Some("team=x".into())),
             ..Default::default()
         };
-        apply_telemetry_update_with(&mut user, update, &resolved);
+        let rejected = apply_telemetry_update_with(&mut user, update, &resolved);
+        assert_eq!(
+            rejected,
+            vec!["endpoint"],
+            "locked field must be reported rejected"
+        );
         assert_eq!(
             user.endpoint.as_deref(),
             Some("https://old-user:4318"),
             "locked endpoint must not change"
         );
-        assert_eq!(
-            user.resource_attributes.as_deref(),
-            Some("team=x"),
-            "unlocked field must persist"
+    }
+
+    #[test]
+    fn apply_update_no_rejections_when_nothing_locked() {
+        use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
+        let mut user = TelemetryConfig::default();
+        let resolved = resolve_telemetry(None, None).unwrap();
+        let update = TelemetryConfigUpdate {
+            resource_attributes: Some(Some("team=x".into())),
+            ..Default::default()
+        };
+        let rejected = apply_telemetry_update_with(&mut user, update, &resolved);
+        assert!(rejected.is_empty());
+        assert_eq!(user.resource_attributes.as_deref(), Some("team=x"));
+    }
+
+    #[test]
+    fn resolve_failure_is_not_masked_as_unlocked() {
+        // MDM enabled=true with no endpoint is a fail-closed resolve error the
+        // update path must propagate, never mask as all-unlocked.
+        use speedwave_runtime::config::{resolve_telemetry, ManagedTelemetryConfig};
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            resolve_telemetry(None, Some(&managed)).is_err(),
+            "fail-closed MDM state must be an Err the update path propagates"
         );
     }
 

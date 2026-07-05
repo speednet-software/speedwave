@@ -1022,10 +1022,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// When present, the claude managed-settings mount must be `:ro`, at the exact
-    /// `/etc/claude-code/managed-settings.json` target, and sourced from
-    /// `<data_dir>/claude-managed/<project>/managed-settings.json` (never a
-    /// user-editable dir). Absent is fine (no MDM policy).
+    /// When present, the managed-settings mount must be `:ro` at the exact target
+    /// and sourced from `<data_dir>/claude-managed/<project>/` (ADR-076).
     fn check_claude_managed_settings(
         doc: &serde_yaml_ng::Value,
         data_dir: &std::path::Path,

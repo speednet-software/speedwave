@@ -1,8 +1,6 @@
 /**
- * Frontend mirror of the telemetry Tauri DTOs in `desktop/src-tauri/src/types.rs`
- * (`TelemetryConfigResponse`, `TelemetryConfigUpdate`, `TelemetryLocks`). Backend
- * is the SSOT; the UI never hardcodes an `OTEL_*` key — it toggles read-only from
- * `locks.<field>`. Keep field names snake_case to match the wire.
+ * Frontend mirror of the telemetry DTOs in `desktop/src-tauri/src/types.rs`
+ * (backend is SSOT; snake_case matches the wire). See ADR-076.
  */
 
 /** OTLP transport protocol; wire strings match Rust `OtlpProtocol` serde. */
@@ -49,18 +47,17 @@ export interface TelemetryConfigResponse {
 }
 
 /**
- * Mirror of Rust `TelemetryConfigUpdate` (`update_telemetry_config`). Every field
- * optional; omit to leave unchanged. `headers` is tri-state: omit = keep,
- * `null` = clear, string = replace. MDM-locked fields are ignored server-side.
+ * Mirror of Rust `TelemetryConfigUpdate`; every field optional (omit = unchanged).
+ * `headers`/`endpoint`/`resource_attributes` are tri-state: omit = keep, `null` = clear.
  */
 export interface TelemetryConfigUpdate {
   enabled?: boolean;
-  endpoint?: string;
+  endpoint?: string | null;
   protocol?: OtlpProtocol;
   export_metrics?: boolean;
   export_logs?: boolean;
   headers?: string | null;
-  resource_attributes?: string;
+  resource_attributes?: string | null;
   include_account_uuid?: boolean;
   log_user_prompts?: boolean;
   log_assistant_responses?: boolean;

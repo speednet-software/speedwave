@@ -18,9 +18,8 @@ import type {
 } from '../../models/telemetry';
 
 /**
- * Settings → Telemetry. Lets a user point Claude Code at their own OTLP collector.
- * MDM-locked fields render read-only ("managed by your organization"); a kill-switch
- * greys the whole section. The headers secret is masked and never leaves the host.
+ * Settings → Telemetry: point Claude Code at your own OTLP collector.
+ * MDM-locked fields render read-only; the headers secret never leaves the host.
  */
 @Component({
   selector: 'app-telemetry-section',
@@ -54,6 +53,15 @@ import type {
             Managed by your organization — telemetry cannot be changed here.
           </div>
         } @else {
+          @if (c.any_locked) {
+            <div
+              class="mono mt-4 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-4 py-2 text-[11px] text-[var(--ink-mute)]"
+              data-testid="telemetry-managed-banner"
+            >
+              <span aria-hidden="true">🔒</span>
+              Some settings are managed by your organization.
+            </div>
+          }
           <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)]">
             <!-- Enable: label + toggle on one line, like an integration row -->
             <div class="flex items-center justify-between gap-3 px-4 py-3">
@@ -196,6 +204,98 @@ import type {
                   />
                 </div>
 
+                <!-- Advanced tuning: resource attributes, account uuid, export intervals -->
+                <details class="rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2">
+                  <summary
+                    class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  >
+                    Advanced (resource attributes, intervals)
+                  </summary>
+                  <div class="mt-2 space-y-3">
+                    <div>
+                      <label
+                        class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                        for="telemetry-resource-attributes"
+                      >
+                        Resource attributes
+                        @if (c.locks.resource_attributes) {
+                          <span class="normal-case tracking-normal">🔒 managed</span>
+                        }
+                      </label>
+                      <input
+                        id="telemetry-resource-attributes"
+                        type="text"
+                        class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)] read-only:opacity-60"
+                        placeholder="team=platform,env=prod"
+                        [value]="resourceAttributes()"
+                        [readonly]="c.locks.resource_attributes"
+                        (input)="onResourceAttributesInput(eventValue($event))"
+                        data-testid="telemetry-resource-attributes"
+                      />
+                    </div>
+                    <label class="flex items-center gap-1.5 text-[11px] text-[var(--ink)]">
+                      <input
+                        type="checkbox"
+                        class="accent-[var(--accent)]"
+                        [checked]="includeAccountUuid()"
+                        [disabled]="c.locks.include_account_uuid"
+                        (change)="includeAccountUuid.set(eventChecked($event))"
+                        data-testid="telemetry-include-account-uuid"
+                      />
+                      Include account UUID
+                      @if (c.locks.include_account_uuid) {
+                        <span class="mono text-[var(--ink-mute)]">🔒 managed</span>
+                      }
+                    </label>
+                    <div class="flex flex-wrap gap-4">
+                      <div>
+                        <label
+                          class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                          for="telemetry-metric-interval"
+                        >
+                          Metric interval (ms)
+                          @if (c.locks.metric_export_interval_ms) {
+                            <span class="normal-case tracking-normal">🔒</span>
+                          }
+                        </label>
+                        <input
+                          id="telemetry-metric-interval"
+                          type="number"
+                          min="1"
+                          class="mono w-32 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)] read-only:opacity-60"
+                          placeholder="60000"
+                          [value]="metricExportIntervalMs() ?? ''"
+                          [readonly]="c.locks.metric_export_interval_ms"
+                          (input)="metricExportIntervalMs.set(parseInterval(eventValue($event)))"
+                          data-testid="telemetry-metric-interval"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                          for="telemetry-logs-interval"
+                        >
+                          Logs interval (ms)
+                          @if (c.locks.logs_export_interval_ms) {
+                            <span class="normal-case tracking-normal">🔒</span>
+                          }
+                        </label>
+                        <input
+                          id="telemetry-logs-interval"
+                          type="number"
+                          min="1"
+                          class="mono w-32 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)] read-only:opacity-60"
+                          placeholder="5000"
+                          [value]="logsExportIntervalMs() ?? ''"
+                          [readonly]="c.locks.logs_export_interval_ms"
+                          (input)="logsExportIntervalMs.set(parseInterval(eventValue($event)))"
+                          data-testid="telemetry-logs-interval"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </details>
+
                 <!-- Privacy gates -->
                 <details class="rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2">
                   <summary
@@ -288,11 +388,17 @@ export class TelemetrySectionComponent implements OnInit {
   // Editable form state (signals — OnPush requires it).
   readonly enabled = signal(false);
   readonly endpoint = signal('');
+  readonly endpointTouched = signal(false);
   readonly protocol = signal<OtlpProtocol>('grpc');
   readonly exportMetrics = signal(true);
   readonly exportLogs = signal(false);
   readonly headers = signal('');
   readonly headersTouched = signal(false);
+  readonly resourceAttributes = signal('');
+  readonly resourceAttributesTouched = signal(false);
+  readonly includeAccountUuid = signal(true);
+  readonly metricExportIntervalMs = signal<number | null>(null);
+  readonly logsExportIntervalMs = signal<number | null>(null);
   readonly logUserPrompts = signal(false);
   readonly logAssistantResponses = signal(false);
   readonly logToolDetails = signal(false);
@@ -312,11 +418,17 @@ export class TelemetrySectionComponent implements OnInit {
       this.config.set(c);
       this.enabled.set(c.enabled);
       this.endpoint.set(c.endpoint ?? '');
+      this.endpointTouched.set(false);
       this.protocol.set(c.protocol);
       this.exportMetrics.set(c.export_metrics);
       this.exportLogs.set(c.export_logs);
       this.headers.set('');
       this.headersTouched.set(false);
+      this.resourceAttributes.set(c.resource_attributes ?? '');
+      this.resourceAttributesTouched.set(false);
+      this.includeAccountUuid.set(c.include_account_uuid);
+      this.metricExportIntervalMs.set(c.metric_export_interval_ms);
+      this.logsExportIntervalMs.set(c.logs_export_interval_ms);
       this.logUserPrompts.set(c.log_user_prompts);
       this.logAssistantResponses.set(c.log_assistant_responses);
       this.logToolDetails.set(c.log_tool_details);
@@ -371,7 +483,26 @@ export class TelemetrySectionComponent implements OnInit {
    */
   onEndpointInput(value: string): void {
     this.endpoint.set(value);
+    this.endpointTouched.set(true);
     this.probeResult.set('');
+  }
+
+  /**
+   * Records a resource-attributes edit (marks touched for the tri-state save).
+   * @param value - the raw input value.
+   */
+  onResourceAttributesInput(value: string): void {
+    this.resourceAttributes.set(value);
+    this.resourceAttributesTouched.set(true);
+  }
+
+  /**
+   * Parses an export-interval input into a positive number or null (blank/invalid).
+   * @param value - the raw input value.
+   */
+  protected parseInterval(value: string): number | null {
+    const n = Number(value);
+    return value.trim() !== '' && Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
   }
 
   /** Probes the endpoint's reachability from the host and shows the result. */
@@ -398,18 +529,28 @@ export class TelemetrySectionComponent implements OnInit {
     this.cdr.markForCheck();
     const update: TelemetryConfigUpdate = {
       enabled: this.enabled(),
-      endpoint: this.endpoint() || undefined,
       protocol: this.protocol(),
       export_metrics: this.exportMetrics(),
       export_logs: this.exportLogs(),
+      include_account_uuid: this.includeAccountUuid(),
+      metric_export_interval_ms: this.metricExportIntervalMs() ?? undefined,
+      logs_export_interval_ms: this.logsExportIntervalMs() ?? undefined,
       log_user_prompts: this.logUserPrompts(),
       log_assistant_responses: this.logAssistantResponses(),
       log_tool_details: this.logToolDetails(),
       log_raw_api_bodies: this.logRawApiBodies(),
     };
-    // Tri-state headers: only send when the user edited the field.
+    // Tri-state (headers / endpoint / resource_attributes): send only when edited;
+    // an emptied field becomes null (clear), otherwise the value.
     if (this.headersTouched()) {
       update.headers = this.headers() === '' ? null : this.headers();
+    }
+    if (this.endpointTouched()) {
+      update.endpoint = this.endpoint() === '' ? null : this.endpoint();
+    }
+    if (this.resourceAttributesTouched()) {
+      update.resource_attributes =
+        this.resourceAttributes() === '' ? null : this.resourceAttributes();
     }
     try {
       await this.tauri.invoke('update_telemetry_config', { update });

@@ -3,7 +3,7 @@
 // keep compiling. Only the Tauri-bound commands live here (runtime is Tauri-free).
 
 pub(crate) use speedwave_runtime::url_validation::{
-    is_private_on_premise, validate_url, PrivatePolicy,
+    is_private_on_premise, validate_collector_url, validate_url, PrivatePolicy,
 };
 
 #[tauri::command]

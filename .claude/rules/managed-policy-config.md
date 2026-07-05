@@ -7,9 +7,9 @@ Speedwave supports organization-forced policy that a user cannot bypass. Today t
 An admin/MDM writes a system-level `managed-config.json` at an admin-only location:
 
 - macOS: `/Library/Application Support/Speedwave/managed-config.json`
-- Windows: `%ProgramData%\Speedwave\managed-config.json` (read `ProgramData` from the env, never hardcode `C:\ProgramData`)
+- Windows: `<ProgramData>\Speedwave\managed-config.json` — resolve ProgramData via `SHGetKnownFolderPath(FOLDERID_ProgramData)`, never the `%ProgramData%` env var (a user process can spoof it to hide the policy) and never a hardcoded `C:\ProgramData`.
 
-Path literals (`Speedwave`, `managed-config.json`) are consts in `consts.rs` (`MANAGED_CONFIG_VENDOR_DIR`, `MANAGED_CONFIG_FILE`); the loader is `managed_config::load_managed_config`. Reading is **fail-closed**: absent file → `None` (zero behavior change), malformed file → hard error. An org policy must never silently vanish on an admin typo.
+Path literals (`Speedwave`, `managed-config.json`) are consts in `consts.rs` (`MANAGED_CONFIG_VENDOR_DIR`, `MANAGED_CONFIG_FILE`); the loader is `managed_config::load_managed_config`. Reading is **fail-closed**: absent file → `None` (zero behavior change), malformed file OR an unresolvable ProgramData path → hard error. An org policy must never silently vanish on an admin typo or a spoofed env var.
 
 ## Presence is the lock
 

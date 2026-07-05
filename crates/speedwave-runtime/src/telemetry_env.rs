@@ -1,6 +1,5 @@
-//! SSOT for the mapping between telemetry fields and the `OTEL_*` /
-//! `CLAUDE_CODE_ENABLE_TELEMETRY` env vars Claude Code reads. Every OTEL key
-//! name is written exactly once here; resolve_telemetry and the env map read it.
+//! SSOT for the telemetry-field ↔ `OTEL_*`/`CLAUDE_CODE_ENABLE_TELEMETRY` env-key
+//! mapping. Read by both `resolve_telemetry` and the env map (ADR-076).
 
 use crate::config::{OtlpProtocol, ResolvedTelemetry};
 use std::collections::HashMap;
