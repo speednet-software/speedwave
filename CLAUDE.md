@@ -6,7 +6,7 @@ Every change must work on **both macOS and Windows**.
 
 ## How to work in this repo
 
-- **Commands run through the Makefile**, never `cargo`/`npm` directly. `make check` before every push, `make test` after every change. Full command list: `.claude/rules/commands.md`.
+- **Commands run through the Makefile**, never `cargo`/`npm` directly. Write tests alongside every change and run the targets you touched (e.g. `make test-rust`); the pre-push hook runs `make check-fmt`, and the required CI checks (macOS + Windows) are the real test gate. Full command list: `.claude/rules/commands.md`.
 - **This file stays thin on purpose.** The real guidance lives in `.claude/rules/` — the SSOT registry, architecture map, alignment pairs, and per-area pitfalls are there, kept next to the code they describe. When a rule and the code disagree, trust the code and fix the rule.
 - If a needed guideline is missing, add it as a new file in `.claude/rules/` — never as a link out to `docs/` or an ADR. These rule files must stay self-contained.
 

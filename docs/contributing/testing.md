@@ -21,6 +21,11 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | `make test-desktop-build`             | Verifies desktop Tauri build succeeds                                                                                                                                                                                                                                                                 |
 | `make test-desktop-config`            | Fast static checks: updater config fields + version consistency (local + CI)                                                                                                                                                                                                                          |
 | `make test-release-gate`              | Release asset verification using `gh` shim (CI-only, not in `make test`)                                                                                                                                                                                                                              |
+| `make check-fmt`                      | Format check only (Rust root + `desktop/src-tauri` + `containers/proxy`, plus Prettier). No builds, no tests. This is what the pre-push hook runs.                                                                                                                                                    |
+
+## Local vs CI
+
+Running the full test suite locally is **optional**. The required CI checks on every PR to `dev`/`main` run the whole suite across **both** macOS and Windows and are what gate a merge — a green local run on one OS cannot validate the other platform's paths. To keep pushes fast, the `pre-push` git hook runs only `make check-fmt` (a fast format check, no builds or tests); `pre-commit` still runs the gitleaks secret scan and `lint-staged`, and `commit-msg` still runs commitlint. Write tests alongside every change and run the targets you touched (e.g. `make test-rust`); reach for the full `make test` / `make check` only when you want a thorough local pass.
 
 ## Coverage
 
@@ -54,12 +59,12 @@ Thresholds are enforced locally via vitest `coverage.thresholds` in each workspa
 The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has seven jobs:
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
-2. **test** — Rust tests, MCP tests with coverage enforcement, Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats)
-3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
+2. **test** — Rust tests (`test-rust`, which also runs the audio-transcription feature tests), proxy tests (`test-proxy`), MCP tests with coverage enforcement, the mcp-os bundle upgrade-path test (`test-mcp-os-bundle`), Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats), CI-workflow tests (`test-ci`, the PR-title validator matrix)
+3. **desktop** — Desktop clippy, desktop unit tests (`test-desktop-run`), Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
-6. **runtime-windows** — Runs `cargo test -p speedwave-runtime` for the platform-specific `runtime::lima`, `runtime::wsl`, `build`, and `host_mcp_process::job_object` (Windows kill-on-close, ADR-048) modules on `windows-latest`, then verifies `.gitattributes` keeps `containers/*.sh` LF-clean after a `core.autocrlf=true` checkout
-7. **desktop-windows-check** — Runs `cargo check --all-targets` for `speedwave-desktop` on `windows-latest` with stubbed bundle resources (`scripts/create-desktop-stubs.sh`), catching Windows-only compile errors without paying for a full Tauri bundle
+6. **runtime-windows** — Runs `cargo test -p speedwave-runtime --lib` for the modules whose behaviour is Windows-specific (`runtime::lima`, `runtime::wsl`, `build`, `host_mcp_process::job_object` — kill-on-close, ADR-048 — and `binary`) plus `cargo test -p speedwave-cli --bins`, on `windows-latest`, then verifies `.gitattributes` keeps `containers/*.sh` LF-clean after a `core.autocrlf=true` checkout
+7. **desktop-windows-check** — Runs `cargo check --all-targets` for `speedwave-desktop` on `windows-latest` with stubbed bundle resources (`scripts/create-desktop-stubs.sh`) to catch Windows-only compile errors, then executes the crate's `#[cfg(windows)]` unit tests by name (a bare `--bins` would pull in cross-platform tests whose fixtures assume POSIX paths and fail on Windows)
 
 ## Test Patterns
 

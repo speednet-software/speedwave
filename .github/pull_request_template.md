@@ -13,8 +13,6 @@
 
 ## Checklist
 
-- [ ] `make test` passes
-- [ ] `make check` passes
-- [ ] I have added tests for new functionality
+- [ ] I have added tests for new functionality (the required CI checks run the full suite; `make test` / `make check` are optional locally)
 - [ ] I have updated documentation if needed
 - [ ] My commits follow [Conventional Commits](https://www.conventionalcommits.org/)

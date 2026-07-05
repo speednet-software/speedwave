@@ -22,8 +22,12 @@
 
 All of these are equally forbidden: `--no-verify`, `HUSKY=0` or any hook-disabling env var, repointing/renaming/deleting `.husky/` or `.git/hooks/`, `core.hooksPath` tricks. If a hook fails, fix the underlying issue; if you cannot, stop and ask the user. Zero exceptions.
 
+Editing a committed hook body (`.husky/*`) in a reviewed PR is NOT a bypass — it passes the same PR + CI + branch-protection gates. But removed coverage must move to a required CI check, never be dropped: this is why pre-push runs only `make check-fmt` while the full suite is the required CI gate.
+
 Caution: the pre-commit stash/pop (lint-staged) can drop uncommitted work when committing repeatedly — commit generated/edited files promptly rather than accumulating a dirty tree across multiple commits.
 
 ## Branch protection & CI — NEVER bypass
 
 Forbidden: `gh pr merge --admin`, disabling or weakening protection rules, marking failing checks as expected. If CI fails — fix it, even when the failure is pre-existing or unrelated to your PR. If you cannot, stop and ask the user. Zero exceptions.
+
+CI (`.github/workflows/test.yml`, on every PR to `dev`/`main` across macOS + Windows) is the real test gate: the required checks — not a local `make test` — are what block a merge. Never mark them not-required or route around them.

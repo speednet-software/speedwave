@@ -2,8 +2,9 @@
 
 ```bash
 make setup-dev      # first-time: prerequisites + all dependencies
-make test           # all tests (Rust + Angular + MCP + entrypoint + desktop)
-make check          # lint + clippy + type-check + format  (run before every push)
+make test           # all tests (Rust + Angular + MCP + entrypoint + desktop) — optional locally; CI runs it
+make check-fmt      # fmt (root + desktop + proxy) + prettier — the pre-push hook gate, no builds/tests
+make check          # lint + clippy + type-check + format — thorough local pass; CI runs it
 make check-all      # check + test + coverage + audit
 make dev            # desktop dev mode (Tauri + Angular hot reload)
 make build          # build everything
