@@ -59,12 +59,12 @@ Thresholds are enforced locally via vitest `coverage.thresholds` in each workspa
 The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has seven jobs:
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
-2. **test** — Rust tests (`test-rust`, which also runs the audio-transcription feature tests), proxy tests (`test-proxy`), MCP tests with coverage enforcement, the mcp-os bundle upgrade-path test (`test-mcp-os-bundle`), Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats)
+2. **test** — Rust tests (`test-rust`, which also runs the audio-transcription feature tests), proxy tests (`test-proxy`), MCP tests with coverage enforcement, the mcp-os bundle upgrade-path test (`test-mcp-os-bundle`), Office Python script tests (`test-mcp-office-py`), entrypoint tests (bats), CI-workflow tests (`test-ci`, the PR-title validator matrix)
 3. **desktop** — Desktop clippy, desktop unit tests (`test-desktop-run`), Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
 6. **runtime-windows** — Runs `cargo test -p speedwave-runtime --lib` for the modules whose behaviour is Windows-specific (`runtime::lima`, `runtime::wsl`, `build`, `host_mcp_process::job_object` — kill-on-close, ADR-048 — and `binary`) plus `cargo test -p speedwave-cli --bins`, on `windows-latest`, then verifies `.gitattributes` keeps `containers/*.sh` LF-clean after a `core.autocrlf=true` checkout
-7. **desktop-windows-check** — Runs `cargo check --all-targets` for `speedwave-desktop` on `windows-latest` with stubbed bundle resources (`scripts/create-desktop-stubs.sh`) to catch Windows-only compile errors, then executes the crate's one `#[cfg(windows)]` unit test by name (`cargo test --bins desktop_log_dir_windows_path_under_local_appdata_logs`)
+7. **desktop-windows-check** — Runs `cargo check --all-targets` for `speedwave-desktop` on `windows-latest` with stubbed bundle resources (`scripts/create-desktop-stubs.sh`) to catch Windows-only compile errors, then executes the crate's `#[cfg(windows)]` unit tests by name (a bare `--bins` would pull in cross-platform tests whose fixtures assume POSIX paths and fail on Windows)
 
 ## Test Patterns
 

@@ -100,7 +100,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
+            containers/proxy/target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'containers/proxy/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
 
       - name: Setup Node
@@ -147,6 +148,9 @@ jobs:
 
       - name: Entrypoint tests
         run: make test-entrypoint
+
+      - name: CI workflow tests
+        run: make test-ci
 
   desktop:
     # macOS runner: target_os=macos so build.rs/bundle.rs accept the target
@@ -203,8 +207,8 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo clippy -- -D warnings
 
-      # CI compiles this crate (clippy above, Windows cargo check) but nothing
-      # else executes its unit tests — this step is their only gate.
+      # Executes the crate's macOS/cross-platform unit tests; the Windows-only
+      # ones run in the desktop-windows-check job (cfg-excluded here).
       - name: Desktop tests
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
@@ -298,13 +302,8 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Windows-only unit tests — `lint`/`test` run on macos-latest and never
-  # compile `#[cfg(windows)]` code or exercise the Windows shell-quoting path.
-  # We run the modules whose Windows behaviour needs guarding: runtime::lima /
-  # runtime::wsl (WSL exec shell-quoting), build, host_mcp_process::job_object
-  # (kill-on-close, ADR-048), binary (binary resolution + system commands), and
-  # speedwave-cli. Compose/consts fixtures use `/`-rooted paths that don't hold
-  # on Windows, so they stay on the macOS jobs. Git Bash ships on the image.
+  # Windows behaviour the macos-latest lint/test jobs can't cover; each step below
+  # is scoped because compose/consts fixtures use POSIX paths that fail on Windows.
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -344,11 +343,9 @@ jobs:
         run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
 
       - name: cargo test binary
-        shell: bash
         run: cargo test -p speedwave-runtime --lib "binary::"
 
       - name: cargo test speedwave-cli
-        shell: bash
         run: cargo test -p speedwave-cli --bins
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
@@ -414,15 +411,19 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
 
-      # Runs the crate's one `#[cfg(windows)]` unit test by name — the only place
-      # it runs, since the macOS desktop job never compiles it. A bare `--bins`
-      # would also pull in cross-platform tests whose fixtures assume POSIX paths
-      # and fail on Windows, so the filter is deliberately narrow.
+      # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
+      # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.
       - name: cargo test speedwave-desktop (windows-only)
         working-directory: desktop/src-tauri
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: cargo test --bins desktop_log_dir_windows_path_under_local_appdata_logs
+        run: >
+          cargo test --bins --
+          desktop_log_dir_windows_path_under_local_appdata_logs
+          set_os_integration_enabled_rejects_on_windows
+          validate_os_integrations_returns_empty_on_windows
+          resolve_cli_source_finds_resources_path
+          full_cleanup_calls_in_order_on_windows
 
       # installer_hooks tests run on macOS; cargo check above already validates
       # the Windows compile of every target.
