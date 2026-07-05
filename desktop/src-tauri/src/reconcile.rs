@@ -308,6 +308,33 @@ fn restore_one_project(
     .map_err(|e| e.to_string())
 }
 
+/// Permanent per-project states that can never restore (skip-and-continue);
+/// transient failures stay abort-worthy so the next reconcile retries them.
+fn restore_skip_reason(
+    user_config: &config::SpeedwaveUserConfig,
+    data_dir: &std::path::Path,
+    project: &str,
+) -> Option<String> {
+    let Some(entry) = user_config.projects.iter().find(|p| p.name == project) else {
+        return Some("not in config".to_string());
+    };
+    // NotFound only: a permission error must NOT skip — the restore attempt
+    // surfaces the CloudStorage TCC remediation instead.
+    match std::fs::metadata(&entry.dir) {
+        Ok(meta) if !meta.is_dir() => {
+            return Some(format!("project dir '{}' is not a directory", entry.dir));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(format!("project dir '{}' no longer exists", entry.dir));
+        }
+        _ => {}
+    }
+    if !crate::auth_commands::project_llm_configured_in(data_dir, user_config, project) {
+        return Some("no LLM provider configured".to_string());
+    }
+    None
+}
+
 pub(crate) fn restore_projects(
     projects: &[String],
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -315,10 +342,10 @@ pub(crate) fn restore_projects(
     let user_config = config::load_user_config().unwrap_or_default();
     let data_dir = speedwave_runtime::consts::data_dir();
     for project in projects {
-        // No-provider guard (mirrors the deferred start paths): a restore render
-        // would hard-fail and wedge the whole reconcile in a failing loop.
-        if !crate::auth_commands::project_llm_configured_in(data_dir, &user_config, project) {
-            log::warn!("restore_projects: skipping '{project}' — no LLM provider configured");
+        // One dead project (deleted dir, stale entry, deferred start) must not
+        // abort the batch and poison the global image-readiness gate.
+        if let Some(reason) = restore_skip_reason(&user_config, data_dir, project) {
+            log::warn!("restore_projects: skipping '{project}' — {reason}");
             continue;
         }
         // Substitute CloudStorage TCC prefix before the error escapes this function.
@@ -1533,6 +1560,132 @@ mod tests {
             assert!(
                 wrapper.contains("speedwave_runtime::runtime::project_has_compose_file"),
                 "wrapper must pass the runtime project_has_compose_file probe"
+            );
+            assert!(
+                !wrapper.contains("!speedwave_runtime::runtime::project_has_compose_file"),
+                "the probe must keep positive polarity — a negation resurrects the fatal-update bug"
+            );
+        }
+    }
+
+    mod restore_skip_reason_tests {
+        use super::restore_skip_reason;
+        use speedwave_runtime::config::{
+            ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
+        };
+
+        fn config_with_project(
+            name: &str,
+            dir: &str,
+            provider: Option<&str>,
+        ) -> SpeedwaveUserConfig {
+            SpeedwaveUserConfig {
+                projects: vec![ProjectUserEntry {
+                    name: name.to_string(),
+                    dir: dir.to_string(),
+                    claude: provider.map(|p| ClaudeOverrides {
+                        env: None,
+                        settings: None,
+                        llm: Some(LlmConfig {
+                            provider: Some(p.to_string()),
+                            ..Default::default()
+                        }),
+                    }),
+                    integrations: None,
+                    plugin_settings: None,
+                }],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn allows_fully_initialized_project() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let proj = tempfile::tempdir().expect("tempdir");
+            let cfg =
+                config_with_project("acme", &proj.path().to_string_lossy(), Some("anthropic"));
+            assert_eq!(restore_skip_reason(&cfg, data.path(), "acme"), None);
+        }
+
+        #[test]
+        fn skips_project_missing_from_config() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let cfg = SpeedwaveUserConfig::default();
+            let reason = restore_skip_reason(&cfg, data.path(), "ghost")
+                .expect("project absent from config can never restore");
+            assert!(reason.contains("not in config"), "got: {reason}");
+        }
+
+        /// Regression: a deleted project dir must skip that project, not abort
+        /// the whole restore batch and poison the image-readiness gate.
+        #[test]
+        fn skips_project_whose_dir_no_longer_exists() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let gone = data.path().join("deleted-project");
+            let cfg = config_with_project("acme", &gone.to_string_lossy(), Some("anthropic"));
+            let reason = restore_skip_reason(&cfg, data.path(), "acme")
+                .expect("missing project dir can never restore");
+            assert!(reason.contains("no longer exists"), "got: {reason}");
+        }
+
+        #[test]
+        fn skips_project_whose_dir_is_a_file() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let file = data.path().join("not-a-dir");
+            std::fs::write(&file, b"x").expect("write");
+            let cfg = config_with_project("acme", &file.to_string_lossy(), Some("anthropic"));
+            let reason = restore_skip_reason(&cfg, data.path(), "acme")
+                .expect("non-directory project path can never restore");
+            assert!(reason.contains("not a directory"), "got: {reason}");
+        }
+
+        #[test]
+        fn skips_project_without_llm_provider() {
+            let data = tempfile::tempdir().expect("tempdir");
+            let proj = tempfile::tempdir().expect("tempdir");
+            let cfg = config_with_project("acme", &proj.path().to_string_lossy(), None);
+            let reason = restore_skip_reason(&cfg, data.path(), "acme")
+                .expect("provider-less project must defer, not restore");
+            assert!(reason.contains("no LLM provider"), "got: {reason}");
+        }
+
+        /// Permission errors must NOT skip: the restore attempt surfaces the
+        /// CloudStorage TCC remediation instead of silently dropping the project.
+        #[cfg(unix)]
+        #[test]
+        fn does_not_skip_on_permission_denied() {
+            use std::os::unix::fs::PermissionsExt;
+            let data = tempfile::tempdir().expect("tempdir");
+            let parent = data.path().join("locked");
+            let proj = parent.join("proj");
+            std::fs::create_dir_all(&proj).expect("mkdir");
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod");
+            let cfg = config_with_project("acme", &proj.to_string_lossy(), Some("anthropic"));
+            let result = restore_skip_reason(&cfg, data.path(), "acme");
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod back");
+            assert_eq!(result, None, "permission-denied dir must attempt restore");
+        }
+
+        /// Wiring: restore_projects must consult the skip guard before any
+        /// restore attempt — one dead project must not abort the batch.
+        #[test]
+        fn restore_projects_consults_skip_reason_before_restore() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn restore_projects(")
+                .expect("restore_projects must exist");
+            let body = &source[fn_start..];
+            let skip_pos = body
+                .find("restore_skip_reason(")
+                .expect("restore_projects must call restore_skip_reason");
+            let restore_pos = body
+                .find("restore_one_project(")
+                .expect("restore_projects must call restore_one_project");
+            assert!(
+                skip_pos < restore_pos,
+                "skip guard must run before restore_one_project"
             );
         }
     }

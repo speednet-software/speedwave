@@ -448,17 +448,13 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
 
 /// Path to a project's compose file: `~/.speedwave/compose/<project>/compose.yml`.
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
-    let path = consts::data_dir()
-        .join("compose")
-        .join(project)
-        .join("compose.yml");
-    Ok(path.to_string_lossy().to_string())
+    Ok(compose_file_path_in(consts::data_dir(), project))
 }
 
 /// True when the project's compose.yml has been rendered — a deferred-start or
 /// interrupted-init project has none and can never have running containers.
 pub fn project_has_compose_file(project: &str) -> bool {
-    compose_file_path(project).is_ok_and(|p| std::path::Path::new(&p).exists())
+    project_has_compose_file_in(consts::data_dir(), project)
 }
 
 /// True when a host-side compose file is absent — a `compose_down` on it is a
@@ -478,8 +474,7 @@ pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()>
     }
 }
 
-/// Testable variant: resolves compose file path under an explicit data directory.
-#[cfg(test)]
+/// Core of [`compose_file_path`] under an explicit data directory.
 fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
     data_dir
         .join("compose")
@@ -489,8 +484,7 @@ fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
         .to_string()
 }
 
-/// Testable variant of [`project_has_compose_file`] under an explicit data directory.
-#[cfg(test)]
+/// Core of [`project_has_compose_file`] under an explicit data directory.
 fn project_has_compose_file_in(data_dir: &std::path::Path, project: &str) -> bool {
     std::path::Path::new(&compose_file_path_in(data_dir, project)).exists()
 }
