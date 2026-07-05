@@ -255,11 +255,16 @@ pub(crate) fn resolve_project_dirs(
 pub(crate) fn ensure_cli_installed() -> Result<(), String> {
     let install = speedwave_runtime::consts::cli_install_path()
         .ok_or_else(|| "cannot determine home directory".to_string())?;
-    if std::path::Path::new(&install).exists() {
+    ensure_cli_installed_at(std::path::Path::new(&install))
+}
+
+fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
+    if install.exists() {
         Ok(())
     } else {
         Err(format!(
-            "CLI not installed at {install} — reopen the Speedwave app to finish setup"
+            "CLI not installed at {} — reopen the Speedwave app to finish setup",
+            install.display()
         ))
     }
 }
@@ -1165,19 +1170,16 @@ mod tests {
     #[test]
     fn cli_presence_gate_rejects_missing_and_accepts_existing() {
         let tmp = tempfile::tempdir().expect("tempdir");
+
         let missing = tmp.path().join("nope").join("speedwave");
-        assert!(!std::path::Path::new(&missing).exists());
+        let err = super::ensure_cli_installed_at(&missing).expect_err("missing path must reject");
+        assert!(err.contains("CLI not installed at"));
+        assert!(err.contains(&missing.display().to_string()));
+        assert!(err.contains("reopen the Speedwave app"));
 
         let present = tmp.path().join("speedwave");
         std::fs::write(&present, b"bin").expect("write");
-        assert!(std::path::Path::new(&present).exists());
-        // The gate's Err message names the path; assert the shape callers rely on.
-        let msg = format!(
-            "CLI not installed at {} — reopen the Speedwave app to finish setup",
-            missing.display()
-        );
-        assert!(msg.contains("CLI not installed at"));
-        assert!(msg.contains("reopen the Speedwave app"));
+        assert!(super::ensure_cli_installed_at(&present).is_ok());
     }
 
     // ── AuthStatusResponse wire-format ─────────────────────────────────────
