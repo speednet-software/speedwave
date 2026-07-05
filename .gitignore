@@ -105,3 +105,5 @@ desktop/src-tauri/oauth/
 # Python bytecode caches
 __pycache__/
 *.pyc
+.claude/specs/
+.claude/plans/
