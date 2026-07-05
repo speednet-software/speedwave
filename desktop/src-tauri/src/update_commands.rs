@@ -58,15 +58,18 @@ pub(crate) async fn install_update_and_reconcile(
 
         if !running_projects.is_empty() && rt.is_available() {
             if let Err(stop_error) = reconcile::stop_projects(&running_projects, &rt) {
-                if let Err(restore_error) = reconcile::restore_projects(&running_projects, &rt)
-                {
-                    log::error!(
-                        "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
-                    );
-                }
+                let retained = match reconcile::restore_projects(&running_projects, &rt) {
+                    Ok(retained) => retained,
+                    Err(restore_error) => {
+                        log::error!(
+                            "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
+                        );
+                        Vec::new()
+                    }
+                };
 
                 state.phase = bundle::BundleReconcilePhase::Done;
-                state.pending_running_projects.clear();
+                state.pending_running_projects = retained;
                 state.last_error = None;
                 let _ = bundle::save_bundle_state(&state);
                 return Err(stop_error);
@@ -80,9 +83,9 @@ pub(crate) async fn install_update_and_reconcile(
 
     if let Err(install_error) = updater::install_update(&app, expected_version).await {
         let projects_to_restore = running_projects.clone();
-        let restore_error = tokio::task::spawn_blocking(move || {
+        let restore_result = tokio::task::spawn_blocking(move || {
             if projects_to_restore.is_empty() {
-                return Ok::<(), String>(());
+                return Ok::<Vec<String>, String>(Vec::new());
             }
 
             let rt = speedwave_runtime::runtime::detect_runtime();
@@ -98,10 +101,11 @@ pub(crate) async fn install_update_and_reconcile(
         .await
         .map_err(|e| e.to_string())?;
 
-        let clear_state_error = tokio::task::spawn_blocking(|| {
+        let retained = restore_result.as_ref().ok().cloned().unwrap_or_default();
+        let clear_state_error = tokio::task::spawn_blocking(move || {
             let mut state = bundle::load_bundle_state();
             state.phase = bundle::BundleReconcilePhase::Done;
-            state.pending_running_projects.clear();
+            state.pending_running_projects = retained;
             state.last_error = None;
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())
         })
@@ -110,7 +114,7 @@ pub(crate) async fn install_update_and_reconcile(
 
         let error = build_install_failure_message(
             install_error,
-            restore_error.err(),
+            restore_result.err(),
             clear_state_error.err(),
         );
         log::error!("install_update_and_reconcile: install failed: {error}");
