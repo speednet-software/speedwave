@@ -23,6 +23,7 @@ Never hand-write a path/value/model-string where an SSOT exists; a wrong literal
 - `diagnostic_sources.rs::DIAGNOSTIC_SOURCES` — every diagnostic file shown in the /logs UI and packed into the diagnostics ZIP. New log file = new registry entry (non-`displayable` = ZIP-only), never a hand-wired path.
 - `engine_path.rs` — all host→engine path handling (`to_engine_path`/`str_to_engine_path`/`vm_path_join`, `strip_extended_length_prefix`).
 - `compose/addressing.rs` — `host_bind_address()`/`host_gateway_ip()`: every host TCP listener bind and every container→host gateway IP.
+- `runtime/mod.rs::project_has_compose_file(project)` — the one probe for "has this project's compose.yml been rendered". A configured-but-never-initialized project fatally errors per-project `compose_ps` — guard with this helper (or degrade gracefully on `Err`), never a hand-rolled `Path::exists()` on a compose path.
 - `url_validation.rs` — the shared SSRF validator (+ `PrivatePolicy`); Desktop re-exports it. One validator — never a second regex or copied constants.
 - `build.rs::IMAGES` + `ImageDef.hash_inputs` — image catalog and what rebuilds each image. Full rules: images-builds rules.
 - `fs_perms.rs` — owner-only permissions (Unix chmod ↔ Windows DACL) and durable fsync-before-rename writes. `binary::system_command` — the only way to spawn system processes.

@@ -455,6 +455,12 @@ pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// True when the project's compose.yml has been rendered — a deferred-start or
+/// interrupted-init project has none and can never have running containers.
+pub fn project_has_compose_file(project: &str) -> bool {
+    compose_file_path(project).is_ok_and(|p| std::path::Path::new(&p).exists())
+}
+
 /// True when a host-side compose file is absent — a `compose_down` on it is a
 /// no-op (deferred no-provider project never rendered one), so skip the engine
 /// call that would fatally error and retry.
@@ -481,6 +487,12 @@ fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
         .join("compose.yml")
         .to_string_lossy()
         .to_string()
+}
+
+/// Testable variant of [`project_has_compose_file`] under an explicit data directory.
+#[cfg(test)]
+fn project_has_compose_file_in(data_dir: &std::path::Path, project: &str) -> bool {
+    std::path::Path::new(&compose_file_path_in(data_dir, project)).exists()
 }
 
 pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
@@ -1206,6 +1218,21 @@ mod tests {
         assert!(path.contains("compose"));
         assert!(path.contains("my-project"));
         assert!(path.ends_with("compose.yml"));
+    }
+
+    #[test]
+    fn project_has_compose_file_false_when_never_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!project_has_compose_file_in(dir.path(), "orphaned"));
+    }
+
+    #[test]
+    fn project_has_compose_file_true_when_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let compose_dir = dir.path().join("compose").join("acme");
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        std::fs::write(compose_dir.join("compose.yml"), "services: {}").unwrap();
+        assert!(project_has_compose_file_in(dir.path(), "acme"));
     }
 
     #[test]

@@ -252,8 +252,29 @@ pub(crate) fn list_running_projects(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     user_config: &config::SpeedwaveUserConfig,
 ) -> Result<Vec<String>, String> {
+    list_running_projects_with(rt, user_config, |p| {
+        speedwave_runtime::runtime::project_has_compose_file(p)
+    })
+}
+
+/// Core with an injectable compose.yml-presence probe so tests drive it
+/// against a mock runtime without touching the real data dir.
+fn list_running_projects_with(
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+    has_compose_file: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
     let mut running = Vec::new();
     for project in &user_config.projects {
+        // No rendered compose.yml (deferred start / interrupted init) means the
+        // project cannot be running — compose_ps would fatally error on it.
+        if !has_compose_file(&project.name) {
+            log::debug!(
+                "list_running_projects: no compose.yml for '{}' — not running",
+                project.name
+            );
+            continue;
+        }
         let containers = rt
             .compose_ps(&project.name)
             .map_err(|e| format!("compose_ps failed for '{}': {}", project.name, e))?;
@@ -1411,6 +1432,107 @@ mod tests {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "stop_vm must run even with no projects"
+            );
+        }
+    }
+
+    mod list_running_projects_tests {
+        use super::list_running_projects_with;
+        use speedwave_runtime::config::{ProjectUserEntry, SpeedwaveUserConfig};
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+
+        fn config_with(names: &[&str]) -> SpeedwaveUserConfig {
+            SpeedwaveUserConfig {
+                projects: names
+                    .iter()
+                    .map(|n| ProjectUserEntry {
+                        name: n.to_string(),
+                        dir: "/tmp/fake".to_string(),
+                        claude: None,
+                        integrations: None,
+                        plugin_settings: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        /// Regression: a project whose compose.yml was never rendered
+        /// (interrupted init) must be skipped, not fail the whole listing.
+        #[test]
+        fn skips_project_without_compose_file_instead_of_failing() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_ps_error("limactl failed: open compose.yml: no such file or directory")
+                .build();
+            let cfg = config_with(&["orphaned"]);
+
+            let running = list_running_projects_with(&rt, &cfg, |_| false)
+                .expect("project without compose.yml must be skipped, not fatal");
+
+            assert!(running.is_empty());
+            assert!(
+                handles.ps_projects().is_empty(),
+                "compose_ps must not be called for a project without compose.yml"
+            );
+        }
+
+        #[test]
+        fn lists_only_projects_with_containers_and_probes_only_rendered_ones() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_ps_response("active", vec![serde_json::json!({"Name": "claude"})])
+                .build();
+            let cfg = config_with(&["orphaned", "active", "idle"]);
+
+            let running =
+                list_running_projects_with(&rt, &cfg, |p| p != "orphaned").expect("must succeed");
+
+            assert_eq!(running, vec!["active"]);
+            assert_eq!(
+                handles.ps_projects(),
+                vec!["active", "idle"],
+                "only projects with a rendered compose.yml may be probed"
+            );
+        }
+
+        /// A compose_ps failure on a project WITH compose.yml still propagates.
+        #[test]
+        fn propagates_compose_ps_error_for_rendered_project() {
+            let (rt, _handles) = MockRuntimeBuilder::new()
+                .with_ps_error("engine down")
+                .build();
+            let cfg = config_with(&["active"]);
+
+            let err = list_running_projects_with(&rt, &cfg, |_| true)
+                .expect_err("real compose_ps failures must propagate");
+
+            assert!(err.contains("compose_ps failed for 'active'"));
+            assert!(err.contains("engine down"));
+        }
+
+        #[test]
+        fn empty_config_yields_empty_list() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let cfg = config_with(&[]);
+            let running = list_running_projects_with(&rt, &cfg, |_| true).expect("must succeed");
+            assert!(running.is_empty());
+            assert!(handles.ps_projects().is_empty());
+        }
+
+        /// Wiring: the public wrapper must probe compose.yml presence via the
+        /// runtime SSOT helper, not a hand-rolled path check.
+        #[test]
+        fn wrapper_wires_runtime_compose_file_probe() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn list_running_projects(")
+                .expect("list_running_projects must exist");
+            let core_start = source
+                .find("fn list_running_projects_with(")
+                .expect("list_running_projects_with must exist");
+            let wrapper = &source[fn_start..core_start];
+            assert!(
+                wrapper.contains("speedwave_runtime::runtime::project_has_compose_file"),
+                "wrapper must pass the runtime project_has_compose_file probe"
             );
         }
     }
