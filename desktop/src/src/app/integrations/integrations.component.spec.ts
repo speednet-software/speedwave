@@ -214,13 +214,11 @@ describe('IntegrationsComponent', () => {
   it('should load active project and integrations on init', async () => {
     await component.ngOnInit();
     expect(component.activeProject).toBe('test-project');
-    // GitHub is in BETA_ONLY_SERVICES, hidden unless beta is on (default off in tests).
-    // Visible services: gitlab, redmine, sharepoint.
-    expect(component.services).toHaveLength(3);
+    // Only office is beta-gated; with beta off the mock's gitlab/redmine/github/sharepoint show.
+    expect(component.services).toHaveLength(4);
     expect(component.osIntegrations).toHaveLength(1);
   });
 
-  // Slack is beta-gated for its first OAuth release (ADR-071).
   function setupWithSlack(): void {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -272,12 +270,12 @@ describe('IntegrationsComponent', () => {
     };
   }
 
-  it('hides slack when beta is off (first-release gate, ADR-071)', async () => {
+  it('shows slack when beta is off', async () => {
     setupWithSlack();
     betaEnabled.set(false);
     await component.ngOnInit();
     const serviceNames = component.services.map((s) => s.service);
-    expect(serviceNames).not.toContain('slack');
+    expect(serviceNames).toContain('slack');
     expect(serviceNames).toContain('sharepoint');
   });
 
@@ -289,11 +287,12 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('beta gating (ADR-058)', () => {
-    const betaServices = ['office', 'github', 'atlassian'] as const;
+    const betaServices = ['office'] as const;
+    const nonBetaServices = ['github', 'atlassian'] as const;
 
-    // Backend always returns the beta services; whether the user sees them is governed by the BetaService signal.
+    // Backend always returns every service; visibility is governed by the BetaService signal.
     function setupWithBetaServices(): void {
-      const extra = betaServices.map((svc) => ({
+      const extra = [...betaServices, ...nonBetaServices].map((svc) => ({
         service: svc,
         enabled: false,
         configured: false,
@@ -337,6 +336,13 @@ describe('IntegrationsComponent', () => {
     it.each(betaServices)('shows %s row when beta is on', async (svc) => {
       setupWithBetaServices();
       betaEnabled.set(true);
+      await component.ngOnInit();
+      expect(component.services.map((s) => s.service)).toContain(svc);
+    });
+
+    it.each(nonBetaServices)('shows %s row even when beta is off', async (svc) => {
+      setupWithBetaServices();
+      betaEnabled.set(false);
       await component.ngOnInit();
       expect(component.services.map((s) => s.service)).toContain(svc);
     });
@@ -1104,11 +1110,6 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('Slack OAuth flow (ADR-071)', () => {
-    // Slack is beta-gated; flip beta on so the row is present.
-    beforeEach(() => {
-      betaEnabled.set(true);
-    });
-
     function slackSvc(): IntegrationStatusEntry {
       return {
         service: 'slack',
@@ -1214,7 +1215,6 @@ describe('IntegrationsComponent', () => {
 
     it('success event reloads integrations, auto-enables slack, and requests restart', async () => {
       setupWithSlack();
-      betaEnabled.set(true);
       await component.ngOnInit();
       component.activeOAuthRequestId = 'sl-rid-4';
       component.oauthService = 'slack';
@@ -1236,11 +1236,6 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('GitHub OAuth flow', () => {
-    // GitHub is in BETA_ONLY_SERVICES (ADR-058); enable beta so its row is present.
-    beforeEach(() => {
-      betaEnabled.set(true);
-    });
-
     it('invokes start_github_oauth with project (no client_id/tenant_id)', async () => {
       await component.ngOnInit();
       const githubSvc = component.services.find((s) => s.service === 'github')!;

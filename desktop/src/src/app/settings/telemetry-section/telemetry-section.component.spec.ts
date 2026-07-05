@@ -101,7 +101,8 @@ describe('TelemetrySectionComponent', () => {
     await create();
     await component.ngOnInit();
     fixture.detectChanges();
-    // The switch: a sr-only checkbox inside the toggle wrapper used across the app.
+    // The switch is the shared app-toggle: a sr-only checkbox inside the toggle wrapper.
+    expect(fixture.nativeElement.querySelector('app-toggle')).not.toBeNull();
     const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
     expect(toggle).not.toBeNull();
     const input = fixture.nativeElement.querySelector('[data-testid="telemetry-enabled"]');
@@ -117,5 +118,43 @@ describe('TelemetrySectionComponent', () => {
     const call = spy.mock.calls.find((c) => c[0] === 'update_telemetry_config');
     expect(call).toBeDefined();
     expect(call?.[1]).toHaveProperty('update');
+  });
+
+  async function savedHeadersUpdate(): Promise<Record<string, unknown>> {
+    const spy = vi.spyOn(mockTauri, 'invoke');
+    await component.save();
+    const call = spy.mock.calls.find((c) => c[0] === 'update_telemetry_config');
+    return (call?.[1] as { update: Record<string, unknown> }).update;
+  }
+
+  it('save() omits headers when the field was never touched (preserve saved secret)', async () => {
+    setup(baseResponse({ has_headers: true }));
+    await create();
+    await component.ngOnInit();
+    expect('headers' in (await savedHeadersUpdate())).toBe(false);
+  });
+
+  it('save() sends headers:null when the field was touched and cleared (remove secret)', async () => {
+    setup(baseResponse({ has_headers: true }));
+    await create();
+    await component.ngOnInit();
+    component.onHeadersInput('');
+    expect((await savedHeadersUpdate())['headers']).toBeNull();
+  });
+
+  it('save() sends the new value when the field was touched with text (replace secret)', async () => {
+    await create();
+    await component.ngOnInit();
+    component.onHeadersInput('Authorization=Bearer new');
+    expect((await savedHeadersUpdate())['headers']).toBe('Authorization=Bearer new');
+  });
+
+  it('editing the endpoint clears a stale probe verdict', async () => {
+    await create();
+    await component.ngOnInit();
+    component.probeResult.set('reachable');
+    component.onEndpointInput('https://other:4318');
+    expect(component.endpoint()).toBe('https://other:4318');
+    expect(component.probeResult()).toBe('');
   });
 });

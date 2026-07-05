@@ -9,6 +9,8 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
+import { ToggleComponent } from '../../shared/toggle.component';
+import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
   OtlpProtocol,
   TelemetryConfigResponse,
@@ -22,7 +24,7 @@ import type {
  */
 @Component({
   selector: 'app-telemetry-section',
-  imports: [],
+  imports: [ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -37,17 +39,19 @@ import type {
       </p>
 
       @if (error()) {
-        <p class="mt-2 text-[12px] text-red-300" data-testid="telemetry-error">{{ error() }}</p>
+        <p class="mt-2 text-[12px] text-[var(--red)]" data-testid="telemetry-error">
+          {{ error() }}
+        </p>
       }
 
       @if (config(); as c) {
         @if (c.kill_switch) {
           <div
-            class="mt-4 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3 text-[12px] text-[var(--ink-mute)]"
+            class="mono mt-4 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3 text-[11px] text-[var(--ink-mute)]"
             data-testid="telemetry-killswitch"
           >
             <span aria-hidden="true">🔒</span>
-            Telemetry is managed by your organization and cannot be changed here.
+            Managed by your organization — telemetry cannot be changed here.
           </div>
         } @else {
           <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)]">
@@ -55,116 +59,131 @@ import type {
             <div class="flex items-center justify-between gap-3 px-4 py-3">
               <div class="min-w-0">
                 <div class="text-[13px] text-[var(--ink)]">Send telemetry</div>
-                <div class="text-[11px] text-[var(--ink-dim)]">
+                <div class="mt-0.5 text-[11px] text-[var(--ink-dim)]">
                   @if (c.locks.enabled) {
-                    <span class="text-[var(--ink-mute)]">🔒 Managed by your organization</span>
+                    <span class="mono text-[var(--ink-mute)]">🔒 Managed by your organization</span>
                   } @else {
                     Off means no data leaves this machine.
                   }
                 </div>
               </div>
-              <label class="relative inline-block h-[24px] w-[44px] shrink-0" data-testid="toggle">
-                <input
-                  type="checkbox"
-                  class="peer sr-only"
-                  [checked]="enabled()"
-                  [disabled]="c.locks.enabled"
-                  (change)="enabled.set(inputChecked($event))"
-                  data-testid="telemetry-enabled"
-                />
-                <span
-                  class="absolute inset-0 rounded-full bg-[var(--line-strong)] transition-all duration-300 peer-checked:bg-[var(--accent)] peer-disabled:opacity-40 peer-disabled:cursor-not-allowed before:absolute before:bottom-[3px] before:left-[3px] before:h-[18px] before:w-[18px] before:rounded-full before:bg-white before:transition-all before:duration-300 before:content-[''] peer-checked:before:translate-x-[20px]"
-                  [class.cursor-pointer]="!c.locks.enabled"
-                ></span>
-              </label>
+              <app-toggle
+                [checked]="enabled()"
+                [disabled]="c.locks.enabled"
+                testId="telemetry-enabled"
+                ariaLabel="Send telemetry"
+                (changed)="enabled.set(eventChecked($event))"
+              />
             </div>
 
             @if (enabled()) {
-              <div class="space-y-4 border-t border-[var(--line)] px-4 py-4">
+              <div class="space-y-5 border-t border-[var(--line)] px-4 py-4">
                 <!-- Endpoint -->
                 <div>
-                  <div class="text-[11px] text-[var(--ink-mute)]">
+                  <label
+                    class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    for="telemetry-endpoint"
+                  >
                     Collector endpoint
                     @if (c.locks.endpoint) {
-                      <span class="text-[10px]">🔒 managed</span>
+                      <span class="normal-case tracking-normal">🔒 managed</span>
                     }
-                  </div>
+                  </label>
                   <input
+                    id="telemetry-endpoint"
                     type="url"
-                    class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)] read-only:opacity-60"
                     placeholder="https://collector.example.com:4318"
                     [value]="endpoint()"
                     [readonly]="c.locks.endpoint"
-                    (input)="endpoint.set(inputValue($event))"
+                    (input)="onEndpointInput(eventValue($event))"
                     data-testid="telemetry-endpoint"
                   />
-                  <button
-                    type="button"
-                    class="mono mt-1 rounded border border-[var(--line-strong)] px-2 py-0.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
-                    [disabled]="!endpoint() || probing()"
-                    (click)="testConnection()"
-                    data-testid="telemetry-probe"
-                  >
-                    {{ probing() ? 'testing…' : 'Test connection' }}
-                  </button>
-                  @if (probeResult()) {
-                    <span
-                      class="ml-2 text-[11px] text-[var(--ink-mute)]"
-                      data-testid="telemetry-probe-result"
+                  <div class="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:cursor-not-allowed disabled:opacity-40"
+                      [disabled]="!endpoint() || probing()"
+                      (click)="testConnection()"
+                      data-testid="telemetry-probe"
                     >
-                      {{ probeResult() }}
-                    </span>
-                  }
+                      {{ probing() ? 'testing…' : 'Test connection' }}
+                    </button>
+                    @if (probeResult(); as result) {
+                      <span
+                        class="mono text-[11px]"
+                        [class]="
+                          result === 'reachable' ? 'text-[var(--green)]' : 'text-[var(--red)]'
+                        "
+                        data-testid="telemetry-probe-result"
+                      >
+                        {{ result }}
+                      </span>
+                    }
+                  </div>
                 </div>
 
                 <!-- Protocol + exporters -->
-                <div class="flex flex-wrap items-center gap-3 text-[11px] text-[var(--ink)]">
-                  <label class="flex items-center gap-1">
-                    Protocol
-                    <select
-                      class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-1 py-0.5"
-                      [value]="protocol()"
-                      [disabled]="c.locks.protocol"
-                      (change)="setProtocol($event)"
-                      data-testid="telemetry-protocol"
-                    >
-                      <option value="grpc">gRPC</option>
-                      <option value="http/protobuf">HTTP protobuf</option>
-                      <option value="http/json">HTTP JSON</option>
-                    </select>
-                  </label>
-                  <label class="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      [checked]="exportMetrics()"
-                      [disabled]="c.locks.export_metrics"
-                      (change)="exportMetrics.set(inputChecked($event))"
-                    />
-                    Metrics
-                  </label>
-                  <label class="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      [checked]="exportLogs()"
-                      [disabled]="c.locks.export_logs"
-                      (change)="exportLogs.set(inputChecked($event))"
-                    />
-                    Logs
-                  </label>
+                <div>
+                  <div
+                    class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  >
+                    Transport &amp; signals
+                  </div>
+                  <div class="flex flex-wrap items-center gap-4 text-[11px] text-[var(--ink)]">
+                    <label class="mono flex items-center gap-1.5">
+                      Protocol
+                      <select
+                        class="mono min-w-[9rem] rounded border border-[var(--line)] bg-[var(--bg-1)] px-1.5 py-1 text-[11px] disabled:opacity-60"
+                        [value]="protocol()"
+                        [disabled]="c.locks.protocol"
+                        (change)="setProtocol($event)"
+                        data-testid="telemetry-protocol"
+                      >
+                        <option value="grpc">gRPC</option>
+                        <option value="http/protobuf">HTTP protobuf</option>
+                        <option value="http/json">HTTP JSON</option>
+                      </select>
+                    </label>
+                    <label class="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        class="accent-[var(--accent)]"
+                        [checked]="exportMetrics()"
+                        [disabled]="c.locks.export_metrics"
+                        (change)="exportMetrics.set(eventChecked($event))"
+                      />
+                      Metrics
+                    </label>
+                    <label class="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        class="accent-[var(--accent)]"
+                        [checked]="exportLogs()"
+                        [disabled]="c.locks.export_logs"
+                        (change)="exportLogs.set(eventChecked($event))"
+                      />
+                      Logs
+                    </label>
+                  </div>
                 </div>
 
                 <!-- Auth headers (masked secret) -->
                 <div>
-                  <div class="text-[11px] text-[var(--ink-mute)]">
+                  <label
+                    class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    for="telemetry-headers"
+                  >
                     Auth headers
                     @if (c.locks.headers) {
-                      <span class="text-[10px]">🔒 managed</span>
+                      <span class="normal-case tracking-normal">🔒 managed</span>
                     }
-                  </div>
+                  </label>
                   <input
+                    id="telemetry-headers"
                     type="password"
                     autocomplete="off"
-                    class="mono mt-1 w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)] read-only:opacity-60"
                     [value]="headers()"
                     [readonly]="c.locks.headers"
                     [placeholder]="
@@ -172,24 +191,30 @@ import type {
                         ? '••••• (saved — type to replace, clear to remove)'
                         : 'Authorization=Bearer …'
                     "
-                    (input)="onHeadersInput(inputValue($event))"
+                    (input)="onHeadersInput(eventValue($event))"
                     data-testid="telemetry-headers"
                   />
                 </div>
 
                 <!-- Privacy gates -->
-                <details class="mt-1">
-                  <summary class="cursor-pointer text-[11px] text-[var(--ink-mute)]">
+                <details class="rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2">
+                  <summary
+                    class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  >
                     Privacy (advanced)
                   </summary>
-                  <p class="mt-2 text-[11px] text-red-300" data-testid="telemetry-privacy-warning">
+                  <p
+                    class="mt-2 text-[11px] leading-relaxed text-[var(--red)]"
+                    data-testid="telemetry-privacy-warning"
+                  >
                     Enabling these sends the content of your conversations and code to the
                     collector. Off by default.
                   </p>
-                  <div class="mt-2 space-y-1 text-[11px] text-[var(--ink)]">
-                    <label class="flex items-center gap-1">
+                  <div class="mt-2 space-y-1.5 text-[11px] text-[var(--ink)]">
+                    <label class="flex items-center gap-1.5">
                       <input
                         type="checkbox"
+                        class="accent-[var(--accent)]"
                         [checked]="logUserPrompts()"
                         [disabled]="c.locks.log_user_prompts"
                         (change)="onPrivacyToggle('logUserPrompts', $event)"
@@ -197,27 +222,30 @@ import type {
                       />
                       Log user prompts
                     </label>
-                    <label class="flex items-center gap-1">
+                    <label class="flex items-center gap-1.5">
                       <input
                         type="checkbox"
+                        class="accent-[var(--accent)]"
                         [checked]="logAssistantResponses()"
                         [disabled]="c.locks.log_assistant_responses"
                         (change)="onPrivacyToggle('logAssistantResponses', $event)"
                       />
                       Log assistant responses
                     </label>
-                    <label class="flex items-center gap-1">
+                    <label class="flex items-center gap-1.5">
                       <input
                         type="checkbox"
+                        class="accent-[var(--accent)]"
                         [checked]="logToolDetails()"
                         [disabled]="c.locks.log_tool_details"
                         (change)="onPrivacyToggle('logToolDetails', $event)"
                       />
                       Log tool details
                     </label>
-                    <label class="flex items-center gap-1">
+                    <label class="flex items-center gap-1.5">
                       <input
                         type="checkbox"
+                        class="accent-[var(--accent)]"
                         [checked]="logRawApiBodies()"
                         [disabled]="c.locks.log_raw_api_bodies"
                         (change)="onPrivacyToggle('logRawApiBodies', $event)"
@@ -227,10 +255,10 @@ import type {
                   </div>
                 </details>
 
-                <div class="flex justify-end">
+                <div class="flex justify-end border-t border-[var(--line)] pt-4">
                   <button
                     type="button"
-                    class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-4 py-1.5 text-[12px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                    class="mono rounded bg-[var(--accent)] px-4 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                     [disabled]="saving()"
                     (click)="save()"
                     data-testid="telemetry-save"
@@ -254,6 +282,7 @@ export class TelemetrySectionComponent implements OnInit {
   readonly error = signal('');
   readonly saving = signal(false);
   readonly probing = signal(false);
+  /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
 
   // Editable form state (signals — OnPush requires it).
@@ -308,7 +337,7 @@ export class TelemetrySectionComponent implements OnInit {
     field: 'logUserPrompts' | 'logAssistantResponses' | 'logToolDetails' | 'logRawApiBodies',
     ev: Event
   ): void {
-    const on = this.inputChecked(ev);
+    const on = eventChecked(ev);
     if (
       on &&
       !confirm('This sends the content of your conversations and code to the collector. Continue?')
@@ -333,7 +362,16 @@ export class TelemetrySectionComponent implements OnInit {
    * @param ev - the select change event.
    */
   setProtocol(ev: Event): void {
-    this.protocol.set(this.inputValue(ev) as OtlpProtocol);
+    this.protocol.set(eventValue(ev) as OtlpProtocol);
+  }
+
+  /**
+   * Updates the endpoint and drops any prior probe verdict (it applied to the old value).
+   * @param value - the raw input value.
+   */
+  onEndpointInput(value: string): void {
+    this.endpoint.set(value);
+    this.probeResult.set('');
   }
 
   /** Probes the endpoint's reachability from the host and shows the result. */
@@ -341,14 +379,15 @@ export class TelemetrySectionComponent implements OnInit {
     this.probing.set(true);
     this.probeResult.set('');
     this.cdr.markForCheck();
+    let ok: boolean;
     try {
-      const ok = await this.tauri.invoke<boolean>('probe_otlp_endpoint', {
+      ok = await this.tauri.invoke<boolean>('probe_otlp_endpoint', {
         endpoint: this.endpoint(),
       });
-      this.probeResult.set(ok ? 'reachable' : 'unreachable from this host');
     } catch {
-      this.probeResult.set('unreachable from this host');
+      ok = false;
     }
+    this.probeResult.set(ok ? 'reachable' : 'unreachable from this host');
     this.probing.set(false);
     this.cdr.markForCheck();
   }
@@ -388,18 +427,7 @@ export class TelemetrySectionComponent implements OnInit {
     this.errorOccurred.emit(msg);
   }
 
-  /**
-   * The `.value` of an input/select event target (cast kept out of the template).
-   * @param ev - the DOM event.
-   */
-  protected inputValue(ev: Event): string {
-    return (ev.target as HTMLInputElement | HTMLSelectElement).value;
-  }
-  /**
-   * The `.checked` of a checkbox event target.
-   * @param ev - the DOM event.
-   */
-  protected inputChecked(ev: Event): boolean {
-    return (ev.target as HTMLInputElement).checked;
-  }
+  /** Shared DOM-event readers, exposed for template event bindings. */
+  protected readonly eventValue = eventValue;
+  protected readonly eventChecked = eventChecked;
 }

@@ -333,7 +333,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian', 'slack']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -572,7 +572,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058, ADR-071).
+      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
         (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
