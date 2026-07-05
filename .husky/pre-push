@@ -1,11 +1,9 @@
 #!/usr/bin/env sh
 # `git push` exports GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE pointing at the
-# pushing repo. Those leak into `cargo test`, where any test that does
-# `git -C <tmp_dir> ...` ignores `-C` and resolves against the leaked GIT_DIR
-# — surfacing the *real* branch instead of the empty tempdir's state and
-# producing spurious assertion failures (e.g. read_branch tests in
-# desktop/src-tauri/src/git_cmd.rs). Strip them before running tests so the
-# suite sees a clean, hook-independent environment.
+# pushing repo; strip them so any git-touching command below (current or future)
+# sees a clean, hook-independent environment, not the leaked push-time state.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_REFLOG_ACTION GIT_PREFIX
 
-make test
+# Fast format-only gate. The full test suite is the required CI gate on every
+# PR to dev/main (macOS + Windows); running it locally would only duplicate CI.
+make check-fmt

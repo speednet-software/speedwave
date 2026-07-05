@@ -18,6 +18,7 @@ import { BetaService } from '../services/beta.service';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
+import { TelemetrySectionComponent } from './telemetry-section/telemetry-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ProjectList } from '../models/update';
@@ -69,6 +70,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     LlmProviderComponent,
     AdvancedSectionComponent,
     TranscriptionSectionComponent,
+    TelemetrySectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
   ],
@@ -185,6 +187,10 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           </div>
         </section>
 
+        @if (beta.enabled()) {
+          <app-telemetry-section (errorOccurred)="error = $event" />
+        }
+
         <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 
         <app-advanced-section
@@ -208,7 +214,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
-  /** Beta-features gate — the meeting-transcription section is beta-only. */
+  /** Beta-features gate — the transcription and telemetry sections are beta-only. */
   readonly beta = inject(BetaService);
 
   private router = inject(Router);

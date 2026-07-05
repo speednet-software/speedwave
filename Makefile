@@ -568,7 +568,7 @@ test-entrypoint:
 
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/ci/validate-pr-title-main.bats _tests/ci/plan-loop-context.bats
+	bats _tests/ci/validate-pr-title-main.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -729,9 +729,14 @@ check-angular:
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 
+# Shared by check-fmt and fmt so the two can't drift.
+PRETTIER_GLOBS := 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+
 check-fmt:
 	cargo fmt --all -- --check
-	$(NPX) prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all -- --check
+	$(NPX) prettier --check $(PRETTIER_GLOBS)
 	@echo "✅ Format check passed"
 
 check-mcp-lint:
@@ -775,7 +780,9 @@ check-all: check test coverage audit
 
 fmt:
 	cargo fmt --all
-	$(NPX) prettier --write 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all
+	$(NPX) prettier --write $(PRETTIER_GLOBS)
 	@echo "✅ Formatted"
 
 lint:

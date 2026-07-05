@@ -11,6 +11,17 @@ pub const DATA_DIR: &str = ".speedwave";
 /// Per-project Claude Code home (`<data_dir>/claude-home/<project>/`) — SSOT;
 /// don't hard-code the `"claude-home"` literal at call sites.
 pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
+/// Per-project native Claude Code managed-settings dir
+/// (`<data_dir>/claude-managed/<project>/`) — SSOT; don't hard-code the literal.
+pub const CLAUDE_MANAGED_SUBDIR: &str = "claude-managed";
+/// Native Claude Code managed-settings filename — SSOT for both the host file
+/// and the container mount-target basename (`/etc/claude-code/<this>`).
+pub const MANAGED_SETTINGS_FILE: &str = "managed-settings.json";
+/// Vendor dir name under the OS system-config root holding the MDM-deployed
+/// `managed-config.json` — SSOT; don't hard-code "Speedwave" at call sites.
+pub const MANAGED_CONFIG_VENDOR_DIR: &str = "Speedwave";
+/// MDM managed-config filename — SSOT.
+pub const MANAGED_CONFIG_FILE: &str = "managed-config.json";
 /// CLI binary name.
 pub const CLI_BINARY: &str = "speedwave";
 /// Prefix for per-project compose project names and networks.
@@ -1012,6 +1023,10 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "PORT",
     "SPW_CREDENTIALS_DIGEST",
     "SPW_PLUGIN_DIGESTS",
+    // Bundled-plugin install list/marketplace — a repo must not redirect which
+    // plugins the container installs (defaults::BUNDLED_PLUGINS is the SSOT).
+    "SPEEDWAVE_BUNDLED_PLUGINS",
+    "SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE",
     // Dynamic linker hijacks (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -1137,10 +1152,10 @@ pub fn cli_install_path_for(
 ) -> String {
     if is_windows {
         format!(
-            "{}\\{}\\{}.exe",
+            "{}\\{}\\{}",
             data_dir.to_string_lossy(),
             CLI_BIN_SUBDIR,
-            CLI_BINARY
+            cli_binary_filename(true)
         )
     } else {
         home.join(".local")
@@ -1160,6 +1175,17 @@ pub fn cli_install_path() -> Option<String> {
         data_dir(),
     ))
 }
+
+/// CLI binary filename for the platform: `<CLI_BINARY>.exe` on Windows,
+/// `CLI_BINARY` otherwise. Single-sourced from `CLI_BINARY`.
+pub fn cli_binary_filename(is_windows: bool) -> String {
+    if is_windows {
+        format!("{CLI_BINARY}.exe")
+    } else {
+        CLI_BINARY.to_string()
+    }
+}
+
 
 /// Instance name from a data-dir path: strips leading dots, panics unless the
 /// basename matches `^[a-z][a-z0-9-]{0,63}$`. Shell SSOT: `scripts/e2e-vm.sh`.
@@ -1248,7 +1274,7 @@ mod tests {
     fn test_reserved_env_keys_complete_and_uppercase() {
         // Bumping this count is deliberate — signals a new hijack vector (grow
         // the plugin.rs test too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 18);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 20);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -2137,6 +2163,15 @@ mod tests {
             "C:\\Users\\alice\\.speedwave\\bin\\speedwave.exe",
             "windows path must use backslashes so it is host-independent on the CI host"
         );
+    }
+
+    #[test]
+    fn cli_binary_filename_is_single_sourced_from_cli_binary() {
+        assert_eq!(cli_binary_filename(false), CLI_BINARY);
+        assert_eq!(cli_binary_filename(true), format!("{CLI_BINARY}.exe"));
+        // Concrete values today, so a rename that breaks the format is visible.
+        assert_eq!(cli_binary_filename(false), "speedwave");
+        assert_eq!(cli_binary_filename(true), "speedwave.exe");
     }
 
     #[test]

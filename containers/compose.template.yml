@@ -37,6 +37,9 @@ services:
       # Auto-connect IDE bridge; value is literal `true` per Claude Code env-vars.
       - CLAUDE_CODE_AUTO_CONNECT_IDE=true
       - ANTHROPIC_LOG=debug
+      # Official Anthropic plugins installed+enabled at start (defaults::BUNDLED_PLUGINS).
+      - SPEEDWAVE_BUNDLED_PLUGINS=${BUNDLED_PLUGINS}
+      - SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE=${BUNDLED_PLUGIN_MARKETPLACE}
     working_dir: /workspace
     networks:
       - ${NETWORK_NAME}

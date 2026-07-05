@@ -36,6 +36,15 @@ echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
 
+    # `timeout` (coreutils) is on PATH in the container but may live under the
+    # homebrew prefix stripped above on a macOS test host — stub a passthrough.
+    cat > "$STUBS_DIR/timeout" << 'EOF'
+#!/bin/bash
+shift
+exec "$@"
+EOF
+    chmod +x "$STUBS_DIR/timeout"
+
     # Default curl stub — fail loudly if unexpectedly called
     cat > "$STUBS_DIR/curl" << 'EOF'
 #!/bin/bash
@@ -1459,4 +1468,107 @@ setup_os_subservice_fixture() {
     status=$?
     set -e
     [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Bundled official Anthropic plugins — install at start
+# ---------------------------------------------------------------------------
+
+# Stub: `plugin list --json` reports nothing installed (so the guard proceeds),
+# `plugin install` records the target; version query still works.
+_stub_claude_recording_plugin_installs() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
+    exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "installs each bundled plugin at start with the marketplace suffix" {
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+}
+
+@test "does not install any plugin when the bundled-plugins env is unset" {
+    _stub_claude_recording_plugin_installs
+    unset SPEEDWAVE_BUNDLED_PLUGINS
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+}
+
+@test "a failing plugin install is non-fatal and surfaces the error reason" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "network down" >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"failed to install bundled plugin"* ]]
+    # the captured stderr reason is surfaced, not discarded
+    [[ "$output" == *"network down"* ]]
+}
+
+@test "skips an invalid bundled-plugin name and continues with the rest" {
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="Bad_Name,superpowers"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"invalid bundled-plugin name: Bad_Name"* ]]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"superpowers@"* ]]
+    [[ "$output" != *"Bad_Name"* ]]
+}
+
+@test "skips all installs when the bundled-plugin marketplace is invalid" {
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="Bad/Marketplace"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"invalid bundled-plugin marketplace"* ]]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+}
+
+@test "does not reinstall a plugin already present (guard respects user disable)" {
+    # plugin list reports frontend-design already installed; install must be skipped.
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
+    echo '[{"id":"frontend-design@claude-plugins-official","enabled":false}]'; exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    # already-present frontend-design (disabled by user) is NOT reinstalled
+    [[ "$output" != *"frontend-design@"* ]]
+    # the missing one still installs
+    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 }

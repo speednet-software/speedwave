@@ -92,6 +92,10 @@ impl MockHandles {
     pub fn down_projects(&self) -> Vec<String> {
         self.down_calls.lock().unwrap().clone()
     }
+    /// Projects passed to `compose_ps`, in call order.
+    pub fn ps_projects(&self) -> Vec<String> {
+        self.ps_calls.lock().unwrap().clone()
+    }
     /// Tags passed to `build_image`.
     pub fn build_tags(&self) -> Vec<String> {
         self.build_calls
@@ -253,6 +257,16 @@ impl MockRuntimeBuilder {
     /// Makes `compose_up_recreate` fail for these projects.
     pub fn with_fail_on_recreate(mut self, projects: &[&str]) -> Self {
         self.fail_on_recreate = projects.iter().map(|s| s.to_string()).collect();
+        self
+    }
+    /// Sets the `compose_ps` response for `project` (default: empty).
+    pub fn with_ps_response(mut self, project: &str, containers: Vec<Value>) -> Self {
+        self.ps_responses.insert(project.to_string(), containers);
+        self
+    }
+    /// Makes every `compose_ps` call fail with `msg`.
+    pub fn with_ps_error(mut self, msg: &str) -> Self {
+        self.ps_error = Some(msg.to_string());
         self
     }
     /// Sets the exact `image_exists` result for `tag`.

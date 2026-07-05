@@ -130,6 +130,9 @@ pub(crate) fn collect_security_paths(
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
         data_dir.join(consts::OAUTH_SUBDIR).join(project),
+        // Native Claude Code managed-settings dir (MDM telemetry policy), 0o700.
+        data_dir.join(consts::CLAUDE_MANAGED_SUBDIR),
+        data_dir.join(consts::CLAUDE_MANAGED_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -210,6 +213,11 @@ pub(crate) fn collect_security_paths(
             }
         }
     }
+
+    // --- claude-managed/<project>/managed-settings.json (MDM telemetry), 0o600 ---
+    files.push(crate::claude_managed::managed_settings_path(
+        data_dir, project,
+    ));
 
     (dirs, files)
 }
@@ -296,8 +304,8 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected 14 dirs.
-        assert_eq!(dirs.len(), 14, "expected 14 dirs, got: {dirs:?}");
+        // Expected 16 dirs (14 legacy + claude-managed + claude-managed/proj).
+        assert_eq!(dirs.len(), 16, "expected 16 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -312,9 +320,11 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
         assert!(dirs.contains(&data_dir.join("oauth")));
         assert!(dirs.contains(&data_dir.join("oauth/proj")));
+        assert!(dirs.contains(&data_dir.join("claude-managed")));
+        assert!(dirs.contains(&data_dir.join("claude-managed/proj")));
 
-        // Expected 15 files: 8 legacy + 6 oauth + 1 mcp-os singleton.
-        assert_eq!(files.len(), 15, "expected 15 files, got: {files:?}");
+        // Expected 16 files: 8 legacy + 6 oauth + 1 mcp-os singleton + managed-settings.json.
+        assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
@@ -330,6 +340,7 @@ mod tests {
         assert!(files.contains(&data_dir.join("oauth/proj/lock.json")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
+        assert!(files.contains(&data_dir.join("claude-managed/proj/managed-settings.json")));
 
         // non-.lock file must NOT be included
         assert!(

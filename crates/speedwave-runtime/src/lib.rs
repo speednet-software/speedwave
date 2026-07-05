@@ -6,6 +6,7 @@ pub mod binary;
 pub mod build;
 pub mod bundle;
 pub mod claude_home;
+pub mod claude_managed;
 pub mod cloudstorage;
 pub mod compose;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod legacy_token_cleanup;
 pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
+pub mod managed_config;
 pub mod mcp_os_process;
 pub mod oauth_persist;
 pub mod oauth_process;
@@ -36,6 +38,7 @@ pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
+pub mod telemetry_env;
 /// Host-side meeting transcription (audio capture, Whisper, model catalogue) —
 /// gated behind the `audio-transcription` feature so the CLI (which never
 /// enables it) stays lean. See `docs/adr/ADR-056-*`.

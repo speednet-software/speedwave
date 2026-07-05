@@ -18,6 +18,7 @@ import { AnthropicModelsService } from '../../services/anthropic-models.service'
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
 import { OauthCompletionWatcher } from './oauth-completion-watcher';
 import type { AuthStatusResponse } from '../../services/project-state.service';
@@ -1500,14 +1501,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return this.findExtraRow(raw, kind)?.id ?? 'local';
   }
 
-  /**
-   * Value of an input/select/textarea change event target — the one typed
-   * narrowing point for template event bindings (no `$any` casts).
-   * @param e - The DOM event from the template.
-   */
-  protected inputValue(e: Event): string {
-    return (e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
-  }
+  /** Value of an input/select/textarea event target, exposed for template bindings. */
+  protected readonly inputValue = eventValue;
 
   /** The active selection Save will persist, derived from the radio state. */
   private buildActive(): LlmActive {

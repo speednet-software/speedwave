@@ -1,7 +1,6 @@
 ---
 name: speedwave-product-showcase
 description: Build a self-contained, dependency-free animated "live product" demo for a landing page — a step carousel that faithfully recreates the real app UI (chat, settings, integrations, logs…) using only HTML + scoped CSS + one inline rAF script. Use when asked to add an animated product walkthrough / hero demo / "show the app in motion" to a marketing site.
-model: opus
 ---
 
 # Animated product showcase (landing-page "live app" demo)

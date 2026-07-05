@@ -1,107 +1,132 @@
 ---
 name: speedwave-code-review
-description: Comprehensive code review using specialized skills
+description: Comprehensive multi-dimensional code review — runs every specialized code-review skill in parallel and aggregates verified results
+argument-hint: [diff-scope]
 disable-model-invocation: true
-model: opus
 ---
 
-# Comprehensive PR Review
+# Comprehensive Code Review
 
-Run a comprehensive pull request review using multiple specialized skills, each focusing on a different aspect of code quality.
+Run a comprehensive review of a changeset using the specialized worker skills below, each focusing on a different dimension of code quality.
+
+## Worker Skills
+
+This list is the single source of truth for what to launch — one review agent per entry, no exceptions:
+
+- code-review-basic
+- code-review-change-impact
+- code-review-comment-analyzer
+- code-review-documentation-checker
+- code-review-duplication-detector
+- code-review-kiss-detector
+- code-review-performance-concurrency
+- code-review-security-checker
+- code-review-silent-failure-hunter
+- code-review-solid-detector
+- code-review-ssot-detector
+- code-review-test-analyzer
+- code-review-type-design-analyzer
+- code-review-yagni-detector
 
 ## Architecture
 
-You (the main agent) directly launch 13 review agents in parallel, wait for all results, then launch 1 aggregator agent to produce a concise summary.
+You (the main agent) launch all review agents in parallel directly, wait for the results, then launch one aggregator agent. Do not delegate the launching to an orchestrator sub-agent: sub-agents are LLMs — they optimize and may skip launching child agents, doing the review themselves instead. Launching every worker from the main context guarantees each skill actually runs.
 
-**Why not an orchestrator agent?** Sub-agents are LLMs — they optimize and may skip launching child agents, doing the review themselves instead. By launching all 13 directly from the main context, you guarantee each skill actually runs.
+Never pass a `model` parameter to any agent launch — every agent inherits the session's model.
 
-## Review Workflow
+## Step 1 — Determine and Materialize the Review Scope
 
-### Step 1 — Determine Review Scope
+Scope argument (empty if none was given): `$ARGUMENTS`
 
-- Check `git status` and `git branch --show-current` to identify changed files
-- Determine the diff command (`DIFF_CMD`), e.g.:
-  - `git diff` (unstaged changes)
-  - `git diff --cached` (staged changes)
+If a scope argument was given, treat it as the scope — a git range, a diff command, or a path to a patch file. Otherwise determine the scope:
+
+- Check `git status --porcelain` and `git branch --show-current`.
+- Choose the diff command, e.g.:
+  - `git diff HEAD` (staged + unstaged — the usual "review my working tree")
+  - `git diff` / `git diff --cached` (unstaged only / staged only)
+  - `git diff <base>...HEAD` (branch review — resolve `<base>` first, e.g. via `git symbolic-ref refs/remotes/origin/HEAD`, or ask the user; do not assume it is named `main`)
   - `git diff HEAD~N..HEAD` (last N commits)
-  - `git diff main...HEAD` (branch vs main)
-- If unclear, ask the user what to review
+- Include untracked files: for each untracked file listed by `git status --porcelain`, run `git add -N <file>` so it appears in the diff (tell the user you did this), or pass the files for full-file review.
+- If unclear, ask the user what to review.
 
-### Step 2 — Launch 13 Review Agents in Parallel
+Materialize the scope once: run the chosen command a single time and write its output to a temporary file outside the repository (e.g. under `/tmp`). Every agent reads this snapshot instead of re-running the diff, so edits made while the review runs cannot skew the results.
 
-In a **single message**, launch exactly 13 Task agents using these parameters for each:
+- **Empty diff:** report that there is nothing to review and stop — do not launch any agents.
+- **Very large diff:** tell the user, and split the review into consecutive runs by directory or subsystem instead of overflowing every agent with one giant snapshot.
+
+## Step 2 — Launch the Review Agents in Parallel
+
+In a single message, launch one Task agent per worker skill listed above:
 
 - `subagent_type: "general-purpose"`
 - `run_in_background: true`
-- `model: "opus"` (each review skill declares `model: opus` and uses ULTRATHINK; do not downgrade)
 - `name: "review-SKILL_NAME"` (for identification)
+- no `model` parameter
 
-Use this prompt template for each (replace `SKILL_NAME` and `DIFF_CMD`):
+Use this prompt template for each (replace `SKILL_NAME` and `DIFF_FILE`):
 
 ```
-Use the Skill tool to invoke 'SKILL_NAME'. Review changes from: DIFF_CMD
+Use the Skill tool to invoke 'SKILL_NAME' and follow that skill exactly.
+Review the changes in the diff file at DIFF_FILE — read that file; do not re-run git diff. Read surrounding code from the working tree as needed for context.
+Your final message must be exactly the skill's report, starting with its '# SKILL_NAME report' heading. If you could not load or apply the skill, reply with 'FAILED: <reason>' instead.
 ```
 
-The 13 skills to launch (ALL in one message, no exceptions):
+## Step 3 — Collect Results and Handle Failures
 
-1. `code-review-basic`
-2. `code-review-documentation-checker`
-3. `code-review-duplication-detector`
-4. `code-review-kiss-detector`
-5. `code-review-yagni-detector`
-6. `code-review-solid-detector`
-7. `code-review-test-analyzer`
-8. `code-review-comment-analyzer`
-9. `code-review-silent-failure-hunter`
-10. `code-review-type-design-analyzer`
-11. `code-review-simplifier`
-12. `code-review-security-checker`
-13. `code-review-ssot-detector`
+Wait for the agents to finish, handling failures instead of stalling:
 
-### Step 3 — Wait for All Results
+- If an agent errors, replies `FAILED`, or returns something that is not a report (empty output, an error trace, a missing report heading), retry it once; if it fails again, record that skill as FAILED and move on.
+- If one agent is still running long after all the others have finished, stop it and record that skill as TIMED OUT — never block the whole review on a single straggler.
+- Never paste invalid output into the aggregation step.
 
-All 13 agents run in background. You will be notified as each completes. Wait until all 13 have finished before proceeding.
+## Step 4 — Aggregate and Verify
 
-### Step 4 — Launch Aggregator Agent
-
-Once all 13 are done, launch 1 final Task agent (`subagent_type: "general-purpose"`, `run_in_background: false`, `model: "opus"`) with this prompt:
+Launch one final Task agent (`subagent_type: "general-purpose"`, `run_in_background: false`, no `model` parameter) with this prompt:
 
 ````
-You are a code review aggregator. Below are 13 review reports from specialized skills. Produce a single summary.
+You are a code review aggregator. Below are review reports from specialized skills, one per skill, each labeled with its skill name. Produce a single summary.
 
 ## Reports
 
-PASTE_ALL_13_RESULTS_HERE
+PASTE_ALL_RESULTS_HERE
+
+## Rules
+
+- Deduplicate: if multiple skills flag the same issue, mention it once with all skill names.
+- Verify before publishing: for every Critical and Important finding, read the referenced file at the referenced line; drop any finding that does not match the actual code.
+- Keep descriptions concise (1-2 sentences each) with `file:line` references.
 
 ## Output Format
 
 ```markdown
-# PR Review Summary
+# Review Summary
 
-## Critical Issues (X found)
+## Critical (X found)
+
 - [skill-name]: Issue description [file:line]
 
-## Important Issues (X found)
+## Important (X found)
+
 - [skill-name]: Issue description [file:line]
 
 ## Suggestions (X found)
+
 - [skill-name]: Suggestion [file:line]
 
-## Skills That Found No Issues
+## Skills With No Findings
+
 - skill-name-1, skill-name-2, ...
+
+## Skills That Did Not Complete
+
+- skill-name: FAILED or TIMED OUT — <reason> (omit this section when every skill completed)
 ```
 
-Rules:
-- Deduplicate: if multiple skills flag the same issue, mention it once with all skill names
-- Categorize by severity: Critical > Important > Suggestion
-- Include file:line references where available
-- Keep descriptions concise (1-2 sentences each)
-- List skills that found no issues at the bottom
-- Return ONLY the markdown summary, nothing else
+Return ONLY the markdown summary, nothing else.
 ````
 
-Replace `PASTE_ALL_13_RESULTS_HERE` with the actual text output from each of the 13 agents, clearly labeled with the skill name.
+Replace `PASTE_ALL_RESULTS_HERE` with the valid reports, each preceded by its skill name. List failed or timed-out skills yourself in the final section — never paste their raw output.
 
-### Step 5 — Display Results
+## Step 5 — Display Results
 
 Show the aggregator's summary directly to the user.
