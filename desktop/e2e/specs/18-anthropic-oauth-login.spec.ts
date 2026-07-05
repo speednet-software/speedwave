@@ -25,7 +25,9 @@ const NO_LLM_PROJECT = 'e2e-second';
  *  (Unix: ~/.local/bin, ignores data_dir; Windows: <data_dir>\bin\…exe). */
 function cliPath(): string {
   if (process.platform === 'win32') {
-    const dataDir = process.env.SPEEDWAVE_DATA_DIR ?? path.join(os.homedir(), '.speedwave');
+    // Empty string falls back too, matching consts::data_dir_from.
+    const envDir = process.env.SPEEDWAVE_DATA_DIR;
+    const dataDir = envDir ? envDir : path.join(os.homedir(), '.speedwave');
     return path.join(dataDir, 'bin', 'speedwave.exe');
   }
   return path.join(os.homedir(), '.local', 'bin', 'speedwave');
