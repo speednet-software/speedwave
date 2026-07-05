@@ -19,6 +19,7 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         crate::consts::CLAUDE_HOME_SUBDIR,
         "secrets",
         "snapshots",
+        "usage",
         crate::consts::OAUTH_SUBDIR,
         // Legacy: retired host_exec state (pre-removal releases) goes with the project.
         crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
@@ -184,6 +185,10 @@ fn add_project_with_validated_dir(
         );
     }
 
+    // Dirs left by a pre-fix removal or crash must not leak into a re-added
+    // project of the same name (stale usage/costs, stale OAuth credentials).
+    cleanup_project_dirs_in(name, data_dir);
+
     // Build new entry
     let entry = config::ProjectUserEntry {
         name: name.to_string(),
@@ -271,8 +276,10 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
 
     user_config.projects.remove(pos);
 
-    config::save_user_config_to(&user_config, &config_path)?;
+    // Cleanup before save: a crash here leaves an entry without dirs (benign,
+    // reconcile-tolerated), never credential dirs without an entry.
     cleanup_project_dirs_in(name, data_dir);
+    config::save_user_config_to(&user_config, &config_path)?;
     Ok(())
 }
 
@@ -516,6 +523,107 @@ mod tests {
         assert!(
             err.contains("already exists"),
             "expected 'already exists' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn add_project_precleans_stale_dirs_from_same_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let project_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let dir = std::fs::canonicalize(&project_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        // Seed stale artifacts left by a pre-fix removal or crash for this name.
+        let usage_file = data_dir
+            .join("usage")
+            .join("stale-project")
+            .join("proxy")
+            .join("usage.jsonl");
+        std::fs::create_dir_all(usage_file.parent().unwrap()).unwrap();
+        std::fs::write(&usage_file, b"{}").unwrap();
+        let claude_home_file = data_dir
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("stale-project")
+            .join("x");
+        std::fs::create_dir_all(claude_home_file.parent().unwrap()).unwrap();
+        std::fs::write(&claude_home_file, b"stale").unwrap();
+
+        add_project_with_data_dir("stale-project", &dir, &data_dir).unwrap();
+
+        assert!(
+            !usage_file.exists(),
+            "stale usage artifact must be pre-cleaned before re-adding the same name"
+        );
+        assert!(
+            !claude_home_file.exists(),
+            "stale claude-home artifact must be pre-cleaned before re-adding the same name"
+        );
+    }
+
+    #[test]
+    fn duplicate_name_add_does_not_delete_existing_project_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let project_dir = tmp.path().join("existing-dir");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
+
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "existing".to_string(),
+                dir: canonical_dir.to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("existing".to_string()),
+            selected_ide: None,
+            ui: None,
+        };
+        save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
+
+        // Seed artifacts belonging to the ALREADY-registered project "existing".
+        let usage_file = data_dir
+            .join("usage")
+            .join("existing")
+            .join("proxy")
+            .join("usage.jsonl");
+        std::fs::create_dir_all(usage_file.parent().unwrap()).unwrap();
+        std::fs::write(&usage_file, b"{}").unwrap();
+        let claude_home_file = data_dir
+            .join(crate::consts::CLAUDE_HOME_SUBDIR)
+            .join("existing")
+            .join("x");
+        std::fs::create_dir_all(claude_home_file.parent().unwrap()).unwrap();
+        std::fs::write(&claude_home_file, b"keep-me").unwrap();
+
+        let other_dir = tmp.path().join("other-dir");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let canonical_other = std::fs::canonicalize(&other_dir).unwrap();
+
+        let result =
+            add_project_with_data_dir("existing", &canonical_other.to_string_lossy(), &data_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already exists"),
+            "expected 'already exists' error, got: {err}"
+        );
+
+        assert!(
+            usage_file.exists(),
+            "duplicate-name add must NOT delete the existing project's usage artifacts"
+        );
+        assert!(
+            claude_home_file.exists(),
+            "duplicate-name add must NOT delete the existing project's claude-home artifacts"
         );
     }
 
@@ -906,6 +1014,46 @@ mod tests {
     }
 
     #[test]
+    fn remove_project_removes_usage_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pd = tmp.path().join("proj");
+        std::fs::create_dir_all(&pd).unwrap();
+        let canonical = std::fs::canonicalize(&pd).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        add_project_with_validated_dir(
+            "first",
+            canonical.clone(),
+            canonical.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        let other_dir = tmp.path().join("other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let canon_other = std::fs::canonicalize(&other_dir).unwrap();
+        add_project_with_validated_dir(
+            "second",
+            canon_other.clone(),
+            canon_other.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        let usage_dir = data_dir.join("usage").join("first").join("proxy");
+        std::fs::create_dir_all(&usage_dir).unwrap();
+        std::fs::write(usage_dir.join("usage.jsonl"), b"{}").unwrap();
+        std::fs::write(usage_dir.join("cost-cache.jsonl"), b"{}").unwrap();
+
+        remove_project_with_data_dir("first", &data_dir).unwrap();
+
+        assert!(
+            !data_dir.join("usage").join("first").exists(),
+            "usage/first must be removed on project removal"
+        );
+    }
+
+    #[test]
     fn remove_project_removes_legacy_host_exec_dir_preserving_siblings() {
         // Cleanup must scope to <project> even for the legacy host-exec tree:
         // another project's leftovers stay behind for the startup sweep.
@@ -1050,6 +1198,98 @@ mod tests {
         assert!(cfg.find_project("first").is_none());
         assert_eq!(cfg.active_project.as_deref(), Some("second"));
         assert!(data_dir.join("compose").join("second").exists());
+    }
+
+    #[test]
+    fn remove_project_cleans_dirs_before_saving_config() {
+        // Structural guard: a crash between the two ops must leave orphaned
+        // config entries (harmless, reconcile-tolerated), never orphaned
+        // credential-bearing dirs with no config entry (invisible, never cleaned).
+        let source = include_str!("project.rs");
+        let fn_start = source
+            .find("fn remove_project_with_data_dir(")
+            .expect("remove_project_with_data_dir must exist in project.rs");
+        let fn_body = &source[fn_start..];
+        let fn_end = fn_body
+            .find("\n}\n")
+            .expect("remove_project_with_data_dir must have a closing brace");
+        let fn_body = &fn_body[..fn_end];
+
+        let cleanup_pos = fn_body
+            .find("cleanup_project_dirs_in(")
+            .expect("cleanup_project_dirs_in call must exist in remove_project_with_data_dir");
+        let save_pos = fn_body
+            .find("save_user_config_to(")
+            .expect("save_user_config_to call must exist in remove_project_with_data_dir");
+        assert!(
+            cleanup_pos < save_pos,
+            "cleanup_project_dirs_in must run BEFORE save_user_config_to in remove_project_with_data_dir"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_project_config_save_failure_still_cleans_dirs_and_keeps_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pd = tmp.path().join("proj");
+        std::fs::create_dir_all(&pd).unwrap();
+        let canonical = std::fs::canonicalize(&pd).unwrap();
+        let other_dir = tmp.path().join("other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let canon_other = std::fs::canonicalize(&other_dir).unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Active-project check requires a different active project so removal
+        // of "victim" is not rejected outright.
+        add_project_with_validated_dir(
+            "victim",
+            canonical.clone(),
+            canonical.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+        add_project_with_validated_dir(
+            "keeper",
+            canon_other.clone(),
+            canon_other.to_string_lossy().to_string(),
+            &data_dir,
+        )
+        .unwrap();
+
+        let tokens_dir = data_dir.join("tokens").join("victim");
+        std::fs::create_dir_all(&tokens_dir).unwrap();
+        std::fs::write(tokens_dir.join("secret"), b"tok").unwrap();
+
+        // Block save_user_config_to's atomic write by making the data_dir read-only.
+        let mut perms = std::fs::metadata(&data_dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&data_dir, perms).unwrap();
+
+        let result = remove_project_with_data_dir("victim", &data_dir);
+
+        // Restore write perms so asserts/reload/tempdir drop can proceed.
+        let mut restore = std::fs::metadata(&data_dir).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&data_dir, restore).unwrap();
+
+        assert!(
+            result.is_err(),
+            "should fail because config write is blocked"
+        );
+
+        assert!(
+            !tokens_dir.exists(),
+            "cleanup must have run before the failed save (crash window converges to benign state)"
+        );
+
+        let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        assert!(
+            cfg.find_project("victim").is_some(),
+            "config entry must still be present since save never completed"
+        );
     }
 
     #[test]

@@ -775,15 +775,17 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| service_id.clone());
-            let mut user_config = config::load_user_config()?;
-            let cfg_entry = user_config
-                .projects
-                .iter_mut()
-                .find(|p| p.name == *project)
-                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
-            integrations.set_plugin_enabled(service_id, true);
-            config::save_user_config(&user_config)?;
+            config::with_config_lock(|| {
+                let mut user_config = config::load_user_config()?;
+                let cfg_entry = user_config
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.name == *project)
+                    .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+                let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
+                integrations.set_plugin_enabled(service_id, true);
+                config::save_user_config(&user_config)
+            })?;
             out!(
                 "Plugin '{}' (service_id: {}) enabled for project '{}'",
                 display_name,
@@ -816,15 +818,17 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| service_id.clone());
-            let mut user_config = config::load_user_config()?;
-            let cfg_entry = user_config
-                .projects
-                .iter_mut()
-                .find(|p| p.name == *project)
-                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-            let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
-            integrations.set_plugin_enabled(service_id, false);
-            config::save_user_config(&user_config)?;
+            config::with_config_lock(|| {
+                let mut user_config = config::load_user_config()?;
+                let cfg_entry = user_config
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.name == *project)
+                    .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+                let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
+                integrations.set_plugin_enabled(service_id, false);
+                config::save_user_config(&user_config)
+            })?;
             out!(
                 "Plugin '{}' (service_id: {}) disabled for project '{}'",
                 display_name,
@@ -2696,5 +2700,40 @@ mod tests {
         let red = redact_err(&err);
         assert!(!red.contains("sk-leak-xyz"), "leaked: {red}");
         assert!(red.contains("REDACTED"), "not redacted: {red}");
+    }
+
+    /// `PluginEnable`/`PluginDisable` must hold `with_config_lock` across their
+    /// load→mutate→save sequence, like `select_anthropic_after_login` does —
+    /// otherwise a concurrent config writer loses the plugin-enabled update.
+    #[test]
+    fn plugin_enable_disable_hold_config_lock_across_save() {
+        let source = include_str!("main.rs");
+        // Full arm header (incl. `} => {`) so this matches only the match arm
+        // in main(), not the CliAction-construction call sites in parse_action.
+        let enable_arm = "CliAction::PluginEnable {\n            service_id,\n            project,\n        } => {";
+        let disable_arm = "CliAction::PluginDisable {\n            service_id,\n            project,\n        } => {";
+        for arm_marker in [enable_arm, disable_arm] {
+            let arm_start = source
+                .find(arm_marker)
+                .unwrap_or_else(|| panic!("{arm_marker} must exist in main.rs"));
+            // Bound the slice to this arm (it ends with exit) so the assertions
+            // can never self-match the test's own string literals below.
+            let rest = &source[arm_start..];
+            let arm_end = rest
+                .find("std::process::exit(0);")
+                .unwrap_or_else(|| panic!("{arm_marker} must end with exit(0)"));
+            let arm = &rest[..arm_end];
+            let lock_pos = arm
+                .find("config::with_config_lock(")
+                .unwrap_or_else(|| panic!("{arm_marker} must take the config lock"));
+            let save_pos = arm
+                .find("config::save_user_config(&user_config)")
+                .unwrap_or_else(|| panic!("{arm_marker} must call save_user_config"));
+            assert!(
+                lock_pos < save_pos,
+                "{arm_marker} must wrap its load→mutate→save in config::with_config_lock \
+                 or a concurrent config writer can lose this update"
+            );
+        }
     }
 }

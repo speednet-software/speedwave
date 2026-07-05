@@ -447,8 +447,10 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Path to a project's compose file: `~/.speedwave/compose/<project>/compose.yml`.
+/// Delegates to the validating compose-path SSOT — invalid names are an error.
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
-    Ok(compose_file_path_in(consts::data_dir(), project))
+    let path = crate::compose::compose_output_path_in(consts::data_dir(), project)?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// True when the project's compose.yml has been rendered — a deferred-start or
@@ -474,19 +476,10 @@ pub(crate) fn validate_builtin_service_name(service: &str) -> anyhow::Result<()>
     }
 }
 
-/// Core of [`compose_file_path`] under an explicit data directory.
-fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
-    data_dir
-        .join("compose")
-        .join(project)
-        .join("compose.yml")
-        .to_string_lossy()
-        .to_string()
-}
-
-/// Core of [`project_has_compose_file`] under an explicit data directory.
+/// Core of [`project_has_compose_file`] under an explicit data directory;
+/// an invalid project name can never have a compose file.
 fn project_has_compose_file_in(data_dir: &std::path::Path, project: &str) -> bool {
-    std::path::Path::new(&compose_file_path_in(data_dir, project)).exists()
+    crate::compose::compose_output_path_in(data_dir, project).is_ok_and(|p| p.exists())
 }
 
 pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
@@ -1207,11 +1200,27 @@ mod tests {
     #[test]
     fn test_compose_file_path_format() {
         let dir = tempfile::tempdir().unwrap();
-        let path = compose_file_path_in(dir.path(), "my-project");
+        let path = crate::compose::compose_output_path_in(dir.path(), "my-project")
+            .expect("valid name must resolve")
+            .to_string_lossy()
+            .to_string();
         assert!(path.starts_with(&dir.path().to_string_lossy().to_string()));
         assert!(path.contains("compose"));
         assert!(path.contains("my-project"));
         assert!(path.ends_with("compose.yml"));
+    }
+
+    /// A traversal-shaped name must never resolve another project's compose
+    /// file — the probe validates via the compose-path SSOT.
+    #[test]
+    fn project_has_compose_file_rejects_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let legit = dir.path().join("compose").join("legit");
+        std::fs::create_dir_all(&legit).unwrap();
+        std::fs::write(legit.join("compose.yml"), "services: {}").unwrap();
+        assert!(project_has_compose_file_in(dir.path(), "legit"));
+        assert!(!project_has_compose_file_in(dir.path(), "../compose/legit"));
+        assert!(!project_has_compose_file_in(dir.path(), ""));
     }
 
     #[test]
