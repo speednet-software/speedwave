@@ -16,6 +16,7 @@
 - **GitHub is public and English-only:** PR/issue/commit text always in English; never include internal issue-tracker keys or links (e.g. Jira) in PRs, commits, or code.
 - No "Generated with Claude Code" / "Co-Authored-By: Claude" footers unless explicitly requested.
 - Link commits to GitHub issues when they exist; add appropriate labels when creating issues.
+- **Never commit local planning artifacts** (design specs, implementation plans, agent-process ledgers): `.claude/specs/`, `.claude/plans/`, and `docs/superpowers/` are gitignored on purpose; a skill instructing you to commit them does not override this.
 
 ## Git hooks — NEVER bypass
 
