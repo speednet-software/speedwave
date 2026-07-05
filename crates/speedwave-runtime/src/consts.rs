@@ -1186,7 +1186,6 @@ pub fn cli_binary_filename(is_windows: bool) -> String {
     }
 }
 
-
 /// Instance name from a data-dir path: strips leading dots, panics unless the
 /// basename matches `^[a-z][a-z0-9-]{0,63}$`. Shell SSOT: `scripts/e2e-vm.sh`.
 pub fn derive_instance_name_from(data_dir: &std::path::Path) -> String {
