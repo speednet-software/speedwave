@@ -1023,6 +1023,10 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "PORT",
     "SPW_CREDENTIALS_DIGEST",
     "SPW_PLUGIN_DIGESTS",
+    // Bundled-plugin install list/marketplace — a repo must not redirect which
+    // plugins the container installs (defaults::BUNDLED_PLUGINS is the SSOT).
+    "SPEEDWAVE_BUNDLED_PLUGINS",
+    "SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE",
     // Dynamic linker hijacks (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -1269,7 +1273,7 @@ mod tests {
     fn test_reserved_env_keys_complete_and_uppercase() {
         // Bumping this count is deliberate — signals a new hijack vector (grow
         // the plugin.rs test too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 18);
+        assert_eq!(RESERVED_ENV_KEYS.len(), 20);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,

@@ -205,6 +205,30 @@ if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
+# Install bundled official Anthropic plugins (from defaults::BUNDLED_PLUGINS).
+# Only installs plugins not already present, so a user's `/plugin disable` is never
+# re-enabled by a restart. Non-fatal + bounded so a slow/failed install never blocks startup.
+if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
+    _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
+    if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
+        echo "WARNING: invalid bundled-plugin marketplace, skipping install: ${_mp}" >&2
+        SPEEDWAVE_BUNDLED_PLUGINS=""
+    fi
+    _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
+    for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
+        if ! echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
+            echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
+            continue
+        fi
+        if echo "${_installed}" | grep -qF "\"${_plugin}@${_mp}\""; then
+            continue
+        fi
+        _err="$(timeout 60 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)" \
+            || echo "WARNING: failed to install bundled plugin ${_plugin}@${_mp}: ${_err} (continuing)" >&2
+    done
+    unset _mp _plugin _installed _err
+fi
+
 # Symlink plugin resources — same managed-link tracking as core/integration entries
 # so toggling a plugin off cleans up its links on the next restart.
 if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
