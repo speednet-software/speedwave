@@ -40,7 +40,7 @@ The privacy gates that send conversation/code content (`OTEL_LOG_USER_PROMPTS`, 
 ## Consequences
 
 - **Enforcement is regenerate-on-render, not a tamper-proof store.** The host `managed-settings.json` under `<data_dir>/claude-managed/` is user-writable between renders; every container start re-renders and overwrites it from the current policy, and `fs_security` enforces `0o700`/`0o600` on it. Integrity comes from re-rendering on every start path, not from the file being unmodifiable on disk.
-- **Org-policy interaction is a known limitation.** An in-container `managed-settings.json` can shadow an end-user organization's Claude Team/Enterprise server-managed policy only if the container performs the first-party policy fetch; today the per-project proxy base URL skips that fetch. This ADR's telemetry `env` block does not conflict with plugin policy; a sibling effort that also writes `/etc/claude-code/managed-settings.json` for plugin policy must merge into a single writer.
+- **Org-policy interaction is a known limitation.** A Claude Team/Enterprise org telemetry policy set in the Claude console (server-managed settings) never reaches Claude Code inside Speedwave: server-managed settings are bypassed for any non-default `ANTHROPIC_BASE_URL`, which the per-project proxy always sets.[^7] Speedwave delivers policy through the endpoint-managed channel (`/etc/claude-code/managed-settings.json`) generated from `managed-config.json` instead; admins must be told to use that channel, not the Claude console. This ADR's telemetry `env` block does not conflict with plugin policy; a sibling effort that also writes `/etc/claude-code/managed-settings.json` for plugin policy must merge into a single writer.
 - **DISABLE_TELEMETRY is untouched.** Anthropic's own Statsig-backed operational telemetry is independent of OTLP and out of scope; disabling it breaks feature flags and killswitches, so this feature never sets it.[^6]
 
 ## Footnotes
@@ -56,3 +56,5 @@ The privacy gates that send conversation/code content (`OTEL_LOG_USER_PROMPTS`, 
 [^5]: https://code.claude.com/docs/en/data-usage.md — Claude Code data usage: prompt/response/tool/API-body content is included in telemetry only when the corresponding `OTEL_LOG_*` gate is explicitly enabled; defaults are off.
 
 [^6]: https://code.claude.com/docs/en/data-usage.md — Claude Code data usage: `DISABLE_TELEMETRY` controls Anthropic's own operational telemetry (Statsig), independent of the OTLP exporter; it also gates feature-flag/killswitch evaluation.
+
+[^7]: https://code.claude.com/docs/en/server-managed-settings — Claude Code server-managed settings: "Server-managed settings are bypassed" when the user configures a third-party model provider, including "a non-default `ANTHROPIC_BASE_URL`"; endpoint-managed settings (a `managed-settings.json` file) are the MDM alternative.
