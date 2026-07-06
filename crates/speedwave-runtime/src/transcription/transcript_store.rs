@@ -68,6 +68,13 @@ pub enum TranscriptEvent {
         /// Monotonic seq.
         seq: u64,
     },
+    /// A non-fatal capture-health warning (silent tap, one side stalled).
+    CaptureWarning {
+        /// Monotonic seq.
+        seq: u64,
+        /// What degraded.
+        warning: crate::transcription::CaptureWarning,
+    },
 }
 
 impl TranscriptEvent {
@@ -79,7 +86,8 @@ impl TranscriptEvent {
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
-            | TranscriptEvent::Finished { seq, .. } => *seq,
+            | TranscriptEvent::Finished { seq, .. }
+            | TranscriptEvent::CaptureWarning { seq, .. } => *seq,
         }
     }
 }
@@ -340,6 +348,20 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
+    /// Emits a capture-health warning event (session state is unchanged).
+    pub fn capture_warning(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarning { seq, warning }
+        })?;
+        Ok(seq_out)
+    }
+
     /// Finalize-progress signal.
     pub fn finalize_progress(&self, id: Uuid, progress: f32) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -427,6 +449,32 @@ mod tests {
             text: text.to_string(),
             words: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn capture_warning_bumps_seq_broadcasts_and_persists_last_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let seq = store
+            .capture_warning(id, crate::transcription::CaptureWarning::MicrophoneStalled)
+            .unwrap();
+        assert_eq!(seq, 1);
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::CaptureWarning { seq: s, warning } => {
+                assert_eq!(s, seq);
+                assert_eq!(
+                    warning,
+                    crate::transcription::CaptureWarning::MicrophoneStalled
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // Session state is untouched apart from the persisted seq.
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.last_seq, seq);
+        assert!(snap.live_segments.is_empty());
     }
 
     #[tokio::test]
@@ -676,6 +724,10 @@ mod tests {
                 segments: vec![seg(0.0, 1.0, "f")],
             },
             TranscriptEvent::Finished { seq: 9 },
+            TranscriptEvent::CaptureWarning {
+                seq: 11,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
@@ -684,6 +736,7 @@ mod tests {
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
+                TranscriptEvent::CaptureWarning { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }

@@ -70,12 +70,16 @@ export interface TranscriptSession {
   last_seq: number;
 }
 
+/** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
+export type CaptureWarning = 'system_audio_silent' | 'microphone_stalled' | 'system_audio_stalled';
+
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
 export type TranscriptEvent =
   | { kind: 'segment_appended'; seq: number; segment: Segment }
   | { kind: 'segments_replaced'; seq: number; from_index: number; segments: Segment[] }
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
   | { kind: 'finalize_progress'; seq: number; progress: number }
+  | { kind: 'capture_warning'; seq: number; warning: CaptureWarning }
   | {
       kind: 'final_segments_ready';
       seq: number;

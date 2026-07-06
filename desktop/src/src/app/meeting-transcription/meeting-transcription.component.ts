@@ -85,6 +85,25 @@ import { SessionListComponent } from './session-list/session-list.component';
             }
           </div>
         }
+        @if (captureWarningText(); as warning) {
+          <div
+            class="mx-6 mt-3 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
+            role="alert"
+            data-testid="capture-warning"
+          >
+            {{ warning }}
+            @if (captureWarning() === 'system_audio_silent') {
+              <button
+                type="button"
+                class="mono ml-2 underline"
+                data-testid="open-audio-settings"
+                (click)="openMicrophoneSettings()"
+              >
+                Open Privacy settings →
+              </button>
+            }
+          </div>
+        }
         <div class="flex flex-1 gap-4 overflow-hidden p-6">
           <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
@@ -125,6 +144,21 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   readonly showOpenSettingsLink = computed(() => {
     const e = this.error().toLowerCase();
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
+  });
+  /** Capture-health warning for the active session (from the live event stream). */
+  readonly captureWarning = computed(() => this.transcription.captureWarning());
+  /** Banner copy for the active capture warning. */
+  readonly captureWarningText = computed(() => {
+    switch (this.captureWarning()) {
+      case 'system_audio_silent':
+        return 'No system audio captured so far — the meeting voice may be missing. Check the System Audio Recording permission.';
+      case 'microphone_stalled':
+        return 'The microphone stopped delivering audio — recording continues with system audio only.';
+      case 'system_audio_stalled':
+        return 'System audio stopped delivering — recording continues with the microphone only.';
+      default:
+        return null;
+    }
   });
 
   /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */

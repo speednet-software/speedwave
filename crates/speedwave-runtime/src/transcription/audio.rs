@@ -114,6 +114,19 @@ pub enum CaptureError {
     Io(#[from] std::io::Error),
 }
 
+/// Non-fatal capture-health warnings a backend surfaces to the UI (ADR-056:
+/// a consent-broken tap delivers silence, not an error — detect and say so).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWarning {
+    /// The system-audio side has produced only digital silence since start.
+    SystemAudioSilent,
+    /// The mic stopped delivering; recording continues with system audio only.
+    MicrophoneStalled,
+    /// System audio stopped delivering; recording continues with the mic only.
+    SystemAudioStalled,
+}
+
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
 /// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
 /// for a live backend it doesn't normally end until `stop()` — represented by
@@ -123,6 +136,47 @@ pub trait AudioStream: Send {
     /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
     /// capture broke (the driver flips the session to `Failed`).
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError>;
+
+    /// Drains capture-health warnings raised since the last call (default: none).
+    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
+        Vec::new()
+    }
+}
+
+/// Flags a system-audio stream that has been pure digital silence since start
+/// (the signature of a consent-broken CoreAudio tap or a wrong loopback device).
+#[derive(Debug, Default)]
+pub struct ZeroStreakDetector {
+    samples_seen: u64,
+    nonzero_seen: bool,
+    reported: bool,
+}
+
+/// Silence-warning threshold: this much all-zero audio from the start.
+pub(crate) const SILENT_AFTER_SAMPLES: u64 = SAMPLE_RATE_HZ as u64 * 15;
+
+impl ZeroStreakDetector {
+    /// Feeds captured samples; returns the one-shot warning when the stream
+    /// crosses [`SILENT_AFTER_SAMPLES`] without a single non-zero sample.
+    pub fn feed(&mut self, samples: &[f32]) -> Option<CaptureWarning> {
+        if self.nonzero_seen || self.reported {
+            return None;
+        }
+        if samples.iter().any(|&s| s != 0.0) {
+            self.nonzero_seen = true;
+            return None;
+        }
+        self.samples_seen += samples.len() as u64;
+        if self.samples_seen >= SILENT_AFTER_SAMPLES {
+            self.reported = true;
+            log::warn!(
+                target: "transcription::capture",
+                "system audio has been pure silence since capture start — likely a missing/broken System Audio Recording permission"
+            );
+            return Some(CaptureWarning::SystemAudioSilent);
+        }
+        None
+    }
 }
 
 /// A host audio-capture backend. Resolved per-OS at runtime (the same pattern
@@ -347,6 +401,47 @@ fn resample_linear(src: &[f32], from: u32, to: u32) -> Vec<f32> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_warning_variants_match_ts_union() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        for (variant, json) in [
+            (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
+            (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
+            (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&variant).unwrap(),
+                format!("\"{json}\"")
+            );
+            assert!(
+                src.contains(json),
+                "models/transcript.ts must carry '{json}'"
+            );
+        }
+        assert!(
+            src.contains("kind: 'capture_warning'"),
+            "TS TranscriptEvent union must carry the capture_warning kind"
+        );
+    }
+
+    #[test]
+    fn zero_streak_detector_fires_once_only_for_pure_silence() {
+        let mut z = ZeroStreakDetector::default();
+        let five_secs = vec![0.0f32; SAMPLE_RATE_HZ as usize * 5];
+        assert_eq!(z.feed(&five_secs), None);
+        assert_eq!(z.feed(&five_secs), None);
+        assert_eq!(z.feed(&five_secs), Some(CaptureWarning::SystemAudioSilent));
+        assert_eq!(z.feed(&five_secs), None); // one-shot
+                                              // Any non-zero sample disarms it for good.
+        let mut z2 = ZeroStreakDetector::default();
+        assert_eq!(z2.feed(&[0.0, 0.001]), None);
+        assert_eq!(
+            z2.feed(&vec![0.0f32; SAMPLE_RATE_HZ as usize * 20]),
+            None,
+            "signal was seen — never warn"
+        );
+    }
 
     /// Writes a 16-bit-int WAV to a temp dir from mono samples at `rate`, with
     /// `channels` (the mono sample is duplicated across channels). Returns the

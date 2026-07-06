@@ -182,6 +182,9 @@ impl TranscriptDriver {
                 Ok(None) => return Ok(()), // stream ended
                 Err(e) => return Err(DriverError::Capture(e.to_string())),
             };
+            for w in self.audio.take_warnings() {
+                let _ = self.store.capture_warning(self.id, w);
+            }
             wav.write(&chunk.samples)?;
             self.pcm.extend_from_slice(&chunk.samples);
 
@@ -663,6 +666,71 @@ mod tests {
             "got {:?}",
             snap.status
         );
+    }
+
+    /// An `AudioStream` emitting `chunks_left` short chunks and one warning.
+    struct WarningStream {
+        chunks_left: usize,
+        warned: bool,
+    }
+    impl AudioStream for WarningStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if self.chunks_left == 0 {
+                return Ok(None);
+            }
+            self.chunks_left -= 1;
+            Ok(Some(crate::transcription::audio::AudioChunk {
+                samples: vec![0.0; 1600],
+                offset: Duration::ZERO,
+            }))
+        }
+
+        fn take_warnings(&mut self) -> Vec<crate::transcription::CaptureWarning> {
+            if self.warned {
+                return Vec::new();
+            }
+            self.warned = true;
+            vec![crate::transcription::CaptureWarning::SystemAudioSilent]
+        }
+    }
+
+    #[test]
+    fn capture_warnings_are_forwarded_as_store_events() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(WarningStream {
+                chunks_left: 2,
+                warned: false,
+            }),
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let mut rx = sub.events;
+        let mut saw = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(
+                ev,
+                crate::transcription::TranscriptEvent::CaptureWarning {
+                    warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+                    ..
+                }
+            ) {
+                saw = true;
+            }
+        }
+        assert!(saw, "the warning should reach store subscribers");
     }
 
     #[test]

@@ -5,6 +5,7 @@ import type {
   AudioSource,
   CapabilitiesAck,
   AudioSourceInfo,
+  CaptureWarning,
   DownloadProgress,
   Language,
   ModelsAck,
@@ -39,9 +40,13 @@ export class TranscriptionService {
   private readonly downloadingModelKeySignal = signal<string | null>(null);
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
+  private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
+
+  /** Latest capture-health warning for the active session (null = none). */
+  readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
 
   /**
    * Download-in-flight key — service-level so it survives component remounts.
@@ -228,6 +233,7 @@ export class TranscriptionService {
    */
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
+    this.captureWarningSignal.set(null); // warnings are per-session
     this.activeSignal.set(snapshot);
   }
 
@@ -267,6 +273,9 @@ export class TranscriptionService {
         break;
       case 'finished':
         next.status = { state: 'done' };
+        break;
+      case 'capture_warning':
+        this.captureWarningSignal.set(ev.warning);
         break;
     }
     this.lastSeq = ev.seq;

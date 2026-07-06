@@ -231,6 +231,41 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('capture warnings', () => {
+    it('capture_warning events set the service signal', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      expect(svc.captureWarning()).toBeNull();
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('system_audio_silent');
+    });
+
+    it('a new session snapshot clears the previous warning', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'microphone_stalled',
+      });
+      expect(svc.captureWarning()).toBe('microphone_stalled');
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      expect(svc.captureWarning()).toBeNull();
+    });
+
+    it('ignores a stale capture_warning (seq below the snapshot)', async () => {
+      await subscribeWith(snapshot({ last_seq: 5 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 3,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBeNull();
+    });
+  });
+
   describe('model download tracking', () => {
     it('downloadModel tracks the key + progress, then clears on completion', async () => {
       let finish!: () => void;

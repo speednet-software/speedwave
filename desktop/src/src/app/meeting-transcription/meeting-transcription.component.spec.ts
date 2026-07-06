@@ -4,7 +4,7 @@ import { provideRouter } from '@angular/router';
 import { signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
-import type { TranscriptSession } from '../models/transcript';
+import type { CaptureWarning, TranscriptSession } from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
   let component: MeetingTranscriptionComponent;
@@ -21,8 +21,10 @@ describe('MeetingTranscriptionComponent', () => {
     list: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
+    captureWarning: typeof captureWarningSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
+  const captureWarningSig = signal<CaptureWarning | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -39,6 +41,7 @@ describe('MeetingTranscriptionComponent', () => {
 
   beforeEach(async () => {
     activeSig.set(null);
+    captureWarningSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
@@ -58,6 +61,7 @@ describe('MeetingTranscriptionComponent', () => {
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
+      captureWarning: captureWarningSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -158,5 +162,27 @@ describe('MeetingTranscriptionComponent', () => {
   it('detaches the live stream on destroy', async () => {
     await component.ngOnDestroy();
     expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('renders no capture-warning banner without a warning', () => {
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="capture-warning"]')).toBeNull();
+  });
+
+  it('renders the silent-system-audio warning with a settings link', () => {
+    captureWarningSig.set('system_audio_silent');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner).not.toBeNull();
+    expect(banner.textContent).toContain('No system audio captured');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).not.toBeNull();
+  });
+
+  it('renders the stalled-microphone warning without a settings link', () => {
+    captureWarningSig.set('microphone_stalled');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('microphone stopped');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
   });
 });
