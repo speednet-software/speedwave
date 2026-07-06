@@ -911,6 +911,7 @@ impl SecurityCheck {
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
+                expected_workspace_mode: "rw",
                 extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
@@ -1082,6 +1083,7 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "sharepoint",
+            "rw",
             VolumeCheckRules::SHAREPOINT,
         )
     }
@@ -1096,16 +1098,18 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "slack",
+            "rw",
             VolumeCheckRules::SLACK,
         )
     }
 
     /// Shared check for built-in workspace workers (ADR-060): /tokens:ro,
-    /// /workspace:rw, per-service oauth bearer allowed, nothing else.
+    /// /workspace at the given mode, per-service oauth bearer allowed, nothing else.
     fn check_builtin_workspace_worker_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
         service_id: &str,
+        expected_workspace_mode: &str,
         rules: VolumeCheckRules,
     ) -> Vec<SecurityViolation> {
         let services = match get_services(doc) {
@@ -1125,6 +1129,7 @@ impl SecurityCheck {
             expected_tokens_path: format!("{}/{service_id}", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
             expected_token_mode: "ro",
+            expected_workspace_mode,
             extra_allowed_ro_targets: &extra_allowed,
             rules,
         };
@@ -1308,6 +1313,7 @@ struct VolumeCheckRules {
     workspace_path_mismatch: SecurityRule,
     workspace_mount_mode: SecurityRule,
     workspace_mount_mode_msg: &'static str,
+    workspace_mount_mode_rem: &'static str,
     no_extra_volumes: SecurityRule,
     no_extra_volumes_msg_prefix: &'static str,
     no_extra_volumes_rem: &'static str,
@@ -1333,6 +1339,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::PluginWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::PluginWorkspaceMountMode,
         workspace_mount_mode_msg: "Workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::PluginNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Plugin service has unauthorized volume mount:",
         no_extra_volumes_rem: "Plugin services may only mount /tokens and /workspace.",
@@ -1360,6 +1367,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
         workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the SharePoint workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
         no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -1387,6 +1395,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::SlackWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SlackWorkspaceMountMode,
         workspace_mount_mode_msg: "Slack workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the Slack workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SlackNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Slack service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -1407,6 +1416,8 @@ struct VolumeCheckParams<'a> {
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
+    /// Expected workspace mount mode: "ro" or "rw"
+    expected_workspace_mode: &'a str,
     /// Additional read-only mount targets permitted on this service (ADR-060 OAuth
     /// bearer). Each entry is matched as an exact `target`; the mount must be `:ro`.
     extra_allowed_ro_targets: &'a [String],
@@ -1476,12 +1487,12 @@ fn validate_service_volume_mounts(
                         remediation: "Workspace mount must use the project directory.",
                     });
                 }
-                if mode.as_deref() != Some("rw") {
+                if mode.as_deref() != Some(params.expected_workspace_mode) {
                     violations.push(SecurityViolation {
                         container: params.container_name.to_string(),
                         rule: params.rules.workspace_mount_mode,
                         message: params.rules.workspace_mount_mode_msg.to_string(),
-                        remediation: "Change the workspace volume mount to :rw.",
+                        remediation: params.rules.workspace_mount_mode_rem,
                     });
                 }
             } else if let Some(extra) = params
