@@ -319,4 +319,24 @@ describe('TelemetrySectionComponent', () => {
     await component.save();
     expect(component.saved()).toBe(true);
   });
+
+  it('save() shows no false success when the write succeeds but the post-save refresh fails', async () => {
+    let allowRead = true;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') {
+        if (!allowRead) throw new Error('read failed');
+        return baseResponse();
+      }
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    allowRead = false; // update succeeds, the refresh read that follows fails
+    await component.save();
+    expect(spy).not.toHaveBeenCalled();
+    expect(component.saved()).toBe(false);
+    expect(component.error()).toBe('read failed');
+  });
 });

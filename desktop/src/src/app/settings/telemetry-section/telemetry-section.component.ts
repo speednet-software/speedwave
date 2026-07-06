@@ -610,14 +610,18 @@ export class TelemetrySectionComponent implements OnInit {
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
       await this.refresh();
-      // OTEL_* env is baked into the claude container at create time, so a saved
-      // change only takes effect after a restart (same as an LLM claude-env change).
-      this.projectState.requestRestart();
-      this.saved.set(true);
-      setTimeout(() => {
-        this.saved.set(false);
-        this.cdr.markForCheck();
-      }, 2000);
+      // refresh() swallows its own errors, so gate success feedback on error()
+      // being clear — never show "Saved" next to an error banner.
+      if (!this.error()) {
+        // OTEL_* env is baked into the claude container at create time, so a saved
+        // change only takes effect after a restart (as with an LLM claude-env change).
+        this.projectState.requestRestart();
+        this.saved.set(true);
+        setTimeout(() => {
+          this.saved.set(false);
+          this.cdr.markForCheck();
+        }, 2000);
+      }
     } catch (e: unknown) {
       this.emitError(e);
     }
