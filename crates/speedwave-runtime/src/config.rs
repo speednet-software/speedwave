@@ -1000,6 +1000,15 @@ pub fn resolve_telemetry(
     })
 }
 
+/// Global boot gate: resolves the telemetry policy once so every MDM error class
+/// fails closed at startup. A malformed user config degrades to defaults (ADR-076).
+pub fn check_telemetry_policy_at_boot() -> anyhow::Result<()> {
+    let user = load_user_config().unwrap_or_default();
+    let managed = crate::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
+    resolve_telemetry(user.telemetry.as_ref(), managed.as_ref())?;
+    Ok(())
+}
+
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {

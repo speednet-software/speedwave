@@ -604,12 +604,12 @@ fn start_oauth_watchdog(oauth_arc: SharedOauth) {
 
 /// Shows the audit-failure dialog and terminates the process. Returns
 /// only via `process::exit`. Caller has already logged the body.
-fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
+fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, title: &str, body: String) -> ! {
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     let _ = app
         .dialog()
         .message(body)
-        .title("Plugin verification failed")
+        .title(title)
         .kind(MessageDialogKind::Error)
         .blocking_show();
     std::process::exit(1);
@@ -847,7 +847,18 @@ fn main() {
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
-                show_audit_failure_dialog_and_exit(app.handle(), body);
+                show_audit_failure_dialog_and_exit(app.handle(), "Plugin verification failed", body);
+            }
+
+            // Fail-closed on an invalid MDM telemetry policy: an org policy must
+            // never silently vanish on an admin typo (resolves the full policy).
+            if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
+                let body = format!(
+                    "Speedwave could not apply the organization telemetry policy.\n\n{e}\n\n\
+                     Contact your administrator to correct the managed configuration."
+                );
+                log::error!("telemetry policy check failed: {}", e);
+                show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
             // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` (pruned on rotation).

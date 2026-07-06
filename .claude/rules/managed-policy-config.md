@@ -15,10 +15,12 @@ Path literals (`Speedwave`, `managed-config.json`) are consts in `consts.rs` (`M
 
 There is no separate `locked` flag. Any field the MDM file sets is authoritative and the user cannot override it; to leave a field user-editable, the MDM omits it. This is because the merge always gives MDM precedence — a `locked:false` "editable default" would let the UI show an edit the runtime ignores. The merge order for a lockable value is: compiled default → user config → MDM (highest). Only MDM-set keys are re-forced over the user layer.
 
-## Enforcement is two layers, one of them load-bearing
+## Enforcement is two layers (one load-bearing), gated by a boot check
 
 1. **Native Claude Code `managed-settings.json` (the hard control).** When MDM locks anything, generate `/etc/claude-code/managed-settings.json` (host source under `<data_dir>/claude-managed/<project>/`, mounted `:ro`). Claude Code reads it at the highest precedence — above process env AND user `settings.json` — in every version. Because the container is `read_only` + `no-new-privileges` + `cap_drop: ALL` running as UID 1000, a `:ro` mount of a host-owned file cannot be edited, remounted, or out-precedenced from inside. This is the boundary. A `SecurityCheck` rule (`ManagedSettingsMount`) enforces `:ro`, the exact target path, and the exact host source — a `:rw` mount or a source outside `claude-managed/` hard-fails at start.
 2. **The process-env layer is defense-in-depth only.** MDM-locked keys are re-forced after the user merge layer (stripped from the user layer, then re-inserted) so `claude.env` cannot weaken them, and the master switch is a locked key whenever MDM sets the enable flag. Do NOT rely on process-env-beats-`settings.json`: that precedence is version-dependent in Claude Code and the in-container `~/.claude/settings.json` is a user-writable host mount.
+
+An **invalid policy is caught once, at boot.** Desktop and CLI call `config::check_telemetry_policy_at_boot()` at startup, which resolves the full global policy (`load_user_config` tolerated with defaults, `load_managed_config` + `resolve_telemetry` fatal). Any error class hard-stops the process the same way a bad plugin signature does (native `blocking_show` dialog "Organization policy error" + exit on Desktop; stderr + non-zero exit on CLI). Because the policy is global, this is the single detection point: the renderer never surfaces a telemetry-policy error (an unresolvable policy resolves to `disabled()`, no mount). Do NOT add a second in-app error surface for MDM policy.
 
 ## Non-negotiables when extending this
 
