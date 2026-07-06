@@ -3,6 +3,7 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
@@ -143,9 +144,16 @@ import type {
                 <!-- Protocol + exporters -->
                 <div>
                   <div
-                    class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Transport &amp; signals
+                    @if (transportManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-transport-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </div>
                   <div class="flex flex-wrap items-center gap-4 text-[11px] text-[var(--ink)]">
                     <label class="mono flex items-center gap-1.5">
@@ -222,6 +230,13 @@ import type {
                     class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Advanced (resource attributes, intervals)
+                    @if (advancedManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-advanced-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </summary>
                   <div class="mt-2 space-y-3">
                     <div>
@@ -314,6 +329,13 @@ import type {
                     class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Privacy (advanced)
+                    @if (privacyManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-privacy-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </summary>
                   <p
                     class="mt-2 text-[11px] leading-relaxed text-[var(--red)]"
@@ -410,6 +432,33 @@ export class TelemetrySectionComponent implements OnInit {
   readonly error = signal('');
   /** Save-specific error, shown by the Save button (not the top load banner). */
   readonly saveError = signal('');
+
+  // Section-level managed indicators: true when any field in the section is
+  // MDM-locked, so the header shows 🔒 even for fields without a per-field badge.
+  readonly transportManaged = computed(() => {
+    const l = this.config()?.locks;
+    return !!l && (l.protocol || l.export_metrics || l.export_logs);
+  });
+  readonly advancedManaged = computed(() => {
+    const l = this.config()?.locks;
+    return (
+      !!l &&
+      (l.resource_attributes ||
+        l.include_account_uuid ||
+        l.metric_export_interval_ms ||
+        l.logs_export_interval_ms)
+    );
+  });
+  readonly privacyManaged = computed(() => {
+    const l = this.config()?.locks;
+    return (
+      !!l &&
+      (l.log_user_prompts ||
+        l.log_assistant_responses ||
+        l.log_tool_details ||
+        l.log_raw_api_bodies)
+    );
+  });
   readonly saving = signal(false);
   /** Transient success flag; true for ~2s after a save persists. */
   readonly saved = signal(false);

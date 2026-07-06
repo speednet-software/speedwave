@@ -116,6 +116,62 @@ describe('TelemetrySectionComponent', () => {
     ).not.toBeNull();
   });
 
+  it('shows a managed indicator at a section header when any field in it is MDM-locked', async () => {
+    setup(
+      baseResponse({
+        locks: { ...baseResponse().locks, protocol: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    // protocol lives in "Transport & signals" — its header must show the indicator.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).not.toBeNull();
+    // Other section headers stay clean.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-advanced-managed"]')
+    ).toBeNull();
+  });
+
+  it('shows no section managed indicators when nothing is locked', async () => {
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-advanced-managed"]')
+    ).toBeNull();
+  });
+
+  it('flags the Privacy header when a privacy gate is MDM-locked', async () => {
+    setup(
+      baseResponse({
+        locks: { ...baseResponse().locks, log_user_prompts: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).toBeNull();
+  });
+
   it('renders the enable control as a toggle (like integrations), not a bare checkbox', async () => {
     await create();
     await component.ngOnInit();
