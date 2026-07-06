@@ -57,4 +57,4 @@ The privacy gates that send conversation/code content (`OTEL_LOG_USER_PROMPTS`, 
 
 [^6]: https://code.claude.com/docs/en/data-usage.md — Claude Code data usage: `DISABLE_TELEMETRY` controls Anthropic's own operational telemetry (Statsig), independent of the OTLP exporter; it also gates feature-flag/killswitch evaluation.
 
-[^7]: https://code.claude.com/docs/en/server-managed-settings — Claude Code server-managed settings: "Server-managed settings are bypassed" when the user configures a third-party model provider, including "a non-default `ANTHROPIC_BASE_URL`"; endpoint-managed settings (a `managed-settings.json` file) are the MDM alternative.
+[^7]: https://code.claude.com/docs/en/server-managed-settings.md — Claude Code server-managed settings: "Server-managed settings are bypassed" when the user configures a third-party model provider, including "a non-default `ANTHROPIC_BASE_URL`"; endpoint-managed settings (a `managed-settings.json` file) are the MDM alternative.
