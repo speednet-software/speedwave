@@ -445,6 +445,7 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
+            Self::check_builtin_atlassian_volumes(&doc, expected_paths),
             // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
             // MDM telemetry managed-settings mount profile
@@ -1148,6 +1149,22 @@ impl SecurityCheck {
         )
     }
 
+    /// Validates volumes for built-in mcp-atlassian service (not a plugin).
+    /// Unlike SharePoint/Slack, the workspace mount is :ro — addAttachment only
+    /// reads a file from the workspace to attach it to a Jira issue, never writes.
+    fn check_builtin_atlassian_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        Self::check_builtin_workspace_worker_volumes(
+            doc,
+            expected_paths,
+            "atlassian",
+            "ro",
+            VolumeCheckRules::ATLASSIAN,
+        )
+    }
+
     /// Shared check for built-in workspace workers (ADR-060): /tokens:ro,
     /// /workspace at the given mode, per-service oauth bearer allowed, nothing else.
     fn check_builtin_workspace_worker_volumes(
@@ -1451,6 +1468,36 @@ impl VolumeCheckRules {
         missing_workspace: SecurityRule::SlackMissingWorkspaceMount,
         missing_workspace_msg: "Slack service is missing required /workspace mount",
         missing_workspace_rem: "Slack must mount /workspace:rw (ADR-071 file downloads).",
+    };
+
+    const ATLASSIAN: Self = Self {
+        volume_long_form: SecurityRule::AtlassianVolumeLongForm,
+        volume_long_form_msg: "Atlassian volume uses long-form YAML mapping",
+        volume_long_form_rem: "Use short-form volume strings.",
+        token_path_mismatch: SecurityRule::AtlassianTokenPathMismatch,
+        token_path_mismatch_rem:
+            "Atlassian token mount must use the project-specific tokens directory.",
+        // `/tokens:ro` is the universal rule — reuse the generic mode variant
+        // (same convention as SHAREPOINT/SLACK above).
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "Atlassian token mount must be :ro",
+        token_mount_mode_rem:
+            "Atlassian uses a static API token; /tokens must be :ro like every other worker.",
+        workspace_path_mismatch: SecurityRule::AtlassianWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::AtlassianWorkspaceMountMode,
+        workspace_mount_mode_msg: "Atlassian workspace mount must be :ro",
+        workspace_mount_mode_rem: "addAttachment only reads files from the workspace; \
+             change the workspace volume mount to :ro.",
+        no_extra_volumes: SecurityRule::AtlassianNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "Atlassian service has unauthorized volume mount:",
+        no_extra_volumes_rem:
+            "Atlassian may mount /tokens, /workspace, and the per-service oauth bearer.",
+        missing_tokens: SecurityRule::AtlassianMissingTokensMount,
+        missing_tokens_msg: "Atlassian service is missing required /tokens mount",
+        missing_tokens_rem: "Atlassian must mount /tokens:ro.",
+        missing_workspace: SecurityRule::AtlassianMissingWorkspaceMount,
+        missing_workspace_msg: "Atlassian service is missing required /workspace mount",
+        missing_workspace_rem: "Atlassian must mount /workspace:ro (needed for addAttachment).",
     };
 }
 
