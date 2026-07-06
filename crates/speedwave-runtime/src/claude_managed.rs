@@ -88,4 +88,23 @@ mod tests {
             "only locked keys go into managed-settings"
         );
     }
+
+    #[test]
+    fn writes_empty_env_when_nothing_locked() {
+        // Master-switch-only / all-unlocked: the file is still written with an
+        // empty `env` object, never a missing key or a non-object value.
+        let mut t = locked_sample();
+        t.locked_keys.clear();
+        t.any_locked = false;
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_settings(tmp.path(), "proj", &t).unwrap();
+        let p = managed_settings_path(tmp.path(), "proj");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let env = v.get("env").expect("env key present").as_object().unwrap();
+        assert!(
+            env.is_empty(),
+            "no locked keys must yield an empty env object"
+        );
+    }
 }

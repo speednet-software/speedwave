@@ -6,7 +6,7 @@ Speedwave can send the in-container Claude Code's OpenTelemetry (OTLP) telemetry
 
 In **Settings → Telemetry**:
 
-1. Enable "Send telemetry to your own OTLP collector".
+1. Turn on the **Send telemetry** toggle ("Send Speedwave usage telemetry to your own OpenTelemetry (OTLP) collector.").
 2. Set the **collector endpoint** (e.g. `https://collector.example.com:4318`) and **protocol** (gRPC / HTTP-protobuf / HTTP-JSON).
 3. Optionally set **auth headers** (e.g. `Authorization=Bearer <token>`). The value is masked and stays on your machine.
 4. Use **Test connection** to check the collector is reachable from this host.
@@ -51,7 +51,7 @@ An administrator can force any subset of the telemetry settings by deploying a `
 }
 ```
 
-With the kill-switch the whole Telemetry section greys out and shows "Telemetry has been disabled by your organization".
+With the kill-switch the whole Telemetry section collapses to a locked banner (`data-testid="telemetry-killswitch"`) reading "Managed by your organization — telemetry cannot be changed here." No editable controls are shown.
 
 ### Fields
 

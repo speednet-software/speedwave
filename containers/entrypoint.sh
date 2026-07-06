@@ -220,7 +220,12 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
             continue
         fi
-        if echo "${_installed}" | grep -qF "\"${_plugin}@${_mp}\""; then
+        # Match a composite id ("name@marketplace") OR separate name+marketplace
+        # fields; jq -e fails on false/empty/parse error, so a bad list re-installs.
+        if printf '%s' "${_installed}" | jq -e \
+            --arg id "${_plugin}@${_mp}" --arg name "${_plugin}" --arg mp "${_mp}" \
+            'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp))' \
+            >/dev/null 2>&1; then
             continue
         fi
         _err="$(timeout 60 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)" \

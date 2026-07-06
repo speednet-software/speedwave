@@ -21,6 +21,10 @@ setup() {
     # CLAUDE_VERSION is required — set a default for tests that don't care about it
     export CLAUDE_VERSION="$PINNED_VERSION"
 
+    # Resolve real jq before stripping PATH — the container has it via apt-get,
+    # but on a macOS test host it may live under the homebrew prefix stripped below.
+    REAL_JQ="$(command -v jq || true)"
+
     # Stubs dir goes first in PATH; also strip real claude locations
     STUBS_DIR="$(mktemp -d)"
     export STUBS_DIR
@@ -28,6 +32,13 @@ setup() {
         | grep -v '\.local/bin' | grep -v 'homebrew' \
         | tr '\n' ':' | sed 's/:$//')"
     export PATH="$CLEAN_PATH"
+
+    # jq passthrough — guarantees the plugin-guard's jq resolves regardless of the
+    # runner PATH; skip suite if jq is genuinely absent (documented in the guard test).
+    if [ -n "$REAL_JQ" ]; then
+        printf '#!/bin/bash\nexec %q "$@"\n' "$REAL_JQ" > "$STUBS_DIR/jq"
+        chmod +x "$STUBS_DIR/jq"
+    fi
 
     # Default stub: claude already installed — skip install
     cat > "$STUBS_DIR/claude" << EOF
@@ -1549,7 +1560,8 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
-@test "does not reinstall a plugin already present (guard respects user disable)" {
+@test "does not reinstall a plugin already present (composite id, guard respects user disable)" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     # plugin list reports frontend-design already installed; install must be skipped.
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
@@ -1568,6 +1580,32 @@ EOF
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/installed-plugins.log"
     # already-present frontend-design (disabled by user) is NOT reinstalled
+    [[ "$output" != *"frontend-design@"* ]]
+    # the missing one still installs
+    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
+}
+
+@test "does not reinstall a plugin already present (separate name+marketplace fields)" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    # plugin list reports name+marketplace as separate fields (no composite id).
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
+    echo '[{"name":"frontend-design","marketplace":"claude-plugins-official","enabled":false}]'
+    exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    # already-present frontend-design is matched by name+marketplace, so NOT reinstalled
     [[ "$output" != *"frontend-design@"* ]]
     # the missing one still installs
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]

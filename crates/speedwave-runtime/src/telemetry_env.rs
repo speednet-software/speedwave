@@ -282,4 +282,21 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn protocol_wire_matches_serde_rename() {
+        // protocol_wire emits OTEL_EXPORTER_OTLP_PROTOCOL and MUST equal the enum's
+        // serde value (the OTLP SDK expects exactly those tokens) — one source of truth.
+        for p in [
+            OtlpProtocol::Grpc,
+            OtlpProtocol::HttpProtobuf,
+            OtlpProtocol::HttpJson,
+        ] {
+            assert_eq!(
+                serde_json::Value::String(protocol_wire(p).to_string()),
+                serde_json::to_value(p).unwrap(),
+                "protocol_wire({p:?}) drifted from the serde rename"
+            );
+        }
+    }
 }

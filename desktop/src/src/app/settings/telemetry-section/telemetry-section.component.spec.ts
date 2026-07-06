@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { TelemetrySectionComponent } from './telemetry-section.component';
 import { TauriService } from '../../services/tauri.service';
@@ -65,6 +65,10 @@ describe('TelemetrySectionComponent', () => {
 
   beforeEach(() => {
     setup(baseResponse());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('should create', async () => {
@@ -156,5 +160,130 @@ describe('TelemetrySectionComponent', () => {
     component.onEndpointInput('https://other:4318');
     expect(component.endpoint()).toBe('https://other:4318');
     expect(component.probeResult()).toBe('');
+  });
+
+  async function savedUpdate(): Promise<Record<string, unknown>> {
+    const spy = vi.spyOn(mockTauri, 'invoke');
+    await component.save();
+    const call = spy.mock.calls.find((c) => c[0] === 'update_telemetry_config');
+    return (call?.[1] as { update: Record<string, unknown> }).update;
+  }
+
+  describe('onPrivacyToggle', () => {
+    function checkboxEvent(checked: boolean): Event {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = checked;
+      return { target: input } as unknown as Event;
+    }
+
+    it('sets the signal when the user confirms enabling', async () => {
+      await create();
+      await component.ngOnInit();
+      const spy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const ev = checkboxEvent(true);
+      component.onPrivacyToggle('logUserPrompts', ev);
+      expect(spy).toHaveBeenCalledOnce();
+      expect(component.logUserPrompts()).toBe(true);
+      expect((ev.target as HTMLInputElement).checked).toBe(true);
+    });
+
+    it('leaves the signal off and unchecks the box when the user cancels', async () => {
+      await create();
+      await component.ngOnInit();
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const ev = checkboxEvent(true);
+      component.onPrivacyToggle('logUserPrompts', ev);
+      expect(component.logUserPrompts()).toBe(false);
+      expect((ev.target as HTMLInputElement).checked).toBe(false);
+    });
+
+    it('turning a gate OFF never prompts', async () => {
+      await create();
+      await component.ngOnInit();
+      component.logToolDetails.set(true);
+      const spy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      component.onPrivacyToggle('logToolDetails', checkboxEvent(false));
+      expect(spy).not.toHaveBeenCalled();
+      expect(component.logToolDetails()).toBe(false);
+    });
+  });
+
+  describe('parseInterval', () => {
+    it.each([
+      ['', null],
+      ['  ', null],
+      ['abc', null],
+      ['0', null],
+      ['-5', null],
+      ['60000', 60000],
+      ['1.9', 1],
+    ])('parses %o to %o', async (input, expected) => {
+      await create();
+      // parseInterval is protected; the tri-state input handlers exercise it.
+      component.onMetricIntervalInput(input);
+      expect(component.metricExportIntervalMs()).toBe(expected);
+    });
+  });
+
+  describe('testConnection', () => {
+    async function probeVerdict(handler: () => Promise<boolean>): Promise<string> {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_telemetry_config') return baseResponse();
+        if (cmd === 'probe_otlp_endpoint') return handler();
+        return undefined;
+      };
+      await create();
+      await component.ngOnInit();
+      await component.testConnection();
+      return component.probeResult();
+    }
+
+    it('shows reachable when the probe resolves true', async () => {
+      expect(await probeVerdict(async () => true)).toBe('reachable');
+    });
+
+    it('shows unreachable when the probe resolves false', async () => {
+      expect(await probeVerdict(async () => false)).toBe('unreachable from this host');
+    });
+
+    it('shows unreachable when the probe rejects', async () => {
+      expect(
+        await probeVerdict(async () => {
+          throw new Error('dial failed');
+        })
+      ).toBe('unreachable from this host');
+    });
+  });
+
+  it('refresh() surfaces an error when get_telemetry_config rejects', async () => {
+    mockTauri = new MockTauriService();
+    mockTauri.invokeHandler = async () => {
+      throw new Error('boom');
+    };
+    await create();
+    const emitted: string[] = [];
+    component.errorOccurred.subscribe((m) => emitted.push(m));
+    await component.ngOnInit();
+    expect(component.error()).toBe('boom');
+    expect(emitted).toContain('boom');
+  });
+
+  it('save() sends the interval as null when it is touched and cleared', async () => {
+    setup(baseResponse({ metric_export_interval_ms: 60000 }));
+    await create();
+    await component.ngOnInit();
+    component.onMetricIntervalInput('');
+    const update = await savedUpdate();
+    expect('metric_export_interval_ms' in update).toBe(true);
+    expect(update['metric_export_interval_ms']).toBeNull();
+  });
+
+  it('save() omits an untouched interval (leave managed/default unchanged)', async () => {
+    setup(baseResponse({ metric_export_interval_ms: 60000 }));
+    await create();
+    await component.ngOnInit();
+    const update = await savedUpdate();
+    expect('metric_export_interval_ms' in update).toBe(false);
   });
 });

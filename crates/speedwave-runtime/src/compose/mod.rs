@@ -364,7 +364,7 @@ pub fn render_compose_in(
             crate::consts::MANAGED_SETTINGS_FILE
         );
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)?;
-        add_claude_volume(&mut doc, &mount);
+        add_claude_volume(&mut doc, &mount)?;
         yaml = serde_yaml_ng::to_string(&doc)?;
     }
 
@@ -1090,17 +1090,26 @@ pub(crate) fn inject_env_into(
     }
 }
 
-/// Adds a volume mount to the claude service.
-pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(claude) = services.get_mut("claude") {
-            if let Some(volumes) = claude.get_mut("volumes") {
-                if let Some(vol_seq) = volumes.as_sequence_mut() {
-                    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
-                }
-            }
-        }
+/// Adds a volume mount to the claude service, creating the `volumes:` sequence if
+/// absent. Errors when the claude service is missing (the mount is a security boundary).
+pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
+    let claude = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut("claude"))
+        .ok_or_else(|| anyhow::anyhow!("compose has no claude service to mount into"))?;
+    let map = claude
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("claude service is not a mapping"))?;
+    let key = serde_yaml_ng::Value::String("volumes".to_string());
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml_ng::Value::Sequence(Vec::new()));
     }
+    let vol_seq = map
+        .get_mut(&key)
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("claude volumes is not a sequence"))?;
+    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
+    Ok(())
 }
 
 /// Adds a volume mount to the mcp-hub service.
@@ -3518,7 +3527,8 @@ services:
         add_claude_volume(
             &mut doc,
             "/home/user/.speedwave/addons/example-plugin/claude-resources:/speedwave/addons/example-plugin:ro",
-        );
+        )
+        .unwrap();
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let vols = claude.get("volumes").unwrap().as_sequence().unwrap();
@@ -3527,6 +3537,29 @@ services:
                 .is_some_and(|s| s.contains("/speedwave/addons/example-plugin:ro"))
         });
         assert!(has_addon_vol, "Addon volume should be in claude volumes");
+    }
+
+    #[test]
+    fn add_claude_volume_creates_missing_volumes_key() {
+        // The security-boundary mount must not be silently dropped when the claude
+        // service has no `volumes:` block — the sequence is created on demand.
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        add_claude_volume(&mut doc, "/src:/etc/claude-code/managed-settings.json:ro").unwrap();
+        let vols = doc["services"]["claude"]["volumes"].as_sequence().unwrap();
+        assert!(vols
+            .iter()
+            .any(|v| v.as_str() == Some("/src:/etc/claude-code/managed-settings.json:ro")));
+    }
+
+    #[test]
+    fn add_claude_volume_errors_when_claude_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  other:\n    image: x\n").unwrap();
+        assert!(
+            add_claude_volume(&mut doc, "/src:/dst:ro").is_err(),
+            "a missing claude service must be an error, not a silent no-op"
+        );
     }
 
     #[test]

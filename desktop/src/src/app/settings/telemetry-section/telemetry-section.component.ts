@@ -148,9 +148,9 @@ import type {
                         (change)="setProtocol($event)"
                         data-testid="telemetry-protocol"
                       >
-                        <option value="grpc">gRPC</option>
-                        <option value="http/protobuf">HTTP protobuf</option>
-                        <option value="http/json">HTTP JSON</option>
+                        @for (o of protocolOptions; track o.value) {
+                          <option [value]="o.value">{{ o.label }}</option>
+                        }
                       </select>
                     </label>
                     <label class="flex items-center gap-1.5">
@@ -266,7 +266,7 @@ import type {
                           placeholder="60000"
                           [value]="metricExportIntervalMs() ?? ''"
                           [readonly]="c.locks.metric_export_interval_ms"
-                          (input)="metricExportIntervalMs.set(parseInterval(eventValue($event)))"
+                          (input)="onMetricIntervalInput(eventValue($event))"
                           data-testid="telemetry-metric-interval"
                         />
                       </div>
@@ -288,7 +288,7 @@ import type {
                           placeholder="5000"
                           [value]="logsExportIntervalMs() ?? ''"
                           [readonly]="c.locks.logs_export_interval_ms"
-                          (input)="logsExportIntervalMs.set(parseInterval(eventValue($event)))"
+                          (input)="onLogsIntervalInput(eventValue($event))"
                           data-testid="telemetry-logs-interval"
                         />
                       </div>
@@ -398,7 +398,9 @@ export class TelemetrySectionComponent implements OnInit {
   readonly resourceAttributesTouched = signal(false);
   readonly includeAccountUuid = signal(true);
   readonly metricExportIntervalMs = signal<number | null>(null);
+  readonly metricIntervalTouched = signal(false);
   readonly logsExportIntervalMs = signal<number | null>(null);
+  readonly logsIntervalTouched = signal(false);
   readonly logUserPrompts = signal(false);
   readonly logAssistantResponses = signal(false);
   readonly logToolDetails = signal(false);
@@ -428,7 +430,9 @@ export class TelemetrySectionComponent implements OnInit {
       this.resourceAttributesTouched.set(false);
       this.includeAccountUuid.set(c.include_account_uuid);
       this.metricExportIntervalMs.set(c.metric_export_interval_ms);
+      this.metricIntervalTouched.set(false);
       this.logsExportIntervalMs.set(c.logs_export_interval_ms);
+      this.logsIntervalTouched.set(false);
       this.logUserPrompts.set(c.log_user_prompts);
       this.logAssistantResponses.set(c.log_assistant_responses);
       this.logToolDetails.set(c.log_tool_details);
@@ -505,6 +509,24 @@ export class TelemetrySectionComponent implements OnInit {
     return value.trim() !== '' && Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
   }
 
+  /**
+   * Records a metric-interval edit (marks touched for the tri-state save).
+   * @param value - the raw input value.
+   */
+  onMetricIntervalInput(value: string): void {
+    this.metricExportIntervalMs.set(this.parseInterval(value));
+    this.metricIntervalTouched.set(true);
+  }
+
+  /**
+   * Records a logs-interval edit (marks touched for the tri-state save).
+   * @param value - the raw input value.
+   */
+  onLogsIntervalInput(value: string): void {
+    this.logsExportIntervalMs.set(this.parseInterval(value));
+    this.logsIntervalTouched.set(true);
+  }
+
   /** Probes the endpoint's reachability from the host and shows the result. */
   async testConnection(): Promise<void> {
     this.probing.set(true);
@@ -533,15 +555,13 @@ export class TelemetrySectionComponent implements OnInit {
       export_metrics: this.exportMetrics(),
       export_logs: this.exportLogs(),
       include_account_uuid: this.includeAccountUuid(),
-      metric_export_interval_ms: this.metricExportIntervalMs() ?? undefined,
-      logs_export_interval_ms: this.logsExportIntervalMs() ?? undefined,
       log_user_prompts: this.logUserPrompts(),
       log_assistant_responses: this.logAssistantResponses(),
       log_tool_details: this.logToolDetails(),
       log_raw_api_bodies: this.logRawApiBodies(),
     };
-    // Tri-state (headers / endpoint / resource_attributes): send only when edited;
-    // an emptied field becomes null (clear), otherwise the value.
+    // Tri-state (headers / endpoint / resource_attributes / intervals): send only
+    // when edited; an emptied field becomes null (clear), otherwise the value.
     if (this.headersTouched()) {
       update.headers = this.headers() === '' ? null : this.headers();
     }
@@ -551,6 +571,12 @@ export class TelemetrySectionComponent implements OnInit {
     if (this.resourceAttributesTouched()) {
       update.resource_attributes =
         this.resourceAttributes() === '' ? null : this.resourceAttributes();
+    }
+    if (this.metricIntervalTouched()) {
+      update.metric_export_interval_ms = this.metricExportIntervalMs();
+    }
+    if (this.logsIntervalTouched()) {
+      update.logs_export_interval_ms = this.logsExportIntervalMs();
     }
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
@@ -567,6 +593,13 @@ export class TelemetrySectionComponent implements OnInit {
     this.error.set(msg);
     this.errorOccurred.emit(msg);
   }
+
+  /** The OTLP protocol choices, driven into the `<select>` (SSOT for the wire union). */
+  protected readonly protocolOptions: { value: OtlpProtocol; label: string }[] = [
+    { value: 'grpc', label: 'gRPC' },
+    { value: 'http/protobuf', label: 'HTTP protobuf' },
+    { value: 'http/json', label: 'HTTP JSON' },
+  ];
 
   /** Shared DOM-event readers, exposed for template event bindings. */
   protected readonly eventValue = eventValue;
