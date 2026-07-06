@@ -169,8 +169,9 @@ export class TranscriptionService {
     if (this.downloadingModelKeySignal() !== null) {
       throw new Error(`a model download is already in progress`);
     }
-    await this.beginDownloadTracking(modelId);
     try {
+      // Inside try: a failed listener attach must also clear the tracking.
+      await this.beginDownloadTracking(modelId);
       await this.tauri.invoke<void>('download_transcription_model', { modelId });
     } finally {
       this.clearDownloadTracking();

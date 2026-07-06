@@ -380,7 +380,10 @@ fn run_wasapi_loopback(
             (Ok(console), Ok(comms_id)) => {
                 console.get_id().map(|id| id == comms_id).unwrap_or(true)
             }
-            _ => true,
+            _ => {
+                log::debug!(target: "transcription::capture", "endpoint id compare failed — assuming comms == console (no second capture)");
+                true
+            }
         };
         if same {
             // One endpoint serves both roles — the console capture covers it.

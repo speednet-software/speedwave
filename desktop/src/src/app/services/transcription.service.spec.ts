@@ -291,6 +291,14 @@ describe('TranscriptionService', () => {
       expect(svc.downloadProgress()).toBeNull();
     });
 
+    it('clears tracking when the progress listener fails to attach', async () => {
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('ipc down');
+      expect(svc.downloadingModelKey()).toBeNull();
+    });
+
     it('clears tracking and rethrows when the backend download fails', async () => {
       mockTauri.invokeHandler = async (cmd) => {
         if (cmd === 'download_transcription_model') throw new Error('integrity check failed');

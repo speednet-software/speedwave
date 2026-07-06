@@ -364,7 +364,7 @@ pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str)
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 // Denials must be visible in logs, not buried at debug.
-                if line.contains("denied") {
+                if line.to_ascii_lowercase().contains("denied") {
                     log::warn!(target: "transcription::capture", "{target}: {line}");
                 } else {
                     log::debug!(target: "transcription::capture", "{target}: {line}");
