@@ -8656,6 +8656,250 @@ services:
         );
     }
 
+    // ── Atlassian built-in security tests ───────────────────────────────
+    // Atlassian's /workspace mount is :ro (addAttachment only reads a file to
+    // stream it as a Jira attachment) — the opposite of SharePoint/Slack's :rw.
+
+    #[test]
+    fn test_security_check_atlassian_correct_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let atlassian_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_atlassian())
+            .collect();
+        assert!(
+            atlassian_violations.is_empty(),
+            "Correct Atlassian mounts should not trigger violations, got: {:?}",
+            atlassian_violations
+                .iter()
+                .map(|v| &v.rule)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_flags_rw_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Atlassian requires :ro — a :rw mount (the SharePoint/Slack profile)
+        // must be rejected here.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianWorkspaceMountMode),
+            "Atlassian workspace mounted :rw should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /wrong/path:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianWorkspacePathMismatch),
+            "Wrong Atlassian workspace path should trigger ATLASSIAN_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_missing_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianMissingWorkspaceMount),
+            "Atlassian without workspace mount should trigger ATLASSIAN_MISSING_WORKSPACE_MOUNT"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:ro
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianNoExtraVolumes),
+            "an unauthorized extra volume on atlassian must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_token_mount_mode() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:rw
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-atlassian"),
+            "a :rw token mount on atlassian must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_token_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /wrong/tokens/path:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianTokenPathMismatch),
+            "Wrong Atlassian token path should trigger ATLASSIAN_TOKEN_PATH_MISMATCH"
+        );
+    }
+
     #[test]
     fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
         let data_dir = tempfile::tempdir().unwrap();
