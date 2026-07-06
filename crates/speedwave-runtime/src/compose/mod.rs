@@ -9131,6 +9131,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /home/user/projects/test:/workspace:ro
     environment:
       - PORT=3000
     networks:
