@@ -48,7 +48,8 @@ export interface TelemetryConfigResponse {
 
 /**
  * Mirror of Rust `TelemetryConfigUpdate`; every field optional (omit = unchanged).
- * `headers`/`endpoint`/`resource_attributes` are tri-state: omit = keep, `null` = clear.
+ * `headers`/`endpoint`/`resource_attributes`/interval fields are tri-state:
+ * omit = keep, `null` = clear, value = set.
  */
 export interface TelemetryConfigUpdate {
   enabled?: boolean;
@@ -63,6 +64,6 @@ export interface TelemetryConfigUpdate {
   log_assistant_responses?: boolean;
   log_tool_details?: boolean;
   log_raw_api_bodies?: boolean;
-  metric_export_interval_ms?: number;
-  logs_export_interval_ms?: number;
+  metric_export_interval_ms?: number | null;
+  logs_export_interval_ms?: number | null;
 }

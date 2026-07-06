@@ -1087,18 +1087,23 @@ fn apply_telemetry_update_with(
         update.log_raw_api_bodies.is_some(),
         user.log_raw_api_bodies = update.log_raw_api_bodies
     );
-    set_field!(
-        "metric_export_interval_ms",
-        F::MetricExportInterval,
-        update.metric_export_interval_ms.is_some(),
-        user.metric_export_interval_ms = update.metric_export_interval_ms
-    );
-    set_field!(
-        "logs_export_interval_ms",
-        F::LogsExportInterval,
-        update.logs_export_interval_ms.is_some(),
-        user.logs_export_interval_ms = update.logs_export_interval_ms
-    );
+    // Interval tri-state: Some(None) clears, Some(Some) sets.
+    if let Some(v) = update.metric_export_interval_ms {
+        set_field!(
+            "metric_export_interval_ms",
+            F::MetricExportInterval,
+            true,
+            user.metric_export_interval_ms = v
+        );
+    }
+    if let Some(v) = update.logs_export_interval_ms {
+        set_field!(
+            "logs_export_interval_ms",
+            F::LogsExportInterval,
+            true,
+            user.logs_export_interval_ms = v
+        );
+    }
     rejected
 }
 
@@ -1162,7 +1167,12 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
     // may 404/405 the path — that still proves the host/port is up.
     match client.head(validated).send().await {
         Ok(_) => Ok(true),
-        Err(_) => Ok(false),
+        Err(e) => {
+            // UI verdict stays boolean; the reason (DNS/TLS/refused/timeout) is only
+            // useful in diagnostics, so surface it at debug rather than discard it.
+            log::debug!("probe_otlp_endpoint: collector unreachable: {e}");
+            Ok(false)
+        }
     }
 }
 
@@ -3375,6 +3385,40 @@ mod tests {
         let rejected = apply_telemetry_update_with(&mut user, update, &resolved);
         assert!(rejected.is_empty());
         assert_eq!(user.resource_attributes.as_deref(), Some("team=x"));
+    }
+
+    #[test]
+    fn apply_update_interval_tri_state_clear_set_and_keep() {
+        use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
+        let resolved = resolve_telemetry(None, None).unwrap();
+
+        // Some(None) clears a previously-saved interval back to the exporter default.
+        let mut user = TelemetryConfig {
+            metric_export_interval_ms: Some(5000),
+            ..Default::default()
+        };
+        let update = TelemetryConfigUpdate {
+            metric_export_interval_ms: Some(None),
+            ..Default::default()
+        };
+        apply_telemetry_update_with(&mut user, update, &resolved);
+        assert_eq!(
+            user.metric_export_interval_ms, None,
+            "Some(None) must clear"
+        );
+
+        // Some(Some(v)) sets it.
+        let update = TelemetryConfigUpdate {
+            metric_export_interval_ms: Some(Some(9000)),
+            ..Default::default()
+        };
+        apply_telemetry_update_with(&mut user, update, &resolved);
+        assert_eq!(user.metric_export_interval_ms, Some(9000));
+
+        // Omitted (None) leaves it untouched.
+        let update = TelemetryConfigUpdate::default();
+        apply_telemetry_update_with(&mut user, update, &resolved);
+        assert_eq!(user.metric_export_interval_ms, Some(9000), "omit must keep");
     }
 
     #[test]

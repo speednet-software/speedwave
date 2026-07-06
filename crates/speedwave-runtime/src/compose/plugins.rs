@@ -148,7 +148,7 @@ pub(crate) fn apply_plugins_from_verified(
                 to_engine_path(&plugin_resources)?,
                 slug
             );
-            add_claude_volume(&mut doc, &mount);
+            add_claude_volume(&mut doc, &mount)?;
         }
     }
 

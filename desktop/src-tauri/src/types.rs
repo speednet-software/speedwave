@@ -230,10 +230,10 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) log_tool_details: Option<bool>,
     #[serde(default)]
     pub(crate) log_raw_api_bodies: Option<bool>,
-    #[serde(default)]
-    pub(crate) metric_export_interval_ms: Option<u64>,
-    #[serde(default)]
-    pub(crate) logs_export_interval_ms: Option<u64>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) metric_export_interval_ms: Option<Option<u64>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
 #[derive(Serialize, Clone)]

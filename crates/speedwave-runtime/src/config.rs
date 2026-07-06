@@ -699,9 +699,10 @@ pub struct TelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
-/// MDM-layer telemetry policy. Presence IS the lock (no `locked` flag); a field
-/// the MDM omits stays user-editable. Rationale in ADR-076.
+/// MDM-layer telemetry policy. Presence IS the lock; unknown keys are rejected
+/// (fail-closed) so a misspelled admin key never silently unlocks (ADR-076).
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ManagedTelemetryConfig {
     /// Force the master switch (kill-switch when `false`).
     pub enabled: Option<bool>,
@@ -1062,19 +1063,48 @@ pub(crate) fn resolve_project_config_in(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
-    // Load Err is swallowed here (config layer must not panic mid-merge); the
-    // renderer re-surfaces it as telemetry_error and fails closed.
-    let managed = crate::managed_config::load_managed_config()
-        .ok()
-        .flatten()
-        .and_then(|m| m.telemetry);
-    resolve_project_config_in_with_managed(
+    resolve_project_config_in_with_load(
         data_dir,
         project_dir,
         user_config,
         project_name,
-        managed.as_ref(),
+        crate::managed_config::load_managed_config(),
     )
+}
+
+/// Core of [`resolve_project_config_in`] taking the raw MDM load result. A load
+/// error fails closed: telemetry off + `telemetry_error` set (ADR-076).
+pub(crate) fn resolve_project_config_in_with_load(
+    data_dir: &Path,
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+    managed_load: anyhow::Result<Option<crate::managed_config::ManagedConfig>>,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    match managed_load {
+        Ok(managed) => {
+            let managed_telemetry = managed.and_then(|m| m.telemetry);
+            resolve_project_config_in_with_managed(
+                data_dir,
+                project_dir,
+                user_config,
+                project_name,
+                managed_telemetry.as_ref(),
+            )
+        }
+        Err(e) => {
+            let (mut claude, integrations) = resolve_project_config_in_with_managed(
+                data_dir,
+                project_dir,
+                user_config,
+                project_name,
+                None,
+            );
+            claude.telemetry = ResolvedTelemetry::disabled();
+            claude.telemetry_error = Some(e.to_string());
+            (claude, integrations)
+        }
+    }
 }
 
 /// Core of [`resolve_project_config_in`] with the MDM telemetry policy injected
@@ -2179,6 +2209,43 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_every_managed_field_reaches_resolved() {
+        // Guards the merge seam: every value below differs from the Resolved
+        // default, so a field forgotten in resolve_telemetry fails the assert.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://corp.example.com:4318".into()),
+            protocol: Some(OtlpProtocol::HttpJson),
+            export_metrics: Some(true),
+            export_logs: Some(true),
+            headers: Some("Authorization=Bearer x".into()),
+            resource_attributes: Some("a=b".into()),
+            include_account_uuid: Some(true),
+            log_user_prompts: Some(true),
+            log_assistant_responses: Some(true),
+            log_tool_details: Some(true),
+            log_raw_api_bodies: Some(true),
+            metric_export_interval_ms: Some(5000),
+            logs_export_interval_ms: Some(7000),
+        };
+        let r = resolve_telemetry(None, Some(&managed)).unwrap();
+        assert!(r.enabled);
+        assert_eq!(r.endpoint.as_deref(), Some("https://corp.example.com:4318"));
+        assert_eq!(r.protocol, OtlpProtocol::HttpJson);
+        assert!(r.export_metrics);
+        assert!(r.export_logs);
+        assert_eq!(r.headers.as_deref(), Some("Authorization=Bearer x"));
+        assert_eq!(r.resource_attributes.as_deref(), Some("a=b"));
+        assert!(r.include_account_uuid);
+        assert!(r.log_user_prompts);
+        assert!(r.log_assistant_responses);
+        assert!(r.log_tool_details);
+        assert!(r.log_raw_api_bodies);
+        assert_eq!(r.metric_export_interval_ms, Some(5000));
+        assert_eq!(r.logs_export_interval_ms, Some(7000));
+    }
+
+    #[test]
     fn telemetry_kill_switch_suppresses_all_output() {
         let user = TelemetryConfig {
             enabled: Some(true),
@@ -2422,6 +2489,84 @@ mod tests {
         assert_eq!(
             resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
             Some(&"https://mine.example.com:4318".to_string())
+        );
+    }
+
+    #[test]
+    fn mdm_load_error_fails_closed_and_disables_telemetry() {
+        let tmp = tempfile::tempdir().unwrap();
+        // User has telemetry ON; a broken MDM policy must still shut it off.
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+                endpoint: Some("https://mine.example.com:4318".into()),
+                export_metrics: Some(true),
+                ..Default::default()
+            }),
+        };
+        let resolved = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Err(anyhow::anyhow!("managed config /x is invalid: boom")),
+        )
+        .0;
+        assert_eq!(
+            resolved.telemetry_error.as_deref(),
+            Some("managed config /x is invalid: boom"),
+            "a malformed MDM policy must surface as telemetry_error so the renderer bails"
+        );
+        assert!(
+            !resolved.telemetry.enabled,
+            "telemetry must be disabled (fail-closed) when the MDM policy cannot be read"
+        );
+    }
+
+    #[test]
+    fn mdm_load_ok_none_leaves_user_telemetry_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+                endpoint: Some("https://mine.example.com:4318".into()),
+                export_metrics: Some(true),
+                ..Default::default()
+            }),
+        };
+        let resolved = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Ok(None),
+        )
+        .0;
+        assert!(resolved.telemetry_error.is_none());
+        assert_eq!(
+            resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            Some(&"https://mine.example.com:4318".to_string()),
+            "absent MDM policy (Ok(None)) must not disturb user telemetry"
         );
     }
 

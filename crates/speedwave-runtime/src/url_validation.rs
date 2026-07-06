@@ -80,10 +80,9 @@ pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
     }
 }
 
-/// Validates a URL: http/https only, no localhost/private IPs, no embedded
-/// credentials, no backslashes. Query/fragment allowed (OAuth `authorize_url`).
-pub fn validate_url(url: &str) -> Result<url::Url, String> {
-    // Reject backslashes before parsing (Windows path / scheme confusion).
+/// Shared preamble for both validators: reject backslashes (Windows path /
+/// scheme confusion), require http/https, reject embedded credentials.
+fn parse_http_url_no_creds(url: &str) -> Result<url::Url, String> {
     if url.contains('\\') {
         return Err("URL must not contain backslashes".to_string());
     }
@@ -97,94 +96,60 @@ pub fn validate_url(url: &str) -> Result<url::Url, String> {
             ))
         }
     }
-
-    // Reject embedded credentials unconditionally (no use in an endpoint URL).
     if parsed.password().is_some() || !parsed.username().is_empty() {
         return Err("URL must not contain embedded credentials".to_string());
     }
+    Ok(parsed)
+}
 
-    match parsed.host() {
+/// The one host classifier for both validators: `Some(reason)` when `url`'s host
+/// is blocked under `policy`. localhost is always blocked; private IPs only allowed under `AllowLoopback`.
+fn host_block_reason(url: &url::Url, policy: PrivatePolicy) -> Option<String> {
+    use std::net::IpAddr;
+    let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);
+    match url.host() {
         Some(url::Host::Domain(domain)) => {
             let lower = domain.to_lowercase();
-            if lower == "localhost" || lower.ends_with(".localhost") {
-                return Err(format!(
-                    "Blocked URL host '{}': localhost is not allowed",
-                    domain
-                ));
-            }
+            (lower == "localhost" || lower.ends_with(".localhost"))
+                .then(|| format!("Blocked URL host '{}': localhost is not allowed", domain))
         }
-        Some(url::Host::Ipv4(ipv4)) => {
-            if is_private_or_reserved(std::net::IpAddr::V4(ipv4)) {
-                return Err(format!("Blocked URL host '{}': private/reserved IP", ipv4));
-            }
-        }
+        Some(url::Host::Ipv4(ipv4)) => (is_private_or_reserved(IpAddr::V4(ipv4))
+            && !allow_loopback)
+            .then(|| format!("Blocked URL host '{}': private/reserved IP", ipv4)),
         Some(url::Host::Ipv6(ipv6)) => {
-            if is_private_or_reserved(std::net::IpAddr::V6(ipv6)) {
-                return Err(format!(
+            if is_private_or_reserved(IpAddr::V6(ipv6)) && !allow_loopback {
+                return Some(format!(
                     "Blocked URL host '{}': private/reserved IPv6",
                     ipv6
                 ));
             }
-            // Also check IPv6-mapped IPv4 addresses (::ffff:x.x.x.x)
-            if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
-                if is_private_or_reserved(std::net::IpAddr::V4(mapped_v4)) {
-                    return Err(format!(
-                        "Blocked URL host '{}': maps to private IPv4 {}",
-                        ipv6, mapped_v4
-                    ));
-                }
-            }
+            // Also check IPv6-mapped IPv4 addresses (::ffff:x.x.x.x).
+            ipv6.to_ipv4_mapped()
+                .filter(|m| is_private_or_reserved(IpAddr::V4(*m)) && !allow_loopback)
+                .map(|m| format!("Blocked URL host '{}': maps to private IPv4 {}", ipv6, m))
         }
-        None => return Err("URL has no host".to_string()),
+        None => Some("URL has no host".to_string()),
     }
+}
 
+/// Validates a URL: http/https only, no localhost/private IPs, no embedded
+/// credentials, no backslashes. Query/fragment allowed (OAuth `authorize_url`).
+pub fn validate_url(url: &str) -> Result<url::Url, String> {
+    let parsed = parse_http_url_no_creds(url)?;
+    if let Some(reason) = host_block_reason(&parsed, PrivatePolicy::BlockLoopback) {
+        return Err(reason);
+    }
     Ok(parsed)
 }
 
 /// Validates an OTLP collector URL (http(s), no credentials, no backslashes);
 /// a private/loopback host is allowed only under `AllowLoopback` (on-prem is valid).
 pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::Url, String> {
-    if url.contains('\\') {
-        return Err("URL must not contain backslashes".to_string());
+    let parsed = parse_http_url_no_creds(url)?;
+    if let Some(reason) = host_block_reason(&parsed, policy) {
+        return Err(reason);
     }
-    let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        s => {
-            return Err(format!(
-                "Blocked URL scheme '{s}': only http and https are allowed"
-            ))
-        }
-    }
-    if parsed.password().is_some() || !parsed.username().is_empty() {
-        return Err("URL must not contain embedded credentials".to_string());
-    }
-    if host_allowed(&parsed, policy) {
-        Ok(parsed)
-    } else {
-        Err("Blocked URL host: private/reserved or loopback not permitted by policy".to_string())
-    }
-}
-
-/// True if `url`'s host is permitted under `policy`, mirroring [`validate_url`]'s
-/// host rules. `localhost`/`*.localhost` stay blocked even under `AllowLoopback`.
-fn host_allowed(url: &url::Url, policy: PrivatePolicy) -> bool {
-    use std::net::IpAddr;
-    let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);
-    match url.host() {
-        Some(url::Host::Domain(d)) => {
-            let l = d.to_lowercase();
-            l != "localhost" && !l.ends_with(".localhost")
-        }
-        Some(url::Host::Ipv4(v4)) => !is_private_or_reserved(IpAddr::V4(v4)) || allow_loopback,
-        Some(url::Host::Ipv6(v6)) => {
-            let mapped_private = v6
-                .to_ipv4_mapped()
-                .is_some_and(|m| is_private_or_reserved(IpAddr::V4(m)));
-            (!is_private_or_reserved(IpAddr::V6(v6)) && !mapped_private) || allow_loopback
-        }
-        None => false,
-    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -855,5 +820,40 @@ mod tests {
             PrivatePolicy::AllowLoopback
         )
         .is_ok());
+    }
+
+    #[test]
+    fn collector_url_blocked_host_error_is_descriptive() {
+        // After sharing one host classifier, the collector path surfaces the same
+        // specific reason validate_url does, not a generic string.
+        let err = validate_collector_url("http://10.0.0.5:4318", PrivatePolicy::BlockLoopback)
+            .unwrap_err();
+        assert!(
+            err.contains("Blocked URL host"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("10.0.0.5"),
+            "message must name the host: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_url_and_collector_block_loopback_agree() {
+        // The shared classifier must keep validate_url == collector(BlockLoopback).
+        for u in [
+            "http://127.0.0.1/",
+            "http://localhost/",
+            "http://x.localhost/",
+            "http://10.0.0.5/",
+            "https://public.example.com/",
+            "ftp://x/",
+        ] {
+            assert_eq!(
+                validate_url(u).is_ok(),
+                validate_collector_url(u, PrivatePolicy::BlockLoopback).is_ok(),
+                "validators disagree for {u}"
+            );
+        }
     }
 }
