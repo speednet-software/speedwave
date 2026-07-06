@@ -309,7 +309,7 @@ describe('TelemetrySectionComponent', () => {
     const spy = vi.spyOn(projectState, 'requestRestart');
     await component.save();
     expect(spy).not.toHaveBeenCalled();
-    expect(component.error()).toBe('save failed');
+    expect(component.saveError()).toBe('save failed');
   });
 
   it('save() shows a transient saved confirmation on success', async () => {
@@ -337,6 +337,22 @@ describe('TelemetrySectionComponent', () => {
     await component.save();
     expect(spy).not.toHaveBeenCalled();
     expect(component.saved()).toBe(false);
-    expect(component.error()).toBe('read failed');
+    expect(component.saveError()).toBe('read failed');
+  });
+
+  it('a save error renders once (inline), not duplicated by the top load banner', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') return baseResponse();
+      if (cmd === 'update_telemetry_config') throw new Error('save failed');
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    await component.save();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-save-error"]')
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="telemetry-error"]')).toBeNull();
   });
 });

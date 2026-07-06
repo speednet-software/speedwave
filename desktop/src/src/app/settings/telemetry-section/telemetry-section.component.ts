@@ -38,7 +38,7 @@ import type {
         Send Speedwave usage telemetry to your own OpenTelemetry (OTLP) collector.
       </p>
 
-      @if (error()) {
+      @if (error() && !saveError()) {
         <p class="mt-2 text-[12px] text-[var(--red)]" data-testid="telemetry-error">
           {{ error() }}
         </p>
@@ -365,12 +365,12 @@ import type {
                 </details>
 
                 <div class="flex items-center justify-end gap-3 border-t border-[var(--line)] pt-4">
-                  @if (error()) {
+                  @if (saveError()) {
                     <span
                       class="mono text-[11px] text-[var(--red)]"
                       data-testid="telemetry-save-error"
                     >
-                      {{ error() }}
+                      {{ saveError() }}
                     </span>
                   }
                   @if (saved()) {
@@ -405,6 +405,8 @@ export class TelemetrySectionComponent implements OnInit {
 
   readonly config = signal<TelemetryConfigResponse | null>(null);
   readonly error = signal('');
+  /** Save-specific error, shown by the Save button (not the top load banner). */
+  readonly saveError = signal('');
   readonly saving = signal(false);
   /** Transient success flag; true for ~2s after a save persists. */
   readonly saved = signal(false);
@@ -607,12 +609,15 @@ export class TelemetrySectionComponent implements OnInit {
     if (this.logsIntervalTouched()) {
       update.logs_export_interval_ms = this.logsExportIntervalMs();
     }
+    this.saveError.set('');
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
       await this.refresh();
-      // refresh() swallows its own errors, so gate success feedback on error()
-      // being clear — never show "Saved" next to an error banner.
-      if (!this.error()) {
+      // refresh() swallows its own errors into error(), so gate success feedback
+      // on it being clear — never show "Saved" next to an error.
+      if (this.error()) {
+        this.saveError.set(this.error());
+      } else {
         // OTEL_* env is baked into the claude container at create time, so a saved
         // change only takes effect after a restart (as with an LLM claude-env change).
         this.projectState.requestRestart();
@@ -624,6 +629,7 @@ export class TelemetrySectionComponent implements OnInit {
       }
     } catch (e: unknown) {
       this.emitError(e);
+      this.saveError.set(this.error());
     }
     this.saving.set(false);
     this.cdr.markForCheck();
