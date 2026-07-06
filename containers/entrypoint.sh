@@ -126,6 +126,9 @@ for resource_type in skills commands agents hooks; do
         [ -e "${entry}" ] || continue
         name="$(basename "${entry}")"
         [ "${name}" = "integrations" ] && continue
+        # hooks.json is a registration manifest merged into settings.json below,
+        # not a script — never expose it as a hook entry.
+        [ "${resource_type}" = "hooks" ] && [ "${name}" = "hooks.json" ] && continue
         link="${HOME}/.claude/${resource_type}/${name}"
         ln -sfn "${entry}" "${link}"
         echo "${link}" >> "${new_state}"
@@ -248,6 +251,7 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
             [ -d "${plugin_path}/${resource_type}" ] || continue
             for entry in "${plugin_path}/${resource_type}"/*; do
                 [ -e "${entry}" ] || continue
+                [ "${resource_type}" = "hooks" ] && [ "$(basename "${entry}")" = "hooks.json" ] && continue
                 target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
                 if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
                     echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
@@ -267,6 +271,122 @@ else
     echo "ERROR: failed to sort managed-links; previous state_file preserved" >&2
     exit 1
 fi
+
+# Register hooks in ~/.claude/settings.json. Claude Code runs hooks ONLY from a
+# settings "hooks" key — files under ~/.claude/hooks/ are never auto-discovered
+# (ADR-078). Enabled core/integration/plugin sources declare hooks/hooks.json;
+# injected entries are tracked in ~/.claude/.speedwave-managed-hooks so a later
+# start removes them on toggle-off while user-added hooks survive.
+hook_decl_dirs=()
+if [ -f "${SPEEDWAVE_RESOURCES}/hooks/hooks.json" ]; then
+    hook_decl_dirs+=("${SPEEDWAVE_RESOURCES}/hooks")
+fi
+if [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
+    for svc in "${ENABLED_SVCS[@]}"; do
+        [ "${svc}" = "os" ] && continue
+        _d="${SPEEDWAVE_RESOURCES}/hooks/integrations/${svc}"
+        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
+    done
+fi
+if [ "${#OS_ENABLED_SUBS[@]}" -gt 0 ]; then
+    for sub in "${OS_ENABLED_SUBS[@]}"; do
+        _d="${SPEEDWAVE_RESOURCES}/hooks/integrations/${sub}"
+        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
+    done
+fi
+if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
+    for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
+        echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$' || continue
+        _d="/speedwave/plugins/${plugin}/hooks"
+        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
+    done
+fi
+
+_managed_hooks="${HOME}/.claude/.speedwave-managed-hooks"
+if [ "${#hook_decl_dirs[@]}" -gt 0 ] || [ -f "${_managed_hooks}" ]; then
+    _decl_dirs=""
+    if [ "${#hook_decl_dirs[@]}" -gt 0 ]; then
+        _decl_dirs="$(printf '%s\n' "${hook_decl_dirs[@]}")"
+    fi
+    SPW_HOOK_DECL_DIRS="${_decl_dirs}" \
+    SPW_SETTINGS_FILE="${HOME}/.claude/settings.json" \
+    SPW_MANAGED_HOOKS_FILE="${_managed_hooks}" \
+    node -e '
+const fs = require("fs");
+const settingsPath = process.env.SPW_SETTINGS_FILE;
+const statePath = process.env.SPW_MANAGED_HOOKS_FILE;
+const declDirs = (process.env.SPW_HOOK_DECL_DIRS || "").split("\n").filter(Boolean);
+
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+// Key-order-insensitive fingerprint for matching previously injected entries.
+const stable = (v) => JSON.stringify(v, (k, val) =>
+  isObj(val) ? Object.keys(val).sort().reduce((o, key) => ((o[key] = val[key]), o), {}) : val);
+const validDecl = (decl) => isObj(decl) && Object.entries(decl).every(([event, groups]) =>
+  /^[A-Z][A-Za-z]{2,63}$/.test(event) && Array.isArray(groups) && groups.every((g) =>
+    isObj(g) && Array.isArray(g.hooks) && g.hooks.every((h) =>
+      isObj(h) && h.type === "command" && typeof h.command === "string")));
+
+let settings = {};
+if (fs.existsSync(settingsPath)) {
+  try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); }
+  catch { console.error("entrypoint: settings.json unparseable — hook registration skipped"); process.exit(0); }
+}
+if (!isObj(settings) || (settings.hooks !== undefined && !isObj(settings.hooks))) {
+  console.error("entrypoint: settings.json hooks key is not an object — hook registration skipped");
+  process.exit(0);
+}
+const before = stable(settings);
+const hooks = settings.hooks || {};
+settings.hooks = hooks;
+
+let prev = {};
+if (fs.existsSync(statePath)) {
+  try { const p = JSON.parse(fs.readFileSync(statePath, "utf8")); if (isObj(p)) prev = p; }
+  catch { console.error("WARNING: managed-hooks state unparseable — previously injected hooks may linger"); }
+}
+
+// Drop entries injected by the previous run; user-added hooks are untouched.
+for (const [event, groups] of Object.entries(prev)) {
+  if (!Array.isArray(hooks[event]) || !Array.isArray(groups)) continue;
+  for (const g of groups) {
+    const i = hooks[event].findIndex((c) => stable(c) === stable(g));
+    if (i !== -1) hooks[event].splice(i, 1);
+  }
+  if (hooks[event].length === 0) delete hooks[event];
+}
+
+const managed = {};
+for (const dir of declDirs) {
+  const file = dir + "/hooks.json";
+  let decl;
+  try { decl = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (e) { console.error("WARNING: ignoring invalid hooks declaration " + file + ": " + e.message); continue; }
+  if (!validDecl(decl)) { console.error("WARNING: ignoring invalid hooks declaration " + file); continue; }
+  for (const [event, groups] of Object.entries(decl)) {
+    for (const g of groups) {
+      for (const h of g.hooks) h.command = h.command.split("${SPEEDWAVE_HOOK_DIR}").join(dir);
+      (managed[event] = managed[event] || []).push(g);
+    }
+  }
+}
+for (const [event, groups] of Object.entries(managed)) {
+  (hooks[event] = hooks[event] || []).push(...groups);
+}
+if (Object.keys(hooks).length === 0) delete settings.hooks;
+
+const writeAtomic = (p, data) => { fs.writeFileSync(p + ".tmp", data); fs.renameSync(p + ".tmp", p); };
+if (stable(settings) !== before) {
+  writeAtomic(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+}
+if (Object.keys(managed).length > 0) {
+  if (stable(managed) !== stable(prev)) writeAtomic(statePath, JSON.stringify(managed, null, 2) + "\n");
+} else if (fs.existsSync(statePath)) {
+  fs.unlinkSync(statePath);
+}
+' || echo 'entrypoint: hook registration skipped' >&2
+    unset _decl_dirs
+fi
+unset _managed_hooks
 
 # Generate MCP config for Claude Code — tells it where the MCP hub lives.
 # MCP_HUB_PORT is injected by compose.template.yml; default matches PORT_BASE.

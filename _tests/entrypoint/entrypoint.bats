@@ -1610,3 +1610,300 @@ EOF
     # the missing one still installs
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Hook registration: hooks.json declarations merged into settings.json (ADR-078).
+# Claude Code runs hooks only from the settings "hooks" key — symlinks under
+# ~/.claude/hooks/ alone never execute.
+# ---------------------------------------------------------------------------
+
+# Writes a plugin with a UserPromptSubmit hooks.json + script into $1/<slug>.
+_make_hook_plugin() {
+    local dir="$1" slug="$2" cmd="${3:-}"
+    if [ -z "${cmd}" ]; then
+        cmd='node ${SPEEDWAVE_HOOK_DIR}/hook.mjs'
+    fi
+    mkdir -p "${dir}/${slug}/hooks"
+    echo "// hook" > "${dir}/${slug}/hooks/hook.mjs"
+    cat > "${dir}/${slug}/hooks/hooks.json" << EOF
+{
+  "UserPromptSubmit": [
+    { "hooks": [ { "type": "command", "command": "${cmd}", "timeout": 10 } ] }
+  ]
+}
+EOF
+}
+
+# jq-free JSON assertion: node exits 0 when the expression is truthy.
+_settings_check() {
+    node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(($1)?0:1)"
+}
+
+@test "plugin hooks.json registers a settings hook with SPEEDWAVE_HOOK_DIR substituted" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    run _settings_check "s.hooks.UserPromptSubmit[0].hooks[0].command==='node ${plugins_dir}/my-plugin/hooks/hook.mjs'"
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.UserPromptSubmit[0].hooks[0].timeout===10"
+    [ "$status" -eq 0 ]
+    # The declaration manifest is never exposed as a hook entry; scripts still are.
+    [ ! -e "${TEST_HOME}/.claude/hooks/hooks.json" ]
+    [ -L "${TEST_HOME}/.claude/hooks/hook.mjs" ]
+    # Injected entries are tracked for the next run's cleanup.
+    [ -f "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "hooks from multiple plugins concatenate under the same event" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "alpha"
+    _make_hook_plugin "$plugins_dir" "beta"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    run _settings_check "s.hooks.UserPromptSubmit.length===2"
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.UserPromptSubmit[0].hooks[0].command.includes('/alpha/hooks/') && s.hooks.UserPromptSubmit[1].hooks[0].command.includes('/beta/hooks/')"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "plugin toggle-off removes injected hooks but preserves user-added hooks" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # User adds their own hook under the same event between runs.
+    node -e "
+const fs=require('fs');
+const p='${TEST_HOME}/.claude/settings.json';
+const s=JSON.parse(fs.readFileSync(p,'utf8'));
+s.hooks.UserPromptSubmit.push({hooks:[{type:'command',command:'echo user-hook'}]});
+s.hooks.SessionStart=[{hooks:[{type:'command',command:'echo user-session'}]}];
+fs.writeFileSync(p,JSON.stringify(s,null,2));
+"
+
+    unset SPEEDWAVE_PLUGINS
+    run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Plugin hook gone, both user hooks intact.
+    run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0].hooks[0].command==='echo user-hook'"
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.SessionStart[0].hooks[0].command==='echo user-session'"
+    [ "$status" -eq 0 ]
+    # Nothing managed anymore — the tracking manifest is removed.
+    [ ! -e "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "toggle-off with no user hooks removes the hooks key entirely" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.UserPromptSubmit.length===1"
+    [ "$status" -eq 0 ]
+
+    unset SPEEDWAVE_PLUGINS
+    run bash "$patched" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks===undefined"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "malformed plugin hooks.json warns and does not block other plugins" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "good-plugin"
+    mkdir -p "${plugins_dir}/bad-plugin/hooks"
+    echo 'NOT_JSON' > "${plugins_dir}/bad-plugin/hooks/hooks.json"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="bad-plugin,good-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: ignoring invalid hooks declaration"* ]]
+    run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0].hooks[0].command.includes('/good-plugin/hooks/')"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "hooks.json with invalid event name or hook shape is rejected" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    mkdir -p "${plugins_dir}/evt-plugin/hooks" "${plugins_dir}/shape-plugin/hooks"
+    # lowercase event name — rejected by the event-shape gate.
+    cat > "${plugins_dir}/evt-plugin/hooks/hooks.json" << 'EOF'
+{ "userPromptSubmit": [ { "hooks": [ { "type": "command", "command": "echo x" } ] } ] }
+EOF
+    # missing type:"command" — rejected.
+    cat > "${plugins_dir}/shape-plugin/hooks/hooks.json" << 'EOF'
+{ "UserPromptSubmit": [ { "hooks": [ { "command": "echo x" } ] } ] }
+EOF
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="evt-plugin,shape-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: ignoring invalid hooks declaration"* ]]
+    # Nothing registered → no settings.json created (no template in this fixture).
+    [ ! -e "${TEST_HOME}/.claude/settings.json" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "core bundle hooks.json registers unconditionally" {
+    mkdir -p "$RESOURCES_DIR/hooks"
+    echo "// core hook" > "$RESOURCES_DIR/hooks/core-hook.mjs"
+    cat > "$RESOURCES_DIR/hooks/hooks.json" << 'EOF'
+{ "SessionStart": [ { "hooks": [ { "type": "command", "command": "node ${SPEEDWAVE_HOOK_DIR}/core-hook.mjs" } ] } ] }
+EOF
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.SessionStart[0].hooks[0].command==='node ${RESOURCES_DIR}/hooks/core-hook.mjs'"
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/hooks/hooks.json" ]
+    [ -L "${TEST_HOME}/.claude/hooks/core-hook.mjs" ]
+}
+
+@test "integration hooks.json is gated by ENABLED_SERVICES and cleaned on toggle-off" {
+    mkdir -p "$RESOURCES_DIR/hooks/integrations/office"
+    cat > "$RESOURCES_DIR/hooks/integrations/office/hooks.json" << 'EOF'
+{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node ${SPEEDWAVE_HOOK_DIR}/guard.mjs" } ] } ] }
+EOF
+    echo "// guard" > "$RESOURCES_DIR/hooks/integrations/office/guard.mjs"
+
+    ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.PreToolUse[0].matcher==='Bash' && s.hooks.PreToolUse[0].hooks[0].command==='node ${RESOURCES_DIR}/hooks/integrations/office/guard.mjs'"
+    [ "$status" -eq 0 ]
+
+    ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks===undefined"
+    [ "$status" -eq 0 ]
+}
+
+@test "OS sub-service hooks.json is gated jointly by os enablement and DISABLED_OS_SERVICES" {
+    for sub in mail calendar; do
+        mkdir -p "$RESOURCES_DIR/hooks/integrations/$sub"
+        cat > "$RESOURCES_DIR/hooks/integrations/$sub/hooks.json" << EOF
+{ "SessionStart": [ { "hooks": [ { "type": "command", "command": "echo $sub" } ] } ] }
+EOF
+    done
+
+    ENABLED_SERVICES="os" DISABLED_OS_SERVICES="mail" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.SessionStart.length===1 && s.hooks.SessionStart[0].hooks[0].command==='echo calendar'"
+    [ "$status" -eq 0 ]
+}
+
+@test "hook registration is idempotent across identical runs" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    local snapshot
+    snapshot="$(mktemp)"
+    cp "${TEST_HOME}/.claude/settings.json" "$snapshot"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    diff "$snapshot" "${TEST_HOME}/.claude/settings.json"
+    # Exactly one entry — no duplication across restarts.
+    run _settings_check "s.hooks.UserPromptSubmit.length===1"
+    [ "$status" -eq 0 ]
+    # Template keys and hooks coexist.
+    run _settings_check "s.effortLevel==='high'"
+    [ "$status" -eq 0 ]
+    [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+
+    rm -rf "$plugins_dir" "$patched" "$snapshot"
+}
+
+@test "hook registration swap: plugin alpha replaced by beta between runs" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "alpha"
+    _make_hook_plugin "$plugins_dir" "beta"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="alpha" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    SPEEDWAVE_PLUGINS="beta" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0].hooks[0].command.includes('/beta/hooks/')"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "corrupt settings.json skips hook registration and leaves the file untouched" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hook registration skipped"* ]]
+    [ "$(cat "${TEST_HOME}/.claude/settings.json")" = 'NOT_JSON' ]
+    [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}

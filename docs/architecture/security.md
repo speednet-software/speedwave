@@ -226,6 +226,16 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the full rationale and the runtime-invariant model.
 
+### Claude Code Hook Execution
+
+Since [ADR-078](../adr/ADR-078-claude-hook-registration.md), hooks shipped by the bundle, by enabled integrations, and by enabled plugins actually execute: the entrypoint merges each enabled source's `hooks/hooks.json` declaration into the `hooks` key of the container's `~/.claude/settings.json`. This is an execution surface — hooks are arbitrary commands run inside the claude container on Claude Code lifecycle events — with these properties:
+
+- **Trust anchor:** a plugin's `hooks.json` and hook scripts live in the Ed25519-signed tree; tampering fails `verify_plugin_signature_cached` before the tree is ever mounted. Bundle/integration declarations ship inside the Speedwave bundle.
+- **Consent gate:** a declaration is registered only while its plugin/integration is enabled for the project; disabling unregisters it on the next start (tracked in `~/.claude/.speedwave-managed-hooks`).
+- **Blast radius:** hooks run in the token-free, hardened claude container — no service credentials, no container socket. Like any in-container code (including Claude itself) a hook can read `/workspace` and use the container's network, so enabling a third-party plugin with hooks is a trust decision about that plugin's author, mitigated by mandatory signing.
+- **Shape validation:** the entrypoint validates each declaration (object of event → matcher groups, `type: "command"` hooks only) and rejects malformed files whole, with a warning; a rejected declaration never blocks container start.
+- User- and team-authored hook entries in any settings scope are never modified by the registration step.
+
 ### SharePoint Volume Rules
 
 Same checks as plugin volumes, applied to the built-in SharePoint service. As of [ADR-060](../adr/ADR-060-host-side-oauth-refresh-worker.md) SharePoint mounts `/tokens:ro` like every other worker; OAuth refresh moved to the host-side `oauth` worker. The token-mount-mode check is the generic `PLUGIN_TOKEN_MOUNT_MODE` (re-used for built-in workers) — there is no dedicated SharePoint variant any more.

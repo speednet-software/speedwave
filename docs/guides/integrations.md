@@ -672,11 +672,32 @@ The directory name under `integrations/` **must match `config_key`** from `crate
 
 The entrypoint records every link it creates in `~/.claude/.speedwave-managed-links`. On the next start it removes those links before building the new set, so toggling an integration off in Settings reliably removes its skill from `~/.claude/skills/`. Files placed in `~/.claude/` by the user are never touched.
 
+### Hooks require a hooks.json declaration
+
+Skills, commands, and agents are auto-discovered by Claude Code once symlinked. **Hooks are not** — Claude Code runs only hooks registered under the `hooks` key of a settings file, and never scans `~/.claude/hooks/`. A resource that ships hooks therefore also ships a declaration file `hooks/hooks.json` in Claude Code's hooks-settings shape:
+
+```json
+{
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        { "type": "command", "command": "node ${SPEEDWAVE_HOOK_DIR}/my-hook.ts", "timeout": 10 }
+      ]
+    }
+  ]
+}
+```
+
+`${SPEEDWAVE_HOOK_DIR}` is replaced at container start with the absolute in-container directory of that `hooks.json` (`/speedwave/resources/hooks`, `/speedwave/resources/hooks/integrations/<config_key>`, or `/speedwave/plugins/<slug>/hooks`), so the command runs the script from its read-only source and sibling files resolve naturally. The claude image runs on Node 24, which executes TypeScript hook scripts directly.
+
+The entrypoint gates declarations with the same filters as symlinks (core: always; integration: `ENABLED_SERVICES`; plugin: `SPEEDWAVE_PLUGINS`), concatenates them per event into the `hooks` key of `~/.claude/settings.json`, and tracks what it injected in `~/.claude/.speedwave-managed-hooks` so a disabled source's hooks are unregistered on the next start. Hooks you or your team add to any settings scope are never touched. A malformed `hooks.json` is skipped with a warning. See [ADR-078](../adr/ADR-078-claude-hook-registration.md) for the design and security analysis.
+
 ### Adding a per-integration resource
 
 1. Place the resource (e.g. `SKILL.md`) under `containers/claude-resources/<type>/integrations/<config_key>/`. `<config_key>` must already exist in `TOGGLEABLE_MCP_SERVICES`.
-2. No Rust or Compose changes are needed — `ENABLED_SERVICES` is already wired up.
-3. Add a BATS test in `_tests/entrypoint/entrypoint.bats` exercising the on/off transition for the new directory.
+2. For a hook, also add `hooks/integrations/<config_key>/hooks.json` declaring it (see above) — without the declaration the hook never runs.
+3. No Rust or Compose changes are needed — `ENABLED_SERVICES` is already wired up.
+4. Add a BATS test in `_tests/entrypoint/entrypoint.bats` exercising the on/off transition for the new directory.
 
 ## Local LLM Setup
 
