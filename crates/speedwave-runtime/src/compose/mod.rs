@@ -1233,13 +1233,8 @@ mod tests {
         user: Option<&crate::config::TelemetryConfig>,
         managed: Option<&crate::config::ManagedTelemetryConfig>,
     ) -> ResolvedClaudeConfig {
-        let (telemetry, telemetry_error) = match crate::config::resolve_telemetry(user, managed) {
-            Ok(t) => (t, None),
-            Err(e) => (
-                crate::config::ResolvedTelemetry::disabled(),
-                Some(e.to_string()),
-            ),
-        };
+        let telemetry = crate::config::resolve_telemetry(user, managed)
+            .unwrap_or_else(|_| crate::config::ResolvedTelemetry::disabled());
         let mut llm = crate::config::LlmConfig {
             provider: Some("local".to_string()),
             model: Some("test/model".to_string()),
@@ -1252,7 +1247,6 @@ mod tests {
             flags: default_flags(),
             llm,
             telemetry,
-            telemetry_error,
         }
     }
 

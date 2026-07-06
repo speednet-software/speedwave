@@ -774,8 +774,8 @@ pub struct ResolvedTelemetry {
 }
 
 impl ResolvedTelemetry {
-    /// All-off value used as the placeholder when resolution fails (the error is
-    /// carried separately in `ResolvedClaudeConfig::telemetry_error`).
+    /// All-off value used as the fail-closed placeholder when resolution fails;
+    /// the invalid policy is hard-stopped at boot, not carried onward.
     pub fn disabled() -> Self {
         Self::default()
     }
@@ -1068,9 +1068,8 @@ pub struct ResolvedClaudeConfig {
     /// Resolved LLM provider/model configuration.
     pub llm: LlmConfig,
     /// Merged telemetry the renderer reads for the managed-settings mount.
+    /// An unresolvable policy degrades to `disabled()`; it is hard-stopped at boot.
     pub telemetry: ResolvedTelemetry,
-    /// Some = telemetry failed to resolve (fail-closed); the renderer bails.
-    pub telemetry_error: Option<String>,
 }
 
 /// Resolves both Claude config and integrations in a single pass,
@@ -1107,7 +1106,7 @@ pub(crate) fn resolve_project_config_in(
 }
 
 /// Core of [`resolve_project_config_in`] taking the raw MDM load result. A load
-/// error fails closed: telemetry off + `telemetry_error` set (ADR-076).
+/// error fails closed to telemetry off; it is hard-stopped at boot (ADR-076).
 pub(crate) fn resolve_project_config_in_with_load(
     data_dir: &Path,
     project_dir: &Path,
@@ -1126,7 +1125,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 managed_telemetry.as_ref(),
             )
         }
-        Err(e) => {
+        Err(_) => {
             let (mut claude, integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
@@ -1134,8 +1133,17 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_name,
                 None,
             );
-            claude.telemetry = ResolvedTelemetry::disabled();
-            claude.telemetry_error = Some(e.to_string());
+            // Fail closed: drop any telemetry env the user layer added, force off.
+            let disabled = ResolvedTelemetry::disabled();
+            for f in crate::telemetry_env::TelemetryField::ALL {
+                if let Some(k) = crate::telemetry_env::env_key_for(*f) {
+                    claude.env.remove(k);
+                }
+            }
+            claude
+                .env
+                .extend(crate::telemetry_env::telemetry_env_map(&disabled));
+            claude.telemetry = disabled;
             (claude, integrations)
         }
     }
@@ -1231,17 +1239,15 @@ pub(crate) fn resolve_project_config_in_with_managed(
         .map(|s| s.to_string())
         .collect();
 
-    let (telemetry, telemetry_error) = match resolved_tel {
-        Ok(t) => (t, None),
-        Err(e) => (ResolvedTelemetry::disabled(), Some(e.to_string())),
-    };
+    // Fail-closed: an unresolvable policy degrades to disabled(); the invalid
+    // policy is hard-stopped at boot by check_telemetry_policy_at_boot.
+    let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
     let claude = ResolvedClaudeConfig {
         env,
         flags,
         llm,
         telemetry,
-        telemetry_error,
     };
     (claude, integrations)
 }
@@ -2602,14 +2608,10 @@ mod tests {
             Err(anyhow::anyhow!("managed config /x is invalid: boom")),
         )
         .0;
-        assert_eq!(
-            resolved.telemetry_error.as_deref(),
-            Some("managed config /x is invalid: boom"),
-            "a malformed MDM policy must surface as telemetry_error so the renderer bails"
-        );
         assert!(
-            !resolved.telemetry.enabled,
-            "telemetry must be disabled (fail-closed) when the MDM policy cannot be read"
+            !resolved.telemetry.enabled
+                && resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_none(),
+            "telemetry must fail closed (disabled, no OTEL env) when the MDM policy cannot be read"
         );
     }
 
@@ -2642,7 +2644,6 @@ mod tests {
             Ok(None),
         )
         .0;
-        assert!(resolved.telemetry_error.is_none());
         assert_eq!(
             resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
             Some(&"https://mine.example.com:4318".to_string()),
