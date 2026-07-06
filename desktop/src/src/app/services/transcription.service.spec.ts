@@ -230,4 +230,93 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.live_segments.length).toBe(0);
     });
   });
+
+  describe('model download tracking', () => {
+    it('downloadModel tracks the key + progress, then clears on completion', async () => {
+      let finish!: () => void;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') {
+          return new Promise<void>((resolve) => (finish = resolve));
+        }
+        return undefined;
+      };
+      const done = svc.downloadModel('large-v3');
+      // A macrotask lets the listener attach AND the invoke start.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(svc.downloadingModelKey()).toBe('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 42,
+        total_bytes: 100,
+      });
+      expect(svc.downloadProgress()?.downloaded_bytes).toBe(42);
+      finish();
+      await done;
+      expect(svc.downloadingModelKey()).toBeNull();
+      expect(svc.downloadProgress()).toBeNull();
+    });
+
+    it('clears tracking and rethrows when the backend download fails', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') throw new Error('integrity check failed');
+        return undefined;
+      };
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('integrity check');
+      expect(svc.downloadingModelKey()).toBeNull();
+    });
+
+    it('rejects a second downloadModel while one is in flight', async () => {
+      let finish!: () => void;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') {
+          return new Promise<void>((resolve) => (finish = resolve));
+        }
+        return undefined;
+      };
+      const first = svc.downloadModel('large-v3');
+      await new Promise((r) => setTimeout(r, 0));
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('already in progress');
+      finish();
+      await first;
+    });
+
+    it('ignores progress events for other model keys', async () => {
+      await svc.resumeDownloadTracking('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3-turbo',
+        downloaded_bytes: 7,
+        total_bytes: 10,
+      });
+      expect(svc.downloadProgress()).toBeNull();
+    });
+
+    it('resumeDownloadTracking attaches without invoking the download command', async () => {
+      const invoked: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked.push(cmd);
+        return undefined;
+      };
+      await svc.resumeDownloadTracking('large-v3');
+      expect(invoked).toEqual([]);
+      expect(svc.downloadingModelKey()).toBe('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 99,
+        total_bytes: 100,
+      });
+      expect(svc.downloadProgress()?.downloaded_bytes).toBe(99);
+    });
+
+    it('clearDownloadTracking detaches the progress listener', async () => {
+      await svc.resumeDownloadTracking('large-v3');
+      svc.clearDownloadTracking();
+      expect(svc.downloadingModelKey()).toBeNull();
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 5,
+        total_bytes: 10,
+      });
+      expect(svc.downloadProgress()).toBeNull();
+    });
+  });
 });

@@ -36,8 +36,21 @@ export class TranscriptionService {
   private lastSeq = 0;
   private patchUnlisten: UnlistenFn | null = null;
 
+  private readonly downloadingModelKeySignal = signal<string | null>(null);
+  private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
+  private downloadUnlisten: UnlistenFn | null = null;
+
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
+
+  /**
+   * Download-in-flight key — service-level so it survives component remounts.
+   */
+  readonly downloadingModelKey: Signal<string | null> = this.downloadingModelKeySignal.asReadonly();
+
+  /** Latest progress payload for the in-flight download (null before first). */
+  readonly downloadProgress: Signal<DownloadProgress | null> =
+    this.downloadProgressSignal.asReadonly();
 
   /** Capture capabilities + compiled whisper.cpp backends for this build. */
   getCapabilities(): Promise<CapabilitiesAck> {
@@ -143,24 +156,52 @@ export class TranscriptionService {
   }
 
   /**
-   * Starts a model download (off-thread) and routes progress to `onProgress`.
+   * Starts a model download tracked in the service signals (backend enforces
+   * single-flight per model; the local guard just fails fast).
    * @param modelId - catalogue key.
-   * @param onProgress - optional progress callback.
    */
-  downloadModel(
-    modelId: string,
-    onProgress?: (p: DownloadProgress) => void
-  ): Promise<{ done: Promise<void>; unlisten: UnlistenFn }> {
-    return this.tauri
-      .listen<DownloadProgress>(MODEL_PROGRESS_EVENT, (e) => {
-        if (e.payload.model_key === modelId) onProgress?.(e.payload);
-      })
-      .then((unlisten) => ({
-        done: this.tauri
-          .invoke<void>('download_transcription_model', { modelId })
-          .finally(() => unlisten()),
-        unlisten,
-      }));
+  async downloadModel(modelId: string): Promise<void> {
+    if (this.downloadingModelKeySignal() !== null) {
+      throw new Error(`a model download is already in progress`);
+    }
+    await this.beginDownloadTracking(modelId);
+    try {
+      await this.tauri.invoke<void>('download_transcription_model', { modelId });
+    } finally {
+      this.clearDownloadTracking();
+    }
+  }
+
+  /**
+   * Re-attaches progress tracking to a download the backend reports as still
+   * running (webview reloaded mid-download — the invoke promise is gone).
+   * @param modelId - catalogue key the backend flagged as `downloading`.
+   */
+  async resumeDownloadTracking(modelId: string): Promise<void> {
+    if (this.downloadingModelKeySignal() === modelId) return;
+    await this.beginDownloadTracking(modelId);
+  }
+
+  /** Drops download tracking (used when the backend no longer reports one). */
+  clearDownloadTracking(): void {
+    if (this.downloadUnlisten) {
+      try {
+        this.downloadUnlisten();
+      } catch (e) {
+        this.log.warn(`download progress unlisten failed: ${String(e)}`);
+      }
+      this.downloadUnlisten = null;
+    }
+    this.downloadingModelKeySignal.set(null);
+    this.downloadProgressSignal.set(null);
+  }
+
+  private async beginDownloadTracking(modelId: string): Promise<void> {
+    this.clearDownloadTracking(); // drop a stale listener before re-attaching
+    this.downloadingModelKeySignal.set(modelId);
+    this.downloadUnlisten = await this.tauri.listen<DownloadProgress>(MODEL_PROGRESS_EVENT, (e) => {
+      if (e.payload.model_key === modelId) this.downloadProgressSignal.set(e.payload);
+    });
   }
 
   /**

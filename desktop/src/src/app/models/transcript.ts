@@ -122,6 +122,7 @@ export interface RecommendedModelAck {
   display_name: string;
   size_bytes: number;
   downloaded: boolean;
+  downloading: boolean;
   accel_label: string;
 }
 

@@ -1,17 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { TranscriptionSectionComponent } from './transcription-section.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { RecommendedModelAck } from '../../models/transcript';
+import type { DownloadProgress, RecommendedModelAck } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
   let component: TranscriptionSectionComponent;
   let fixture: ComponentFixture<TranscriptionSectionComponent>;
+  let downloadingModelKey: ReturnType<typeof signal<string | null>>;
+  let downloadProgress: ReturnType<typeof signal<DownloadProgress | null>>;
   let svc: {
     recommendedModel: ReturnType<typeof vi.fn>;
     downloadModel: ReturnType<typeof vi.fn>;
     deleteModel: ReturnType<typeof vi.fn>;
+    resumeDownloadTracking: ReturnType<typeof vi.fn>;
+    clearDownloadTracking: ReturnType<typeof vi.fn>;
+    downloadingModelKey: typeof downloadingModelKey;
+    downloadProgress: typeof downloadProgress;
   };
 
   const notDownloaded: RecommendedModelAck = {
@@ -19,15 +26,22 @@ describe('TranscriptionSectionComponent', () => {
     display_name: 'Large v3 (multilingual)',
     size_bytes: 3_100_000_000,
     downloaded: false,
+    downloading: false,
     accel_label: 'Metal (GPU)',
   };
   const downloaded: RecommendedModelAck = { ...notDownloaded, downloaded: true };
 
   beforeEach(async () => {
+    downloadingModelKey = signal<string | null>(null);
+    downloadProgress = signal<DownloadProgress | null>(null);
     svc = {
       recommendedModel: vi.fn(async () => notDownloaded),
-      downloadModel: vi.fn(async () => ({ done: Promise.resolve(), unlisten: () => undefined })),
+      downloadModel: vi.fn(async () => undefined),
       deleteModel: vi.fn(async () => undefined),
+      resumeDownloadTracking: vi.fn(async () => undefined),
+      clearDownloadTracking: vi.fn(() => undefined),
+      downloadingModelKey,
+      downloadProgress,
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -80,7 +94,7 @@ describe('TranscriptionSectionComponent', () => {
     await component.ngOnInit();
     svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.download('large-v3');
-    expect(svc.downloadModel).toHaveBeenCalledWith('large-v3', expect.any(Function));
+    expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
     expect(component.model()?.downloaded).toBe(true);
     expect(component.busy()).toBe(false);
   });
@@ -111,6 +125,37 @@ describe('TranscriptionSectionComponent', () => {
     await component.ngOnInit();
     expect(errSpy).toHaveBeenCalledWith('boom');
     expect(component.model()).toBeNull();
+  });
+
+  it('a fresh instance reflects a download already in flight in the service', async () => {
+    // Regression: navigating away and back must not re-offer the download
+    // button while the backend is still writing the model.
+    downloadingModelKey.set('large-v3');
+    downloadProgress.set({ model_key: 'large-v3', downloaded_bytes: 50, total_bytes: 100 });
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="download-model"]');
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toContain('downloading 50%');
+  });
+
+  it('progress label falls back to an indeterminate form without total_bytes', () => {
+    downloadingModelKey.set('large-v3');
+    downloadProgress.set({ model_key: 'large-v3', downloaded_bytes: 50, total_bytes: null });
+    expect(component.progressLabel()).toBe('downloading…');
+  });
+
+  it('resumes progress tracking when the backend reports an untracked download', async () => {
+    svc.recommendedModel.mockResolvedValueOnce({ ...notDownloaded, downloading: true });
+    await component.ngOnInit();
+    expect(svc.resumeDownloadTracking).toHaveBeenCalledWith('large-v3');
+  });
+
+  it('clears stale tracking when the backend no longer reports a download', async () => {
+    downloadingModelKey.set('large-v3');
+    svc.recommendedModel.mockResolvedValueOnce(downloaded);
+    await component.ngOnInit();
+    expect(svc.clearDownloadTracking).toHaveBeenCalled();
   });
 
   it('size() formats GB and MB', () => {

@@ -707,6 +707,8 @@ fn main() {
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let transcript_downloads: transcription_cmd::DownloadsHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project oauth
     // workers, auto-check handle.
@@ -824,6 +826,7 @@ fn main() {
         .manage(model_store.clone())
         .manage(transcript_drivers.clone())
         .manage(transcript_forwarders.clone())
+        .manage(transcript_downloads.clone())
         .manage(tray_state)
         .setup(move |app| {
             // Fixed at Trace — no user-facing toggle.

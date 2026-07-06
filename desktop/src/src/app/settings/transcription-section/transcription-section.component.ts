@@ -3,6 +3,7 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
@@ -76,7 +77,7 @@ import { formatBytes } from '../../shared/format-bytes';
                 [disabled]="busy()"
                 (click)="download(m.key)"
               >
-                {{ busy() ? progressLabel() : 'download model' }}
+                {{ downloading() ? progressLabel() : 'download model' }}
               </button>
             }
           </div>
@@ -91,25 +92,47 @@ export class TranscriptionSectionComponent implements OnInit {
 
   /** The recommended model + its state; `null` while loading. */
   readonly model = signal<RecommendedModelAck | null>(null);
-  /** Disables the button while a download/remove is in flight. */
-  readonly busy = signal(false);
-  /** Live download progress label (e.g. `downloading 42%`). */
-  readonly progressLabel = signal('downloading…');
   /** Local error string. */
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
 
+  /** `true` while a remove is in flight (download state lives in the service). */
+  private readonly removeBusy = signal(false);
+
+  /**
+   * Download-in-flight — from the service, so a remounted section still sees it.
+   */
+  readonly downloading = computed(() => this.transcription.downloadingModelKey() !== null);
+
+  /** Disables both buttons while a download or remove is in flight. */
+  readonly busy = computed(() => this.downloading() || this.removeBusy());
+
+  /** Live download progress label (e.g. `downloading 42%`). */
+  readonly progressLabel = computed(() => {
+    const p = this.transcription.downloadProgress();
+    if (!p?.total_bytes) return 'downloading…';
+    return `downloading ${Math.round((p.downloaded_bytes / p.total_bytes) * 100)}%`;
+  });
+
   /** Reads the recommended model + its download state on first paint. */
   async ngOnInit(): Promise<void> {
     await this.refresh();
   }
 
-  /** Re-reads the recommended-model state from the backend. */
+  /** Re-reads the recommended-model state and re-syncs download tracking. */
   private async refresh(): Promise<void> {
     try {
-      this.model.set(await this.transcription.recommendedModel());
+      const ack = await this.transcription.recommendedModel();
+      this.model.set(ack);
+      if (ack.downloading && this.transcription.downloadingModelKey() !== ack.key) {
+        // Backend download survived a webview reload — reattach progress.
+        await this.transcription.resumeDownloadTracking(ack.key);
+      } else if (!ack.downloading && this.transcription.downloadingModelKey() === ack.key) {
+        // Stale tracking for a download the backend already finished.
+        this.transcription.clearDownloadTracking();
+      }
       this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -124,25 +147,14 @@ export class TranscriptionSectionComponent implements OnInit {
    * @param key - the model catalogue key.
    */
   async download(key: string): Promise<void> {
-    this.busy.set(true);
-    this.progressLabel.set('downloading…');
-    this.cdr.markForCheck();
     try {
-      const { done } = await this.transcription.downloadModel(key, (p) => {
-        if (p.total_bytes) {
-          const pct = Math.round((p.downloaded_bytes / p.total_bytes) * 100);
-          this.progressLabel.set(`downloading ${pct}%`);
-          this.cdr.markForCheck();
-        }
-      });
-      await done;
+      await this.transcription.downloadModel(key);
       await this.refresh();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
-    this.busy.set(false);
     this.cdr.markForCheck();
   }
 
@@ -151,7 +163,7 @@ export class TranscriptionSectionComponent implements OnInit {
    * @param key - the model catalogue key.
    */
   async remove(key: string): Promise<void> {
-    this.busy.set(true);
+    this.removeBusy.set(true);
     try {
       await this.transcription.deleteModel(key);
       await this.refresh();
@@ -160,7 +172,7 @@ export class TranscriptionSectionComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
-    this.busy.set(false);
+    this.removeBusy.set(false);
     this.cdr.markForCheck();
   }
 

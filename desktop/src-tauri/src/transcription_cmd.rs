@@ -27,6 +27,9 @@ pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
 /// Sessions that already have a live event forwarder — guards against
 /// double-spawning on repeated `subscribe_transcript` calls.
 pub type ForwardersHandle = Arc<Mutex<HashSet<Uuid>>>;
+/// Model keys with a download in flight — single-flight guard: a second
+/// concurrent download would corrupt the shared `.part` temp file.
+pub type DownloadsHandle = Arc<Mutex<HashSet<String>>>;
 
 /// Per-session Tauri event name for transcript streams.
 pub fn transcript_event_name(id: Uuid) -> String {
@@ -536,6 +539,40 @@ pub async fn get_transcript_markdown(
 
 // ---- 5) model management --------------------------------------------------
 
+/// RAII slot in the in-flight download registry: removed on drop, so the
+/// registry empties on every exit path of the owning download task.
+struct DownloadSlot {
+    downloads: DownloadsHandle,
+    key: String,
+}
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.downloads.lock() {
+            set.remove(&self.key);
+        }
+    }
+}
+
+/// Claims the single download slot for `key`; errors if one is already live.
+fn try_begin_download(downloads: &DownloadsHandle, key: &str) -> Result<DownloadSlot, String> {
+    let mut set = downloads
+        .lock()
+        .map_err(|_| "download registry poisoned".to_string())?;
+    if !set.insert(key.to_string()) {
+        return Err(format!("model '{key}' is already downloading"));
+    }
+    Ok(DownloadSlot {
+        downloads: downloads.clone(),
+        key: key.to_string(),
+    })
+}
+
+/// `true` while a download of `key` is in flight.
+fn is_downloading(downloads: &DownloadsHandle, key: &str) -> bool {
+    downloads.lock().map(|s| s.contains(key)).unwrap_or(false)
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ModelsAck {
     /// Status of each Whisper model in the catalogue.
@@ -556,6 +593,8 @@ pub struct RecommendedModelAck {
     pub size_bytes: u64,
     /// `true` if already downloaded.
     pub downloaded: bool,
+    /// `true` while a download is in flight (a remounted UI re-syncs on this).
+    pub downloading: bool,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
 }
@@ -572,6 +611,7 @@ fn accel_label() -> String {
 #[tauri::command]
 pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
+    downloads: tauri::State<'_, DownloadsHandle>,
 ) -> Result<RecommendedModelAck, String> {
     let best = transcription::best_model_for_this_build();
     let status = models
@@ -584,6 +624,7 @@ pub async fn recommended_transcription_model(
         display_name: best.display_name.to_string(),
         size_bytes: status.size_bytes,
         downloaded: status.downloaded,
+        downloading: is_downloading(downloads.inner(), best.key),
         accel_label: accel_label(),
     })
 }
@@ -602,16 +643,24 @@ pub async fn list_transcription_models(
 pub async fn download_transcription_model(
     model_id: String,
     models: tauri::State<'_, ModelStoreHandle>,
+    downloads: tauri::State<'_, DownloadsHandle>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let slot = try_begin_download(downloads.inner(), &model_id)?;
     let models = models.inner().clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // The slot lives inside the blocking task: the registry entry clears
+        // exactly when the download work ends, even if this future is dropped.
+        let _slot = slot;
         models
             .ensure_model(&model_id, &mut |p| {
                 let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
             })
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| {
+                log::warn!(target: "transcription::models", "download of '{model_id}' failed: {e}");
+                e.to_string()
+            })
     })
     .await
     .map_err(|e| format!("download task panicked: {e}"))??;
@@ -743,6 +792,40 @@ mod tests {
         // Unknown id → default.
         let missing = Uuid::new_v4();
         assert_eq!(session_language(&store, missing), Language::Pl);
+    }
+
+    #[test]
+    fn try_begin_download_claims_then_rejects_a_second_claim() {
+        let downloads = DownloadsHandle::default();
+        let slot = try_begin_download(&downloads, "large-v3").unwrap();
+        assert!(is_downloading(&downloads, "large-v3"));
+        // Second concurrent claim of the same key is refused with the reason.
+        let err = try_begin_download(&downloads, "large-v3").err().unwrap();
+        assert!(err.contains("already downloading"), "got: {err}");
+        // A different key is independent.
+        let other = try_begin_download(&downloads, "large-v3-turbo").unwrap();
+        drop(other);
+        drop(slot);
+    }
+
+    #[test]
+    fn download_slot_clears_the_registry_on_drop() {
+        let downloads = DownloadsHandle::default();
+        {
+            let _slot = try_begin_download(&downloads, "large-v3").unwrap();
+            assert!(is_downloading(&downloads, "large-v3"));
+        }
+        assert!(!is_downloading(&downloads, "large-v3"));
+        // The key is claimable again after the slot dropped.
+        assert!(try_begin_download(&downloads, "large-v3").is_ok());
+    }
+
+    #[test]
+    fn is_downloading_is_false_for_an_empty_registry_and_unknown_keys() {
+        let downloads = DownloadsHandle::default();
+        assert!(!is_downloading(&downloads, "large-v3"));
+        let _slot = try_begin_download(&downloads, "large-v3").unwrap();
+        assert!(!is_downloading(&downloads, "some-other-model"));
     }
 
     #[test]

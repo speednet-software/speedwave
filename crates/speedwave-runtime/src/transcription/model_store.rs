@@ -30,10 +30,13 @@ use sha2::{Digest, Sha256};
 use crate::consts;
 use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
 
-/// Timeout for the whole model download. A 2.9 GiB model over a slow link can
-/// legitimately take a long time, so this is generous; it's a backstop against
-/// a wedged connection, not a performance bound.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Max time to establish the connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-request backstop. 8 h keeps a ~100 KB/s link viable for a 2.9 GiB
+/// model (1 h aborted those); dead links are caught earlier by TCP keepalive.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(8 * 60 * 60);
+/// Keepalive probe interval — detects a dead peer without capping transfer time.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// Read-buffer size for the streaming download (also the granularity at which
 /// progress is reported).
@@ -201,6 +204,11 @@ impl ModelStore {
                 cap: consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             });
         }
+        log::info!(
+            target: "transcription::models",
+            "downloading model '{key}' (~{} bytes)",
+            info.approx_bytes
+        );
         self.download_to(
             &info.url(),
             &dest,
@@ -209,6 +217,7 @@ impl ModelStore {
             per_model_cap,
             progress,
         )?;
+        log::info!(target: "transcription::models", "model '{key}' downloaded and verified");
         Ok(dest)
     }
 
@@ -292,13 +301,13 @@ impl Default for ModelStore {
 
 // --- the HTTP downloader ---------------------------------------------------
 
-/// Builds the `reqwest::blocking::Client` used for model downloads: a generous
-/// timeout, and a custom redirect policy that follows redirects **only** to
-/// allowlisted hosts that pass the shared SSRF validator (`url_validation` —
-/// blocks loopback / link-local-metadata / private / reserved targets).
+/// Model-download client: connect + read-idle timeouts (no total-transfer cap)
+/// and redirects only to allowlisted hosts that pass the shared SSRF validator.
 fn build_client() -> Result<reqwest::blocking::Client, ModelStoreError> {
     reqwest::blocking::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(DOWNLOAD_TIMEOUT)
+        .tcp_keepalive(TCP_KEEPALIVE)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() > 10 {
                 return attempt.error("too many redirects");
