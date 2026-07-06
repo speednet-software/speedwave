@@ -355,15 +355,57 @@ pub fn bytes_to_f32_samples(raw: &[u8]) -> Vec<f32> {
 /// Spawns a background thread draining a child's stderr into the log so the
 /// child can't deadlock on a full pipe. `target` distinguishes log lines per
 /// capture backend.
-pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) {
+pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) -> ChildStderr {
     use std::io::BufRead;
+    let collected = ChildStderr::default();
     if let Some(stderr) = child.stderr.take() {
+        let sink = collected.clone();
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                log::debug!(target: "transcription::capture", "{target}: {line}");
+                // Denials must be visible in logs, not buried at debug.
+                if line.contains("denied") {
+                    log::warn!(target: "transcription::capture", "{target}: {line}");
+                } else {
+                    log::debug!(target: "transcription::capture", "{target}: {line}");
+                }
+                if let Ok(mut lines) = sink.lines.lock() {
+                    if lines.len() < MAX_STDERR_LINES {
+                        lines.push(line);
+                    }
+                }
             }
+            sink.done.store(true, std::sync::atomic::Ordering::SeqCst);
         });
+    } else {
+        collected
+            .done
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    collected
+}
+
+/// Cap on buffered child-stderr lines (diagnostics only).
+const MAX_STDERR_LINES: usize = 50;
+
+/// Handle to a capture child's collected stderr (see [`drain_child_stderr`]).
+#[derive(Clone, Debug, Default)]
+pub struct ChildStderr {
+    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ChildStderr {
+    /// Joined stderr lines; waits up to `timeout` for the drain to finish
+    /// (the child must already have exited, else this just times out).
+    pub fn wait_snapshot(&self, timeout: Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        while !self.done.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.lines.lock().map(|l| l.join("; ")).unwrap_or_default()
     }
 }
 

@@ -133,7 +133,7 @@ impl AudioCapture for MacOsAudioCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("capture CLI stdout not piped".to_string()))?;
-        super::audio::drain_child_stderr(&mut child, CLI_NAME);
+        let stderr = super::audio::drain_child_stderr(&mut child, CLI_NAME);
 
         let mut reader = BufReader::new(stdout);
         // First: the JSON header line.
@@ -144,10 +144,9 @@ impl AudioCapture for MacOsAudioCapture {
         if n == 0 {
             // CLI exited before emitting anything — usually permission denial
             // or old OS. Reap it to read the exit code, then classify.
-            let _ = child.wait();
-            return Err(CaptureError::PermissionDenied(
-                "capture CLI produced no output (check Privacy & Security → Microphone / Audio Recording)".to_string(),
-            ));
+            let code = child.wait().ok().and_then(|s| s.code());
+            let detail = stderr.wait_snapshot(Duration::from_millis(300));
+            return Err(classify_early_exit(code, &detail));
         }
         let header: StreamHeader = serde_json::from_str(header_line.trim()).map_err(|e| {
             CaptureError::Failed(format!("parse capture header {header_line:?}: {e}"))
@@ -366,6 +365,23 @@ impl AudioStream for MixedCliStream {
     }
 }
 
+/// Maps an early CLI exit to a precise error (exit 2 = a permission denial;
+/// the CLI's stderr says which permission and how to grant it).
+fn classify_early_exit(code: Option<i32>, detail: &str) -> CaptureError {
+    let detail = if detail.is_empty() {
+        "capture CLI produced no output (check Privacy & Security → Microphone / System Audio Recording)"
+    } else {
+        detail
+    };
+    match code {
+        Some(2) => CaptureError::PermissionDenied(detail.to_string()),
+        _ => CaptureError::Failed(format!(
+            "capture CLI exited early (code {}): {detail}",
+            code.map_or("killed".to_string(), |c| c.to_string())
+        )),
+    }
+}
+
 /// The fallback picker entry when device enumeration yields nothing/errors.
 fn generic_default_mic() -> AudioSourceInfo {
     AudioSourceInfo {
@@ -383,9 +399,11 @@ fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
         .output()
         .map_err(|e| CaptureError::Failed(format!("spawn {CLI_NAME} --list-mics: {e}")))?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CaptureError::Failed(format!(
-            "{CLI_NAME} --list-mics exited {:?}",
-            output.status.code()
+            "{CLI_NAME} --list-mics exited {:?}: {}",
+            output.status.code(),
+            stderr.trim()
         )));
     }
     serde_json::from_slice(&output.stdout)
@@ -619,6 +637,46 @@ mod tests {
         assert!(stream.next_chunk().unwrap().is_none());
         // Subsequent calls keep returning None.
         assert!(stream.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn classify_early_exit_maps_exit_2_to_permission_denied_with_the_cli_reason() {
+        let e = classify_early_exit(
+            Some(2),
+            "system audio recording permission denied — grant it in System Settings",
+        );
+        assert!(matches!(e, CaptureError::PermissionDenied(_)));
+        assert!(e.to_string().contains("System Settings"), "got: {e}");
+    }
+
+    #[test]
+    fn classify_early_exit_falls_back_to_a_generic_hint_without_stderr() {
+        let e = classify_early_exit(Some(2), "");
+        assert!(matches!(e, CaptureError::PermissionDenied(_)));
+        assert!(e.to_string().contains("Privacy & Security"), "got: {e}");
+    }
+
+    #[test]
+    fn classify_early_exit_treats_other_codes_as_failures_with_detail() {
+        let e = classify_early_exit(Some(1), "record start failed: boom");
+        assert!(matches!(e, CaptureError::Failed(_)));
+        assert!(e.to_string().contains("code 1") && e.to_string().contains("boom"));
+        let killed = classify_early_exit(None, "");
+        assert!(killed.to_string().contains("killed"), "got: {killed}");
+    }
+
+    #[test]
+    fn drain_child_stderr_collects_lines_for_error_details() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo 'permission denied — grant it' >&2; exit 2")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = super::super::audio::drain_child_stderr(&mut child, "test-cli");
+        let _ = child.wait();
+        let detail = stderr.wait_snapshot(Duration::from_secs(2));
+        assert!(detail.contains("permission denied"), "got: {detail:?}");
     }
 
     #[test]
