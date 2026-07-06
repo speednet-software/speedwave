@@ -117,17 +117,23 @@ if [ "${OS_ENABLED}" = true ] && [ "${#OS_AVAILABLE[@]}" -gt 0 ]; then
     done
 fi
 
+# Hook declaration dirs (hooks/hooks.json), collected by the symlink passes below
+# under the same enablement gates and merged into settings.json (ADR-078).
+hook_decl_dirs=()
+
 for resource_type in skills commands agents hooks; do
     src_dir="${SPEEDWAVE_RESOURCES}/${resource_type}"
     [ -d "${src_dir}" ] || continue
 
     # Core entries — always-on. Skip the `integrations/` bucket which is gated below.
+    if [ "${resource_type}" = "hooks" ] && [ -f "${src_dir}/hooks.json" ]; then
+        hook_decl_dirs+=("${src_dir}")
+    fi
     for entry in "${src_dir}"/*; do
         [ -e "${entry}" ] || continue
         name="$(basename "${entry}")"
         [ "${name}" = "integrations" ] && continue
-        # hooks.json is a registration manifest merged into settings.json below,
-        # not a script — never expose it as a hook entry.
+        # hooks.json is a registration manifest (ADR-078), not a hook script.
         [ "${resource_type}" = "hooks" ] && [ "${name}" = "hooks.json" ] && continue
         link="${HOME}/.claude/${resource_type}/${name}"
         ln -sfn "${entry}" "${link}"
@@ -142,6 +148,9 @@ for resource_type in skills commands agents hooks; do
             [ "${svc}" = "os" ] && continue
             src="${integrations_dir}/${svc}"
             [ -d "${src}" ] || continue
+            if [ "${resource_type}" = "hooks" ] && [ -f "${src}/hooks.json" ]; then
+                hook_decl_dirs+=("${src}")
+            fi
             link="${HOME}/.claude/${resource_type}/${svc}"
             ln -sfn "${src}" "${link}"
             echo "${link}" >> "${new_state}"
@@ -153,6 +162,9 @@ for resource_type in skills commands agents hooks; do
         for sub in "${OS_ENABLED_SUBS[@]}"; do
             src="${integrations_dir}/${sub}"
             [ -d "${src}" ] || continue
+            if [ "${resource_type}" = "hooks" ] && [ -f "${src}/hooks.json" ]; then
+                hook_decl_dirs+=("${src}")
+            fi
             link="${HOME}/.claude/${resource_type}/${sub}"
             ln -sfn "${src}" "${link}"
             echo "${link}" >> "${new_state}"
@@ -247,6 +259,9 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
         fi
         plugin_path="/speedwave/plugins/${plugin}"
         [ -d "${plugin_path}" ] || continue
+        if [ -f "${plugin_path}/hooks/hooks.json" ]; then
+            hook_decl_dirs+=("${plugin_path}/hooks")
+        fi
         for resource_type in skills commands agents hooks; do
             [ -d "${plugin_path}/${resource_type}" ] || continue
             for entry in "${plugin_path}/${resource_type}"/*; do
@@ -272,36 +287,8 @@ else
     exit 1
 fi
 
-# Register hooks in ~/.claude/settings.json. Claude Code runs hooks ONLY from a
-# settings "hooks" key — files under ~/.claude/hooks/ are never auto-discovered
-# (ADR-078). Enabled core/integration/plugin sources declare hooks/hooks.json;
-# injected entries are tracked in ~/.claude/.speedwave-managed-hooks so a later
-# start removes them on toggle-off while user-added hooks survive.
-hook_decl_dirs=()
-if [ -f "${SPEEDWAVE_RESOURCES}/hooks/hooks.json" ]; then
-    hook_decl_dirs+=("${SPEEDWAVE_RESOURCES}/hooks")
-fi
-if [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
-    for svc in "${ENABLED_SVCS[@]}"; do
-        [ "${svc}" = "os" ] && continue
-        _d="${SPEEDWAVE_RESOURCES}/hooks/integrations/${svc}"
-        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
-    done
-fi
-if [ "${#OS_ENABLED_SUBS[@]}" -gt 0 ]; then
-    for sub in "${OS_ENABLED_SUBS[@]}"; do
-        _d="${SPEEDWAVE_RESOURCES}/hooks/integrations/${sub}"
-        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
-    done
-fi
-if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
-    for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
-        echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$' || continue
-        _d="/speedwave/plugins/${plugin}/hooks"
-        [ -f "${_d}/hooks.json" ] && hook_decl_dirs+=("${_d}")
-    done
-fi
-
+# Register the collected hooks.json declarations in ~/.claude/settings.json —
+# Claude Code runs hooks only from the settings "hooks" key (ADR-078).
 _managed_hooks="${HOME}/.claude/.speedwave-managed-hooks"
 if [ "${#hook_decl_dirs[@]}" -gt 0 ] || [ -f "${_managed_hooks}" ]; then
     _decl_dirs=""
@@ -324,12 +311,12 @@ const stable = (v) => JSON.stringify(v, (k, val) =>
 const validDecl = (decl) => isObj(decl) && Object.entries(decl).every(([event, groups]) =>
   /^[A-Z][A-Za-z]{2,63}$/.test(event) && Array.isArray(groups) && groups.every((g) =>
     isObj(g) && Array.isArray(g.hooks) && g.hooks.every((h) =>
-      isObj(h) && h.type === "command" && typeof h.command === "string")));
+      isObj(h) && h.type === "command" && typeof h.command === "string" && h.command.trim() !== "")));
 
 let settings = {};
 if (fs.existsSync(settingsPath)) {
   try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); }
-  catch { console.error("entrypoint: settings.json unparseable — hook registration skipped"); process.exit(0); }
+  catch (e) { console.error("entrypoint: settings.json unparseable — hook registration skipped: " + e.message); process.exit(0); }
 }
 if (!isObj(settings) || (settings.hooks !== undefined && !isObj(settings.hooks))) {
   console.error("entrypoint: settings.json hooks key is not an object — hook registration skipped");
@@ -342,7 +329,7 @@ settings.hooks = hooks;
 let prev = {};
 if (fs.existsSync(statePath)) {
   try { const p = JSON.parse(fs.readFileSync(statePath, "utf8")); if (isObj(p)) prev = p; }
-  catch { console.error("WARNING: managed-hooks state unparseable — previously injected hooks may linger"); }
+  catch (e) { console.error("WARNING: managed-hooks state unparseable (" + e.message + ") — hooks of disabled sources may stay registered until re-enabled and disabled again"); }
 }
 
 // Drop entries injected by the previous run; user-added hooks are untouched.
@@ -370,11 +357,27 @@ for (const dir of declDirs) {
   }
 }
 for (const [event, groups] of Object.entries(managed)) {
-  (hooks[event] = hooks[event] || []).push(...groups);
+  if (hooks[event] === undefined) hooks[event] = [];
+  else if (!Array.isArray(hooks[event])) {
+    console.error("WARNING: settings.json hooks." + event + " is not an array — skipping its managed hooks");
+    continue;
+  }
+  // Skip structurally identical entries: heals a crash between the two writes
+  // below and a lost manifest without ever double-registering a hook.
+  for (const g of groups) {
+    if (!hooks[event].some((c) => stable(c) === stable(g))) hooks[event].push(g);
+  }
 }
 if (Object.keys(hooks).length === 0) delete settings.hooks;
 
-const writeAtomic = (p, data) => { fs.writeFileSync(p + ".tmp", data); fs.renameSync(p + ".tmp", p); };
+// fsync-before-rename is mandatory (virtiofs/drvfs tear; see cross-platform rules).
+const writeAtomic = (p, data) => {
+  const fd = fs.openSync(p + ".tmp", "w");
+  fs.writeSync(fd, data);
+  fs.fsyncSync(fd);
+  fs.closeSync(fd);
+  fs.renameSync(p + ".tmp", p);
+};
 if (stable(settings) !== before) {
   writeAtomic(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 }
@@ -383,7 +386,7 @@ if (Object.keys(managed).length > 0) {
 } else if (fs.existsSync(statePath)) {
   fs.unlinkSync(statePath);
 }
-' || echo 'entrypoint: hook registration skipped' >&2
+' || echo 'entrypoint: hook registration failed — continuing without managed hooks' >&2
     unset _decl_dirs
 fi
 unset _managed_hooks

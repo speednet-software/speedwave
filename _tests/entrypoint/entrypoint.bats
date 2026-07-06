@@ -1612,26 +1612,30 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Hook registration: hooks.json declarations merged into settings.json (ADR-078).
-# Claude Code runs hooks only from the settings "hooks" key — symlinks under
-# ~/.claude/hooks/ alone never execute.
+# Hook registration (ADR-078): hooks.json declarations merged into the settings
+# "hooks" key — symlinks under ~/.claude/hooks/ alone never execute.
 # ---------------------------------------------------------------------------
 
 # Writes a plugin with a UserPromptSubmit hooks.json + script into $1/<slug>.
 _make_hook_plugin() {
-    local dir="$1" slug="$2" cmd="${3:-}"
-    if [ -z "${cmd}" ]; then
-        cmd='node ${SPEEDWAVE_HOOK_DIR}/hook.mjs'
-    fi
+    local dir="$1" slug="$2"
     mkdir -p "${dir}/${slug}/hooks"
     echo "// hook" > "${dir}/${slug}/hooks/hook.mjs"
-    cat > "${dir}/${slug}/hooks/hooks.json" << EOF
+    cat > "${dir}/${slug}/hooks/hooks.json" << 'EOF'
 {
   "UserPromptSubmit": [
-    { "hooks": [ { "type": "command", "command": "${cmd}", "timeout": 10 } ] }
+    { "hooks": [ { "type": "command", "command": "node ${SPEEDWAVE_HOOK_DIR}/hook.mjs", "timeout": 10 } ] }
   ]
 }
 EOF
+}
+
+# Copies the entrypoint with /speedwave/plugins/ redirected into $1; echoes the path.
+_patch_plugins_dir() {
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|$1/|g" "$ENTRYPOINT" > "$patched"
+    echo "$patched"
 }
 
 # jq-free JSON assertion: node exits 0 when the expression is truthy.
@@ -1640,13 +1644,10 @@ _settings_check() {
 }
 
 @test "plugin hooks.json registers a settings hook with SPEEDWAVE_HOOK_DIR substituted" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1665,14 +1666,11 @@ _settings_check() {
 }
 
 @test "hooks from multiple plugins concatenate under the same event" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "alpha"
     _make_hook_plugin "$plugins_dir" "beta"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1686,13 +1684,10 @@ _settings_check() {
 }
 
 @test "plugin toggle-off removes injected hooks but preserves user-added hooks" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1723,13 +1718,10 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
 }
 
 @test "toggle-off with no user hooks removes the hooks key entirely" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1746,15 +1738,12 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
 }
 
 @test "malformed plugin hooks.json warns and does not block other plugins" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "good-plugin"
     mkdir -p "${plugins_dir}/bad-plugin/hooks"
     echo 'NOT_JSON' > "${plugins_dir}/bad-plugin/hooks/hooks.json"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="bad-plugin,good-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1765,10 +1754,10 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     rm -rf "$plugins_dir" "$patched"
 }
 
-@test "hooks.json with invalid event name or hook shape is rejected" {
-    local plugins_dir
+@test "hooks.json with invalid event name, hook shape, or empty command is rejected" {
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
-    mkdir -p "${plugins_dir}/evt-plugin/hooks" "${plugins_dir}/shape-plugin/hooks"
+    mkdir -p "${plugins_dir}/evt-plugin/hooks" "${plugins_dir}/shape-plugin/hooks" "${plugins_dir}/empty-plugin/hooks"
     # lowercase event name — rejected by the event-shape gate.
     cat > "${plugins_dir}/evt-plugin/hooks/hooks.json" << 'EOF'
 { "userPromptSubmit": [ { "hooks": [ { "type": "command", "command": "echo x" } ] } ] }
@@ -1777,12 +1766,13 @@ EOF
     cat > "${plugins_dir}/shape-plugin/hooks/hooks.json" << 'EOF'
 { "UserPromptSubmit": [ { "hooks": [ { "command": "echo x" } ] } ] }
 EOF
+    # whitespace-only command — rejected.
+    cat > "${plugins_dir}/empty-plugin/hooks/hooks.json" << 'EOF'
+{ "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "  " } ] } ] }
+EOF
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
-
-    SPEEDWAVE_PLUGINS="evt-plugin,shape-plugin" run bash "$patched" true
+    SPEEDWAVE_PLUGINS="evt-plugin,shape-plugin,empty-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARNING: ignoring invalid hooks declaration"* ]]
     # Nothing registered → no settings.json created (no template in this fixture).
@@ -1839,14 +1829,11 @@ EOF
 }
 
 @test "hook registration is idempotent across identical runs" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1869,14 +1856,11 @@ EOF
 }
 
 @test "hook registration swap: plugin alpha replaced by beta between runs" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "alpha"
     _make_hook_plugin "$plugins_dir" "beta"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="alpha" run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1890,20 +1874,118 @@ EOF
 }
 
 @test "corrupt settings.json skips hook registration and leaves the file untouched" {
-    local plugins_dir
+    local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
     printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
-
-    local patched
-    patched="$(mktemp)"
-    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"hook registration skipped"* ]]
     [ "$(cat "${TEST_HOME}/.claude/settings.json")" = 'NOT_JSON' ]
     [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "non-object hooks key in settings.json skips registration and leaves the file untouched" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    printf '{"hooks":[]}' > "${TEST_HOME}/.claude/settings.json"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hooks key is not an object — hook registration skipped"* ]]
+    [ "$(cat "${TEST_HOME}/.claude/settings.json")" = '{"hooks":[]}' ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "non-array event value in settings hooks is skipped with a warning, other events register" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    # User broke one event by hand; the plugin also declares it.
+    printf '{"hooks":{"UserPromptSubmit":"oops"}}' > "${TEST_HOME}/.claude/settings.json"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hooks.UserPromptSubmit is not an array"* ]]
+    # The broken user value is preserved, not clobbered.
+    run _settings_check "s.hooks.UserPromptSubmit==='oops'"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "hand-deleted injected hook is re-added on the next start while its source stays enabled" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    # User hand-deletes the injected entry (unsupported removal path).
+    node -e "
+const fs=require('fs');
+const p='${TEST_HOME}/.claude/settings.json';
+const s=JSON.parse(fs.readFileSync(p,'utf8'));
+delete s.hooks;
+fs.writeFileSync(p,JSON.stringify(s,null,2));
+"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    run _settings_check "s.hooks.UserPromptSubmit.length===1"
+    [ "$status" -eq 0 ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "a lost managed-hooks manifest does not duplicate injected hooks" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    # Simulate a crash that lost the manifest after settings.json was written.
+    rm -f "${TEST_HOME}/.claude/.speedwave-managed-hooks"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    # Structural dedupe: still exactly one entry, and it is tracked again.
+    run _settings_check "s.hooks.UserPromptSubmit.length===1"
+    [ "$status" -eq 0 ]
+    [ -f "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "a corrupt managed-hooks manifest warns, does not duplicate, and is rewritten" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude/.speedwave-managed-hooks"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"managed-hooks state unparseable"* ]]
+    # Dedupe keeps the registration single; the manifest is valid again.
+    run _settings_check "s.hooks.UserPromptSubmit.length===1"
+    [ "$status" -eq 0 ]
+    run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/.speedwave-managed-hooks','utf8'))"
+    [ "$status" -eq 0 ]
 
     rm -rf "$plugins_dir" "$patched"
 }
