@@ -10,7 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+    CaptureError, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
 use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
@@ -23,6 +23,14 @@ const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 /// A few seconds of audio — enough to absorb a slow consumer without unbounded
 /// memory growth (a full channel drops the oldest, see the send site).
 const CHANNEL_DEPTH: usize = 32;
+
+/// Which default render endpoint a loopback thread captures. Teams/Slack play
+/// call audio to the Communications-role endpoint, often a different device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopbackRole {
+    Console,
+    Communications,
+}
 
 /// Windows capture backend. Stateless; `start()` opens a fresh cpal stream.
 pub struct WasapiAudioCapture;
@@ -105,10 +113,16 @@ impl AudioCapture for WasapiAudioCapture {
             AudioSource::SystemWide => {
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
                 let stop = Arc::new(AtomicBool::new(false));
-                let handle = spawn_wasapi_loopback(ResamplerSink::Channel(tx), &stop)?;
+                let handle = spawn_wasapi_loopback(
+                    LoopbackRole::Console,
+                    ResamplerSink::Channel(tx),
+                    &stop,
+                )?;
                 Ok(Box::new(WasapiLoopbackStream {
                     rx,
                     _handle: handle,
+                    zero: ZeroStreakDetector::default(),
+                    warnings: Vec::new(),
                 }))
             }
             AudioSource::Microphone { device } => {
@@ -127,12 +141,30 @@ impl AudioCapture for WasapiAudioCapture {
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
                 let stop = Arc::new(AtomicBool::new(false));
                 let handle = spawn_wasapi_loopback(
+                    LoopbackRole::Console,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::System,
                     },
                     &stop,
                 )?;
+                // Call audio renders to the Communications-role endpoint (often a
+                // headset ≠ console device) — capture it too, summed as System.
+                // Best-effort: the console capture is the baseline.
+                let comms_handle = match spawn_wasapi_loopback(
+                    LoopbackRole::Communications,
+                    ResamplerSink::Mixed {
+                        buf: Arc::clone(&buf),
+                        source: MixSource::System,
+                    },
+                    &stop,
+                ) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        log::warn!(target: "transcription::capture", "communications-endpoint loopback unavailable: {e}");
+                        None
+                    }
+                };
                 let mic_stream = open_capture_stream(
                     &mic_dev,
                     ResamplerSink::Mixed {
@@ -143,6 +175,7 @@ impl AudioCapture for WasapiAudioCapture {
                 Ok(Box::new(MixedWasapiAudioStream {
                     buf,
                     handle: Some(handle),
+                    comms_handle,
                     _mic: mic_stream,
                 }))
             }
@@ -258,6 +291,7 @@ impl Drop for WasapiCaptureHandle {
 /// chunks into `sink` until `stop` is set. Reports setup success/failure back
 /// through a one-shot channel so a bad endpoint fails `start()` cleanly.
 fn spawn_wasapi_loopback(
+    role: LoopbackRole,
     sink: ResamplerSink,
     stop: &Arc<AtomicBool>,
 ) -> Result<WasapiCaptureHandle, CaptureError> {
@@ -267,9 +301,9 @@ fn spawn_wasapi_loopback(
     let failed = Arc::new(AtomicBool::new(false));
     let failed_thread = Arc::clone(&failed);
     let join = std::thread::Builder::new()
-        .name("wasapi-loopback".to_string())
+        .name(format!("wasapi-loopback-{role:?}").to_lowercase())
         .spawn(move || {
-            run_wasapi_loopback(sink, &stop_thread, &failed_thread, ready_tx);
+            run_wasapi_loopback(role, sink, &stop_thread, &failed_thread, ready_tx);
         })
         .map_err(|e| CaptureError::Failed(format!("spawn wasapi capture thread: {e}")))?;
     // Wait for the thread's setup result (bounded — a wedged COM init shouldn't
@@ -299,13 +333,14 @@ fn spawn_wasapi_loopback(
 /// signal readiness, then pump frames → `Resampler` → `sink` until `stop`.
 #[cfg(windows)]
 fn run_wasapi_loopback(
+    role: LoopbackRole,
     sink: ResamplerSink,
     stop: &AtomicBool,
     failed: &AtomicBool,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     use std::collections::VecDeque;
-    use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode};
+    use wasapi::{DeviceEnumerator, Direction, Role, SampleType, StreamMode};
 
     // COM must be initialised on the capturing thread (MTA so the realtime
     // capture isn't bound to a UI message pump).
@@ -314,11 +349,50 @@ fn run_wasapi_loopback(
         return;
     }
 
+    let enumerator = match DeviceEnumerator::new() {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = ready.send(Err(format!("device enumerator: {e:?}")));
+            return;
+        }
+    };
     // System loopback captures the default *render* endpoint in loopback mode.
-    let client_res = DeviceEnumerator::new()
-        .and_then(|e| e.get_default_device(&Direction::Render))
-        .and_then(|d| d.get_iaudioclient());
-    let mut client = match client_res {
+    // The Communications role only gets its own capture when it's a different
+    // physical endpoint than the console one (else it would double the audio).
+    let wanted_role = match role {
+        LoopbackRole::Console => Role::Console,
+        LoopbackRole::Communications => Role::Communications,
+    };
+    let device = match enumerator.get_default_device_for_role(&Direction::Render, &wanted_role) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ready.send(Err(format!("open {role:?} render endpoint: {e:?}")));
+            return;
+        }
+    };
+    if role == LoopbackRole::Communications {
+        // Fail toward `same` — a duplicate capture would double the audio.
+        let same = match (
+            enumerator.get_default_device_for_role(&Direction::Render, &Role::Console),
+            device.get_id(),
+        ) {
+            (Ok(console), Ok(comms_id)) => {
+                console.get_id().map(|id| id == comms_id).unwrap_or(true)
+            }
+            _ => true,
+        };
+        if same {
+            // One endpoint serves both roles — the console capture covers it.
+            let _ = ready.send(Ok(()));
+            wasapi::deinitialize();
+            return;
+        }
+        log::info!(
+            target: "transcription::capture",
+            "communications render endpoint differs from console — capturing it too (call audio)"
+        );
+    }
+    let mut client = match device.get_iaudioclient() {
         Ok(c) => c,
         Err(e) => {
             let _ = ready.send(Err(format!("open audio client: {e:?}")));
@@ -383,7 +457,9 @@ fn run_wasapi_loopback(
     // Setup OK — let start() return.
     let _ = ready.send(Ok(()));
 
-    let mut resampler = Resampler::new(src_rate, src_channels);
+    // Anchored: a loopback endpoint delivers nothing while idle, so stream
+    // position alone would misplace audio that starts mid-recording.
+    let mut resampler = Resampler::new(src_rate, src_channels).anchored();
     let mut queue: VecDeque<u8> = VecDeque::new();
     let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
 
@@ -442,6 +518,7 @@ fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec
 /// of the surrounding logic needs the symbol to resolve.
 #[cfg(not(windows))]
 fn run_wasapi_loopback(
+    _role: LoopbackRole,
     _sink: ResamplerSink,
     _stop: &AtomicBool,
     _failed: &AtomicBool,
@@ -502,7 +579,14 @@ struct Resampler {
     out: Vec<f32>,
     /// Total output samples emitted so far — used to stamp the chunk offset.
     emitted: u64,
+    /// Wall-clock epoch for gappy sources (idle loopback delivers nothing).
+    anchor: Option<std::time::Instant>,
+    /// Offset (ns) added on top of the stream position when anchored.
+    base_ns: u64,
 }
+
+/// A chunk landing this far before "now" means the source was idle — re-anchor.
+const REANCHOR_GAP_NS: u64 = 1_000_000_000;
 
 impl Resampler {
     /// Creates a resampler from `src_rate`/`channels` to 16 kHz mono.
@@ -514,7 +598,16 @@ impl Resampler {
             last: 0.0,
             out: Vec::with_capacity(CHUNK_SAMPLES),
             emitted: 0,
+            anchor: None,
+            base_ns: 0,
         }
+    }
+
+    /// Anchors chunk offsets to wall clock so audio starting mid-recording
+    /// lands at the right session position (see `REANCHOR_GAP_NS`).
+    fn anchored(mut self) -> Self {
+        self.anchor = Some(std::time::Instant::now());
+        self
     }
 
     /// Feeds one interleaved callback buffer; pushes any completed chunks.
@@ -587,7 +680,17 @@ impl Resampler {
         // `emitted` is incremented before each push, so it's ≥ n in normal
         // operation; `saturating_sub` keeps a directly-poked `out` (tests)
         // from underflowing.
-        let offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+        let mut offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+        if let Some(epoch) = self.anchor {
+            let elapsed_ns = epoch.elapsed().as_nanos() as u64;
+            let chunk_ns = n * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+            let stream_end_ns = self.base_ns + offset_ns + chunk_ns;
+            if elapsed_ns.saturating_sub(stream_end_ns) > REANCHOR_GAP_NS {
+                // The source was idle — realign so this chunk ends "now".
+                self.base_ns = elapsed_ns.saturating_sub(chunk_ns + offset_ns);
+            }
+            offset_ns += self.base_ns;
+        }
         sink.deliver(samples, offset_ns);
         self.out = Vec::with_capacity(CHUNK_SAMPLES);
     }
@@ -619,6 +722,9 @@ struct WasapiLoopbackStream {
     rx: Receiver<AudioChunk>,
     /// Held to keep the capture thread alive; its `Drop` winds the thread down.
     _handle: WasapiCaptureHandle,
+    /// Flags a capture that has been digital silence since start.
+    zero: ZeroStreakDetector,
+    warnings: Vec<CaptureWarning>,
 }
 
 impl AudioStream for WasapiLoopbackStream {
@@ -626,12 +732,21 @@ impl AudioStream for WasapiLoopbackStream {
         // `recv` blocks until a chunk, or until the thread drops the sender. A
         // disconnect after an abort (device-read error) is an error, not EOF.
         match self.rx.recv() {
-            Ok(chunk) => Ok(Some(chunk)),
+            Ok(chunk) => {
+                if let Some(w) = self.zero.feed(&chunk.samples) {
+                    self.warnings.push(w);
+                }
+                Ok(Some(chunk))
+            }
             Err(_) if self._handle.aborted() => Err(CaptureError::Failed(
                 "wasapi capture stopped on a device-read error".to_string(),
             )),
             Err(_) => Ok(None),
         }
+    }
+
+    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
+        std::mem::take(&mut self.warnings)
     }
 }
 
@@ -643,12 +758,14 @@ struct MixedWasapiAudioStream {
     buf: Arc<Mutex<MixBuffer>>,
     /// Held to keep the wasapi capture thread alive; its `Drop` stops + joins.
     handle: Option<WasapiCaptureHandle>,
+    /// Communications-endpoint capture, when it's a distinct device.
+    comms_handle: Option<WasapiCaptureHandle>,
     /// Held to keep the cpal mic stream alive.
     _mic: cpal::Stream,
 }
 
 impl MixedWasapiAudioStream {
-    /// `true` if the wasapi capture thread aborted on a device-read error.
+    /// `true` if the console wasapi thread aborted on a device-read error.
     fn aborted(&self) -> bool {
         self.handle.as_ref().is_some_and(|h| h.aborted())
     }
@@ -663,7 +780,8 @@ impl AudioStream for MixedWasapiAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         // A wasapi-thread device-read abort surfaces as an error, not a quietly
         // truncated "complete" recording. Re-check after a poll stall so the
-        // message is the precise abort, not the generic stall.
+        // message is the precise abort, not the generic stall. (A comms-thread
+        // abort is non-fatal: its own thread already logged the read error.)
         if self.aborted() {
             return Err(Self::abort_err());
         }
@@ -673,13 +791,21 @@ impl AudioStream for MixedWasapiAudioStream {
         }
         res
     }
+
+    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
+        self.buf
+            .lock()
+            .map(|mut b| b.take_warnings())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for MixedWasapiAudioStream {
     fn drop(&mut self) {
-        // Stop the wasapi thread first (the cpal stream stops when `_mic` drops),
-        // then mark the buffer finished so any final poll returns EOF.
+        // Stop the wasapi threads first (the cpal stream stops when `_mic`
+        // drops), then mark the buffer finished so a final poll returns EOF.
         self.handle.take();
+        self.comms_handle.take();
         if let Ok(mut b) = self.buf.lock() {
             b.finish();
         }
@@ -784,6 +910,57 @@ mod tests {
         r.out = vec![0.0; CHUNK_SAMPLES];
         r.flush(&sink); // would block on send() — try_send drops it instead
                         // If we got here without hanging, the non-blocking behaviour holds.
+    }
+
+    #[test]
+    fn unanchored_resampler_keeps_stream_position_offsets() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let sink = ResamplerSink::Channel(tx);
+        let mut r = Resampler::new(16_000, 1);
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        drop(sink);
+        let first = rx.recv().unwrap();
+        let second = rx.recv().unwrap();
+        assert_eq!(first.offset, Duration::ZERO);
+        // Second chunk starts exactly one chunk later (stream position).
+        assert_eq!(second.offset, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn anchored_resampler_realigns_audio_that_starts_after_an_idle_gap() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let sink = ResamplerSink::Channel(tx);
+        let mut r = Resampler::new(16_000, 1);
+        // Simulate a source that stayed idle for ~10 s before its first buffer.
+        r.anchor = std::time::Instant::now().checked_sub(Duration::from_secs(10));
+        assert!(r.anchor.is_some(), "test clock underflowed");
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        drop(sink);
+        let chunk = rx.recv().unwrap();
+        // The chunk lands near the 10 s mark, not at stream position 0.
+        assert!(
+            chunk.offset > Duration::from_secs(8) && chunk.offset < Duration::from_secs(12),
+            "got {:?}",
+            chunk.offset
+        );
+    }
+
+    #[test]
+    fn anchored_resampler_stays_stream_positioned_while_continuous() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let sink = ResamplerSink::Channel(tx);
+        let mut r = Resampler::new(16_000, 1).anchored();
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        drop(sink);
+        let first = rx.recv().unwrap();
+        let second = rx.recv().unwrap();
+        // No idle gap → offsets stay chunk-consecutive (no re-anchor between).
+        assert_eq!(
+            second.offset.saturating_sub(first.offset),
+            Duration::from_millis(200)
+        );
     }
 
     #[test]
