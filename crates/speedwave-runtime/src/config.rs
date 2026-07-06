@@ -791,6 +791,26 @@ impl ResolvedTelemetry {
     }
 }
 
+/// Advisory only: gRPC conventionally serves :4317, HTTP :4318. A mismatch often
+/// means the export silently fails at the collector; never a hard error.
+fn warn_on_protocol_port_mismatch(protocol: OtlpProtocol, endpoint: Option<&str>) {
+    let Some(port) = endpoint
+        .and_then(|e| e.parse::<url::Url>().ok())
+        .and_then(|u| u.port())
+    else {
+        return;
+    };
+    let mismatch = match protocol {
+        OtlpProtocol::Grpc => port == 4318,
+        OtlpProtocol::HttpProtobuf | OtlpProtocol::HttpJson => port == 4317,
+    };
+    if mismatch {
+        log::warn!(
+            "OTLP protocol {protocol:?} with port {port} looks mismatched (gRPC=4317, HTTP=4318)"
+        );
+    }
+}
+
 /// Merges the user and MDM telemetry layers per-field (MDM wins + locks), then
 /// gates: `enabled=false` suppresses output, `enabled=true` w/o endpoint fails closed.
 pub fn resolve_telemetry(
@@ -953,6 +973,11 @@ pub fn resolve_telemetry(
             anyhow::bail!("OTLP headers must not contain control characters");
         }
     }
+    // A zero interval makes the OTEL exporter rapid-fire; reject on either layer.
+    if metric_export_interval_ms == Some(0) || logs_export_interval_ms == Some(0) {
+        anyhow::bail!("OTLP export interval must be greater than 0");
+    }
+    warn_on_protocol_port_mismatch(protocol, endpoint_opt.as_deref());
 
     Ok(ResolvedTelemetry {
         enabled: true,
@@ -2370,6 +2395,52 @@ mod tests {
         };
         let r = resolve_telemetry(Some(&u), None).unwrap();
         assert_eq!(r.headers.as_deref(), Some("Authorization=Bearer abc=="));
+    }
+
+    #[test]
+    fn telemetry_rejects_zero_export_interval() {
+        let base = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let metric_zero = TelemetryConfig {
+            metric_export_interval_ms: Some(0),
+            ..base.clone()
+        };
+        assert!(resolve_telemetry(Some(&metric_zero), None).is_err());
+        let logs_zero = TelemetryConfig {
+            logs_export_interval_ms: Some(0),
+            ..base.clone()
+        };
+        assert!(resolve_telemetry(Some(&logs_zero), None).is_err());
+        let ok = TelemetryConfig {
+            metric_export_interval_ms: Some(60000),
+            ..base
+        };
+        assert!(resolve_telemetry(Some(&ok), None).is_ok());
+    }
+
+    #[test]
+    fn telemetry_port_protocol_mismatch_is_advisory_not_error() {
+        // A mismatched port only warns; resolve still succeeds.
+        let grpc_on_http_port = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            protocol: Some(OtlpProtocol::Grpc),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&grpc_on_http_port), None).is_ok());
+        let http_on_grpc_port = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4317".into()),
+            protocol: Some(OtlpProtocol::HttpProtobuf),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&http_on_grpc_port), None).is_ok());
     }
 
     #[test]

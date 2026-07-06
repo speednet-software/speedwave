@@ -1303,6 +1303,59 @@ mod tests {
 
     #[test]
     #[serial_test::serial(host_addressing)]
+    fn telemetry_env_reaches_the_claude_service() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("otel-env-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let user = crate::config::TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            protocol: Some(crate::config::OtlpProtocol::HttpProtobuf),
+            headers: Some("Authorization=Bearer abc==".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let mut resolved = resolved_with_telemetry(Some(&user), None);
+        // The shared fixture zeroes env; the renderer injects OTEL only from env.
+        resolved.env = crate::telemetry_env::telemetry_env_map(&resolved.telemetry);
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        assert_eq!(
+            find_env_value(&env, "CLAUDE_CODE_ENABLE_TELEMETRY=").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_ENDPOINT=").as_deref(),
+            Some("https://c.example.com:4318")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_PROTOCOL=").as_deref(),
+            Some("http/protobuf")
+        );
+        // The header value keeps its '=' (the de-dup keys only on the pre-'=' segment).
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_HEADERS=").as_deref(),
+            Some("Authorization=Bearer abc==")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
     fn render_hard_errors_on_invalid_telemetry_endpoint() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("mdm-badurl-{}", std::process::id());

@@ -9,6 +9,7 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
@@ -117,7 +118,15 @@ import type {
                     >
                       {{ probing() ? 'testing…' : 'Test connection' }}
                     </button>
-                    @if (probeResult(); as result) {
+                    @if (probing()) {
+                      <span
+                        class="mono text-[11px] text-[var(--ink-mute)]"
+                        data-testid="telemetry-probing"
+                      >
+                        Probing {{ endpoint() }}…
+                      </span>
+                    }
+                    @if (!probing() && probeResult(); as result) {
                       <span
                         class="mono text-[11px]"
                         [class]="
@@ -355,7 +364,23 @@ import type {
                   </div>
                 </details>
 
-                <div class="flex justify-end border-t border-[var(--line)] pt-4">
+                <div class="flex items-center justify-end gap-3 border-t border-[var(--line)] pt-4">
+                  @if (error()) {
+                    <span
+                      class="mono text-[11px] text-[var(--red)]"
+                      data-testid="telemetry-save-error"
+                    >
+                      {{ error() }}
+                    </span>
+                  }
+                  @if (saved()) {
+                    <span
+                      class="mono text-[11px] text-[var(--green)]"
+                      data-testid="telemetry-saved"
+                    >
+                      Saved — restart to apply
+                    </span>
+                  }
                   <button
                     type="button"
                     class="mono rounded bg-[var(--accent)] px-4 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
@@ -381,6 +406,8 @@ export class TelemetrySectionComponent implements OnInit {
   readonly config = signal<TelemetryConfigResponse | null>(null);
   readonly error = signal('');
   readonly saving = signal(false);
+  /** Transient success flag; true for ~2s after a save persists. */
+  readonly saved = signal(false);
   readonly probing = signal(false);
   /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
@@ -408,6 +435,7 @@ export class TelemetrySectionComponent implements OnInit {
 
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
+  private readonly projectState = inject(ProjectStateService);
 
   /** Loads the effective telemetry config on first paint. */
   async ngOnInit(): Promise<void> {
@@ -548,6 +576,7 @@ export class TelemetrySectionComponent implements OnInit {
   /** Persists the editable fields (MDM-locked ones are ignored server-side). */
   async save(): Promise<void> {
     this.saving.set(true);
+    this.saved.set(false);
     this.cdr.markForCheck();
     const update: TelemetryConfigUpdate = {
       enabled: this.enabled(),
@@ -581,6 +610,14 @@ export class TelemetrySectionComponent implements OnInit {
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
       await this.refresh();
+      // OTEL_* env is baked into the claude container at create time, so a saved
+      // change only takes effect after a restart (same as an LLM claude-env change).
+      this.projectState.requestRestart();
+      this.saved.set(true);
+      setTimeout(() => {
+        this.saved.set(false);
+        this.cdr.markForCheck();
+      }, 2000);
     } catch (e: unknown) {
       this.emitError(e);
     }

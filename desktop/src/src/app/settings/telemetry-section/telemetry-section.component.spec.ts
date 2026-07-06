@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { TelemetrySectionComponent } from './telemetry-section.component';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import type { TelemetryConfigResponse } from '../../models/telemetry';
 
@@ -285,5 +286,37 @@ describe('TelemetrySectionComponent', () => {
     await component.ngOnInit();
     const update = await savedUpdate();
     expect('metric_export_interval_ms' in update).toBe(false);
+  });
+
+  it('save() requests a container restart on success (OTEL env is baked at create time)', async () => {
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    await component.save();
+    expect(spy).toHaveBeenCalledOnce();
+  });
+
+  it('save() does NOT request a restart when the write fails', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') return baseResponse();
+      if (cmd === 'update_telemetry_config') throw new Error('save failed');
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    await component.save();
+    expect(spy).not.toHaveBeenCalled();
+    expect(component.error()).toBe('save failed');
+  });
+
+  it('save() shows a transient saved confirmation on success', async () => {
+    await create();
+    await component.ngOnInit();
+    expect(component.saved()).toBe(false);
+    await component.save();
+    expect(component.saved()).toBe(true);
   });
 });
