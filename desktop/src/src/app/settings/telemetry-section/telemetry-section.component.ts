@@ -158,7 +158,10 @@ import type {
                         data-testid="telemetry-protocol"
                       >
                         @for (o of protocolOptions; track o.value) {
-                          <option [value]="o.value">{{ o.label }}</option>
+                          <!-- Select on the option, not [value] on select: @for options mount after the select's bindings flush. -->
+                          <option [value]="o.value" [selected]="o.value === protocol()">
+                            {{ o.label }}
+                          </option>
                         }
                       </select>
                     </label>

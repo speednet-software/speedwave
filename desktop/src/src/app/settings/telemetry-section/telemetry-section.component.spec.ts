@@ -92,6 +92,20 @@ describe('TelemetrySectionComponent', () => {
     expect(component.config()?.locks.endpoint).toBe(true);
   });
 
+  it('renders the saved non-first protocol as the selected option (@for options)', async () => {
+    setup(baseResponse({ protocol: 'http/protobuf' }));
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    const select = fixture.nativeElement.querySelector(
+      '[data-testid="telemetry-protocol"]'
+    ) as HTMLSelectElement;
+    expect(select.value).toBe('http/protobuf');
+    const selected = select.querySelector('option:checked') as HTMLOptionElement;
+    expect(selected.value).toBe('http/protobuf');
+  });
+
   it('greys the whole section when kill_switch is set', async () => {
     setup(baseResponse({ kill_switch: true, enabled: false }));
     await create();
