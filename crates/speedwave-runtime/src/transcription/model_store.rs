@@ -301,7 +301,7 @@ impl Default for ModelStore {
 
 // --- the HTTP downloader ---------------------------------------------------
 
-/// Model-download client: connect + read-idle timeouts (no total-transfer cap)
+/// Model-download client: connect timeout + a generous whole-request backstop
 /// and redirects only to allowlisted hosts that pass the shared SSRF validator.
 fn build_client() -> Result<reqwest::blocking::Client, ModelStoreError> {
     reqwest::blocking::Client::builder()

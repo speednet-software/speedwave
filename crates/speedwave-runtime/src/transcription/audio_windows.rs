@@ -148,16 +148,16 @@ impl AudioCapture for WasapiAudioCapture {
                     },
                     &stop,
                 )?;
-                // Call audio renders to the Communications-role endpoint (often a
-                // headset ≠ console device) — capture it too, summed as System.
-                // Best-effort: the console capture is the baseline.
+                // Call audio renders to the Communications endpoint — capture it
+                // too (own stop flag: its init failure must not kill the console).
+                let comms_stop = Arc::new(AtomicBool::new(false));
                 let comms_handle = match spawn_wasapi_loopback(
                     LoopbackRole::Communications,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
                         source: MixSource::System,
                     },
-                    &stop,
+                    &comms_stop,
                 ) {
                     Ok(h) => Some(h),
                     Err(e) => {
@@ -176,6 +176,7 @@ impl AudioCapture for WasapiAudioCapture {
                     buf,
                     handle: Some(handle),
                     comms_handle,
+                    comms_abort_reported: false,
                     _mic: mic_stream,
                 }))
             }
@@ -760,6 +761,8 @@ struct MixedWasapiAudioStream {
     handle: Option<WasapiCaptureHandle>,
     /// Communications-endpoint capture, when it's a distinct device.
     comms_handle: Option<WasapiCaptureHandle>,
+    /// One-shot latch for a comms-thread abort warning.
+    comms_abort_reported: bool,
     /// Held to keep the cpal mic stream alive.
     _mic: cpal::Stream,
 }
@@ -793,10 +796,18 @@ impl AudioStream for MixedWasapiAudioStream {
     }
 
     fn take_warnings(&mut self) -> Vec<CaptureWarning> {
-        self.buf
+        let mut warnings = self
+            .buf
             .lock()
             .map(|mut b| b.take_warnings())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A dead comms capture loses the call audio while the console side
+        // keeps the mix flowing — MixBuffer can't see it, so report it here.
+        if !self.comms_abort_reported && self.comms_handle.as_ref().is_some_and(|h| h.aborted()) {
+            self.comms_abort_reported = true;
+            warnings.push(CaptureWarning::SystemAudioStalled);
+        }
+        warnings
     }
 }
 

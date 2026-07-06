@@ -405,8 +405,6 @@ final class RecordSession {
     var ioProcId: AudioDeviceIOProcID?
     /// Optional mic engine; nil when --mic none.
     var micEngine: AVAudioEngine?
-    /// Config-change observer token (mic engine restart); removed in teardown.
-    var micObserver: NSObjectProtocol?
     /// Debounce for mic restarts — config changes arrive in bursts.
     var micRestartWork: DispatchWorkItem?
     /// Monotonic nanoseconds reference for `offset_ns`.
@@ -444,12 +442,8 @@ final class RecordSession {
             AudioHardwareDestroyProcessTap(tapId)
             tapId = 0
         }
-        micRestartWork?.cancel()
-        micRestartWork = nil
-        if let obs = micObserver {
-            NotificationCenter.default.removeObserver(obs)
-            micObserver = nil
-        }
+        // No observer/GCD cleanup: teardown can run from a signal handler
+        // (not async-signal-safe) and every call site exits right after.
         micEngine?.stop()
         micEngine = nil
     }
@@ -802,13 +796,13 @@ func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex
     }
 }
 
-/// Watches for engine-configuration changes (device switch, rate change) and
-/// schedules a debounced mic restart. One observer per session, any engine.
+/// Debounced mic restart on engine-configuration changes (device switch).
+/// Process-lifetime observer — the CLI records one session and exits.
 @available(macOS 14.4, *)
 func installMicConfigChangeObserver(
     session: RecordSession, selector: MicSelector, streamIndex: UInt32
 ) {
-    session.micObserver = NotificationCenter.default.addObserver(
+    _ = NotificationCenter.default.addObserver(
         forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
     ) { _ in
         session.scheduleMicRestart {

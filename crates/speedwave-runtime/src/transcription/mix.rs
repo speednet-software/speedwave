@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::audio::{
-    AudioChunk, CaptureError, CaptureWarning, CHUNK_DURATION, SAMPLE_RATE_HZ, SILENT_AFTER_SAMPLES,
+    AudioChunk, CaptureError, CaptureWarning, ZeroStreakDetector, CHUNK_DURATION, SAMPLE_RATE_HZ,
 };
 
 /// Per-source gain applied before summing (so two full-scale signals can't clip
@@ -69,10 +69,8 @@ pub struct MixBuffer {
     finished: bool,
     /// Side currently treated as dead (lagging > [`DEAD_GAP_SAMPLES`]), if any.
     lagging: Option<MixSource>,
-    /// `true` once the system side has delivered any non-zero sample.
-    sys_nonzero_seen: bool,
-    /// One-shot latch for the all-zeros warning.
-    silent_reported: bool,
+    /// One-shot all-zeros detection for the system side (shared mechanism).
+    zero: ZeroStreakDetector,
     /// Health warnings not yet drained by `take_warnings`.
     pending_warnings: Vec<CaptureWarning>,
 }
@@ -94,8 +92,7 @@ impl MixBuffer {
             mic_filled: 0,
             finished: false,
             lagging: None,
-            sys_nonzero_seen: false,
-            silent_reported: false,
+            zero: ZeroStreakDetector::default(),
             pending_warnings: Vec::new(),
         }
     }
@@ -112,8 +109,10 @@ impl MixBuffer {
         if samples.is_empty() {
             return;
         }
-        if source == MixSource::System && !self.sys_nonzero_seen {
-            self.sys_nonzero_seen = samples.iter().any(|&s| s != 0.0);
+        if source == MixSource::System {
+            if let Some(w) = self.zero.feed(samples) {
+                self.pending_warnings.push(w);
+            }
         }
         let start = Self::index_of(offset_ns);
         let end = start.saturating_add(samples.len() as u64);
@@ -157,17 +156,21 @@ impl MixBuffer {
         self.refresh_health();
     }
 
-    /// Re-evaluates lag + silence after a watermark change; queues one-shot
+    /// Re-evaluates the lag state after a watermark change; queues one-shot
     /// warnings and logs transitions only (never per push).
     fn refresh_health(&mut self) {
         let gap = self.sys_filled.abs_diff(self.mic_filled);
-        let now_lagging = (gap > DEAD_GAP_SAMPLES).then(|| {
-            if self.sys_filled < self.mic_filled {
-                MixSource::System
-            } else {
-                MixSource::Mic
-            }
-        });
+        let now_lagging = (gap > DEAD_GAP_SAMPLES)
+            .then(|| {
+                if self.sys_filled < self.mic_filled {
+                    MixSource::System
+                } else {
+                    MixSource::Mic
+                }
+            })
+            // A never-delivering system side is a normal quiet start (an idle
+            // Windows loopback emits no packets) — not a stall.
+            .filter(|s| !(*s == MixSource::System && self.sys_filled == 0));
         if now_lagging != self.lagging {
             match now_lagging {
                 Some(MixSource::Mic) => {
@@ -185,18 +188,6 @@ impl MixBuffer {
                 }
             }
             self.lagging = now_lagging;
-        }
-        if !self.silent_reported
-            && !self.sys_nonzero_seen
-            && self.sys_filled >= SILENT_AFTER_SAMPLES
-        {
-            self.silent_reported = true;
-            log::warn!(
-                target: "transcription::mix",
-                "system audio has been pure silence since capture start — likely a missing/broken System Audio Recording permission"
-            );
-            self.pending_warnings
-                .push(CaptureWarning::SystemAudioSilent);
         }
     }
 
@@ -461,10 +452,23 @@ mod tests {
     #[test]
     fn a_dead_system_side_warns_with_the_system_variant() {
         let mut b = MixBuffer::new();
+        // System delivered 1 s, then died; mic runs on to 7 s (gap > 5 s).
+        b.push(MixSource::System, 0, &vec![0.8; SAMPLE_RATE_HZ as usize]);
+        let seven_secs = SAMPLE_RATE_HZ as usize * 7;
+        b.push(MixSource::Mic, 0, &vec![0.8; seven_secs]);
+        assert!(b.pop(1, seven_secs).is_some());
+        assert_eq!(b.take_warnings(), vec![CaptureWarning::SystemAudioStalled]);
+    }
+
+    #[test]
+    fn a_system_side_that_never_started_is_a_quiet_start_not_a_stall() {
+        let mut b = MixBuffer::new();
+        // Idle Windows loopback: no system packets at all. Mix must flow from
+        // the mic without a spurious SystemAudioStalled warning.
         let six_secs = SAMPLE_RATE_HZ as usize * 6;
         b.push(MixSource::Mic, 0, &vec![0.8; six_secs]);
         assert!(b.pop(1, six_secs).is_some());
-        assert_eq!(b.take_warnings(), vec![CaptureWarning::SystemAudioStalled]);
+        assert_eq!(b.take_warnings(), vec![]);
     }
 
     #[test]

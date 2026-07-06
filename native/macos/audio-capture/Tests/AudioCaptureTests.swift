@@ -148,4 +148,18 @@ final class AudioCaptureTests: XCTestCase {
             XCTFail("expected micOnly(_)")
         }
     }
+
+    // MARK: - Mic restart debounce
+
+    @available(macOS 14.4, *)
+    func testScheduleMicRestartCoalescesBursts() {
+        let session = RecordSession()
+        let fired = expectation(description: "debounced restart runs once")
+        var firstRan = false
+        // Burst of two schedules — only the second body may run.
+        session.scheduleMicRestart { firstRan = true }
+        session.scheduleMicRestart { fired.fulfill() }
+        waitForExpectations(timeout: 2)
+        XCTAssertFalse(firstRan, "the earlier scheduled restart must be cancelled")
+    }
 }
