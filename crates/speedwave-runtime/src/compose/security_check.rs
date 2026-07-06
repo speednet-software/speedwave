@@ -240,6 +240,35 @@ pub enum SecurityRule {
     #[strum(props(description = "Slack has /workspace mount"))]
     SlackMissingWorkspaceMount,
 
+    /// Atlassian volumes use short-form only.
+    #[strum(to_string = "ATLASSIAN_VOLUME_LONG_FORM")]
+    #[strum(props(description = "Atlassian volumes use short-form only"))]
+    AtlassianVolumeLongForm,
+    /// Atlassian token path matches expected.
+    #[strum(to_string = "ATLASSIAN_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "Atlassian token path matches expected"))]
+    AtlassianTokenPathMismatch,
+    /// Atlassian workspace path matches expected.
+    #[strum(to_string = "ATLASSIAN_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "Atlassian workspace path matches expected"))]
+    AtlassianWorkspacePathMismatch,
+    /// Atlassian workspace mount mode is `:ro`.
+    #[strum(to_string = "ATLASSIAN_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "Atlassian workspace mount mode is :ro"))]
+    AtlassianWorkspaceMountMode,
+    /// Atlassian has no extra volumes.
+    #[strum(to_string = "ATLASSIAN_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "Atlassian has no extra volumes"))]
+    AtlassianNoExtraVolumes,
+    /// Atlassian has a `/tokens` mount.
+    #[strum(to_string = "ATLASSIAN_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "Atlassian has /tokens mount"))]
+    AtlassianMissingTokensMount,
+    /// Atlassian has a `/workspace` mount.
+    #[strum(to_string = "ATLASSIAN_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "Atlassian has /workspace mount"))]
+    AtlassianMissingWorkspaceMount,
+
     /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
     /// host network (ADR-073 — it is a worker-class token holder).
     #[strum(to_string = "PROXY_VOLUMES")]
@@ -290,6 +319,22 @@ impl SecurityRule {
                 | Self::SlackNoExtraVolumes
                 | Self::SlackMissingTokensMount
                 | Self::SlackMissingWorkspaceMount
+        )
+    }
+
+    /// Returns `true` for Atlassian-specific rules. The workspace mount is
+    /// :ro here (unlike SharePoint/Slack's :rw) — addAttachment only reads a
+    /// file from the workspace, it never writes to it.
+    pub fn is_atlassian(self) -> bool {
+        matches!(
+            self,
+            Self::AtlassianVolumeLongForm
+                | Self::AtlassianTokenPathMismatch
+                | Self::AtlassianWorkspacePathMismatch
+                | Self::AtlassianWorkspaceMountMode
+                | Self::AtlassianNoExtraVolumes
+                | Self::AtlassianMissingTokensMount
+                | Self::AtlassianMissingWorkspaceMount
         )
     }
 

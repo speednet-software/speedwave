@@ -1171,7 +1171,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 40;
+    const SECURITY_RULE_COUNT: usize = 47;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -10023,6 +10023,10 @@ services:
             .filter(|r| r.to_string().starts_with("SLACK_"))
             .count();
         let slack_by_method = SecurityRule::iter().filter(|r| r.is_slack()).count();
+        let atlassian_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("ATLASSIAN_"))
+            .count();
+        let atlassian_by_method = SecurityRule::iter().filter(|r| r.is_atlassian()).count();
         assert_eq!(
             slack_by_method, slack_by_prefix,
             "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \
@@ -10032,6 +10036,12 @@ services:
             by_prefix, by_method,
             "is_sharepoint() count ({by_method}) differs from SHAREPOINT-prefixed variant count \
              ({by_prefix}) — update SecurityRule::is_sharepoint() to include the new variant"
+        );
+        assert_eq!(
+            atlassian_by_method, atlassian_by_prefix,
+            "is_atlassian() count ({atlassian_by_method}) differs from ATLASSIAN-prefixed \
+             variant count ({atlassian_by_prefix}) — update SecurityRule::is_atlassian() \
+             to include the new variant"
         );
     }
 
