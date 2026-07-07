@@ -181,6 +181,9 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
     await this.refreshModelReady();
+    // Re-attach the live stream if a recording was left running while this tab
+    // was destroyed on navigation (the backend driver never stopped).
+    await this.transcription.resumeActiveRecording();
     // Clear the gate after a download in Settings without recreating the tab.
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);

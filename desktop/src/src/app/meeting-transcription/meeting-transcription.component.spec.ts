@@ -13,6 +13,7 @@ describe('MeetingTranscriptionComponent', () => {
     active: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
     subscribeToTranscript: ReturnType<typeof vi.fn>;
+    resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
     // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
@@ -22,9 +23,11 @@ describe('MeetingTranscriptionComponent', () => {
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarning: typeof captureWarningSig;
+    recordingSessionId: typeof recordingSessionIdSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
   const captureWarningSig = signal<CaptureWarning | null>(null);
+  const recordingSessionIdSig = signal<string | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -42,10 +45,12 @@ describe('MeetingTranscriptionComponent', () => {
   beforeEach(async () => {
     activeSig.set(null);
     captureWarningSig.set(null);
+    recordingSessionIdSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
       subscribeToTranscript: vi.fn(async () => ({ event_name: 'e', snapshot: {} as never })),
+      resumeActiveRecording: vi.fn(async () => undefined),
       recommendedModel: vi.fn(async () => recommended(true)),
       getCapabilities: vi.fn(async () => ({
         capabilities: {
@@ -62,6 +67,7 @@ describe('MeetingTranscriptionComponent', () => {
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarning: captureWarningSig,
+      recordingSessionId: recordingSessionIdSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],

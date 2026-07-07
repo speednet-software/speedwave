@@ -172,8 +172,6 @@ export class RecordingControlsComponent implements OnInit {
   readonly backends = signal<Backend[]>([]);
   /** Derived acceleration label. */
   readonly accel = computed(() => accelLabel(this.backends()));
-  /** `true` while a recording is in progress. */
-  readonly recording = signal(false);
   /** Disables Start/Stop while a transition is in flight. */
   readonly busy = signal(false);
   /** Local error string. */
@@ -199,11 +197,15 @@ export class RecordingControlsComponent implements OnInit {
     const k = this.sources()[this.sourceIndex()]?.source.kind;
     return k === 'mixed' || k === 'microphone';
   });
-  /** The active session id (set on start, cleared on stop). */
-  private activeSessionId: string | null = null;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
+
+  /**
+   * `true` while a recording is in progress — read from the service so it
+   * survives this tab being destroyed on navigation (the driver keeps going).
+   */
+  readonly recording = computed(() => this.transcription.recordingSessionId() !== null);
 
   /** Loads backends + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
@@ -289,8 +291,6 @@ export class RecordingControlsComponent implements OnInit {
     this.error.set('');
     try {
       const ack = await this.transcription.startRecording(src, this.language());
-      this.activeSessionId = ack.session_id;
-      this.recording.set(true);
       this.started.emit(ack.session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -303,13 +303,11 @@ export class RecordingControlsComponent implements OnInit {
 
   /** Stops the in-progress recording. */
   async stop(): Promise<void> {
-    const id = this.activeSessionId;
+    const id = this.transcription.recordingSessionId();
     if (!id) return;
     this.busy.set(true);
     try {
       await this.transcription.stopRecording(id);
-      this.recording.set(false);
-      this.activeSessionId = null;
       this.stopped.emit(id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

@@ -95,6 +95,66 @@ describe('TranscriptionService', () => {
           language: 'pl',
         },
       });
+      // The recording id is tracked at service level so it survives a remount.
+      expect(svc.recordingSessionId()).toBe('sess-1');
+    });
+  });
+
+  describe('recording state survives a tab switch', () => {
+    async function startWith(id: string): Promise<void> {
+      const ack = {
+        session_id: id,
+        event_name: `transcript_event::${id}`,
+        snapshot: snapshot({ id }),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      await svc.startRecording({ kind: 'system_wide' }, 'pl');
+    }
+
+    it('stopRecording clears the tracked id', async () => {
+      await startWith('sess-1');
+      expect(svc.recordingSessionId()).toBe('sess-1');
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('stopRecording clears the id even if the backend call rejects', async () => {
+      await startWith('sess-1');
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'stop_transcription') throw new Error('already stopping');
+        return undefined;
+      };
+      await expect(svc.stopRecording('sess-1')).rejects.toThrow('already stopping');
+      expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('resumeActiveRecording re-subscribes to a still-running recording', async () => {
+      await startWith('sess-1');
+      await svc.detach(); // simulate the record tab being destroyed
+      const seen: string[] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        seen.push(cmd);
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: `transcript_event::${(args as { sessionId: string }).sessionId}`,
+            snapshot: snapshot({ id: 'sess-1' }),
+          };
+        }
+        return undefined;
+      };
+      await svc.resumeActiveRecording();
+      expect(seen).toContain('subscribe_transcript');
+    });
+
+    it('resumeActiveRecording is a no-op when nothing is recording', async () => {
+      const seen: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        seen.push(cmd);
+        return undefined;
+      };
+      await svc.resumeActiveRecording();
+      expect(seen).toEqual([]);
     });
   });
 

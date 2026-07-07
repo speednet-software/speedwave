@@ -41,9 +41,16 @@ export class TranscriptionService {
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
   private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
+  private readonly recordingSessionIdSignal = signal<string | null>(null);
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
+
+  /**
+   * Session id of the in-progress recording — service-level so it survives the
+   * record tab being destroyed on navigation (the backend driver keeps going).
+   */
+  readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
 
   /** Latest capture-health warning for the active session (null = none). */
   readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
@@ -77,6 +84,7 @@ export class TranscriptionService {
       params: { source, language },
     });
     this.activateSnapshot(ack.snapshot);
+    this.recordingSessionIdSignal.set(ack.session_id);
     await this.attachListener(ack.event_name);
     return ack;
   }
@@ -85,8 +93,23 @@ export class TranscriptionService {
    * Signals the driver to stop and transition to the offline pass.
    * @param sessionId - the recording to stop.
    */
-  stopRecording(sessionId: string): Promise<void> {
-    return this.tauri.invoke<void>('stop_transcription', { sessionId });
+  async stopRecording(sessionId: string): Promise<void> {
+    try {
+      await this.tauri.invoke<void>('stop_transcription', { sessionId });
+    } finally {
+      if (this.recordingSessionIdSignal() === sessionId) {
+        this.recordingSessionIdSignal.set(null);
+      }
+    }
+  }
+
+  /**
+   * Re-attaches the live stream of the in-progress recording after the record
+   * tab was destroyed and recreated (the driver never stopped).
+   */
+  async resumeActiveRecording(): Promise<void> {
+    const id = this.recordingSessionIdSignal();
+    if (id && !this.patchUnlisten) await this.subscribeToTranscript(id);
   }
 
   /**
