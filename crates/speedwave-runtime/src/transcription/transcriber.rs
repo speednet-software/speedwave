@@ -4,6 +4,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::audio::SAMPLE_RATE_HZ;
+
 /// Languages this feature transcribes (forced into Whisper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,10 +212,16 @@ impl WhisperCppTranscriber {
             let Some(seg) = state.get_segment(i) else {
                 continue;
             };
-            // The model's own no-speech probability drops silence-hallucinated
-            // segments by signal, not by matching text (which would eat real
-            // short utterances).
-            if seg.no_speech_probability() > NO_SPEECH_MAX {
+            let no_speech = seg.no_speech_probability();
+            let seg_rms = rms(segment_pcm(pcm, seg.start_timestamp(), seg.end_timestamp()));
+            // Metrics only — segment text must stay out of the logs.
+            log::debug!(
+                target: "transcription::transcriber",
+                "segment {}..{}cs rms={seg_rms:.5} no_speech={no_speech:.2}",
+                seg.start_timestamp(),
+                seg.end_timestamp()
+            );
+            if is_hallucinated(no_speech, seg_rms) {
                 continue;
             }
             // whisper_rs timestamps are centiseconds.
@@ -273,13 +281,38 @@ const SILENCE_RMS: f32 = 0.001;
 /// estimate that the span is not speech (the filler-on-silence signature).
 const NO_SPEECH_MAX: f32 = 0.6;
 
-/// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
-fn is_silent(pcm: &[f32]) -> bool {
+/// A merely-elevated no-speech probability drops the segment only when the
+/// audio under it also sits below [`SPEECH_RMS_FLOOR`] (two signals agree).
+const NO_SPEECH_SUSPECT: f32 = 0.3;
+
+/// RMS below this (−45 dBFS) cannot be intelligible speech.
+const SPEECH_RMS_FLOOR: f32 = 0.0055;
+
+/// RMS of a PCM span (0.0 for an empty span).
+fn rms(pcm: &[f32]) -> f32 {
     if pcm.is_empty() {
-        return true;
+        return 0.0;
     }
     let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    ((sum_sq / pcm.len() as f64).sqrt() as f32) < SILENCE_RMS
+    (sum_sq / pcm.len() as f64).sqrt() as f32
+}
+
+/// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
+fn is_silent(pcm: &[f32]) -> bool {
+    rms(pcm) < SILENCE_RMS
+}
+
+/// The window samples under a whisper segment (centisecond timestamps, 16 kHz).
+fn segment_pcm(pcm: &[f32], start_cs: i64, end_cs: i64) -> &[f32] {
+    const SAMPLES_PER_CS: i64 = SAMPLE_RATE_HZ as i64 / 100;
+    let a = (start_cs.max(0).saturating_mul(SAMPLES_PER_CS)).min(pcm.len() as i64) as usize;
+    let b = (end_cs.max(0).saturating_mul(SAMPLES_PER_CS)).min(pcm.len() as i64) as usize;
+    &pcm[a..b.max(a)]
+}
+
+/// Signal-driven hallucination verdict for one decoded segment.
+fn is_hallucinated(no_speech: f32, seg_rms: f32) -> bool {
+    no_speech > NO_SPEECH_MAX || (no_speech > NO_SPEECH_SUSPECT && seg_rms < SPEECH_RMS_FLOOR)
 }
 
 /// Deterministic fake transcriber for orchestration tests — one segment per
@@ -364,6 +397,42 @@ mod tests {
         assert_eq!(cs_to_duration(0), Duration::ZERO);
         assert_eq!(cs_to_duration(150), Duration::from_millis(1500));
         assert_eq!(cs_to_duration(-5), Duration::ZERO);
+    }
+
+    #[test]
+    fn hallucination_guard_needs_both_signals_to_agree() {
+        // Model certain the span is not speech — dropped regardless of energy.
+        assert!(is_hallucinated(0.7, 0.5));
+        // Model unsure AND audio below the speech floor — dropped.
+        assert!(is_hallucinated(0.4, 0.001));
+        // Model unsure but the audio is loud — kept (real sound, model's call).
+        assert!(!is_hallucinated(0.4, 0.05));
+        // Model confident it is speech — kept even when quiet.
+        assert!(!is_hallucinated(0.1, 0.001));
+        // Thresholds are strict: exactly-at values are kept.
+        assert!(!is_hallucinated(0.3, 0.001));
+        assert!(!is_hallucinated(0.6, 0.0055));
+    }
+
+    #[test]
+    fn segment_pcm_maps_centiseconds_and_clamps() {
+        let pcm: Vec<f32> = (0..16_000).map(|i| i as f32).collect(); // 1 s at 16 kHz
+        assert_eq!(segment_pcm(&pcm, 10, 20), &pcm[1_600..3_200]);
+        // An end past the window clamps to the window.
+        assert_eq!(segment_pcm(&pcm, 90, 500), &pcm[14_400..]);
+        // Degenerate, reversed, and out-of-window spans yield an empty slice.
+        assert!(segment_pcm(&pcm, 50, 50).is_empty());
+        assert!(segment_pcm(&pcm, 60, 40).is_empty());
+        assert!(segment_pcm(&pcm, 200, 300).is_empty());
+        // Negative timestamps clamp to the start.
+        assert_eq!(segment_pcm(&pcm, -5, 10), &pcm[0..1_600]);
+    }
+
+    #[test]
+    fn rms_of_known_signals() {
+        assert_eq!(rms(&[]), 0.0);
+        assert!((rms(&vec![0.5f32; 100]) - 0.5).abs() < 1e-6);
+        assert!((rms(&vec![-0.5f32; 100]) - 0.5).abs() < 1e-6);
     }
 
     #[test]
