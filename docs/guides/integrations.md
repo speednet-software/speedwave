@@ -394,6 +394,24 @@ The MCP Hub (`speedwave_<project>_mcp_hub`, port 4000) is the **only** MCP serve
 
 The Hub has **zero tokens** — it acts as a router. Each worker container mounts only its own service credentials.
 
+## Identity-first behavior
+
+Every integration acts as one authenticated account, not a directory of every user in the org. A question shaped like "my hours", "my open issues", or "messages sent to me" needs the current user's identity resolved before any filtering or counting happens.
+
+Tools whose result depends on the caller's identity are marked `_meta: { userScoped: true }` (see [Tool Policy via `_meta`](#tool-policy-via-_meta)). The Hub surfaces this in two ways:
+
+- A user-scoped tool's `search_tools` `full_schema` description names the current-user tool to call first (e.g. `getMyself`, `getCurrentUser`, `resolveUser`) or the parameter that accepts a self-reference (e.g. passing `"me"` as an identifier).
+- `search_tools` boosts the current-user tool to the top of results for self-reference queries like "me" or "current user".
+
+Per-service current-user tools exist under different names because the underlying APIs differ: Atlassian's `getMyself`, SharePoint's `getCurrentUser`, Redmine's `resolveUser` with `identifier: "me"`. Look the tool up per service rather than assuming a common name.
+
+## Read-path guarantees
+
+Read operations across built-in workers share two guarantees:
+
+- **Teaching errors.** A failed tool call states what was wrong with the parameter, which tool provides a correct value, and the suggested next step, in that order. Follow the hint instead of retrying blindly.
+- **Hints on empty results.** An empty `search_tools` result still carries guidance toward a better query, a different `service` filter, or a different `detail_level`, rather than a bare empty list.
+
 ## Workspace Mount
 
 MCP service containers (both built-in SharePoint and plugins) mount the project directory as `/workspace:rw`:

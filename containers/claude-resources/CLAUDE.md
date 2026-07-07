@@ -83,6 +83,16 @@ Service globals are injected automatically based on enabled integrations (no imp
 2. `search_tools` with `full_schema` for the specific tool you need
 3. `execute_code` using exact parameter names from the schema
 
+## Identity: resolve the current user first
+
+Every integration acts as ONE authenticated account (yours, or the service account configured for the project), never as a directory of everyone in the org. Treat any question shaped like "my hours", "my issues", "messages sent to me", or "assigned to me" as requiring the current user's identity before you filter or count anything.
+
+Resolve identity before answering: look for the service's current-user tool (a `getCurrentUser`/`getMyself`/`resolveUser`-style tool; the exact name differs per service) or a self-reference parameter (e.g. passing `"me"` where an identifier is expected). Both are discoverable in `search_tools` `full_schema` descriptions: a user-scoped tool's description names the current-user tool to call first, or the parameter that accepts a self-reference. Never guess a username or numeric ID for "me".
+
+## Teaching results: follow the hints
+
+Tool errors and empty search results are written to teach, not just to report failure. An error names what was wrong with a parameter and what to call next to get a correct value; an empty `search_tools` result still carries a hint toward a better query or a different `service`/`detail_level`. Read and follow the hint before retrying blindly or telling the user the capability is missing.
+
 ## Write/delete confirmation rule
 
 - Read operations (search, list, get): no confirmation needed.
