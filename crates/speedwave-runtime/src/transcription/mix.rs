@@ -160,14 +160,13 @@ impl MixBuffer {
     /// warnings and logs transitions only (never per push).
     fn refresh_health(&mut self) {
         let gap = self.sys_filled.abs_diff(self.mic_filled);
+        let lagging_side = if self.sys_filled < self.mic_filled {
+            MixSource::System
+        } else {
+            MixSource::Mic
+        };
         let now_lagging = (gap > DEAD_GAP_SAMPLES)
-            .then(|| {
-                if self.sys_filled < self.mic_filled {
-                    MixSource::System
-                } else {
-                    MixSource::Mic
-                }
-            })
+            .then_some(lagging_side)
             // A never-delivering system side is a normal quiet start (an idle
             // Windows loopback emits no packets) — not a stall.
             .filter(|s| !(*s == MixSource::System && self.sys_filled == 0));
