@@ -146,6 +146,12 @@ export interface ToolMetadata {
   osCategory?: 'reminders' | 'calendar' | 'mail' | 'notes';
   /** Behavioral annotations from the worker (readOnlyHint, destructiveHint, etc.) */
   annotations?: import('@speedwave/mcp-shared').ToolAnnotations;
+  /** True when results depend on the authenticated user's identity. */
+  userScoped?: boolean;
+  /** Name of the sibling tool that resolves "me"/"my" without an explicit id param. */
+  currentUserTool?: string;
+  /** Name of the input param that accepts a self-referential value (e.g. "me"). */
+  selfParam?: string;
 }
 
 /**

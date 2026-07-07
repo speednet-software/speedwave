@@ -60,10 +60,12 @@ const HUB_RATE_LIMIT_WINDOW_MS = 60_000;
 const TOOLS: Tool[] = [
   {
     name: 'search_tools',
-    description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
+    description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
 Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
+
+Matching is tokenized and ranked (each word matched independently against name/keywords/description), so a natural phrase like "my logged hours" also works. A zero-match result includes a 'hint' with next steps.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })

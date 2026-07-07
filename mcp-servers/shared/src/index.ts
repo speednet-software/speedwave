@@ -117,6 +117,14 @@ export { sanitize } from './sanitizer.js';
 // Errors (SSOT for user-facing messages)
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
 
+// Teaching-style errors + pagination guard (SSOT)
+export { teachingErrorResult, clampPageSize } from './teaching-errors.js';
+export type { TeachingErrorParams } from './teaching-errors.js';
+
+// _meta key contract (SSOT for prefixed MCP-spec keys + legacy fallback reader)
+export { META_KEYS, metaValue } from './meta-keys.js';
+export type { MetaKey } from './meta-keys.js';
+
 // Retry
 export { retryAsync } from './retry.js';
 export type { RetryOptions } from './retry.js';

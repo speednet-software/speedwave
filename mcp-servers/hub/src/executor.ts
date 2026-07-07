@@ -425,6 +425,43 @@ const batch = async <T>(operations: Promise<T>[]): Promise<BatchResult<T>> => {
 };
 
 /**
+ * Levenshtein edit distance, capped for speed since candidate lists are short method names.
+ * @param a - First string.
+ * @param b - Second string.
+ */
+function levenshteinLite(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+
+  for (let i = 0; i < rows; i++) dp[i][0] = i;
+  for (let j = 0; j < cols; j++) dp[0][j] = j;
+
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+
+  return dp[rows - 1][cols - 1];
+}
+
+/**
+ * Find the N closest candidate names to an attempted name by edit distance (ascending).
+ * @param attempted - The name that failed to resolve.
+ * @param candidates - Available names to rank against.
+ * @param limit - Maximum number of suggestions to return (default 3).
+ */
+export function closestMatches(attempted: string, candidates: string[], limit = 3): string[] {
+  return [...candidates]
+    .map((c) => ({ name: c, distance: levenshteinLite(attempted.toLowerCase(), c.toLowerCase()) }))
+    .sort((x, y) => x.distance - y.distance || x.name.localeCompare(y.name))
+    .slice(0, limit)
+    .map((c) => c.name);
+}
+
+/**
  * Execute code in sandbox
  * Uses AsyncFunction for async/await support
  * @param params - Code execution parameters
@@ -560,7 +597,10 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
         );
 
         if (availableMethods.length > 0) {
-          sanitizedMessage = `${serviceName}.${attemptedMethod} is not a function. Available ${serviceName} methods: ${availableMethods.join(', ')}`;
+          const suggestions = closestMatches(attemptedMethod, availableMethods);
+          const didYouMean =
+            suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
+          sanitizedMessage = `${serviceName}.${attemptedMethod} is not a function.${didYouMean} Available ${serviceName} methods: ${availableMethods.join(', ')}`;
         }
       }
     }

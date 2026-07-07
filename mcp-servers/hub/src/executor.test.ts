@@ -4,6 +4,7 @@ import {
   _setBridgesForTesting,
   _formatErrorMessage,
   _deriveAuditCategory,
+  closestMatches,
 } from './executor.js';
 import {
   TOOL_REGISTRY,
@@ -386,6 +387,15 @@ describe('executor', () => {
       expect(result.error?.message).toContain('updateIssue');
     });
 
+    it('should suggest the closest real method name (Did you mean) for a near-miss call', async () => {
+      const code = `await redmine.listProjects()`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      // listProjectIds is the closest real method to the attempted listProjects
+      expect(result.error?.message).toContain('Did you mean:');
+      expect(result.error?.message).toContain('listProjectIds');
+    });
+
     it('should show available methods for gitlab when calling non-existent function', async () => {
       const code = `await gitlab.getRepositories()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
@@ -405,6 +415,48 @@ describe('executor', () => {
       expect(result.error?.message).toContain('slack_nonExistentMethod is not defined');
       expect(result.error?.message).toContain('Use dot notation');
       expect(result.error?.message).toContain('Available methods');
+    });
+  });
+
+  describe('closestMatches', () => {
+    it('ranks candidates by ascending edit distance', () => {
+      const result = closestMatches('listProjects', ['listProjectIds', 'listIssueIds', 'getFile']);
+      expect(result[0]).toBe('listProjectIds');
+    });
+
+    it('returns an exact match first with distance 0', () => {
+      const result = closestMatches('getIssue', ['getIssue', 'getIssueFull', 'listIssues']);
+      expect(result[0]).toBe('getIssue');
+    });
+
+    it('respects the limit parameter', () => {
+      const result = closestMatches('foo', ['fob', 'foc', 'fod', 'foe'], 2);
+      expect(result).toHaveLength(2);
+    });
+
+    it('defaults to 3 suggestions when limit is not provided', () => {
+      const result = closestMatches('foo', ['fob', 'foc', 'fod', 'foe']);
+      expect(result).toHaveLength(3);
+    });
+
+    it('returns fewer than limit when candidate list is shorter than limit', () => {
+      const result = closestMatches('foo', ['fob']);
+      expect(result).toEqual(['fob']);
+    });
+
+    it('returns empty array for an empty candidate list', () => {
+      expect(closestMatches('foo', [])).toEqual([]);
+    });
+
+    it('is case-insensitive', () => {
+      const result = closestMatches('GETISSUE', ['getIssue', 'unrelatedName']);
+      expect(result[0]).toBe('getIssue');
+    });
+
+    it('breaks ties alphabetically', () => {
+      // Both 'aaa' and 'aab' are distance 1 from 'aax'
+      const result = closestMatches('aax', ['aab', 'aaa']);
+      expect(result).toEqual(['aaa', 'aab']);
     });
   });
 
