@@ -15,6 +15,8 @@ The **Privacy (advanced)** group controls whether conversation and code content 
 
 ## Organization enforcement (MDM)
 
+> **Claude Team / Enterprise admins:** a telemetry policy set in the Claude console (Admin Settings > Claude Code > Managed settings) does **not** reach Claude Code inside Speedwave. Claude Code runs behind Speedwave's local proxy (`ANTHROPIC_BASE_URL` is non-default), and Anthropic's server-managed settings are bypassed for any non-default base URL. Enforce telemetry through Speedwave's own `managed-config.json` below instead.
+
 An administrator can force any subset of the telemetry settings by deploying a `managed-config.json` to a machine-wide, admin-only location:
 
 - macOS: `/Library/Application Support/Speedwave/managed-config.json`
