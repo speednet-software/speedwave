@@ -267,14 +267,30 @@ describe('TranscriptionService', () => {
   });
 
   describe('sendToChat', () => {
-    it('renders markdown and forwards it to ChatStateService.sendMessage', async () => {
-      mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'get_transcript_markdown' ? '# Meeting transcript' : undefined;
+    it('sends the transcript with a Polish summarization instruction on top', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'pl' });
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return undefined;
+      };
       await svc.sendToChat('sess-1');
-      expect(mockChat.sendMessage).toHaveBeenCalledWith(
-        '# Meeting transcript',
-        'Meeting transcript'
-      );
+      const [text, label] = mockChat.sendMessage.mock.calls[0];
+      expect(label).toBe('Meeting transcript');
+      expect(text).toContain('podsumowanie');
+      expect(text.endsWith('# Meeting transcript')).toBe(true);
+    });
+
+    it('uses the English instruction for an English session', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return undefined;
+      };
+      await svc.sendToChat('sess-1');
+      const [text] = mockChat.sendMessage.mock.calls[0];
+      expect(text).toContain('summary');
+      expect(text).toContain('action item');
+      expect(text.endsWith('# Meeting transcript')).toBe(true);
     });
   });
 

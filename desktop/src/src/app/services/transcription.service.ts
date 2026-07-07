@@ -23,6 +23,18 @@ import { LoggerService } from './logger.service';
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
 
+/** Instruction prepended to a transcript sent to chat, per session language. */
+const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
+  pl:
+    'Poniżej transkrypt spotkania. Przygotuj zwięzłe podsumowanie: najważniejsze wątki, ' +
+    'podjęte decyzje i listę zadań (kto, co, na kiedy — jeśli padło). ' +
+    'Transkrypt może zawierać błędy rozpoznawania mowy; niejasne fragmenty oznacz.',
+  en:
+    'Below is a meeting transcript. Write a concise summary: key topics, decisions made, ' +
+    'and an action item list (who, what, by when — where stated). ' +
+    'The transcript may contain speech-recognition errors; flag unclear fragments.',
+};
+
 /**
  * Meeting-transcription state + Tauri-command facade. Mirrors the ADR-056
  * snapshot+seq delivery: `subscribeToTranscript` applies a snapshot, then
@@ -166,12 +178,14 @@ export class TranscriptionService {
   }
 
   /**
-   * Renders the transcript as markdown and sends it to Claude via the chat path.
+   * Sends the transcript to Claude with a summarization instruction on top
+   * (in the session language), so the chat knows what to do with it.
    * @param sessionId - the session to send.
    */
   async sendToChat(sessionId: string): Promise<void> {
-    const md = await this.getMarkdown(sessionId);
-    await this.chatState.sendMessage(md, 'Meeting transcript');
+    const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
+    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language];
+    await this.chatState.sendMessage(`${instruction}\n\n${md}`, 'Meeting transcript');
   }
 
   /** The single best model for this hardware + its download state. */
