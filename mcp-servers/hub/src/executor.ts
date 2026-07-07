@@ -584,9 +584,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
 
     // Redact host file paths and their positions; keep user-code line:column
     // (e.g. "<anonymous>:3:7") — it teaches the model where its snippet broke.
+    // Any absolute path the extension list misses still loses its :line:col (final pass).
     let sanitizedMessage = message
-      .replace(/\/[a-zA-Z0-9_\-./]+\.(ts|js|json)/g, '[file]')
+      .replace(/\/[a-zA-Z0-9_\-./]+\.(ts|js|json|mjs|cjs|tsx|jsx|node|map)/g, '[file]')
       .replace(/\[file\]:\d+:\d+/g, '[file]')
+      .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);
 
     // Smart error enhancement: if "X.Y is not a function", show available methods

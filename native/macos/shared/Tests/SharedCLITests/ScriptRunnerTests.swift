@@ -165,6 +165,24 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(splitAddressList("  ,  "), [])
     }
 
+    func testSplitAddressListQuotedCommaDisplayNameKeptIntact() {
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, bob@x.com"),
+            ["\"Smith, Jane\" <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListPlainList() {
+        XCTAssertEqual(
+            splitAddressList("alice@x.com,bob@x.com,carol@x.com"),
+            ["alice@x.com", "bob@x.com", "carol@x.com"]
+        )
+    }
+
+    func testSplitAddressListTrailingComma() {
+        XCTAssertEqual(splitAddressList("alice@x.com,bob@x.com,"), ["alice@x.com", "bob@x.com"])
+    }
+
     // MARK: - Parse Delimited
 
     func testParseDelimitedBasic4Field() {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { teachingErrorResult, clampPageSize } from './teaching-errors.js';
+import { teachingErrorResult, teachingToolResult, clampPageSize } from './teaching-errors.js';
 
 describe('teachingErrorResult', () => {
   it('composes param name, received value, and next step', () => {
@@ -73,6 +73,58 @@ describe('teachingErrorResult', () => {
     const result = teachingErrorResult({ paramName: 'filter', received: circular, nextStep: 'x' });
 
     expect(result.content[0].text).toContain('[object Object]');
+  });
+});
+
+describe('teachingToolResult', () => {
+  it('shares identical message text with teachingErrorResult (no Error: prefix games)', () => {
+    const params = {
+      paramName: 'issue_id',
+      received: 99999,
+      correctValueTool: 'listIssueIds',
+      nextStep: 'Retry with a valid id.',
+    };
+
+    const errorEnvelope = teachingErrorResult(params);
+    const toolEnvelope = teachingToolResult(params);
+
+    const errorText = errorEnvelope.content[0].text as string;
+    expect(errorText).toBe(`Error: ${toolEnvelope.error?.message}`);
+  });
+
+  it('defaults the error code to INVALID_PARAM', () => {
+    const result = teachingToolResult({
+      paramName: 'query',
+      received: undefined,
+      nextStep: 'Provide a query.',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INVALID_PARAM');
+  });
+
+  it('accepts a custom error code', () => {
+    const result = teachingToolResult(
+      { paramName: 'channel', received: '', nextStep: 'Provide a channel.' },
+      'MISSING_PARAM'
+    );
+
+    expect(result.error?.code).toBe('MISSING_PARAM');
+  });
+
+  it('omits the correct-value-tool sentence and matches teachingErrorResult wording', () => {
+    const params = {
+      paramName: 'service',
+      received: 'unknownservice',
+      nextStep: 'Use one of the known services.',
+    };
+
+    const result = teachingToolResult(params, 'INVALID_ID');
+
+    expect(result.error?.message).not.toContain('Get a valid value from');
+    expect(result.error?.message).toBe(
+      (teachingErrorResult(params).content[0].text as string).replace(/^Error: /, '')
+    );
   });
 });
 

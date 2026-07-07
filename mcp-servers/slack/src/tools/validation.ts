@@ -5,7 +5,7 @@
 import {
   withResultValidation,
   notConfiguredMessage,
-  teachingErrorResult,
+  teachingToolResult,
   type ToolResult,
   type ToolsCallResult,
 } from '@speedwave/mcp-shared';
@@ -16,7 +16,7 @@ export type { ToolResult };
 /**
  * Build a MISSING_PARAM {@link ToolResult} naming the param, the received value,
  * and the next step — used to validate required params before calling Slack.
- * Delegates message composition to the shared {@link teachingErrorResult}.
+ * Delegates to the shared {@link teachingToolResult}.
  * @param paramName - Name of the missing/invalid parameter.
  * @param received - The value actually received.
  * @param nextStep - What the caller should do instead.
@@ -26,12 +26,7 @@ export function missingParamResult(
   received: unknown,
   nextStep: string
 ): ToolResult {
-  const teaching = teachingErrorResult({ paramName, received, nextStep });
-  const message = (teaching.content[0].text as string).replace(/^Error: /, '');
-  return {
-    success: false,
-    error: { code: 'MISSING_PARAM', message },
-  };
+  return teachingToolResult({ paramName, received, nextStep }, 'MISSING_PARAM');
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
@@ -18,7 +19,7 @@ const listRelationsTool: Tool = {
   name: 'listRelations',
   description: 'List all relations for an issue (blocks, precedes, duplicates, etc.)',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'link', 'dependency', 'blocks', 'precedes', 'follows', 'list'],
   example: `const { relations } = await redmine.listRelations({ issue_id: 12345 })`,
   inputSchema: {
@@ -76,7 +77,7 @@ const createRelationTool: Tool = {
   name: 'createRelation',
   description: 'Create a relation between two issues',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'create', 'link', 'dependency', 'blocks', 'precedes'],
   example: `await redmine.createRelation({ issue_id: 100, issue_to_id: 101, relation_type: 'blocks' })`,
   inputSchema: {
@@ -156,7 +157,7 @@ const deleteRelationTool: Tool = {
   name: 'deleteRelation',
   description: 'Delete a relation between issues',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'delete', 'remove', 'unlink'],
   example: `await redmine.deleteRelation({ relation_id: 456 })`,
   inputSchema: {

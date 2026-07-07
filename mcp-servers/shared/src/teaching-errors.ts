@@ -5,6 +5,7 @@
  */
 
 import { errorResult } from './server.js';
+import type { ToolResult } from './tool-validation.js';
 
 /**
  * Summarize an arbitrary received value for inclusion in an error message.
@@ -37,18 +38,43 @@ export interface TeachingErrorParams {
 }
 
 /**
- * Build a teaching-style {@link errorResult}: states what was wrong, which tool
- * provides a correct value, and the suggested next step — in that order.
+ * Compose the teaching-style message body (no envelope): what was wrong, which
+ * tool provides a correct value, and the suggested next step — in that order.
  * @param params - What was wrong, where a correct value comes from, and what to do next.
  */
-export function teachingErrorResult(params: TeachingErrorParams): ReturnType<typeof errorResult> {
+function buildTeachingMessage(params: TeachingErrorParams): string {
   const { paramName, received, correctValueTool, nextStep } = params;
   const parts = [`Invalid ${paramName} (received: ${summarizeReceived(received)}).`];
   if (correctValueTool) {
     parts.push(`Get a valid value from ${correctValueTool}.`);
   }
   parts.push(nextStep);
-  return errorResult(parts.join(' '));
+  return parts.join(' ');
+}
+
+/**
+ * Build a teaching-style {@link errorResult}: states what was wrong, which tool
+ * provides a correct value, and the suggested next step — in that order.
+ * @param params - What was wrong, where a correct value comes from, and what to do next.
+ */
+export function teachingErrorResult(params: TeachingErrorParams): ReturnType<typeof errorResult> {
+  return errorResult(buildTeachingMessage(params));
+}
+
+/**
+ * Build a teaching-style {@link ToolResult} error envelope (Family A's
+ * `{ success, error }` shape) with the same message text as {@link teachingErrorResult}.
+ * @param params - What was wrong, where a correct value comes from, and what to do next.
+ * @param code - Error code to attach (default `INVALID_PARAM`).
+ */
+export function teachingToolResult(
+  params: TeachingErrorParams,
+  code = 'INVALID_PARAM'
+): ToolResult {
+  return {
+    success: false,
+    error: { code, message: buildTeachingMessage(params) },
+  };
 }
 
 /**

@@ -71,10 +71,26 @@ public func isAppleScriptNotFoundError(_ stderr: String) -> Bool {
 }
 
 /// Split a comma-separated address list into trimmed, non-empty addresses.
-/// Shared by mail clients so "a@x, b@y" becomes multiple recipients, not one malformed address.
+/// Quote-aware: commas inside a double-quoted span (e.g. a "Last, First" display name) do not split.
 public func splitAddressList(_ addresses: String) -> [String] {
-    addresses
-        .components(separatedBy: ",")
+    var entries: [String] = []
+    var current = ""
+    var insideQuotes = false
+
+    for char in addresses {
+        if char == "\"" {
+            insideQuotes.toggle()
+            current.append(char)
+        } else if char == "," && !insideQuotes {
+            entries.append(current)
+            current = ""
+        } else {
+            current.append(char)
+        }
+    }
+    entries.append(current)
+
+    return entries
         .map { $0.trimmingCharacters(in: .whitespaces) }
         .filter { !$0.isEmpty }
 }

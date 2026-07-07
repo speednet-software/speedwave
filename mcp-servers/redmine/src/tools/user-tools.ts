@@ -9,6 +9,7 @@ import {
   errorResult,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
@@ -17,7 +18,7 @@ const listUsersTool: Tool = {
   description:
     'List users (optionally filtered by project membership). If this worker is scoped to a single project, project_id is forced to that project and a different value throws an error.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'users', 'list', 'members', 'team', 'assignable'],
   example: `const users = await redmine.listUsers({ project_id: "my-project" })`,
   inputSchema: {
@@ -69,9 +70,9 @@ const resolveUserTool: Tool = {
   description: "Resolve user identifier to user ID (supports 'me', user ID, or username)",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': true,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/self-param': "identifier: 'me'",
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "identifier: 'me'",
   },
   keywords: ['redmine', 'user', 'resolve', 'lookup', 'identity', 'id'],
   example: `const { user_id } = await redmine.resolveUser({ identifier: "john@example.com" })`,
@@ -114,7 +115,7 @@ const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
   description: "Get current authenticated user's profile (id, login, email, name)",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true, 'speedwave.pl/user-scoped': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.USER_SCOPED]: true },
   keywords: ['redmine', 'user', 'profile', 'current', 'me', 'authenticated'],
   example: `const user = await redmine.getCurrentUser()`,
   inputSchema: {

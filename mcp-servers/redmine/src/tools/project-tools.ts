@@ -9,6 +9,7 @@ import {
   errorResult,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
@@ -17,7 +18,7 @@ const listProjectIdsTool: Tool = {
   description:
     'List project IDs with optional filters. Returns only IDs for efficiency. If this Redmine integration is scoped to a single project, this always returns just that one project regardless of limit/offset.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'projects', 'list', 'ids', 'filter', 'active', 'closed'],
   example: `const { ids } = await redmine.listProjectIds({ status: 'active' })`,
   inputSchema: {
@@ -72,7 +73,7 @@ const getProjectFullTool: Tool = {
   description:
     'Get complete project data including trackers, categories, modules. No truncation. If scoped to a single project, requesting a different project_id fails with a scope error.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'project', 'details', 'full', 'trackers', 'categories', 'modules'],
   example: `const project = await redmine.getProjectFull({ project_id: 'my-project' })`,
   inputSchema: {
@@ -137,7 +138,7 @@ const searchProjectIdsTool: Tool = {
   description:
     'Search projects by name, identifier or description. Returns matching IDs only. If scoped to a single project, only that project is searched.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'projects', 'search', 'find', 'query', 'name'],
   example: `const { ids } = await redmine.searchProjectIds({ query: 'mobile' })`,
   inputSchema: {

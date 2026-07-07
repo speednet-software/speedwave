@@ -2,23 +2,17 @@
  * Validation helpers for tool parameters.
  */
 
-import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  withResultValidation,
+  teachingToolResult,
+  type ToolResult,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
 
 export type { ToolResult };
 
 /** Permitted characters in a Microsoft Graph id segment: alphanumerics, dashes, underscores, dots. */
 const GRAPH_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-
-/**
- * Render a received value for inclusion in a teaching error message.
- * @param value - the value that failed validation
- */
-function summarizeReceived(value: unknown): string {
-  if (value === undefined) return 'undefined';
-  if (value === null) return 'null';
-  if (typeof value === 'string') return `"${value}"`;
-  return String(value);
-}
 
 /**
  * Assert that `value` is a non-empty string matching {@link GRAPH_ID_RE}.
@@ -35,15 +29,12 @@ export function validateGraphId(
 ): ToolResult | null {
   if (typeof value !== 'string' || !GRAPH_ID_RE.test(value)) {
     const nextStep = sourceTool
-      ? `Get a valid ${fieldName} from ${sourceTool} instead of guessing one.`
+      ? 'Retry with that id instead of guessing one.'
       : `A valid ${fieldName} contains only letters, digits, '.', '_', '-' (max 128 chars).`;
-    return {
-      success: false,
-      error: {
-        code: 'INVALID_ID',
-        message: `Invalid ${fieldName} (received: ${summarizeReceived(value)}). ${nextStep}`,
-      },
-    };
+    return teachingToolResult(
+      { paramName: fieldName, received: value, correctValueTool: sourceTool, nextStep },
+      'INVALID_ID'
+    );
   }
   return null;
 }

@@ -11,6 +11,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   clampPageSize,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
@@ -21,10 +22,10 @@ const listTimeEntriesTool: Tool = {
     'List time entries with optional filters. Returns entries for ALL users by default — for "my hours"/"my time entries" questions, pass user_id: "me" to scope to the current authenticated user. If this Redmine integration is scoped to a single project, results are silently restricted to that project even when project_id is omitted.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': true,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/current-user-tool': 'getCurrentUser',
-    'speedwave.pl/self-param': "user_id: 'me'",
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.SELF_PARAM]: "user_id: 'me'",
   },
   keywords: ['redmine', 'time', 'entries', 'list', 'hours', 'log'],
   example: `const entries = await redmine.listTimeEntries({ issue_id: 12345 })`,
@@ -94,9 +95,9 @@ const createTimeEntryTool: Tool = {
     "Log time on an issue or project. The entry is always attributed to the current authenticated user (getCurrentUser) — there is no way to log time on another user's behalf.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': true,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/current-user-tool': 'getCurrentUser',
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
   keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
   example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
@@ -164,7 +165,7 @@ const updateTimeEntryTool: Tool = {
   name: 'updateTimeEntry',
   description: 'Update an existing time entry',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'time', 'update', 'modify', 'hours', 'edit'],
   example: `await redmine.updateTimeEntry({ time_entry_id: 789, hours: 3.5 })`,
   inputSchema: {

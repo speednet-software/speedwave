@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { teachingToolResult } from '@speedwave/mcp-shared';
 import { withValidation, validateGraphId } from './validation.js';
 import type { ToolResult } from './validation.js';
 
@@ -54,6 +55,21 @@ describe('validateGraphId', () => {
 
   it('accepts a string exactly 128 characters long', () => {
     expect(validateGraphId('a'.repeat(128), 'pageId')).toBeNull();
+  });
+
+  it('produces the exact shared teachingToolResult envelope (message and code)', () => {
+    const result = validateGraphId('bad/../path', 'listId', 'listLists');
+    const expected = teachingToolResult(
+      {
+        paramName: 'listId',
+        received: 'bad/../path',
+        correctValueTool: 'listLists',
+        nextStep: 'Retry with that id instead of guessing one.',
+      },
+      'INVALID_ID'
+    );
+
+    expect(result).toEqual(expected);
   });
 });
 

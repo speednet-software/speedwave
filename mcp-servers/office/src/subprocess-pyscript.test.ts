@@ -52,6 +52,11 @@ beforeAll(() => {
     path.join(SCRIPTS_DIR, 'crash-with-junk-stdout.py'),
     'process.stdout.write("not json"); process.stderr.write("stack trace"); process.exit(1);'
   );
+  // Prints a valid `{ok:true}` payload but still exits non-zero — the exit code must win.
+  fs.writeFileSync(
+    path.join(SCRIPTS_DIR, 'ok-json-but-nonzero-exit.py'),
+    'process.stdout.write(JSON.stringify({ ok: true, value: 1 })); process.exit(3);'
+  );
 });
 
 afterAll(() => {
@@ -88,6 +93,15 @@ describe('runPythonScript', () => {
   it('falls back to the raw exit/stderr detail when a non-zero exit produced no parseable JSON', async () => {
     await expect(runPythonScript('crash-with-junk-stdout.py', [])).rejects.toThrow(
       /exited with code 1: stack trace/
+    );
+  });
+
+  it('throws when the process exits non-zero even though stdout claims ok:true', async () => {
+    await expect(runPythonScript('ok-json-but-nonzero-exit.py', [])).rejects.toBeInstanceOf(
+      SubprocessError
+    );
+    await expect(runPythonScript('ok-json-but-nonzero-exit.py', [])).rejects.toThrow(
+      /exited with code 3 even though stdout claimed success/
     );
   });
 });

@@ -11,6 +11,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
@@ -18,7 +19,7 @@ const listJournalsTool: Tool = {
   name: 'listJournals',
   description: 'List all journals (comments/updates) for an issue',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journals', 'history', 'comments', 'audit', 'changelog'],
   example: `const journals = await redmine.listJournals({ issue_id: 12345 })`,
   inputSchema: {
@@ -80,7 +81,7 @@ const updateJournalTool: Tool = {
   description:
     "Update an existing journal entry. Redmine typically restricts editing to the original comment author or an admin; a 403 here usually means the current user isn't the author.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journal', 'update', 'comment', 'edit', 'modify'],
   example: `await redmine.updateJournal({ issue_id: 12345, journal_id: 67890, notes: "Updated comment with more details" })`,
   inputSchema: {
@@ -130,7 +131,7 @@ const deleteJournalTool: Tool = {
   name: 'deleteJournal',
   description: 'Delete a journal entry',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journal', 'delete', 'remove', 'comment'],
   example: `await redmine.deleteJournal({ issue_id: 12345, journal_id: 67890 })`,
   inputSchema: {

@@ -4,10 +4,34 @@
  * Shared validation utilities following the Speedwave MCP pattern.
  */
 
-import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  withResultValidation,
+  teachingToolResult as sharedTeachingToolResult,
+  type ToolResult,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
 
 /** Standardized result returned by OS tool handlers (re-export of the shared type). */
 export type { ToolResult };
+
+/**
+ * Positional sugar over the shared {@link sharedTeachingToolResult} for this
+ * file's many call sites.
+ * @param code - Machine-readable error code (e.g. `MISSING_FIELDS`).
+ * @param paramName - Name of the offending parameter.
+ * @param received - The value actually received.
+ * @param nextStep - Concrete next step for the caller to take.
+ * @param correctValueTool - Name of a tool that provides a correct value, if any.
+ */
+function teachingToolResult(
+  code: string,
+  paramName: string,
+  received: unknown,
+  nextStep: string,
+  correctValueTool?: string
+): ToolResult {
+  return sharedTeachingToolResult({ paramName, received, nextStep, correctValueTool }, code);
+}
 
 /**
  * Wraps a tool handler with parameter validation and error handling
@@ -33,28 +57,28 @@ export function requireFields(
     (f) => params[f] === undefined || params[f] === null || typeof params[f] !== 'string'
   );
   if (missing.length > 0) {
+    const [first, ...rest] = missing;
     return {
       valid: false,
-      error: {
-        success: false,
-        error: {
-          code: 'MISSING_FIELDS',
-          message: `Missing required fields: ${missing.join(', ')}`,
-        },
-      },
+      error: teachingToolResult(
+        'MISSING_FIELDS',
+        missing.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
+        params[first],
+        `Provide a non-empty string for ${missing.join(', ')}.`
+      ),
     };
   }
   const empty = fields.filter((f) => (params[f] as string).trim() === '');
   if (empty.length > 0) {
+    const [first, ...rest] = empty;
     return {
       valid: false,
-      error: {
-        success: false,
-        error: {
-          code: 'EMPTY_FIELDS',
-          message: `Fields must not be empty: ${empty.join(', ')}`,
-        },
-      },
+      error: teachingToolResult(
+        'EMPTY_FIELDS',
+        empty.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
+        params[first],
+        `Provide a non-empty value for ${empty.join(', ')}.`
+      ),
     };
   }
   return { valid: true };
@@ -99,35 +123,32 @@ export function validateStringFields(
     if (typeof value !== 'string') {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be a string` },
-        },
+        error: teachingToolResult('INVALID_TYPE', name, value, `Pass ${name} as a string.`),
       };
     }
     if (value.length > maxLength) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'FIELD_TOO_LONG',
-            message: `${name} exceeds maximum length of ${maxLength}`,
-          },
-        },
+        error: teachingToolResult(
+          'FIELD_TOO_LONG',
+          name,
+          `${value.length} characters`,
+          `Shorten ${name} to at most ${maxLength} characters.`
+        ),
       };
     }
     const re = allowNewlines ? CONTROL_CHARS_BODY : CONTROL_CHARS_STRICT;
     if (re.test(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'INVALID_CHARACTERS',
-            message: `${name} contains invalid control characters`,
-          },
-        },
+        error: teachingToolResult(
+          'INVALID_CHARACTERS',
+          name,
+          value,
+          allowNewlines
+            ? `Remove control characters from ${name} (tabs, newlines, and carriage returns are allowed).`
+            : `Remove control characters and newlines from ${name}.`
+        ),
       };
     }
   }
@@ -149,25 +170,23 @@ export function validateNumberFields(
     if (typeof value !== 'number' || !Number.isFinite(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'INVALID_TYPE',
-            message: `${name} must be a finite number between ${min} and ${max}`,
-          },
-        },
+        error: teachingToolResult(
+          'INVALID_TYPE',
+          name,
+          value,
+          `Pass ${name} as a finite number between ${min} and ${max}.`
+        ),
       };
     }
     if (value < min || value > max) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'OUT_OF_RANGE',
-            message: `${name} must be between ${min} and ${max}`,
-          },
-        },
+        error: teachingToolResult(
+          'OUT_OF_RANGE',
+          name,
+          value,
+          `Pass ${name} as a number between ${min} and ${max}.`
+        ),
       };
     }
   }
@@ -189,10 +208,12 @@ export function validateBooleanFields(
     if (typeof value !== 'boolean') {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be a boolean` },
-        },
+        error: teachingToolResult(
+          'INVALID_TYPE',
+          name,
+          value,
+          `Pass ${name} as a literal boolean (true or false), not a string or number.`
+        ),
       };
     }
   }
@@ -214,66 +235,70 @@ export function validateStringArrayFields(
     if (!Array.isArray(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be an array` },
-        },
+        error: teachingToolResult(
+          'INVALID_TYPE',
+          name,
+          value,
+          `Pass ${name} as an array of strings.`
+        ),
       };
     }
     if (value.length > maxItems) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'ARRAY_TOO_LONG',
-            message: `${name} exceeds maximum of ${maxItems} items`,
-          },
-        },
+        error: teachingToolResult(
+          'ARRAY_TOO_LONG',
+          name,
+          `${value.length} items`,
+          `Trim ${name} to at most ${maxItems} items.`
+        ),
       };
     }
     for (let i = 0; i < value.length; i++) {
       const item = value[i];
+      const itemName = `${name}[${i}]`;
       if (typeof item !== 'string') {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'INVALID_TYPE', message: `${name}[${i}] must be a string` },
-          },
+          error: teachingToolResult(
+            'INVALID_TYPE',
+            itemName,
+            item,
+            `Pass ${itemName} as a string.`
+          ),
         };
       }
       if (item.trim() === '') {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'EMPTY_FIELDS', message: `${name}[${i}] must not be empty` },
-          },
+          error: teachingToolResult(
+            'EMPTY_FIELDS',
+            itemName,
+            item,
+            `Provide a non-empty value for ${itemName}, or remove it from ${name}.`
+          ),
         };
       }
       if (item.length > maxItemLength) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: {
-              code: 'FIELD_TOO_LONG',
-              message: `${name}[${i}] exceeds maximum length of ${maxItemLength}`,
-            },
-          },
+          error: teachingToolResult(
+            'FIELD_TOO_LONG',
+            itemName,
+            `${item.length} characters`,
+            `Shorten ${itemName} to at most ${maxItemLength} characters.`
+          ),
         };
       }
       if (CONTROL_CHARS_STRICT.test(item)) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: {
-              code: 'INVALID_CHARACTERS',
-              message: `${name}[${i}] contains invalid control characters`,
-            },
-          },
+          error: teachingToolResult(
+            'INVALID_CHARACTERS',
+            itemName,
+            item,
+            `Remove control characters and newlines from ${itemName}.`
+          ),
         };
       }
     }
@@ -350,10 +375,12 @@ export function validateDateFields(
       if (typeof value !== 'string' || !isValidISO8601(value)) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'INVALID_DATE', message: `Invalid ${field} date format. Use ISO8601.` },
-          },
+          error: teachingToolResult(
+            'INVALID_DATE',
+            field,
+            value,
+            `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`
+          ),
         };
       }
     }

@@ -9,6 +9,7 @@ import {
   errorResult,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
@@ -17,7 +18,7 @@ const getMappingsTool: Tool = {
   description:
     'Get project-specific Redmine ID mappings (status, priority, tracker, activity). Returns a flat object keyed by mapping name (e.g. status_new, priority_high, tracker_bug, activity_development) mapped to the configured numeric ID — not an array of {id, name} objects, and no success wrapper.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'mappings', 'config', 'status', 'priority', 'tracker', 'activity'],
   example: `const mappings = await redmine.getMappings()`,
   inputSchema: {
@@ -62,7 +63,7 @@ const getConfigTool: Tool = {
   description:
     'Get project configuration (default project_id, project_name, Redmine URL). project_name is auto-fetched from the Redmine API at startup when absent from config.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'config', 'configuration', 'project', 'url', 'settings'],
   example: `const config = await redmine.getConfig()`,
   inputSchema: {

@@ -118,7 +118,7 @@ export { sanitize } from './sanitizer.js';
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
 
 // Teaching-style errors + pagination guard (SSOT)
-export { teachingErrorResult, clampPageSize } from './teaching-errors.js';
+export { teachingErrorResult, teachingToolResult, clampPageSize } from './teaching-errors.js';
 export type { TeachingErrorParams } from './teaching-errors.js';
 
 // _meta key contract (SSOT for prefixed MCP-spec keys + legacy fallback reader)

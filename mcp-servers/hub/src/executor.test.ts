@@ -1200,6 +1200,25 @@ describe('executor', () => {
       expect(result.success).toBe(false);
       expect(result.error?.message).toContain(':3:7');
     });
+
+    it('redacts an .mjs host path and strips its position', async () => {
+      const code = `throw new Error('boom at /repo/build/loader.mjs:42:9 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/repo/build/loader.mjs');
+      expect(result.error?.message).not.toContain(':42:9');
+    });
+
+    it('strips :line:col from an absolute path whose extension is not in the known list', async () => {
+      const code = `throw new Error('boom at /repo/config/settings.yaml:7:3 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('/repo/config/settings.yaml');
+      expect(result.error?.message).not.toContain(':7:3');
+    });
   });
 
   describe('smart error — underscore match when service not in sandbox', () => {

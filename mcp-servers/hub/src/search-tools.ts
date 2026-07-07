@@ -104,6 +104,32 @@ function requiredMatchCount(tokenCount: number): number {
   return tokenCount >= 4 ? tokenCount - 1 : tokenCount;
 }
 
+/** Lowercased copies of a tool's searchable fields, cached so repeated searches don't re-lowercase static metadata. */
+interface LowercasedToolFields {
+  nameLower: string;
+  descriptionLower: string;
+  keywordsLower: string[];
+}
+
+const lowercaseCache = new WeakMap<ToolMetadata, LowercasedToolFields>();
+
+/**
+ * Get (and cache) the lowercased name/description/keywords for a tool.
+ * @param tool - Tool metadata to derive lowercased fields from.
+ */
+function getLowercasedFields(tool: ToolMetadata): LowercasedToolFields {
+  const cached = lowercaseCache.get(tool);
+  if (cached) return cached;
+
+  const fields: LowercasedToolFields = {
+    nameLower: tool.name.toLowerCase(),
+    descriptionLower: tool.description.toLowerCase(),
+    keywordsLower: tool.keywords.map((k) => k.toLowerCase()),
+  };
+  lowercaseCache.set(tool, fields);
+  return fields;
+}
+
 /**
  * Determine the best match tier for a tool against a single token, or undefined if
  * the token does not appear in name, keywords, or description.
@@ -111,11 +137,11 @@ function requiredMatchCount(tokenCount: number): number {
  * @param token - Lowercased query token.
  */
 function tokenMatchTier(tool: ToolMetadata, token: string): MatchTier | undefined {
-  const nameLower = tool.name.toLowerCase();
+  const { nameLower, descriptionLower, keywordsLower } = getLowercasedFields(tool);
   if (nameLower === token) return MatchTier.ExactName;
   if (nameLower.startsWith(token)) return MatchTier.NamePrefix;
-  if (tool.keywords.some((k) => k.toLowerCase().includes(token))) return MatchTier.Keyword;
-  if (tool.description.toLowerCase().includes(token)) return MatchTier.Description;
+  if (keywordsLower.some((k) => k.includes(token))) return MatchTier.Keyword;
+  if (descriptionLower.includes(token)) return MatchTier.Description;
   return undefined;
 }
 
@@ -127,7 +153,9 @@ function tokenMatchTier(tool: ToolMetadata, token: string): MatchTier | undefine
  */
 function scoreTool(tool: ToolMetadata, tokens: string[]): MatchTier | undefined {
   const contentTokens = tokens.filter((t) => !SELF_REFERENCE_TOKENS.has(t));
-  if (contentTokens.length === 0) return MatchTier.Description;
+  if (contentTokens.length === 0) {
+    return tool.userScoped ? MatchTier.Description : undefined;
+  }
 
   let matchedCount = 0;
   let bestTier: MatchTier | undefined;

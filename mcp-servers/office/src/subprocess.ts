@@ -186,7 +186,8 @@ export async function runOk(
  * @param args - Arguments to pass after the script path.
  * @param opts - Run options.
  * @returns The parsed JSON object the script printed on stdout.
- * @throws {SubprocessError} On timeout, spawn failure, or when stdout is not a JSON object with `ok: true`.
+ * @throws {SubprocessError} On timeout, spawn failure, a non-zero exit (even one whose stdout claims `ok: true`),
+ * or when stdout is not a JSON object with `ok: true`.
  */
 export async function runPythonScript(
   scriptName: string,
@@ -219,6 +220,12 @@ export async function runPythonScript(
     const error = (parsed as { error?: unknown }).error;
     const message = typeof error === 'string' ? error : JSON.stringify(parsed);
     throw new SubprocessError(`${scriptName} reported failure: ${message}`, r);
+  }
+  if (r.code !== 0) {
+    throw new SubprocessError(
+      `${scriptName} exited with code ${r.code} even though stdout claimed success`,
+      r
+    );
   }
   return parsed as Record<string, unknown>;
 }

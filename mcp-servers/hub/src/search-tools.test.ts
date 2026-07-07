@@ -832,6 +832,91 @@ describe('searchTools tokenized multi-word query', () => {
 
     expect(result.matches.some((m) => m.tool === 'redmine/getCurrentUser')).toBe(true);
   });
+
+  it('a query consisting only of self-reference tokens ("my") matches only userScoped tools', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['getCurrentUser'] = {
+      ...mutableRegistry['redmine']['getCurrentUser'],
+      userScoped: true,
+    };
+
+    const result = await searchTools({
+      query: 'my',
+      detailLevel: 'names_only',
+      service: 'redmine',
+    });
+
+    expect(result.matches.length).toBeGreaterThan(0);
+    expect(result.matches.every((m) => m.tool === 'redmine/getCurrentUser')).toBe(true);
+  });
+
+  it('a query consisting only of self-reference tokens ("moje") matches only userScoped tools', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['getCurrentUser'] = {
+      ...mutableRegistry['redmine']['getCurrentUser'],
+      userScoped: true,
+    };
+
+    const result = await searchTools({
+      query: 'moje',
+      detailLevel: 'names_only',
+      service: 'redmine',
+    });
+
+    expect(result.matches.length).toBeGreaterThan(0);
+    expect(result.matches.every((m) => m.tool === 'redmine/getCurrentUser')).toBe(true);
+  });
+
+  it('a self-reference-only query returns no matches when no tool in the service is userScoped', async () => {
+    const result = await searchTools({
+      query: 'my',
+      detailLevel: 'names_only',
+      service: 'gitlab',
+    });
+
+    expect(result.matches).toEqual([]);
+  });
+});
+
+describe('search-tools lowercase cache', () => {
+  const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+  });
+
+  afterEach(() => {
+    if (savedEnabledServices === undefined) {
+      delete process.env.ENABLED_SERVICES;
+    } else {
+      process.env.ENABLED_SERVICES = savedEnabledServices;
+    }
+    resetServiceCaches();
+  });
+
+  it('returns consistent results across repeated searches for the same tool', async () => {
+    const first = await searchTools({
+      query: 'sendChannel',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+    const second = await searchTools({
+      query: 'sendChannel',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+    const third = await searchTools({
+      query: 'SENDCHANNEL',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    expect(second.matches.map((m) => m.tool)).toEqual(first.matches.map((m) => m.tool));
+    expect(third.matches.map((m) => m.tool)).toEqual(first.matches.map((m) => m.tool));
+  });
 });
 
 describe('searchTools zero-match hint', () => {

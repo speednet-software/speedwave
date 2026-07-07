@@ -11,6 +11,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   teachingErrorResult,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
@@ -22,9 +23,9 @@ const listIssueIdsTool: Tool = {
     'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': false,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/self-param': "assigned_to: 'me'",
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
   },
   keywords: ['redmine', 'issues', 'list', 'filter', 'tasks', 'bugs', 'ids'],
   example: `const { ids, total_count } = await redmine.listIssueIds({ status: "open", assigned_to: "me" })`,
@@ -99,7 +100,7 @@ const getIssueFullTool: Tool = {
   name: 'getIssueFull',
   description: 'Get complete issue data including custom_fields, relations. No truncation.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['redmine', 'issue', 'show', 'get', 'detail', 'single', 'full'],
   example: `const issue = await redmine.getIssueFull({ issue_id: 12345, include: ["journals", "attachments"] })`,
   inputSchema: {
@@ -189,7 +190,7 @@ const searchIssueIdsTool: Tool = {
   name: 'searchIssueIds',
   description: 'Search issues by text query. Returns matching IDs only.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'issue', 'search', 'find', 'query', 'ids'],
   example: `const { ids, total_count } = await redmine.searchIssueIds({ query: "authentication error", project_id: "my-project" })`,
   inputSchema: {
@@ -244,9 +245,9 @@ const createIssueTool: Tool = {
     "Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': false,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/self-param': "assigned_to: 'me'",
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
   },
   keywords: ['redmine', 'issue', 'create', 'new', 'task', 'bug', 'add'],
   example: `const issue = await redmine.createIssue({ subject: "Fix bug", project_id: "my-project", tracker: "bug" })`,
@@ -327,9 +328,9 @@ const updateIssueTool: Tool = {
   description: 'Update an existing Redmine issue',
   annotations: WRITE_ANNOTATIONS,
   _meta: {
-    'speedwave.pl/defer-loading': true,
-    'speedwave.pl/user-scoped': true,
-    'speedwave.pl/self-param': "assigned_to: 'me'",
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
   },
   keywords: ['redmine', 'issue', 'update', 'modify', 'change', 'edit', 'move', 'project'],
   example: `const updated = await redmine.updateIssue({ issue_id: 12345, assigned_to_id: userId });
@@ -410,7 +411,7 @@ const commentIssueTool: Tool = {
   name: 'commentIssue',
   description: 'Add a comment to an issue',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'issue', 'comment', 'note', 'add'],
   example: `await redmine.commentIssue({ issue_id: 12345, notes: "Work in progress" })`,
   inputSchema: {
