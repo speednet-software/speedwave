@@ -10,7 +10,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+    CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
+    SAMPLE_RATE_HZ,
 };
 use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
@@ -122,7 +123,7 @@ impl AudioCapture for WasapiAudioCapture {
                     rx,
                     _handle: handle,
                     zero: ZeroStreakDetector::default(),
-                    warnings: Vec::new(),
+                    health: Vec::new(),
                 }))
             }
             AudioSource::Microphone { device } => {
@@ -728,7 +729,7 @@ struct WasapiLoopbackStream {
     _handle: WasapiCaptureHandle,
     /// Flags a capture that has been digital silence since start.
     zero: ZeroStreakDetector,
-    warnings: Vec<CaptureWarning>,
+    health: Vec<CaptureHealth>,
 }
 
 impl AudioStream for WasapiLoopbackStream {
@@ -737,8 +738,8 @@ impl AudioStream for WasapiLoopbackStream {
         // disconnect after an abort (device-read error) is an error, not EOF.
         match self.rx.recv() {
             Ok(chunk) => {
-                if let Some(w) = self.zero.feed(&chunk.samples) {
-                    self.warnings.push(w);
+                if let Some(t) = self.zero.feed(&chunk.samples) {
+                    self.health.push(t);
                 }
                 Ok(Some(chunk))
             }
@@ -749,8 +750,8 @@ impl AudioStream for WasapiLoopbackStream {
         }
     }
 
-    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
-        std::mem::take(&mut self.warnings)
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
+        std::mem::take(&mut self.health)
     }
 }
 
@@ -798,19 +799,19 @@ impl AudioStream for MixedWasapiAudioStream {
         res
     }
 
-    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
-        let mut warnings = self
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
+        let mut health = self
             .buf
             .lock()
-            .map(|mut b| b.take_warnings())
+            .map(|mut b| b.take_health())
             .unwrap_or_default();
         // A dead comms capture loses the call audio while the console side
         // keeps the mix flowing — MixBuffer can't see it, so report it here.
         if !self.comms_abort_reported && self.comms_handle.as_ref().is_some_and(|h| h.aborted()) {
             self.comms_abort_reported = true;
-            warnings.push(CaptureWarning::SystemAudioStalled);
+            health.push(CaptureHealth::Raised(CaptureWarning::SystemAudioStalled));
         }
-        warnings
+        health
     }
 }
 

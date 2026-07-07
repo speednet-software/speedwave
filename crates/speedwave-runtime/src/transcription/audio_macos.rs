@@ -179,7 +179,7 @@ impl AudioCapture for MacOsAudioCapture {
             Ok(Box::new(PassthroughCliStream {
                 raw,
                 zero: is_system.then(super::audio::ZeroStreakDetector::default),
-                warnings: Vec::new(),
+                health: Vec::new(),
             }))
         }
     }
@@ -279,7 +279,7 @@ struct PassthroughCliStream {
     raw: CliRawReader,
     /// Silence detector — present only when stream 0 is system audio.
     zero: Option<super::audio::ZeroStreakDetector>,
-    warnings: Vec<super::audio::CaptureWarning>,
+    health: Vec<super::audio::CaptureHealth>,
 }
 
 impl AudioStream for PassthroughCliStream {
@@ -295,8 +295,8 @@ impl AudioStream for PassthroughCliStream {
                     return Ok(None);
                 }
                 Some((0, offset_ns, samples)) => {
-                    if let Some(w) = self.zero.as_mut().and_then(|z| z.feed(&samples)) {
-                        self.warnings.push(w);
+                    if let Some(t) = self.zero.as_mut().and_then(|z| z.feed(&samples)) {
+                        self.health.push(t);
                     }
                     return Ok(Some(AudioChunk {
                         samples,
@@ -308,8 +308,8 @@ impl AudioStream for PassthroughCliStream {
         }
     }
 
-    fn take_warnings(&mut self) -> Vec<super::audio::CaptureWarning> {
-        std::mem::take(&mut self.warnings)
+    fn take_health(&mut self) -> Vec<super::audio::CaptureHealth> {
+        std::mem::take(&mut self.health)
     }
 }
 
@@ -321,8 +321,8 @@ struct MixedCliStream {
 }
 
 impl AudioStream for MixedCliStream {
-    fn take_warnings(&mut self) -> Vec<super::audio::CaptureWarning> {
-        self.mix.take_warnings()
+    fn take_health(&mut self) -> Vec<super::audio::CaptureHealth> {
+        self.mix.take_health()
     }
 
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
@@ -627,7 +627,7 @@ mod tests {
         let mut stream = PassthroughCliStream {
             raw: raw_reader_over(&bytes),
             zero: None,
-            warnings: Vec::new(),
+            health: Vec::new(),
         };
         let c1 = stream.next_chunk().unwrap().unwrap();
         assert_eq!(c1.samples, vec![1.0, 2.0]);
@@ -690,16 +690,18 @@ mod tests {
         let mut stream = PassthroughCliStream {
             raw: raw_reader_over(&bytes),
             zero: Some(super::super::audio::ZeroStreakDetector::default()),
-            warnings: Vec::new(),
+            health: Vec::new(),
         };
         for _ in 0..4 {
             let _ = stream.next_chunk().unwrap().unwrap();
         }
         assert_eq!(
-            stream.take_warnings(),
-            vec![super::super::audio::CaptureWarning::SystemAudioSilent]
+            stream.take_health(),
+            vec![super::super::audio::CaptureHealth::Raised(
+                super::super::audio::CaptureWarning::SystemAudioSilent
+            )]
         );
-        assert_eq!(stream.take_warnings(), vec![]);
+        assert_eq!(stream.take_health(), vec![]);
     }
 
     #[test]

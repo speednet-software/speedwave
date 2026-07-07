@@ -83,6 +83,7 @@ export type TranscriptEvent =
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
   | { kind: 'finalize_progress'; seq: number; progress: number }
   | { kind: 'capture_warning'; seq: number; warning: CaptureWarning }
+  | { kind: 'capture_warning_cleared'; seq: number; warning: CaptureWarning }
   | {
       kind: 'final_segments_ready';
       seq: number;

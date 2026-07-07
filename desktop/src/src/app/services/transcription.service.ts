@@ -310,6 +310,12 @@ export class TranscriptionService {
       case 'capture_warning':
         this.captureWarningSignal.set(ev.warning);
         break;
+      case 'capture_warning_cleared':
+        // Only the banner for the recovered warning goes away.
+        if (this.captureWarningSignal() === ev.warning) {
+          this.captureWarningSignal.set(null);
+        }
+        break;
     }
     this.lastSeq = ev.seq;
     this.activeSignal.set(next);

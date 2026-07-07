@@ -127,6 +127,15 @@ pub enum CaptureWarning {
     SystemAudioStalled,
 }
 
+/// A capture-health transition: a warning raised, or a prior one recovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHealth {
+    /// The degradation began.
+    Raised(CaptureWarning),
+    /// The degraded side recovered.
+    Cleared(CaptureWarning),
+}
+
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
 /// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
 /// for a live backend it doesn't normally end until `stop()` — represented by
@@ -137,8 +146,8 @@ pub trait AudioStream: Send {
     /// capture broke (the driver flips the session to `Failed`).
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError>;
 
-    /// Drains capture-health warnings raised since the last call (default: none).
-    fn take_warnings(&mut self) -> Vec<CaptureWarning> {
+    /// Drains capture-health transitions since the last call (default: none).
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
         Vec::new()
     }
 }
@@ -156,14 +165,24 @@ pub struct ZeroStreakDetector {
 pub(crate) const SILENT_AFTER_SAMPLES: u64 = SAMPLE_RATE_HZ as u64 * 15;
 
 impl ZeroStreakDetector {
-    /// Feeds captured samples; returns the one-shot warning when the stream
-    /// crosses [`SILENT_AFTER_SAMPLES`] without a single non-zero sample.
-    pub fn feed(&mut self, samples: &[f32]) -> Option<CaptureWarning> {
-        if self.nonzero_seen || self.reported {
+    /// Feeds samples; one-shot `Raised` after [`SILENT_AFTER_SAMPLES`] of pure
+    /// zeros, one-shot `Cleared` if signal arrives after the warning fired.
+    pub fn feed(&mut self, samples: &[f32]) -> Option<CaptureHealth> {
+        if self.nonzero_seen {
             return None;
         }
         if samples.iter().any(|&s| s != 0.0) {
             self.nonzero_seen = true;
+            if self.reported {
+                log::info!(
+                    target: "transcription::capture",
+                    "system audio started delivering signal after the silent-start warning"
+                );
+                return Some(CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent));
+            }
+            return None;
+        }
+        if self.reported {
             return None;
         }
         self.samples_seen += samples.len() as u64;
@@ -173,7 +192,7 @@ impl ZeroStreakDetector {
                 target: "transcription::capture",
                 "system audio has been pure silence since capture start — likely a missing/broken System Audio Recording permission"
             );
-            return Some(CaptureWarning::SystemAudioSilent);
+            return Some(CaptureHealth::Raised(CaptureWarning::SystemAudioSilent));
         }
         None
     }
@@ -465,6 +484,10 @@ mod tests {
             src.contains("kind: 'capture_warning'"),
             "TS TranscriptEvent union must carry the capture_warning kind"
         );
+        assert!(
+            src.contains("kind: 'capture_warning_cleared'"),
+            "TS TranscriptEvent union must carry the capture_warning_cleared kind"
+        );
     }
 
     #[test]
@@ -473,7 +496,10 @@ mod tests {
         let five_secs = vec![0.0f32; SAMPLE_RATE_HZ as usize * 5];
         assert_eq!(z.feed(&five_secs), None);
         assert_eq!(z.feed(&five_secs), None);
-        assert_eq!(z.feed(&five_secs), Some(CaptureWarning::SystemAudioSilent));
+        assert_eq!(
+            z.feed(&five_secs),
+            Some(CaptureHealth::Raised(CaptureWarning::SystemAudioSilent))
+        );
         assert_eq!(z.feed(&five_secs), None); // one-shot
                                               // Any non-zero sample disarms it for good.
         let mut z2 = ZeroStreakDetector::default();
@@ -483,6 +509,22 @@ mod tests {
             None,
             "signal was seen — never warn"
         );
+    }
+
+    #[test]
+    fn zero_streak_detector_clears_once_when_signal_finally_arrives() {
+        let mut z = ZeroStreakDetector::default();
+        let five_secs = vec![0.0f32; SAMPLE_RATE_HZ as usize * 5];
+        for _ in 0..3 {
+            let _ = z.feed(&five_secs);
+        }
+        // Warned already; the first real sample recovers the banner exactly once.
+        assert_eq!(
+            z.feed(&[0.0, 0.2]),
+            Some(CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent))
+        );
+        assert_eq!(z.feed(&[0.3]), None);
+        assert_eq!(z.feed(&five_secs), None, "disarmed for good after signal");
     }
 
     /// Writes a 16-bit-int WAV to a temp dir from mono samples at `rate`, with

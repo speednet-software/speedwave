@@ -315,6 +315,37 @@ describe('TranscriptionService', () => {
       expect(svc.captureWarning()).toBe('system_audio_silent');
     });
 
+    it('capture_warning_cleared removes the matching banner', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('system_audio_silent');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning_cleared',
+        seq: 2,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBeNull();
+    });
+
+    it('capture_warning_cleared leaves a different active banner alone', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'microphone_stalled',
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning_cleared',
+        seq: 2,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('microphone_stalled');
+    });
+
     it('a new session snapshot clears the previous warning', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
       mockTauri.dispatchEvent('transcript_event::sess-1', {

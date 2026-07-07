@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::audio::{
-    AudioChunk, CaptureError, CaptureWarning, ZeroStreakDetector, CHUNK_DURATION, SAMPLE_RATE_HZ,
+    AudioChunk, CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, CHUNK_DURATION,
+    SAMPLE_RATE_HZ,
 };
 
 /// Per-source gain applied before summing (so two full-scale signals can't clip
@@ -71,13 +72,21 @@ pub struct MixBuffer {
     lagging: Option<MixSource>,
     /// One-shot all-zeros detection for the system side (shared mechanism).
     zero: ZeroStreakDetector,
-    /// Health warnings not yet drained by `take_warnings`.
-    pending_warnings: Vec<CaptureWarning>,
+    /// Health transitions not yet drained by `take_health`.
+    pending_health: Vec<CaptureHealth>,
 }
 
 impl Default for MixBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The stall warning corresponding to a mix side.
+fn stall_warning(side: MixSource) -> CaptureWarning {
+    match side {
+        MixSource::Mic => CaptureWarning::MicrophoneStalled,
+        MixSource::System => CaptureWarning::SystemAudioStalled,
     }
 }
 
@@ -93,7 +102,7 @@ impl MixBuffer {
             finished: false,
             lagging: None,
             zero: ZeroStreakDetector::default(),
-            pending_warnings: Vec::new(),
+            pending_health: Vec::new(),
         }
     }
 
@@ -110,8 +119,8 @@ impl MixBuffer {
             return;
         }
         if source == MixSource::System {
-            if let Some(w) = self.zero.feed(samples) {
-                self.pending_warnings.push(w);
+            if let Some(t) = self.zero.feed(samples) {
+                self.pending_health.push(t);
             }
         }
         let start = Self::index_of(offset_ns);
@@ -157,7 +166,7 @@ impl MixBuffer {
     }
 
     /// Re-evaluates the lag state after a watermark change; queues one-shot
-    /// warnings and logs transitions only (never per push).
+    /// transitions and logs them only (never per push).
     fn refresh_health(&mut self) {
         let gap = self.sys_filled.abs_diff(self.mic_filled);
         let lagging_side = if self.sys_filled < self.mic_filled {
@@ -170,29 +179,25 @@ impl MixBuffer {
             // A never-delivering system side is a normal quiet start (an idle
             // Windows loopback emits no packets) — not a stall.
             .filter(|s| !(*s == MixSource::System && self.sys_filled == 0));
-        if now_lagging != self.lagging {
-            match now_lagging {
-                Some(MixSource::Mic) => {
-                    log::warn!(target: "transcription::mix", "microphone stream stalled — continuing with system audio only");
-                    self.pending_warnings
-                        .push(CaptureWarning::MicrophoneStalled);
-                }
-                Some(MixSource::System) => {
-                    log::warn!(target: "transcription::mix", "system audio stream stalled — continuing with the microphone only");
-                    self.pending_warnings
-                        .push(CaptureWarning::SystemAudioStalled);
-                }
-                None => {
-                    log::info!(target: "transcription::mix", "stalled capture side caught back up");
-                }
-            }
-            self.lagging = now_lagging;
+        if now_lagging == self.lagging {
+            return;
         }
+        if let Some(old) = self.lagging {
+            log::info!(target: "transcription::mix", "stalled {old:?} side caught back up");
+            self.pending_health
+                .push(CaptureHealth::Cleared(stall_warning(old)));
+        }
+        if let Some(new) = now_lagging {
+            log::warn!(target: "transcription::mix", "{new:?} stream stalled — continuing with the other side only");
+            self.pending_health
+                .push(CaptureHealth::Raised(stall_warning(new)));
+        }
+        self.lagging = now_lagging;
     }
 
-    /// Drains health warnings queued since the last call.
-    pub fn take_warnings(&mut self) -> Vec<CaptureWarning> {
-        std::mem::take(&mut self.pending_warnings)
+    /// Drains health transitions queued since the last call.
+    pub fn take_health(&mut self) -> Vec<CaptureHealth> {
+        std::mem::take(&mut self.pending_health)
     }
 
     /// Marks the input finished — subsequent `pop`s drain remaining samples
@@ -444,8 +449,11 @@ mod tests {
         // ready = 6s − 5s gap = 1s; mic side pads as zeros → 0.5·0.8.
         assert_eq!(c.len(), SAMPLE_RATE_HZ as usize);
         assert!(c.iter().all(|&s| (s - 0.4).abs() < 1e-6));
-        assert_eq!(b.take_warnings(), vec![CaptureWarning::MicrophoneStalled]);
-        assert_eq!(b.take_warnings(), vec![]); // drained — one-shot
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Raised(CaptureWarning::MicrophoneStalled)]
+        );
+        assert_eq!(b.take_health(), vec![]); // drained — one-shot
     }
 
     #[test]
@@ -456,7 +464,10 @@ mod tests {
         let seven_secs = SAMPLE_RATE_HZ as usize * 7;
         b.push(MixSource::Mic, 0, &vec![0.8; seven_secs]);
         assert!(b.pop(1, seven_secs).is_some());
-        assert_eq!(b.take_warnings(), vec![CaptureWarning::SystemAudioStalled]);
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Raised(CaptureWarning::SystemAudioStalled)]
+        );
     }
 
     #[test]
@@ -467,7 +478,7 @@ mod tests {
         let six_secs = SAMPLE_RATE_HZ as usize * 6;
         b.push(MixSource::Mic, 0, &vec![0.8; six_secs]);
         assert!(b.pop(1, six_secs).is_some());
-        assert_eq!(b.take_warnings(), vec![]);
+        assert_eq!(b.take_health(), vec![]);
     }
 
     #[test]
@@ -476,9 +487,14 @@ mod tests {
         let six_secs = SAMPLE_RATE_HZ as usize * 6;
         b.push(MixSource::System, 0, &vec![0.8; six_secs]);
         let _ = b.pop(1, six_secs).unwrap();
-        let _ = b.take_warnings();
-        // Mic revives at the current offset (6 s): gap closes, min-gating returns.
+        let _ = b.take_health();
+        // Mic revives at the current offset (6 s): gap closes, min-gating returns
+        // and the stall banner is recovered.
         b.push(MixSource::Mic, 6_000_000_000, &[0.8; 16]);
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Cleared(CaptureWarning::MicrophoneStalled)]
+        );
         // 6s+16 samples on mic vs 6s on sys → gap 16 ≪ DEAD_GAP → gate = min.
         let c = b.pop(1, usize::MAX).unwrap();
         // Drains up to sys_filled (6 s) minus already-popped base (1 s) = 5 s.
@@ -498,11 +514,14 @@ mod tests {
             b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
             let _ = b.pop(1, usize::MAX);
         }
-        let w = b.take_warnings();
-        assert_eq!(w, vec![CaptureWarning::SystemAudioSilent]);
+        let w = b.take_health();
+        assert_eq!(
+            w,
+            vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
+        );
         // More zeros never re-trigger the one-shot.
         b.push(MixSource::System, 17_000_000_000, &chunk);
-        assert_eq!(b.take_warnings(), vec![]);
+        assert_eq!(b.take_health(), vec![]);
     }
 
     #[test]
@@ -517,7 +536,7 @@ mod tests {
             b.push(MixSource::Mic, (i - 1) * 1_000_000_000, &zeros);
             let _ = b.pop(1, usize::MAX);
         }
-        assert_eq!(b.take_warnings(), vec![]);
+        assert_eq!(b.take_health(), vec![]);
     }
 
     #[test]

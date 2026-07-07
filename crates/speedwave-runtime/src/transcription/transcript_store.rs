@@ -75,6 +75,13 @@ pub enum TranscriptEvent {
         /// What degraded.
         warning: crate::transcription::CaptureWarning,
     },
+    /// A previously-raised capture-health warning recovered.
+    CaptureWarningCleared {
+        /// Monotonic seq.
+        seq: u64,
+        /// What recovered.
+        warning: crate::transcription::CaptureWarning,
+    },
 }
 
 impl TranscriptEvent {
@@ -87,7 +94,8 @@ impl TranscriptEvent {
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
             | TranscriptEvent::Finished { seq, .. }
-            | TranscriptEvent::CaptureWarning { seq, .. } => *seq,
+            | TranscriptEvent::CaptureWarning { seq, .. }
+            | TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
         }
     }
 }
@@ -358,6 +366,20 @@ impl TranscriptStore {
         self.with_session(id, |_s, seq| {
             seq_out = seq;
             TranscriptEvent::CaptureWarning { seq, warning }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Emits a capture-health recovery event (session state is unchanged).
+    pub fn capture_warning_cleared(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarningCleared { seq, warning }
         })?;
         Ok(seq_out)
     }
@@ -728,6 +750,10 @@ mod tests {
                 seq: 11,
                 warning: crate::transcription::CaptureWarning::SystemAudioSilent,
             },
+            TranscriptEvent::CaptureWarningCleared {
+                seq: 12,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
@@ -737,6 +763,7 @@ mod tests {
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
                 TranscriptEvent::CaptureWarning { seq, .. } => *seq,
+                TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::transcription::audio::{AudioStream, SAMPLE_RATE_HZ};
+use crate::transcription::audio::{AudioStream, CaptureHealth, SAMPLE_RATE_HZ};
 use crate::transcription::transcriber::{Segment, TranscribeOptions, Transcriber};
 use crate::transcription::transcript::TranscriptStatus;
 use crate::transcription::transcript_store::TranscriptStore;
@@ -182,8 +182,11 @@ impl TranscriptDriver {
                 Ok(None) => return Ok(()), // stream ended
                 Err(e) => return Err(DriverError::Capture(e.to_string())),
             };
-            for w in self.audio.take_warnings() {
-                let _ = self.store.capture_warning(self.id, w);
+            for t in self.audio.take_health() {
+                let _ = match t {
+                    CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
+                    CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
+                };
             }
             wav.write(&chunk.samples)?;
             self.pcm.extend_from_slice(&chunk.samples);
@@ -686,10 +689,11 @@ mod tests {
         );
     }
 
-    /// An `AudioStream` emitting `chunks_left` short chunks and one warning.
+    /// An `AudioStream` emitting `chunks_left` short chunks; the first chunk
+    /// raises the silent warning, the second clears it.
     struct WarningStream {
         chunks_left: usize,
-        warned: bool,
+        emitted: usize,
     }
     impl AudioStream for WarningStream {
         fn next_chunk(
@@ -705,12 +709,17 @@ mod tests {
             }))
         }
 
-        fn take_warnings(&mut self) -> Vec<crate::transcription::CaptureWarning> {
-            if self.warned {
-                return Vec::new();
+        fn take_health(&mut self) -> Vec<CaptureHealth> {
+            self.emitted += 1;
+            match self.emitted {
+                1 => vec![CaptureHealth::Raised(
+                    crate::transcription::CaptureWarning::SystemAudioSilent,
+                )],
+                2 => vec![CaptureHealth::Cleared(
+                    crate::transcription::CaptureWarning::SystemAudioSilent,
+                )],
+                _ => Vec::new(),
             }
-            self.warned = true;
-            vec![crate::transcription::CaptureWarning::SystemAudioSilent]
         }
     }
 
@@ -726,7 +735,7 @@ mod tests {
             store: store.clone(),
             audio: Box::new(WarningStream {
                 chunks_left: 2,
-                warned: false,
+                emitted: 0,
             }),
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
@@ -736,19 +745,26 @@ mod tests {
         driver.run(&out_wav).unwrap();
 
         let mut rx = sub.events;
-        let mut saw = false;
+        let mut saw_raised = false;
+        let mut saw_cleared = false;
         while let Ok(ev) = rx.try_recv() {
-            if matches!(
-                ev,
+            match ev {
                 crate::transcription::TranscriptEvent::CaptureWarning {
                     warning: crate::transcription::CaptureWarning::SystemAudioSilent,
                     ..
+                } => saw_raised = true,
+                crate::transcription::TranscriptEvent::CaptureWarningCleared {
+                    warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+                    ..
+                } => {
+                    assert!(saw_raised, "cleared must follow the raise");
+                    saw_cleared = true;
                 }
-            ) {
-                saw = true;
+                _ => {}
             }
         }
-        assert!(saw, "the warning should reach store subscribers");
+        assert!(saw_raised, "the warning should reach store subscribers");
+        assert!(saw_cleared, "the recovery should reach store subscribers");
     }
 
     #[test]
