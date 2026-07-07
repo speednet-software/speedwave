@@ -2,20 +2,60 @@
 //! shared by the macOS and Windows capture backends (ADR-056 decision 15).
 //!
 //! `MixBuffer` accumulates samples by absolute index and pops once both have
-//! reached that point, or drains remaining once `finish()` is called. Overlapping
-//! samples are summed with 0.5/0.5 gain and clamped.
+//! reached that point, or drains remaining once `finish()` is called. Each source
+//! is boost-only levelled toward a common target, then summed 0.5/0.5 and clamped.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
 use super::audio::{
-    AudioChunk, CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, CHUNK_DURATION,
-    SAMPLE_RATE_HZ,
+    rms, AudioChunk, CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector,
+    CHUNK_DURATION, SAMPLE_RATE_HZ,
 };
 
 /// Per-source gain applied before summing (so two full-scale signals can't clip
 /// past ±1 on their own; the clamp catches the rest).
 const MIX_GAIN: f32 = 0.5;
+
+/// Target per-source loudness of active audio (−20 dBFS RMS) before the sum —
+/// a far-field mic must not vanish under a loud system stream.
+const LEVEL_TARGET_RMS: f32 = 0.1;
+
+/// Chunks below this RMS (−50 dBFS) never adapt the level estimate: noise
+/// floors and pauses must not drive the boost.
+const LEVEL_ACTIVITY_FLOOR: f32 = 0.003;
+
+/// Boost ceiling (+18 dB). Boost-only: a hot source is never attenuated.
+const LEVEL_MAX_BOOST: f32 = 8.0;
+
+/// Time constant of the active-RMS estimate, in seconds of active audio.
+const LEVEL_EMA_SECS: f32 = 3.0;
+
+/// Per-source boost-only levelling toward [`LEVEL_TARGET_RMS`].
+#[derive(Debug, Default)]
+struct LevelBalancer {
+    /// EMA of the source's above-floor RMS; `None` until the first active chunk.
+    active_rms: Option<f32>,
+}
+
+impl LevelBalancer {
+    /// Feeds one chunk and returns the gain to apply to it. The gain holds
+    /// through pauses (the estimate only moves on above-floor audio).
+    fn gain(&mut self, samples: &[f32]) -> f32 {
+        let level = rms(samples);
+        if level > LEVEL_ACTIVITY_FLOOR {
+            let alpha = (samples.len() as f32 / (SAMPLE_RATE_HZ as f32 * LEVEL_EMA_SECS)).min(1.0);
+            self.active_rms = Some(match self.active_rms {
+                None => level,
+                Some(prev) => prev + alpha * (level - prev),
+            });
+        }
+        match self.active_rms {
+            Some(est) => (LEVEL_TARGET_RMS / est).clamp(1.0, LEVEL_MAX_BOOST),
+            None => 1.0,
+        }
+    }
+}
 
 /// Hard cap on buffered samples per side — ~1 minute at 16 kHz. A larger
 /// declared offset (e.g. a corrupt timestamp from the macOS CLI) is refused
@@ -70,6 +110,10 @@ pub struct MixBuffer {
     finished: bool,
     /// Side currently treated as dead (lagging > [`DEAD_GAP_SAMPLES`]), if any.
     lagging: Option<MixSource>,
+    /// Levelling state for the system side.
+    sys_level: LevelBalancer,
+    /// Levelling state for the mic side.
+    mic_level: LevelBalancer,
     /// One-shot all-zeros detection for the system side (shared mechanism).
     zero: ZeroStreakDetector,
     /// Health transitions not yet drained by `take_health`.
@@ -101,6 +145,8 @@ impl MixBuffer {
             mic_filled: 0,
             finished: false,
             lagging: None,
+            sys_level: LevelBalancer::default(),
+            mic_level: LevelBalancer::default(),
             zero: ZeroStreakDetector::default(),
             pending_health: Vec::new(),
         }
@@ -123,6 +169,10 @@ impl MixBuffer {
                 self.pending_health.push(t);
             }
         }
+        let gain = match source {
+            MixSource::System => self.sys_level.gain(samples),
+            MixSource::Mic => self.mic_level.gain(samples),
+        };
         let start = Self::index_of(offset_ns);
         let end = start.saturating_add(samples.len() as u64);
         // Index of the first sample we still keep.
@@ -152,7 +202,7 @@ impl MixBuffer {
             buf.resize(needed, 0.0);
         }
         for (i, &s) in samples[skip..].iter().enumerate() {
-            buf[rel + i] += s; // additive so overlapping pushes within a stream sum
+            buf[rel + i] += s * gain; // additive so overlapping pushes within a stream sum
         }
         self.bump_filled(source, end);
     }
@@ -537,6 +587,112 @@ mod tests {
             let _ = b.pop(1, usize::MAX);
         }
         assert_eq!(b.take_health(), vec![]);
+    }
+
+    #[test]
+    fn a_quiet_source_is_boosted_toward_the_target() {
+        let mut b = MixBuffer::new();
+        // Mic speech at RMS 0.02 (under LEVEL_TARGET_RMS) → 5× boost.
+        b.push(MixSource::Mic, 0, &[0.02; 1600]);
+        b.push(MixSource::System, 0, &[0.0; 1600]);
+        let c = b.pop(1, 1600).unwrap();
+        // 0.02 × 5 (boost) × 0.5 (mix gain) = 0.05
+        assert!(
+            c.iter().all(|&s| (s - 0.05).abs() < 1e-4),
+            "got {:?}",
+            &c[..3]
+        );
+    }
+
+    #[test]
+    fn a_quiet_system_side_is_boosted_too() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::System, 0, &[0.02; 1600]);
+        b.push(MixSource::Mic, 0, &[0.0; 1600]);
+        let c = b.pop(1, 1600).unwrap();
+        assert!(
+            c.iter().all(|&s| (s - 0.05).abs() < 1e-4),
+            "got {:?}",
+            &c[..3]
+        );
+    }
+
+    #[test]
+    fn boost_is_capped_at_the_maximum() {
+        let mut b = MixBuffer::new();
+        // RMS 0.005 wants a 20× boost — clamps to LEVEL_MAX_BOOST (8×).
+        b.push(MixSource::Mic, 0, &[0.005; 1600]);
+        b.push(MixSource::System, 0, &[0.0; 1600]);
+        let c = b.pop(1, 1600).unwrap();
+        // 0.005 × 8 × 0.5 = 0.02
+        assert!(
+            c.iter().all(|&s| (s - 0.02).abs() < 1e-4),
+            "got {:?}",
+            &c[..3]
+        );
+    }
+
+    #[test]
+    fn a_loud_source_is_never_attenuated() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::Mic, 0, &[0.4; 1600]);
+        b.push(MixSource::System, 0, &[0.0; 1600]);
+        let c = b.pop(1, 1600).unwrap();
+        // Gain clamps at 1.0 from below: 0.4 × 1 × 0.5 = 0.2.
+        assert!(
+            c.iter().all(|&s| (s - 0.2).abs() < 1e-4),
+            "got {:?}",
+            &c[..3]
+        );
+    }
+
+    #[test]
+    fn noise_below_the_activity_floor_never_drives_the_boost() {
+        let mut b = MixBuffer::new();
+        // A -60 dBFS noise floor stays below LEVEL_ACTIVITY_FLOOR over many chunks.
+        for i in 0..20u64 {
+            b.push(MixSource::Mic, i * 100_000_000, &[0.001; 1600]);
+            b.push(MixSource::System, i * 100_000_000, &[0.0; 1600]);
+        }
+        let c = b.pop(1, usize::MAX).unwrap();
+        // No estimate formed → unity gain: 0.001 × 0.5.
+        assert!(
+            c.iter().all(|&s| (s - 0.0005).abs() < 1e-5),
+            "got {:?}",
+            &c[..3]
+        );
+    }
+
+    #[test]
+    fn gain_holds_through_silence_between_utterances() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::Mic, 0, &[0.02; 1600]);
+        b.push(MixSource::Mic, 100_000_000, &[0.0; 1600]); // pause
+        b.push(MixSource::Mic, 200_000_000, &[0.02; 1600]); // same level again
+        b.push(MixSource::System, 0, &[0.0; 4800]);
+        let c = b.pop(1, usize::MAX).unwrap();
+        // Both utterances get the held 5× boost; the pause stays zero.
+        assert!(c[..1600].iter().all(|&s| (s - 0.05).abs() < 1e-4));
+        assert!(c[1600..3200].iter().all(|&s| s.abs() < 1e-6));
+        assert!(c[3200..].iter().all(|&s| (s - 0.05).abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_estimate_adapts_when_the_source_gets_louder() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::Mic, 0, &[0.02; 16_000]); // 1 s at RMS 0.02 → est 0.02
+        for i in 1..9u64 {
+            // 8 s at RMS 0.1 pull the estimate up; gain decays toward 1×.
+            b.push(MixSource::Mic, i * 1_000_000_000, &[0.1; 16_000]);
+        }
+        b.push(MixSource::System, 0, &[0.0; 16_000 * 9]);
+        let c = b.pop(1, usize::MAX).unwrap();
+        let first = c[0]; // 0.02 × 5 × 0.5 = 0.05
+        let last = c[c.len() - 1];
+        assert!((first - 0.05).abs() < 1e-4, "first {first}");
+        // After ~8 s of louder audio the boost has decayed close to unity:
+        // 0.1 × gain × 0.5 with gain ≈ 1.03 → just above 0.05.
+        assert!(last > 0.049 && last < 0.056, "last {last}");
     }
 
     #[test]
