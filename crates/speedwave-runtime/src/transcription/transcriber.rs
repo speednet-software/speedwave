@@ -169,7 +169,9 @@ impl WhisperCppTranscriber {
         pcm: &[f32],
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError> {
-        if pcm.is_empty() {
+        // Near-silent input makes Whisper emit trained-in filler ("Dziękuję" /
+        // "Thank you") — skip it instead of transcribing hallucinations.
+        if pcm.is_empty() || is_silent(pcm) {
             return Ok(Vec::new());
         }
         let mut state = self
@@ -184,6 +186,16 @@ impl WhisperCppTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        // Anti-hallucination: no cross-window context (a hallucinated segment
+        // would otherwise seed the next window), deterministic decoding, and
+        // whisper.cpp's own silence/low-confidence gates.
+        params.set_no_context(true);
+        params.set_temperature(0.0);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        params.set_no_speech_thold(0.6);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
         if opts.word_timestamps {
             params.set_token_timestamps(true);
             params.set_max_len(1); // one token per segment → segment ts == word ts
@@ -202,6 +214,9 @@ impl WhisperCppTranscriber {
             let start = cs_to_duration(seg.start_timestamp());
             let end = cs_to_duration(seg.end_timestamp());
             let text = format!("{seg}").trim().to_string();
+            if text.is_empty() || is_hallucinated_filler(&text) {
+                continue;
+            }
             out.push(Segment {
                 start,
                 end,
@@ -242,6 +257,41 @@ impl Transcriber for WhisperCppTranscriber {
 
 fn cs_to_duration(centiseconds: i64) -> Duration {
     Duration::from_millis(centiseconds.max(0) as u64 * 10)
+}
+
+/// RMS below this (16-bit-ish −45 dBFS) is treated as silence — Whisper on
+/// near-silence emits trained filler, so we skip the decode entirely.
+const SILENCE_RMS: f32 = 0.0055;
+
+/// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
+fn is_silent(pcm: &[f32]) -> bool {
+    if pcm.is_empty() {
+        return true;
+    }
+    let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    ((sum_sq / pcm.len() as f64).sqrt() as f32) < SILENCE_RMS
+}
+
+/// A lone trained-in filler phrase Whisper emits on silence — dropped when it
+/// is the entire segment (real speech carries more than just this token).
+fn is_hallucinated_filler(text: &str) -> bool {
+    let t = text
+        .trim()
+        .trim_end_matches(['.', '!', '?', '…'])
+        .trim()
+        .to_lowercase();
+    matches!(
+        t.as_str(),
+        "dziękuję"
+            | "dziękuje"
+            | "dzięki"
+            | "thank you"
+            | "thanks"
+            | "thanks for watching"
+            | "you"
+            | "napisy stworzone przez społeczność amara.org"
+            | "subscribe"
+    )
 }
 
 /// Deterministic fake transcriber for orchestration tests — one segment per
@@ -326,6 +376,41 @@ mod tests {
         assert_eq!(cs_to_duration(0), Duration::ZERO);
         assert_eq!(cs_to_duration(150), Duration::from_millis(1500));
         assert_eq!(cs_to_duration(-5), Duration::ZERO);
+    }
+
+    #[test]
+    fn is_silent_flags_quiet_and_empty_but_not_speech() {
+        assert!(is_silent(&[]));
+        assert!(is_silent(&vec![0.0f32; 16_000]));
+        // Dither well under the threshold is still silence.
+        assert!(is_silent(&vec![0.002f32; 16_000]));
+        // A half-scale tone is clearly not silence.
+        let tone: Vec<f32> = (0..16_000)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        assert!(!is_silent(&tone));
+    }
+
+    #[test]
+    fn hallucinated_filler_is_dropped_case_and_punctuation_insensitive() {
+        for s in [
+            "Dziękuję",
+            "dziękuję.",
+            " Dziękuję ",
+            "Thank you.",
+            "you",
+            "Thanks",
+        ] {
+            assert!(is_hallucinated_filler(s), "should drop {s:?}");
+        }
+        // Real content — even when it contains the word — is kept.
+        for s in [
+            "Dziękuję za spotkanie",
+            "thank you for the demo",
+            "no dzięki, robimy",
+        ] {
+            assert!(!is_hallucinated_filler(s), "should keep {s:?}");
+        }
     }
 
     #[test]
