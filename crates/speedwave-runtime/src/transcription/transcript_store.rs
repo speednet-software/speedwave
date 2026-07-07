@@ -31,6 +31,14 @@ pub enum TranscriptEvent {
         /// The segment.
         segment: Segment,
     },
+    /// The not-yet-committed tail of the latest live decode — replace-only
+    /// display state; an empty string clears it.
+    LiveDraft {
+        /// Monotonic seq.
+        seq: u64,
+        /// The draft text.
+        text: String,
+    },
     /// The lifecycle status changed.
     StatusChanged {
         /// Monotonic seq.
@@ -79,6 +87,7 @@ impl TranscriptEvent {
     pub fn seq(&self) -> u64 {
         match self {
             TranscriptEvent::SegmentAppended { seq, .. }
+            | TranscriptEvent::LiveDraft { seq, .. }
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
@@ -296,6 +305,17 @@ impl TranscriptStore {
             seq_out = seq;
             s.live_segments.push(segment.clone());
             TranscriptEvent::SegmentAppended { seq, segment }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Publishes the uncommitted live-decode tail (replace-only; `""` clears it).
+    pub fn live_draft(&self, id: Uuid, text: String) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |s, seq| {
+            seq_out = seq;
+            s.live_draft = text.clone();
+            TranscriptEvent::LiveDraft { seq, text }
         })?;
         Ok(seq_out)
     }
@@ -683,6 +703,10 @@ mod tests {
                 seq: 1,
                 segment: seg(0.0, 1.0, "x"),
             },
+            TranscriptEvent::LiveDraft {
+                seq: 2,
+                text: "tail".to_string(),
+            },
             TranscriptEvent::StatusChanged {
                 seq: 4,
                 status: TranscriptStatus::Done,
@@ -707,6 +731,7 @@ mod tests {
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
+                TranscriptEvent::LiveDraft { seq, .. } => *seq,
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
@@ -793,6 +818,49 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),
             ev
+        );
+    }
+
+    #[test]
+    fn live_draft_emits_sets_snapshot_and_never_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        store
+            .live_draft(id, "not yet committed".to_string())
+            .unwrap();
+
+        let ev = sub.events.try_recv().unwrap();
+        match &ev {
+            TranscriptEvent::LiveDraft { text, .. } => assert_eq!(text, "not yet committed"),
+            other => panic!("expected LiveDraft, got {other:?}"),
+        }
+        // Snapshot carries the draft for late subscribers…
+        assert_eq!(store.get(id).unwrap().live_draft, "not yet committed");
+        // …but the durable transcript.json never does (ephemeral display state).
+        let json = std::fs::read_to_string(store.session_dir(id).join("transcript.json")).unwrap();
+        assert!(!json.contains("live_draft"));
+        assert!(!json.contains("not yet committed"));
+        // A fresh store (app restart) reloads without any draft.
+        let store2 = TranscriptStore::with_root(dir.path());
+        assert_eq!(store2.get(id).unwrap().live_draft, "");
+    }
+
+    #[test]
+    fn live_draft_serde_round_trip_and_ts_mirror() {
+        let ev = TranscriptEvent::LiveDraft {
+            seq: 9,
+            text: "tail".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"kind\":\"live_draft\""));
+        assert_eq!(serde_json::from_str::<TranscriptEvent>(&json).unwrap(), ev);
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("kind: 'live_draft'"),
+            "TS TranscriptEvent union must carry the live_draft kind"
         );
     }
 }

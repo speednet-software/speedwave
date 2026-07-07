@@ -67,6 +67,10 @@ pub struct TranscriptSession {
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
+    /// Uncommitted tail of the latest live decode — replace-only display state,
+    /// never persisted and never part of `effective_segments`.
+    #[serde(skip, default)]
+    pub live_draft: String,
 }
 
 impl TranscriptSession {
@@ -95,6 +99,7 @@ impl TranscriptSession {
             audio_path: Some(audio_path),
             models_used: ModelsUsed::default(),
             last_seq: 0,
+            live_draft: String::new(),
         }
     }
 

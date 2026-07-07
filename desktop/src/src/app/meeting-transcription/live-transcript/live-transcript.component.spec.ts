@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { LiveTranscriptComponent } from './live-transcript.component';
@@ -38,11 +39,13 @@ describe('LiveTranscriptComponent', () => {
   let fixture: ComponentFixture<LiveTranscriptComponent>;
   let svc: {
     sendToChat: ReturnType<typeof vi.fn>;
+    liveDraft: WritableSignal<string>;
   };
 
   beforeEach(async () => {
     svc = {
       sendToChat: vi.fn(async () => undefined),
+      liveDraft: signal(''),
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
@@ -79,6 +82,25 @@ describe('LiveTranscriptComponent', () => {
     );
     fixture.detectChanges();
     expect(component.lines()[0].text).toBe('final');
+  });
+
+  it('renders the service draft as a muted tail line while recording', () => {
+    svc.liveDraft.set('jeszcze niezatwierdzony ogon');
+    fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hi')] }));
+    fixture.detectChanges();
+    const draft = fixture.nativeElement.querySelector('[data-testid="live-draft"]');
+    expect(draft).not.toBeNull();
+    expect(draft.textContent).toContain('jeszcze niezatwierdzony ogon');
+  });
+
+  it('hides the draft once the session leaves the recording state', () => {
+    svc.liveDraft.set('stale tail');
+    fixture.componentRef.setInput(
+      'session',
+      session({ status: { state: 'finalizing', progress: 0.1 } })
+    );
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="live-draft"]')).toBeNull();
   });
 
   it('shows the finalize progress bar while finalizing', () => {

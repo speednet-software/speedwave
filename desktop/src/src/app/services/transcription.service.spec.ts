@@ -233,6 +233,59 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.status).toEqual({ state: 'done' });
     });
 
+    it('live_draft replaces the draft text wholesale', () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 1,
+        text: 'first tail',
+      });
+      expect(svc.liveDraft()).toBe('first tail');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 2,
+        text: 'longer second tail',
+      });
+      expect(svc.liveDraft()).toBe('longer second tail');
+    });
+
+    it('ignores a stale live_draft (seq below lastSeq)', () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 2,
+        text: 'current',
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 1,
+        text: 'stale',
+      });
+      expect(svc.liveDraft()).toBe('current');
+    });
+
+    it('a lifecycle change away from recording clears the draft', () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 1,
+        text: 'tail',
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 2,
+        status: { state: 'failed', reason: 'capture died' },
+      });
+      expect(svc.liveDraft()).toBe('');
+    });
+
+    it('a new session snapshot clears the previous draft', async () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 1,
+        text: 'tail',
+      });
+      await subscribeWith(snapshot({ id: 'sess-2', last_seq: 0 }));
+      expect(svc.liveDraft()).toBe('');
+    });
+
     it('swaps in final_segments on final_segments_ready', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'segment_appended',

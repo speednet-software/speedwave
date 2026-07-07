@@ -56,6 +56,7 @@ export class TranscriptionService {
   private downloadUnlisten: UnlistenFn | null = null;
   private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
   private readonly recordingSessionIdSignal = signal<string | null>(null);
+  private readonly liveDraftSignal = signal<string>('');
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
@@ -68,6 +69,9 @@ export class TranscriptionService {
 
   /** Latest capture-health warning for the active session (null = none). */
   readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
+
+  /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
+  readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
 
   /**
    * Download-in-flight key — service-level so it survives component remounts.
@@ -287,6 +291,7 @@ export class TranscriptionService {
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
     this.captureWarningSignal.set(null); // warnings are per-session
+    this.liveDraftSignal.set(''); // drafts are per-session too
     this.activeSignal.set(snapshot);
   }
 
@@ -311,8 +316,15 @@ export class TranscriptionService {
       case 'segment_appended':
         next.live_segments = [...cur.live_segments, ev.segment];
         break;
+      case 'live_draft':
+        this.liveDraftSignal.set(ev.text);
+        break;
       case 'status_changed':
         next.status = ev.status;
+        // A draft is only meaningful while recording (e.g. stale on failure).
+        if (ev.status.state !== 'recording') {
+          this.liveDraftSignal.set('');
+        }
         break;
       case 'finalize_progress':
         next.status = { state: 'finalizing', progress: ev.progress };
@@ -323,6 +335,7 @@ export class TranscriptionService {
         break;
       case 'finished':
         next.status = { state: 'done' };
+        this.liveDraftSignal.set('');
         break;
       case 'capture_warning':
         this.captureWarningSignal.set(ev.warning);
