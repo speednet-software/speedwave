@@ -80,4 +80,105 @@ describe('withValidation', () => {
     // An Octokit-style error (numeric `status`) is expected — don't log it as a bug.
     expect(errSpy).not.toHaveBeenCalled();
   });
+
+  describe('owner/repo forgiveness', () => {
+    it('splits a combined owner/repo string passed in repo when owner is omitted', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ repo: string }>(client, async (_c, params) => {
+        seen = params as unknown as Record<string, unknown>;
+        return jsonResult({ ok: true });
+      });
+
+      await wrapped({ repo: 'octocat/hello-world' });
+
+      expect(seen).toEqual({ owner: 'octocat', repo: 'hello-world' });
+    });
+
+    it('leaves params untouched when owner is already present', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ owner: string; repo: string }>(
+        client,
+        async (_c, params) => {
+          seen = params as unknown as Record<string, unknown>;
+          return jsonResult({ ok: true });
+        }
+      );
+
+      await wrapped({ owner: 'octocat', repo: 'octocat/hello-world' });
+
+      expect(seen).toEqual({ owner: 'octocat', repo: 'octocat/hello-world' });
+    });
+
+    it('leaves repo untouched when it has no slash', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ repo: string }>(client, async (_c, params) => {
+        seen = params as unknown as Record<string, unknown>;
+        return jsonResult({ ok: true });
+      });
+
+      await wrapped({ repo: 'hello-world' });
+
+      expect(seen).toEqual({ repo: 'hello-world' });
+    });
+
+    it('supports a repo name containing extra slashes (nested owner segment)', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ repo: string }>(client, async (_c, params) => {
+        seen = params as unknown as Record<string, unknown>;
+        return jsonResult({ ok: true });
+      });
+
+      await wrapped({ repo: 'octocat/hello/world' });
+
+      expect(seen).toEqual({ owner: 'octocat', repo: 'hello/world' });
+    });
+  });
+
+  describe('numeric-id forgiveness', () => {
+    it.each(['number', 'run_id', 'artifact_id'] as const)(
+      'strips a leading # and coerces %s to a number',
+      async (key) => {
+        const client = new GitHubClient({ token: 'x' });
+        let seen: Record<string, unknown> | undefined;
+        const wrapped = withValidation<Record<string, unknown>>(client, async (_c, params) => {
+          seen = params;
+          return jsonResult({ ok: true });
+        });
+
+        await wrapped({ [key]: '#42' });
+
+        expect(seen).toEqual({ [key]: 42 });
+      }
+    );
+
+    it('leaves an already-numeric id untouched', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ number: number }>(client, async (_c, params) => {
+        seen = params as unknown as Record<string, unknown>;
+        return jsonResult({ ok: true });
+      });
+
+      await wrapped({ number: 42 });
+
+      expect(seen).toEqual({ number: 42 });
+    });
+
+    it('leaves a non-numeric string id untouched (validation surfaces the error downstream)', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let seen: Record<string, unknown> | undefined;
+      const wrapped = withValidation<{ number: unknown }>(client, async (_c, params) => {
+        seen = params as unknown as Record<string, unknown>;
+        return jsonResult({ ok: true });
+      });
+
+      await wrapped({ number: 'not-a-number' });
+
+      expect(seen).toEqual({ number: 'not-a-number' });
+    });
+  });
 });

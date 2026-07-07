@@ -217,10 +217,13 @@ describe('createRepositoryTools', () => {
 
       const result = await handler!({ project_id: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('should accept numeric project_id', async () => {
@@ -347,10 +350,13 @@ describe('createRepositoryTools', () => {
 
       const result = await handler!({ project_id: 'project-1', file_path: 'nonexistent.txt' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('should accept numeric project_id', async () => {

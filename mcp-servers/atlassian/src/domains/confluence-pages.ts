@@ -3,7 +3,7 @@
  * @module mcp-atlassian/domains/confluence-pages
  */
 
-import { ts } from '@speedwave/mcp-shared';
+import { ts, clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
 import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
@@ -54,6 +54,12 @@ export interface ConfluencePagesClient {
 export function createConfluencePagesClient(client: AtlassianClient): ConfluencePagesClient {
   /** Resolve a space ID → space key, caching within the client instance. */
   const spaceKeyCache = new Map<string, string>();
+  /**
+   * Resolve a space ID → key. A 404 means the space genuinely has no
+   * resolvable key (unassignable); any other lookup failure is rethrown so
+   * callers can distinguish "no key" from "the lookup itself failed".
+   * @param spaceId - The Confluence space ID from a page payload.
+   */
   const resolveSpaceKey = async (spaceId: string): Promise<string | undefined> => {
     if (!spaceId) return undefined;
     if (spaceKeyCache.has(spaceId)) return spaceKeyCache.get(spaceId);
@@ -65,14 +71,14 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       if (key) spaceKeyCache.set(spaceId, key);
       return key;
     } catch (error) {
-      // 404 means the space isn't visible (unresolvable); other errors are logged.
       const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status !== 404) {
-        console.warn(
-          `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${spaceId}': ${error}`
-        );
-      }
-      return undefined;
+      if (status === 404) return undefined;
+      console.warn(
+        `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${spaceId}': ${error}`
+      );
+      throw new Error(
+        `Could not verify the Confluence space for this page (space lookup failed); retry, or confirm the space is accessible.`
+      );
     }
   };
 
@@ -103,7 +109,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     async search({ cql, limit = 25 }) {
       const res = await client.get<{ results?: unknown[] }>('/wiki/rest/api/content/search', {
         cql,
-        limit: Math.min(Math.max(limit, 1), 100),
+        limit: clampPageSize(limit, 25, 100),
       });
       const pages = (res.results ?? [])
         .map(mapV1SearchResult)
@@ -177,7 +183,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       }
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children`,
-        { limit: Math.min(Math.max(options.limit ?? 25, 1), 100) }
+        { limit: clampPageSize(options.limit, 25, 100) }
       );
       // Children come back without spaceId/version detail; map best-effort.
       return (res.results ?? []).map(mapV2ChildPage);

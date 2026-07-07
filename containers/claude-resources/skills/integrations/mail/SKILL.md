@@ -25,8 +25,8 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **`confirm_send` is mandatory for writes.** Both `os.sendEmail` and `os.replyToEmail` require `confirm_send: true` in the payload — the parameter is a hard gate in the Swift CLI, not just a convention. Per the global write/delete confirmation rule in CLAUDE.md, always show the user a summary of subject, recipients, and body before calling these tools; never set `confirm_send: true` without explicit user approval.
 - **Sending is irreversible.** Once `os.sendEmail` or `os.replyToEmail` returns `{ "status": "sent" }`, the message is in the MTA queue. There is no undo. Drafts (compose without send) are not exposed as a tool; if the user only wants to draft, explain this limitation.
 - **Attachments are not returned inline.** The current tool surface does not decode MIME attachments; if attachment content is needed, note this limitation to the user.
-- **Search scope.** `os.searchEmails` searches the inbox only (subject and body content). For searches across all mailboxes, list target mailboxes with `os.listMailboxes` first and iterate with `os.listEmails({ mailbox })`.
-- **Microsoft Outlook.** If Outlook is installed and running, pass `client: "outlook"` to redirect calls to it. The default is Apple Mail.
+- **Search and single-message lookup scope.** `os.searchEmails`, `os.getEmail`, and `os.replyToEmail` can only see/resolve messages in the Inbox. A message id obtained from `os.listEmails({ mailbox: "Archive" })` (or any non-Inbox mailbox) cannot be fetched or replied to by id through this integration, and `os.searchEmails`'s `mailbox` parameter has no effect. For searches or lookups across all mailboxes, list target mailboxes with `os.listMailboxes` first and iterate with `os.listEmails({ mailbox })`.
+- **Microsoft Outlook.** Pass `client: "outlook"` on any mail tool to redirect calls to it when installed and running. The default is Apple Mail.
 
 ## When NOT to use
 

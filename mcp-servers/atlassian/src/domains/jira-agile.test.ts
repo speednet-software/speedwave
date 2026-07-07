@@ -175,26 +175,26 @@ describe('sprints', () => {
 });
 
 describe('moveIssuesToSprint', () => {
-  it('scope-checks the sprint board then POSTs up to 50 issues', async () => {
+  it('scope-checks the sprint board then POSTs all given issues (no truncation)', async () => {
     client.get
       .mockResolvedValueOnce({ originBoardId: 7 }) // sprint lookup
       .mockResolvedValueOnce(rawBoard()); // enforceBoard
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
-    const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
-    await c.moveIssuesToSprint(42, many);
+    const fifty = Array.from({ length: 50 }, (_, i) => `PROJ-${i}`);
+    await c.moveIssuesToSprint(42, fifty);
     const sent = client.post.mock.calls[0];
     expect(sent[0]).toBe('/rest/agile/1.0/sprint/42/issue');
     expect((sent[1] as { issues: string[] }).issues).toHaveLength(50);
   });
 
-  it('forwards exactly 50 issues to the domain when given 60', async () => {
+  it('does not truncate the batch itself (the tool handler enforces the 50 cap)', async () => {
     client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId, no allowlist → ok
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
     const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
     await c.moveIssuesToSprint(42, many);
-    expect((client.post.mock.calls[0][1] as { issues: string[] }).issues).toHaveLength(50);
+    expect((client.post.mock.calls[0][1] as { issues: string[] }).issues).toHaveLength(60);
   });
 
   it('skips the board scope check when the sprint has no originBoardId and no allowlist', async () => {

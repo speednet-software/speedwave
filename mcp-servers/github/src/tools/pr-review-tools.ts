@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -22,7 +23,7 @@ const listPrCommitsTool: Tool = {
   name: 'listPrCommits',
   description: 'List the commits included in a pull request.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'commits', 'history'],
   example:
     'const { commits, count } = await github.listPrCommits({ owner: "octocat", repo: "hello", number: 42 })',
@@ -71,7 +72,7 @@ const listPrReviewsTool: Tool = {
   name: 'listPrReviews',
   description: 'List the reviews submitted on a pull request.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'reviews', 'approvals'],
   example:
     'const { reviews, count } = await github.listPrReviews({ owner: "octocat", repo: "hello", number: 42 })',
@@ -123,7 +124,7 @@ const createPrReviewTool: Tool = {
   description:
     'Create a review on a pull request (approve, request changes, or comment), optionally with inline line comments.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'review', 'approve', 'request-changes', 'comment'],
   example:
     'await github.createPrReview({ owner: "octocat", repo: "hello", number: 42, event: "APPROVE", body: "LGTM" })',
@@ -200,7 +201,7 @@ const listPrCommentsTool: Tool = {
   name: 'listPrComments',
   description: 'General (non-review) comments on a pull request.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'comments', 'discussion'],
   example:
     'const { comments, count } = await github.listPrComments({ owner: "octocat", repo: "hello", number: 42 })',
@@ -250,7 +251,7 @@ const createPrCommentTool: Tool = {
   name: 'createPrComment',
   description: 'Add a general (non-review) comment to a pull request.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'comment', 'create', 'add'],
   example:
     'await github.createPrComment({ owner: "octocat", repo: "hello", number: 42, body: "Thanks!" })',
@@ -287,7 +288,7 @@ const createPrReviewCommentTool: Tool = {
   name: 'createPrReviewComment',
   description: "A review comment anchored to a specific line of a file in a pull request's diff.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'review', 'comment', 'inline', 'line'],
   example:
     'await github.createPrReviewComment({ owner: "octocat", repo: "hello", number: 42, body: "nit", commit_id: "abc123", path: "src/index.ts", line: 10 })',
@@ -296,9 +297,19 @@ const createPrReviewCommentTool: Tool = {
     properties: {
       ...PR_NUMBER_PROPERTIES,
       body: { type: 'string', description: 'Comment text (Markdown)' },
-      commit_id: { type: 'string', description: 'SHA of the commit to comment on' },
-      path: { type: 'string', description: 'File path the comment is attached to' },
-      line: { type: 'number', description: 'Line number in the file' },
+      commit_id: {
+        type: 'string',
+        description:
+          "SHA of the commit to comment on. Obtain from listPrCommits, or the PR's head SHA from getPullRequest.",
+      },
+      path: {
+        type: 'string',
+        description: 'File path the comment is attached to. Obtain valid paths from getPrFiles.',
+      },
+      line: {
+        type: 'number',
+        description: 'Line number in the file. Obtain valid lines from getPrFiles or getPrDiff.',
+      },
     },
     required: ['owner', 'repo', 'number', 'body', 'commit_id', 'path', 'line'],
   },

@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -23,7 +24,7 @@ const listBranchesTool: Tool = {
   name: 'listBranches',
   description: 'List branches in a repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'branches', 'list', 'git', 'refs'],
   example:
     'const { branches, count } = await github.listBranches({ owner: "octocat", repo: "hello" })',
@@ -59,7 +60,7 @@ const getBranchTool: Tool = {
   name: 'getBranch',
   description: 'Get detailed information about a specific branch.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'branch', 'get', 'show', 'git'],
   example:
     'const branch = await github.getBranch({ owner: "octocat", repo: "hello", branch: "main" })',
@@ -96,7 +97,7 @@ const createBranchTool: Tool = {
   description:
     'Create a new branch from a SHA or an existing branch. Provide either from_sha or from_branch.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'branch', 'create', 'new', 'git'],
   example:
     'const branch = await github.createBranch({ owner: "octocat", repo: "hello", branch: "feature/x", from_branch: "main" })',
@@ -106,10 +107,15 @@ const createBranchTool: Tool = {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
       branch: { type: 'string', description: 'Name for the new branch' },
-      from_sha: { type: 'string', description: 'SHA to branch from' },
+      from_sha: {
+        type: 'string',
+        description:
+          'SHA to branch from. Obtain from listCommits, getBranch, or compareBranches. Provide either from_sha or from_branch.',
+      },
       from_branch: {
         type: 'string',
-        description: 'Branch name to branch from. Provide either from_sha or from_branch.',
+        description:
+          'Branch name to branch from (its head SHA is used). Obtain from listBranches. Provide either from_sha or from_branch.',
       },
     },
     required: ['owner', 'repo', 'branch'],
@@ -146,7 +152,7 @@ const deleteBranchTool: Tool = {
   name: 'deleteBranch',
   description: 'Delete a branch from the repository.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'branch', 'delete', 'remove', 'git'],
   example: 'await github.deleteBranch({ owner: "octocat", repo: "hello", branch: "feature/old" })',
   inputSchema: {
@@ -180,7 +186,7 @@ const compareBranchesTool: Tool = {
   name: 'compareBranches',
   description: 'Compare two refs (branches or commits) and return the diff summary.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'compare', 'diff', 'branches', 'git', 'ahead', 'behind'],
   example:
     'const cmp = await github.compareBranches({ owner: "octocat", repo: "hello", base: "main", head: "develop" })',
@@ -189,8 +195,16 @@ const compareBranchesTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      base: { type: 'string', description: 'Base ref (branch or commit)' },
-      head: { type: 'string', description: 'Head ref (branch or commit)' },
+      base: {
+        type: 'string',
+        description:
+          'Base ref (branch name or commit SHA). See listBranches for branch names, or listCommits for SHAs.',
+      },
+      head: {
+        type: 'string',
+        description:
+          'Head ref (branch name or commit SHA). See listBranches for branch names, or listCommits for SHAs.',
+      },
     },
     required: ['owner', 'repo', 'base', 'head'],
   },

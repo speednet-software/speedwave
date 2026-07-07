@@ -25,13 +25,15 @@ Atlassian access (Jira and Confluence) goes through the MCP Hub via `search_tool
 
 ## Pitfalls
 
-**Allowlists may silently filter results to empty.** If a search returns 0 hits for something the user expects to exist, mention the project/space key may not be in the allowlist — do not claim the issue or page doesn't exist.
+**Allowlists may silently filter results to empty.** If a search returns 0 hits for something the user expects to exist, mention the project/space key may not be in the allowlist — do not claim the issue or page doesn't exist. Allowlists filter after the API call, so pagination cursors (`next_page_token`/`is_last`) reflect the unfiltered upstream page — a page that looks "last" may still be hiding excluded items, and vice versa.
+
+**Self-scoping reads.** Speedwave authenticates as one shared Atlassian account per project, not a per-human login. For "my"/"assigned to me"/"my hours" questions, use `assignee = currentUser()` directly in JQL (`searchIssues`), or resolve `getMyself().account_id` and compare it against the assignee/author/reporter/worklog-author field in results — never assume all data belongs to "the user" without checking.
 
 **JQL ≠ CQL.** Jira uses JQL (`searchIssues`); Confluence uses CQL (`searchPages`). The field names, functions, and operators differ — never mix them. Example JQL: `assignee = currentUser() AND statusCategory != Done`. Example CQL: `space = DEV AND type = page AND text ~ "runbook"`.
 
 **ADF vs storage format.** Jira Cloud content (issue description, comments) is ADF (Atlassian Document Format — a JSON tree). Confluence content is "storage" format (XHTML-like). Use `bodyText` for plain-text input to either product and let the worker convert; only pass `bodyAdf` or `bodyStorage` when you have the native format. Never feed ADF to a Confluence tool or storage XHTML to a Jira tool.
 
-**User references use `accountId`.** `assignIssue`, `createIssue`, and similar tools take an opaque Cloud account ID (e.g. `5b10ac8d82e05b22cc7d4ef5`), not a username or email. Resolve the current user with `getMyself`; for other users, use a user-lookup tool — do not guess.
+**User references use `accountId`.** `assignIssue`, `createIssue`, and similar tools take an opaque Cloud account ID (e.g. `5b10ac8d82e05b22cc7d4ef5`), not a username or email. Resolve the current user with `getMyself`. This worker has no user-search tool: for someone else, reuse an assignee/reporter `account_id` already present in a prior `getIssue`/`searchIssues` result, or ask the user for it — do not guess.
 
 **Transitions need a `transitionId`.** Call the transitions endpoint first to map a status name (e.g. "Done", "In Progress") to the valid numeric ID for that issue's current workflow before calling transition.
 

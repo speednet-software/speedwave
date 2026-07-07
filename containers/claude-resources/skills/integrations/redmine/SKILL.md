@@ -18,7 +18,8 @@ Redmine access goes through MCP Hub via `search_tools` + `execute_code` and the 
 ## Redmine-specific pitfalls
 
 - **No wiki tools.** The worker does not expose wiki pages. If the user asks for wiki content, say so and offer to fetch the URL via the `playwright` skill (if enabled) or ask the user to paste the content.
-- **Time entries are user-scoped.** The current user is inferred from the API key — do not pass a user ID for "my time entries" unless filtering for someone else.
+- **Time entries are NOT scoped by the API key.** `listTimeEntries` with no `user_id` returns every user's entries. For "my hours"/"my time entries", first resolve the current user via `getCurrentUser()` (or `resolveUser({identifier: 'me'})`) and pass that id, or the literal `'me'`, as `user_id` — never assume the API key implicitly filters results.
+- **Identity-dependent queries need explicit resolution.** "My issues", "assigned to me", "my hours" all require resolving the caller first: pass `'me'` directly to `assigned_to` (issues) or `user_id` (time entries), or call `getCurrentUser()`/`resolveUser({identifier: 'me'})` when you need the numeric ID for a write. Never assume any endpoint implicitly filters to the caller.
 - **Issue relation directions matter.** `precedes`/`follows` and `blocks`/`blocked` are opposites; picking the wrong direction is a common mistake. Confirm direction with the user before creating a relation.
 - **Status transitions go through `status_id`.** Discover allowed values via the mappings/config tool before setting a status; do not guess numeric IDs.
 - **Custom field IDs are project-specific.** Resolve custom field names to IDs via the mappings tool before including them in a write call.

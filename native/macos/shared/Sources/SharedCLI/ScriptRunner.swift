@@ -64,6 +64,21 @@ public enum ScriptError: LocalizedError {
     }
 }
 
+/// True if `stderr` is AppleScript's "Can't get <noun> ..." (-1728), i.e. a name-lookup miss.
+/// Callers rethrow a domain-specific `CLIError.notFound` instead of the raw AppleScript text.
+public func isAppleScriptNotFoundError(_ stderr: String) -> Bool {
+    stderr.contains("Can\u{2019}t get") || stderr.contains("(-1728)")
+}
+
+/// Split a comma-separated address list into trimmed, non-empty addresses.
+/// Shared by mail clients so "a@x, b@y" becomes multiple recipients, not one malformed address.
+public func splitAddressList(_ addresses: String) -> [String] {
+    addresses
+        .components(separatedBy: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+}
+
 /// Escape AppleScript string literals; strips C0/DEL/line-separator scalars first.
 public func escapeAppleScript(_ s: String) -> String {
     let safe = String(s.unicodeScalars.filter { scalar in

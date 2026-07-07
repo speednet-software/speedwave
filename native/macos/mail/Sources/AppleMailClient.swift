@@ -10,6 +10,15 @@ enum AppleMailClient {
         return true
     }
 
+    /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
+    static func recipientClauses(_ addresses: String, kind: String) -> String {
+        splitAddressList(addresses)
+            .map { addr in
+                "        make new \(kind) recipient at end of \(kind) recipients with properties {address:\"\(escapeAppleScript(addr))\"}"
+            }
+            .joined(separator: "\n")
+    }
+
     static func listMailboxes() throws -> [[String: Any]] {
         let script = """
         tell application "Mail"
@@ -57,7 +66,7 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runMailScript(script, timeout: 30, mailbox: mailbox)
         return parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"])
     }
 
@@ -112,25 +121,21 @@ enum AppleMailClient {
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 
-    static func sendEmail(to: String, subject: String, body: String, cc: String?) throws -> [String: Any] {
-        let toEsc = escapeAppleScript(to)
+    static func sendEmail(to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
         let subjectEsc = escapeAppleScript(subject)
         let bodyEsc = escapeAppleScript(body)
 
-        var ccClause = ""
-        if let cc = cc {
-            let ccEsc = escapeAppleScript(cc)
-            ccClause = """
-                        make new cc recipient at end of cc recipients with properties {address:"\(ccEsc)"}
-            """
-        }
+        let toClause = recipientClauses(to, kind: "to")
+        let ccClause = cc.map { recipientClauses($0, kind: "cc") } ?? ""
+        let bccClause = bcc.map { recipientClauses($0, kind: "bcc") } ?? ""
 
         let script = """
         tell application "Mail"
             set newMsg to make new outgoing message with properties {subject:"\(subjectEsc)", content:"\(bodyEsc)", visible:true}
             tell newMsg
-                make new to recipient at end of to recipients with properties {address:"\(toEsc)"}
+        \(toClause)
         \(ccClause)
+        \(bccClause)
             end tell
             send newMsg
         end tell
@@ -165,3 +170,13 @@ enum AppleMailClient {
     }
 }
 
+/// Runs a mailbox-scoped AppleScript, mapping a "Can't get mailbox" failure to a
+/// teaching `CLIError.notFound` instead of the raw AppleScript text.
+func runMailScript(_ script: String, timeout: TimeInterval, mailbox: String?) throws -> String {
+    do { return try ScriptRunner.run(script, timeout: timeout) }
+    catch ScriptError.scriptFailed(let msg) where mailbox != nil && isAppleScriptNotFoundError(msg) {
+        throw CLIError.notFound(
+            "Mailbox '\(mailbox!)' not found. List valid mailboxes via listMailboxes and use their name field."
+        )
+    }
+}

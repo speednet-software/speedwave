@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createRepoTools } from './repo-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -83,9 +83,22 @@ describe('Repo Tools', () => {
       expect(tools).toHaveLength(3);
       expect(tools.map((t) => t.tool.name)).toEqual(['listRepos', 'getRepo', 'searchCode']);
       // listRepos is the primary list tool — eager-loaded
-      expect(tools.find((t) => t.tool.name === 'listRepos')?.tool._meta?.deferLoading).toBe(false);
-      expect(tools.find((t) => t.tool.name === 'getRepo')?.tool._meta?.deferLoading).toBe(true);
-      expect(tools.find((t) => t.tool.name === 'searchCode')?.tool._meta?.deferLoading).toBe(true);
+      expect(
+        tools.find((t) => t.tool.name === 'listRepos')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(false);
+      expect(
+        tools.find((t) => t.tool.name === 'getRepo')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(true);
+      expect(
+        tools.find((t) => t.tool.name === 'searchCode')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(true);
+    });
+
+    it('listRepos declares user-scoped identity with getCurrentUser as the resolver', () => {
+      const tools = createRepoTools(mockClient as unknown as GitHubClient);
+      const meta = tools.find((t) => t.tool.name === 'listRepos')?.tool._meta;
+      expect(meta?.[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta?.[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
     });
 
     it('searchCode requires query, getRepo requires owner+repo, listRepos requires nothing', () => {

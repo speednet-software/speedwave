@@ -372,6 +372,20 @@ describe('Project Tools', () => {
         content: [{ type: 'text', text: 'Error: Project not found' }],
       });
     });
+
+    it('passes project_id as formatError context on failure', async () => {
+      mockClient.showProject.mockRejectedValue(new Error('Not found'));
+
+      const tools = createProjectTools(mockClient as unknown as RedmineClient);
+      const getProjectFullTool = tools.find((t) => t.tool.name === 'getProjectFull');
+
+      await getProjectFullTool!.handler({ project_id: 'nonexistent' });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'project_id=nonexistent'
+      );
+    });
   });
 
   describe('searchProjectIds', () => {

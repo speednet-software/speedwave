@@ -1178,6 +1178,25 @@ describe('executor', () => {
     });
   });
 
+  describe('error sanitization — host paths redacted, user-code positions kept', () => {
+    it('strips positions attached to redacted file paths', async () => {
+      const code = `throw new Error('boom at /repo/src/executor.ts:10:5 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain(':10:5');
+    });
+
+    it('keeps line:column that points into the user snippet', async () => {
+      const code = `throw new Error('Unexpected token at <anonymous>:3:7');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain(':3:7');
+    });
+  });
+
   describe('smart error — underscore match when service not in sandbox', () => {
     const savedEnabledServices = process.env.ENABLED_SERVICES;
 

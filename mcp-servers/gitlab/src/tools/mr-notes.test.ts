@@ -123,10 +123,27 @@ describe('createMrNotesTools', () => {
       const tool = tools.find((t) => t.tool.name === 'listMrCommits');
       const result = await tool!.handler({ project_id: 1, mr_iid: 1 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+    });
+
+    it('should accept a numeric-string mr_iid', async () => {
+      mockClient.listMrCommits.mockResolvedValue([]);
+
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listMrCommits');
+      await tool!.handler({ project_id: 1, mr_iid: '15' });
+
+      expect(mockClient.listMrCommits).toHaveBeenCalledWith(1, 15, undefined);
+    });
+
+    it('should return a teaching error for a non-numeric mr_iid without calling the client', async () => {
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listMrCommits');
+      const result = await tool!.handler({ project_id: 1, mr_iid: 'bad' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.listMrCommits).not.toHaveBeenCalled();
     });
 
     it('should handle authentication errors', async () => {
@@ -265,15 +282,18 @@ describe('createMrNotesTools', () => {
       const tool = tools.find((t) => t.tool.name === 'listMrPipelines');
       const result = await tool!.handler({ project_id: 1, mr_iid: 1 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
+    });
+
+    it('should accept a "#"-prefixed mr_iid', async () => {
+      mockClient.listMrPipelines.mockResolvedValue([]);
+
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listMrPipelines');
+      await tool!.handler({ project_id: 1, mr_iid: '#1' });
+
+      expect(mockClient.listMrPipelines).toHaveBeenCalledWith(1, 1, undefined);
     });
   });
 
@@ -561,6 +581,32 @@ describe('createMrNotesTools', () => {
       expect(mockClient.createMrNote).toHaveBeenCalledWith(1, 1, '');
     });
 
+    it('should accept a numeric-string mr_iid', async () => {
+      mockClient.createMrNote.mockResolvedValue({ id: 1, body: 'Note' });
+
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'createMrNote');
+      await tool!.handler({ project_id: 1, mr_iid: '1', body: 'Note' });
+
+      expect(mockClient.createMrNote).toHaveBeenCalledWith(1, 1, 'Note');
+    });
+
+    it('should return a teaching error for a non-numeric mr_iid without calling the client', async () => {
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'createMrNote');
+      const result = await tool!.handler({ project_id: 1, mr_iid: 'oops', body: 'Note' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.createMrNote).not.toHaveBeenCalled();
+    });
+
+    it('states in its description that the note is posted as the authenticated user', () => {
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'createMrNote')?.tool;
+
+      expect(tool?.description).toContain('authenticated GitLab user');
+    });
+
     it('should handle generic errors', async () => {
       mockClient.createMrNote.mockRejectedValue(new Error('Validation failed'));
 
@@ -692,7 +738,10 @@ describe('createMrNotesTools', () => {
         type: 'object',
         properties: {
           project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-          mr_iid: { type: 'number', description: 'Merge request IID' },
+          mr_iid: {
+            type: ['number', 'string'],
+            description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+          },
           limit: { type: 'number', description: 'Max results (default 20)' },
         },
         required: ['project_id', 'mr_iid'],
@@ -707,7 +756,10 @@ describe('createMrNotesTools', () => {
         type: 'object',
         properties: {
           project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-          mr_iid: { type: 'number', description: 'Merge request IID' },
+          mr_iid: {
+            type: ['number', 'string'],
+            description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+          },
           limit: { type: 'number', description: 'Max results (default 10)' },
         },
         required: ['project_id', 'mr_iid'],
@@ -722,7 +774,10 @@ describe('createMrNotesTools', () => {
         type: 'object',
         properties: {
           project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-          mr_iid: { type: 'number', description: 'Merge request IID' },
+          mr_iid: {
+            type: ['number', 'string'],
+            description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+          },
           limit: { type: 'number', description: 'Max results (default 20)' },
         },
         required: ['project_id', 'mr_iid'],
@@ -737,7 +792,10 @@ describe('createMrNotesTools', () => {
         type: 'object',
         properties: {
           project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-          mr_iid: { type: 'number', description: 'Merge request IID' },
+          mr_iid: {
+            type: ['number', 'string'],
+            description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+          },
           body: { type: 'string', description: 'Comment body' },
         },
         required: ['project_id', 'mr_iid', 'body'],
@@ -750,7 +808,9 @@ describe('createMrNotesTools', () => {
       expect(tools[0].tool.description).toBe('List commits in a merge request');
       expect(tools[1].tool.description).toBe('List pipelines associated with a merge request');
       expect(tools[2].tool.description).toBe('List notes/comments on a merge request');
-      expect(tools[3].tool.description).toBe('Add a comment/note to a merge request');
+      expect(tools[3].tool.description).toBe(
+        'Add a comment/note to a merge request. Posted as the currently authenticated GitLab user (the configured token owner).'
+      );
     });
   });
 });

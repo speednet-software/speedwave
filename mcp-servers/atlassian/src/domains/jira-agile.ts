@@ -4,6 +4,7 @@
  * @module mcp-atlassian/domains/jira-agile
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import {
   ScopeError,
@@ -32,7 +33,7 @@ export interface JiraAgileClient {
   ): Promise<JiraSprint[]>;
   /** Get a single sprint by ID. */
   getSprint(sprintId: number): Promise<JiraSprint>;
-  /** Move issues into a sprint (max 50 per call, per the Agile API). */
+  /** Move issues into a sprint. Callers must enforce the Agile API's 50-per-call cap. */
   moveIssuesToSprint(sprintId: number, issueKeysOrIds: string[]): Promise<void>;
 }
 
@@ -75,7 +76,7 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
   return {
     async listBoards(options = {}) {
       const params: Record<string, unknown> = {
-        maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100),
+        maxResults: clampPageSize(options.maxResults, 50, 100),
       };
       if (options.name) params.name = options.name;
       if (options.projectKeyOrId) params.projectKeyOrId = options.projectKeyOrId;
@@ -97,7 +98,7 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
     async listSprints(boardId, options = {}) {
       await enforceBoard(boardId);
       const params: Record<string, unknown> = {
-        maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100),
+        maxResults: clampPageSize(options.maxResults, 50, 100),
       };
       if (options.state) params.state = options.state;
       const res = await client.get<{ values?: unknown[] }>(
@@ -122,10 +123,12 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
         sprintId,
         typeof sprint.originBoardId === 'number' ? sprint.originBoardId : undefined
       );
-      // Each issue may belong to a different project than the sprint's board.
-      const issues = issueKeysOrIds.slice(0, 50);
-      for (const ref of issues) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
-      await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, { issues });
+      // Caller (tool handler) rejects batches over 50; each issue may belong
+      // to a different project than the sprint's board, so check all of them.
+      for (const ref of issueKeysOrIds) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
+      await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
+        issues: issueKeysOrIds,
+      });
     },
   };
 }

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createBranchTools } from './branch-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -89,11 +89,13 @@ describe('Branch Tools', () => {
     it('returns 5 tools, listBranches is eager-loaded', () => {
       const tools = createBranchTools(mockClient as unknown as GitHubClient);
       expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOL_NAMES);
-      expect(tools.find((t) => t.tool.name === 'listBranches')?.tool._meta?.deferLoading).toBe(
-        false
-      );
+      expect(
+        tools.find((t) => t.tool.name === 'listBranches')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(false);
       for (const name of ALL_TOOL_NAMES.filter((n) => n !== 'listBranches')) {
-        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.deferLoading).toBe(true);
+        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(
+          true
+        );
       }
     });
 

@@ -3,8 +3,59 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { withValidation } from './validation.js';
+import { withValidation, validateGraphId } from './validation.js';
 import type { ToolResult } from './validation.js';
+
+describe('validateGraphId', () => {
+  it('returns null for a valid id', () => {
+    expect(validateGraphId('L1', 'listId')).toBeNull();
+    expect(validateGraphId('abc-123.def_456', 'listId')).toBeNull();
+  });
+
+  it('rejects a non-string value and names the received value', () => {
+    const result = validateGraphId(42, 'listId');
+    expect(result?.success).toBe(false);
+    expect(result?.error?.code).toBe('INVALID_ID');
+    expect(result?.error?.message).toContain('listId');
+    expect(result?.error?.message).toContain('42');
+  });
+
+  it('rejects undefined and renders it as "undefined"', () => {
+    const result = validateGraphId(undefined, 'itemId');
+    expect(result?.error?.message).toContain('undefined');
+  });
+
+  it('rejects a path-traversal string and quotes the received value', () => {
+    const result = validateGraphId('bad/../path', 'listId');
+    expect(result?.error?.message).toContain('"bad/../path"');
+  });
+
+  it('without a sourceTool, explains the accepted character set', () => {
+    const result = validateGraphId('bad/../path', 'listId');
+    expect(result?.error?.message).toMatch(/letters, digits/);
+  });
+
+  it('with a sourceTool, names it as the place to get a valid value', () => {
+    const result = validateGraphId('bad/../path', 'listId', 'listLists');
+    expect(result?.error?.message).toContain('listLists');
+    expect(result?.error?.message).not.toMatch(/letters, digits/);
+  });
+
+  it('rejects an empty string', () => {
+    const result = validateGraphId('', 'pageId');
+    expect(result?.success).toBe(false);
+    expect(result?.error?.code).toBe('INVALID_ID');
+  });
+
+  it('rejects a string longer than 128 characters', () => {
+    const result = validateGraphId('a'.repeat(129), 'pageId');
+    expect(result?.success).toBe(false);
+  });
+
+  it('accepts a string exactly 128 characters long', () => {
+    expect(validateGraphId('a'.repeat(128), 'pageId')).toBeNull();
+  });
+});
 
 describe('withValidation', () => {
   // ─── validateParams guard ────────────────────────────────────────────────────

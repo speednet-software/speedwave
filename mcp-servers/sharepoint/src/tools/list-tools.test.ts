@@ -406,6 +406,30 @@ describe('list-tools handlers — error paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe(code);
   });
 
+  it('listItems appends a single-quote hint when filter contains a double quote', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new Error('400 Bad Request'));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: 'fields/Status eq "Open"' });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string; message: string };
+    expect(parsed.code).toBe('LIST_ITEMS_FAILED');
+    expect(parsed.message).toContain('single-quoted string literals');
+  });
+
+  it('listItems does not append the quote hint when filter has no double quote', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new Error('400 Bad Request'));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: "fields/Status eq 'Open'" });
+    const parsed = parseContent(result) as { message: string };
+    expect(parsed.message).not.toContain('single-quoted string literals');
+  });
+
   it('updateList errors when description is provided alone', async () => {
     // Covers the description-only branch (displayName omitted).
     const graph = vi.fn().mockResolvedValueOnce(undefined);

@@ -4,6 +4,7 @@
  * @module mcp-atlassian/domains/jira-projects
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { assertJiraProjectAllowed, filterByAllowlist } from '../scope.js';
 import { deriveBrowseUrl } from '../url.js';
@@ -29,7 +30,7 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
   return {
     async list(options = {}) {
       const params: Record<string, unknown> = {
-        maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100),
+        maxResults: clampPageSize(options.maxResults, 50, 100),
         expand: 'lead',
       };
       if (options.query) params.query = options.query;

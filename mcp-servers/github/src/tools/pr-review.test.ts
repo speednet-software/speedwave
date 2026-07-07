@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createPrReviewTools } from './pr-review-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -130,7 +130,7 @@ describe('PR Review Tools', () => {
       const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
       expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOL_NAMES);
       for (const t of tools) {
-        expect(t.tool._meta?.deferLoading).toBe(true);
+        expect(t.tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       }
     });
 

@@ -202,15 +202,11 @@ describe('label-tools', () => {
       const listLabelsTool = tools.find((t) => t.tool.name === 'listLabels');
       const result = await listLabelsTool!.handler({ project_id: 1 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
+      expect((result.content[0] as { text: string }).text).toContain(
+        'required scope (api or write_repository)'
+      );
     });
 
     it('returns error for 404 not found', async () => {
@@ -221,10 +217,13 @@ describe('label-tools', () => {
       const listLabelsTool = tools.find((t) => t.tool.name === 'listLabels');
       const result = await listLabelsTool!.handler({ project_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('returns error for network timeout', async () => {
@@ -501,15 +500,11 @@ describe('label-tools', () => {
         color: '#FF0000',
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
+      expect((result.content[0] as { text: string }).text).toContain(
+        'required scope (api or write_repository)'
+      );
     });
 
     it('returns error for 404 project not found', async () => {
@@ -524,10 +519,13 @@ describe('label-tools', () => {
         color: '#FF0000',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('returns error for network timeout', async () => {

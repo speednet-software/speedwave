@@ -10,6 +10,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -20,9 +21,9 @@ import { toStorageBodyInput, withValidation } from './validation.js';
 const addPageCommentTool: Tool = {
   name: 'addPageComment',
   description:
-    'Add a footer comment to a Confluence page. Provide `bodyStorage` (storage XHTML) or `bodyText` (plain text).',
+    'Add a footer comment to a Confluence page. Provide `bodyStorage` (storage XHTML) or `bodyText` (plain text). Restricted to the configured Confluence space allowlist, if any.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'comment', 'add', 'page', 'reply', 'note'],
   example:
     'await atlassian.addPageComment({ pageId: "12345", bodyText: "Reviewed — looks good." })',
@@ -58,9 +59,10 @@ const addPageCommentTool: Tool = {
 
 const getPageCommentsTool: Tool = {
   name: 'getPageComments',
-  description: 'List footer comments on a Confluence page.',
+  description:
+    'List footer comments on a Confluence page. Restricted to the configured Confluence space allowlist, if any.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'comments', 'list', 'page'],
   example: 'const { comments } = await atlassian.getPageComments({ pageId: "12345" })',
   inputSchema: {
@@ -85,9 +87,10 @@ const getPageCommentsTool: Tool = {
 
 const addPageLabelsTool: Tool = {
   name: 'addPageLabels',
-  description: 'Add one or more labels to a Confluence page.',
+  description:
+    'Add one or more labels to a Confluence page. Restricted to the configured Confluence space allowlist, if any.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'labels', 'tags', 'add', 'page'],
   example:
     'const { labels } = await atlassian.addPageLabels({ pageId: "12345", labels: ["runbook", "ops"] })',
@@ -115,9 +118,10 @@ const addPageLabelsTool: Tool = {
 
 const getPageLabelsTool: Tool = {
   name: 'getPageLabels',
-  description: 'List labels on a Confluence page.',
+  description:
+    'List labels on a Confluence page. Restricted to the configured Confluence space allowlist, if any.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'labels', 'tags', 'list', 'page'],
   example: 'const { labels } = await atlassian.getPageLabels({ pageId: "12345" })',
   inputSchema: {
@@ -142,9 +146,10 @@ const getPageLabelsTool: Tool = {
 
 const listAttachmentsTool: Tool = {
   name: 'listAttachments',
-  description: 'List attachments on a Confluence page (metadata only — no download).',
+  description:
+    'List attachments on a Confluence page (metadata only — no download). Restricted to the configured Confluence space allowlist, if any.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'attachments', 'files', 'list', 'page'],
   example: 'const { attachments } = await atlassian.listAttachments({ pageId: "12345" })',
   inputSchema: {

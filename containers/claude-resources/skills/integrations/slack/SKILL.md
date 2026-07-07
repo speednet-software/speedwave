@@ -42,7 +42,7 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 **Channel references** — tools accept `#name`, bare `name`, or a channel ID (`C…`/`G…`/`D…`). Name resolution scans the (paginated) channel list each time — when you will touch a channel repeatedly, resolve once via `listChannelIds` and reuse the ID.
 
-**Threads need explicit expansion** — channel history returns top-level messages; a thread parent carries `reply_count > 0` and `thread_ts`. Fetch the full thread with `getThreadMessages({ channel, thread_ts })` (parent first, then replies oldest-first; paginate with `cursor`). For a complete channel export, expand every message with `reply_count > 0` — without that step the discussion inside threads is invisible.
+**Threads need explicit expansion** — channel history returns top-level messages; a thread parent carries `reply_count > 0` and `thread_ts`. Fetch the full thread with `getThreadMessages({ channel, thread_ts })` (parent first, then replies oldest-first; paginate with `cursor`). `thread_ts` must be copied EXACTLY as a string from a prior result (e.g. `"1717000000.000100"`) — never reformat, round, or convert it to a number. For a complete channel export, expand every message with `reply_count > 0` — without that step the discussion inside threads is invisible.
 
 **Files and app messages** — uploads arrive as `files[]` metadata on the message (often with empty `text`); read text files (markdown, code, logs, JSON) inline via `getFileContent({ file: files[0].id })`. For binary files (PDF, Word/Excel, images) do NOT stop at metadata: `downloadFile({ file })` saves them to `/workspace/.speedwave/slack/…`, then read PDFs/documents through the office integration (when enabled) or the filesystem; if neither can process it (e.g. an image), give the user the workspace path. Messages from apps (Jira, CI bots) frequently carry their content in `attachments_text`, not `text` — check it before declaring a message empty.
 
@@ -54,7 +54,9 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 **Free-plan workspaces** — Slack hides messages older than the plan's retention window from the API as well as the UI; an export that stops early on an old channel may have hit that wall, not a bug.
 
-**User lookup** — `findUsers` searches by name (display or real name, partial and diacritic-insensitive); `getUsers` resolves an exact e-mail. Names are not unique — when identity matters (especially before any DM send), confirm the specific person with the user.
+**User lookup** — `findUsers` searches by name (display or real name, partial and diacritic-insensitive); `getUsers` resolves an exact e-mail. Names are not unique — when identity matters (especially before any DM send), confirm the specific person with the user. Neither tool resolves the signed-in user's OWN identity — use `getCurrentUser` for that.
+
+**Resolving "me"** — every message from `getChannelMessages`/`getThreadMessages` carries a `user` field with no built-in way to tell which one is the signed-in user. To answer any question that depends on the signed-in user's own identity ("what did I say", "who mentioned me", "did I already reply to this thread"), first call `getCurrentUser` to resolve their user ID, then match it against the `user` field in the results — never assume identity from display name alone.
 
 ## Direct messages
 

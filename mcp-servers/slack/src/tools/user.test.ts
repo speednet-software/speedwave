@@ -4,7 +4,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { withSetupGuidance, RefreshLock } from '@speedwave/mcp-shared';
-import { handleGetUsers, handleFindUsers, createUserTools } from './user-tools.js';
+import {
+  handleGetUsers,
+  handleFindUsers,
+  handleGetCurrentUser,
+  createUserTools,
+} from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
 // Mock the client module
@@ -13,6 +18,7 @@ vi.mock('../client.js', async () => {
   return {
     ...actual,
     getUsers: vi.fn(),
+    getCurrentUser: vi.fn(),
     formatSlackError: vi.fn((error: unknown) => {
       const e = error as { message?: string };
       return e.message || 'Unknown error';
@@ -288,12 +294,38 @@ describe('user-tools', () => {
       expect(result.error?.code).toBe('SEARCH_FAILED');
     });
   });
+
+  describe('handleGetCurrentUser', () => {
+    it('returns the resolved identity on success', async () => {
+      const me = { id: 'U1', name: 'pawel', real_name: 'Paweł Kowalski', team_id: 'T1' };
+      vi.mocked(client.getCurrentUser).mockResolvedValue(me);
+
+      const result = await handleGetCurrentUser(mockClients, {});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(me);
+      expect(client.getCurrentUser).toHaveBeenCalledWith(mockClients);
+    });
+
+    it('maps failures to LOOKUP_FAILED', async () => {
+      vi.mocked(client.getCurrentUser).mockRejectedValue(new Error('invalid_auth'));
+      vi.mocked(client.formatSlackError).mockReturnValue(
+        withSetupGuidance('Authentication failed. Check your Slack tokens.')
+      );
+
+      const result = await handleGetCurrentUser(mockClients, {});
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('LOOKUP_FAILED');
+      expect(result.error?.message).toContain('Authentication failed');
+    });
+  });
 });
 
 describe('createUserTools (null clients — not configured)', () => {
-  it('returns both tool definitions when clients are null', () => {
+  it('returns all three tool definitions when clients are null', () => {
     const tools = createUserTools(unconfiguredClients());
-    expect(tools.map((t) => t.tool.name)).toEqual(['getUsers', 'findUsers']);
+    expect(tools.map((t) => t.tool.name)).toEqual(['getUsers', 'findUsers', 'getCurrentUser']);
   });
 
   it('findUsers handler returns NOT_CONFIGURED error when clients are null', async () => {
@@ -315,6 +347,17 @@ describe('createUserTools (null clients — not configured)', () => {
     const parsed = JSON.parse(result.content[0].text as string);
     expect(parsed.code).toBe('NOT_CONFIGURED');
     expect(parsed.message).toBeTruthy();
+  });
+
+  it('getCurrentUser handler returns NOT_CONFIGURED error when clients are null', async () => {
+    const tools = createUserTools(unconfiguredClients());
+    const getCurrentUserHandler = tools[2].handler;
+
+    const result = await getCurrentUserHandler({});
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('NOT_CONFIGURED');
   });
 });
 
@@ -350,5 +393,19 @@ describe('createUserTools (with clients — configured path)', () => {
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse(result.content[0].text as string);
     expect(parsed.user.id).toBe('U1234567890');
+  });
+
+  it('getCurrentUser handler routes to handler when clients are configured', async () => {
+    const me = { id: 'U1234567890', name: 'alice', team_id: 'T1' };
+    vi.mocked(client.getCurrentUser).mockResolvedValue(me);
+
+    const tools = createUserTools(mockClients);
+    const getCurrentUserHandler = tools[2].handler;
+
+    const result = await getCurrentUserHandler({});
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.id).toBe('U1234567890');
   });
 });

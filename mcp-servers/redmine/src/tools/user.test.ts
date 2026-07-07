@@ -169,6 +169,30 @@ describe('User Tools', () => {
         content: [{ type: 'text', text: 'Error: Network error' }],
       });
     });
+
+    it('passes project_id as formatError context on failure', async () => {
+      mockClient.listUsers.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createUserTools(mockClient as unknown as RedmineClient);
+      const listUsersTool = tools.find((t) => t.tool.name === 'listUsers');
+
+      await listUsersTool!.handler({ project_id: 'my-project' });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'project_id=my-project');
+    });
+
+    it('passes undefined context when project_id is absent', async () => {
+      mockClient.listUsers.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createUserTools(mockClient as unknown as RedmineClient);
+      const listUsersTool = tools.find((t) => t.tool.name === 'listUsers');
+
+      await listUsersTool!.handler({});
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), undefined);
+    });
   });
 
   describe('resolveUser', () => {

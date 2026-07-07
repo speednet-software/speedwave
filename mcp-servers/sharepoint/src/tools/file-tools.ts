@@ -9,6 +9,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   TIMEOUTS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
@@ -57,7 +58,8 @@ function normalizeDownloadParams(params: Record<string, unknown>): {
 
 const listFileIdsTool: Tool = {
   name: 'listFileIds',
-  description: 'List file IDs and names in a folder.',
+  description:
+    'List file IDs, names, and paths in a folder. Provides the file_id used by getFileFull and the path used by downloadFile/uploadFile (sharepointPath).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,7 +67,7 @@ const listFileIdsTool: Tool = {
     },
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'files', 'list', 'directory', 'folder'],
   example: 'const files = await sharepoint.listFileIds({ path: "documents" })',
   outputSchema: {
@@ -77,7 +79,13 @@ const listFileIdsTool: Tool = {
         items: {
           type: 'object',
           properties: {
+            id: { type: 'string', description: 'Graph driveItem id, for getFileFull.' },
             name: { type: 'string' },
+            path: {
+              type: 'string',
+              description:
+                'Relative path, reusable directly as sharepointPath for downloadFile/uploadFile.',
+            },
             size: { type: 'number', description: 'File size in bytes' },
             lastModified: { type: 'string', description: 'ISO 8601 timestamp' },
             isFolder: { type: 'boolean' },
@@ -102,18 +110,23 @@ const listFileIdsTool: Tool = {
 
 const getFileFullTool: Tool = {
   name: 'getFileFull',
-  description: 'Get complete file metadata.',
+  description:
+    "Get complete file metadata (no content). file_id comes from listFileIds's returned id field, and only accepts that Graph driveItem id: file paths and list display names are not accepted here. To read the file itself, use downloadFile with the sharepointPath from listFileIds instead.",
   inputSchema: {
     type: 'object',
     properties: {
-      file_id: { type: 'string', description: 'File ID' },
+      file_id: {
+        type: 'string',
+        description:
+          'Graph driveItem id, obtained via listFileIds (returns id + name + path per entry).',
+      },
     },
     required: ['file_id'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true, timeoutMs: TIMEOUTS.LONG_OPERATION_MS },
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_MS]: TIMEOUTS.LONG_OPERATION_MS },
   keywords: ['sharepoint', 'file', 'get', 'detail', 'download', 'metadata'],
-  example: 'const file = await sharepoint.getFileFull({ file_id: "abc123", include: ["content"] })',
+  example: 'const file = await sharepoint.getFileFull({ file_id: "abc123" })',
   outputSchema: {
     type: 'object',
     properties: {
@@ -124,7 +137,6 @@ const getFileFullTool: Tool = {
           id: { type: 'string' },
           name: { type: 'string' },
           size: { type: 'number' },
-          content: { type: 'string', description: 'File content (if requested)' },
           metadata: { type: 'object', description: 'File metadata' },
         },
       },
@@ -134,19 +146,16 @@ const getFileFullTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'Minimal: get file metadata only',
+      description: 'Get file metadata only',
       input: { file_id: 'abc123' },
-    },
-    {
-      description: 'Full: get file with content',
-      input: { file_id: 'document.pdf', include: ['content', 'metadata'] },
     },
   ],
 };
 
 const downloadFileTool: Tool = {
   name: 'downloadFile',
-  description: 'Download a file from SharePoint to a local path.',
+  description:
+    'Download a file from SharePoint to a local path. sharepointPath (or sharepoint_path) and localPath (or local_path) are both required — provide either the camelCase or snake_case form of each. Get sharepointPath from listFileIds (its returned path field).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -160,7 +169,7 @@ const downloadFileTool: Tool = {
     },
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true, timeoutClass: 'long' as const },
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' as const },
   keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
   example:
     'await sharepoint.downloadFile({ sharepoint_path: "docs/report.pdf", local_path: "/workspace/report.pdf" })',
@@ -186,7 +195,7 @@ const downloadFileTool: Tool = {
 const uploadFileTool: Tool = {
   name: 'uploadFile',
   description:
-    'Upload a local file to SharePoint. Supports ETag-based Compare-And-Swap for conflict detection.',
+    'Upload a local file to SharePoint. Supports ETag-based Compare-And-Swap for conflict detection. localPath (or local_path) and sharepointPath (or sharepoint_path) are both required — provide either the camelCase or snake_case form of each.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -205,7 +214,7 @@ const uploadFileTool: Tool = {
     },
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true, timeoutClass: 'long' as const },
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' as const },
   keywords: ['sharepoint', 'upload', 'file', 'put', 'write', 'sync'],
   example:
     'await sharepoint.uploadFile({ local_path: "/workspace/report.pdf", sharepoint_path: "docs/report.pdf" })',
@@ -266,7 +275,7 @@ export async function handleListFileIds(
     return {
       success: true,
       data: {
-        files: files.map((f) => ({ id: f.id, name: f.name, isFolder: f.isFolder })),
+        files: files.map((f) => ({ id: f.id, name: f.name, path: f.path, isFolder: f.isFolder })),
         count: files.length,
         exists: result.exists,
       },
@@ -293,9 +302,13 @@ export async function handleGetFileFull(
     const result = await client.getFileMetadata(params.file_id);
     return { success: true, data: result };
   } catch (error) {
+    const message = SharePointClient.formatError(error);
+    const hint = message.includes('not found')
+      ? ' Call listFileIds first to get a valid file_id.'
+      : '';
     return {
       success: false,
-      error: { code: 'GET_FAILED', message: SharePointClient.formatError(error) },
+      error: { code: 'GET_FAILED', message: `${message}${hint}` },
     };
   }
 }

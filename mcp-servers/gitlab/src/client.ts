@@ -5,7 +5,7 @@
  * Architecture:
  * - Token mounted RO from /tokens/token
  * - Host URL from /tokens/host_url file or GITLAB_URL env var
- * - Exposes 44 tools via `@gitbeaker`/rest
+ * - Exposes 48 tools via `@gitbeaker`/rest
  * Security:
  * - Blast radius containment: only GitLab tokens if compromised
  * - Token never exposed in responses
@@ -54,9 +54,18 @@ export interface GitLabMergeRequest {
   source_branch: string;
   target_branch: string;
   author: { id: number; name: string; username: string };
+  assignees?: unknown[];
+  reviewers?: unknown[];
+  labels?: string[];
   web_url: string;
   created_at: string;
   updated_at: string;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  changes_count?: string | null;
+  has_conflicts?: boolean;
+  merge_status?: string;
+  detailed_merge_status?: string;
 }
 
 /** GitLab CI/CD pipeline information including status, ref, SHA, and timestamps */
@@ -68,6 +77,15 @@ export interface GitLabPipeline {
   web_url: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Authenticated GitLab user identity, as returned by getCurrentUser. */
+export interface GitLabCurrentUser {
+  id: number;
+  username: string;
+  name: string;
+  email?: string;
+  web_url: string;
 }
 
 /** GitLab commit information including SHA, message, author details, and timestamp */
@@ -174,9 +192,21 @@ export class GitLabClient {
         name: string;
         username: string;
       },
+      assignees: (mr.assignees as unknown[] | undefined) ?? undefined,
+      reviewers: (mr.reviewers as unknown[] | undefined) ?? undefined,
+      labels: (mr.labels as string[] | undefined) ?? undefined,
       web_url: String(webUrl || ''),
       created_at: String(mr.createdAt || mr.created_at || ''),
       updated_at: String(mr.updatedAt || mr.updated_at || ''),
+      merged_at: (mr.mergedAt as string | null | undefined) ?? (mr.merged_at as string | null),
+      merge_commit_sha:
+        (mr.mergeCommitSha as string | null | undefined) ?? (mr.merge_commit_sha as string | null),
+      changes_count:
+        (mr.changesCount as string | null | undefined) ?? (mr.changes_count as string | null),
+      has_conflicts: (mr.hasConflicts as boolean | undefined) ?? (mr.has_conflicts as boolean),
+      merge_status: (mr.mergeStatus as string | undefined) ?? (mr.merge_status as string),
+      detailed_merge_status:
+        (mr.detailedMergeStatus as string | undefined) ?? (mr.detailed_merge_status as string),
     };
   }
 
@@ -215,11 +245,20 @@ export class GitLabClient {
     }
 
     if (status === 403 || message.includes('403') || message.includes('Forbidden')) {
-      return 'Permission denied. Your GitLab token may not have sufficient permissions.';
+      return (
+        'Permission denied performing this GitLab operation. Your token likely lacks the ' +
+        'required scope (api or write_repository) or you lack sufficient project role ' +
+        '(e.g. Maintainer for merge/approve/delete-branch). Check the integration setup in the ' +
+        'Speedwave Desktop app.'
+      );
     }
 
     if (status === 404 || message.includes('404') || message.includes('not found')) {
-      return 'Resource not found in GitLab.';
+      return (
+        'Resource not found in GitLab. Verify the project_id/path and the ID/name argument are ' +
+        'correct — list valid values with the corresponding list* tool first (listProjectIds, ' +
+        'listMrIds, listIssues, listBranches, etc.) before retrying.'
+      );
     }
 
     // 5xx - Server errors
@@ -229,6 +268,14 @@ export class GitLabClient {
       if (status === 503) return 'GitLab service unavailable. The server is temporarily down.';
       if (status === 504) return 'GitLab gateway timeout. The request took too long.';
       return `GitLab server error (${status}). Please try again later.`;
+    }
+
+    if (status === 422) {
+      const detail = err.cause?.description || message;
+      return (
+        `GitLab rejected the request (422 Unprocessable): ${detail}. Check that the ` +
+        'referenced branch/tag/state value is valid and not already in a terminal or protected state.'
+      );
     }
 
     if (
@@ -280,6 +327,22 @@ export class GitLabClient {
     }
   }
 
+  /**
+   * Gets the identity of the currently authenticated GitLab user (the configured token owner).
+   * Resolves 'me'/'my' style queries (my MRs, my issues, my projects) without asking the user.
+   * @returns The authenticated user's id, username, name, email, and profile URL
+   */
+  async getCurrentUser(): Promise<GitLabCurrentUser> {
+    const user = (await this.gitlab.Users.showCurrentUser()) as Record<string, unknown>;
+    return {
+      id: Number(user.id),
+      username: String(user.username || ''),
+      name: String(user.name || ''),
+      email: user.email ? String(user.email) : undefined,
+      web_url: String(user.webUrl || user.web_url || ''),
+    };
+  }
+
   //═════════════════════════════════════════════════════════════════════════════
   // Projects
   //═════════════════════════════════════════════════════════════════════════════
@@ -293,6 +356,8 @@ export class GitLabClient {
    * @param options.limit - Maximum number of projects to return (default: 20, max: 20)
    * @param options.page - Page number for pagination (default: 1)
    * @param options.owned - If `true`, only return projects owned by the current user (excludes shared/member projects)
+   * @param options.membership - If `true`, only return projects the authenticated user is a member of
+   * @param options.archived - If `true`, include archived projects (default: false, GitLab excludes them)
    * @returns Array of project objects with basic metadata (id, name, path, description, URL, default branch)
    * @example
    * ```typescript
@@ -312,6 +377,8 @@ export class GitLabClient {
       limit?: number;
       page?: number;
       owned?: boolean;
+      membership?: boolean;
+      archived?: boolean;
     } = {}
   ): Promise<GitLabProject[]> {
     const projects = await this.gitlab.Projects.all({
@@ -320,6 +387,8 @@ export class GitLabClient {
       page: options.page || 1,
       pagination: 'offset' as const,
       owned: options.owned,
+      membership: options.membership,
+      archived: options.archived,
     });
 
     // Take only first page (limit results)
@@ -384,7 +453,6 @@ export class GitLabClient {
    * @param query - Search query string (supports literal text, not regex)
    * @param options - Search scope options
    * @param options.project_id - If provided, limits search to this project ID or path. If omitted, searches across all accessible projects
-   * @param options.scope - Reserved for future use (currently not implemented by GitLab API)
    * @returns Array of search results containing file paths, matching lines, and context
    * @example
    * ```typescript
@@ -403,7 +471,6 @@ export class GitLabClient {
     query: string,
     options: {
       project_id?: string | number;
-      scope?: string;
     } = {}
   ): Promise<unknown[]> {
     this.validateRequired({ query });
@@ -430,6 +497,7 @@ export class GitLabClient {
    * @param options.author_username - Filter by author's username
    * @param options.reviewer_username - Filter by reviewer's username
    * @param options.labels - Filter by comma-separated labels (e.g., "bug,feature")
+   * @param options.scope - Filter by identity: "assigned_to_me", "created_by_me", or "all"
    * @param options.limit - Maximum number of results to return (default: 20)
    */
   async listMergeRequests(
@@ -439,6 +507,7 @@ export class GitLabClient {
       author_username?: string;
       reviewer_username?: string;
       labels?: string;
+      scope?: 'assigned_to_me' | 'created_by_me' | 'all';
       limit?: number;
     } = {}
   ): Promise<GitLabMergeRequest[]> {
@@ -460,6 +529,9 @@ export class GitLabClient {
     }
     if (options.labels) {
       queryOptions.labels = options.labels;
+    }
+    if (options.scope) {
+      queryOptions.scope = options.scope;
     }
 
     const mrs = (await this.gitlab.MergeRequests.all(
@@ -951,18 +1023,32 @@ export class GitLabClient {
    * @param projectId - Project ID or path (e.g., 123 or "group/project")
    * @param filePath - Full path to file in repository (e.g., "src/index.ts")
    * @param ref - Branch, tag, or commit SHA to read from (default: "main")
-   * @returns File content (base64 encoded), encoding type, and size in bytes
+   * @returns File content (base64 encoded), encoding type, size, name, path, and ref
    */
   async getFile(
     projectId: string | number,
     filePath: string,
     ref: string = 'main'
-  ): Promise<{ content: string; encoding: string; size: number }> {
-    const file = await this.gitlab.RepositoryFiles.show(projectId, filePath, ref);
+  ): Promise<{
+    content: string;
+    encoding: string;
+    size: number;
+    file_name: string;
+    file_path: string;
+    ref: string;
+  }> {
+    const file = (await this.gitlab.RepositoryFiles.show(
+      projectId,
+      filePath,
+      ref
+    )) as unknown as Record<string, unknown>;
     return {
       content: String(file.content),
       encoding: String(file.encoding),
       size: Number(file.size),
+      file_name: String(file.fileName || file.file_name || ''),
+      file_path: String(file.filePath || file.file_path || filePath),
+      ref: String(file.ref || ref),
     };
   }
 
@@ -1043,6 +1129,7 @@ export class GitLabClient {
    * @param options.state - Filter by state: "opened", "closed", or "all" (default: "all")
    * @param options.labels - Comma-separated label names to filter by
    * @param options.assignee_username - Filter by assignee username
+   * @param options.scope - Filter by identity: "assigned_to_me", "created_by_me", or "all"
    * @param options.limit - Maximum issues to return (default: 20)
    * @returns Array of issues matching the filter criteria
    */
@@ -1052,6 +1139,7 @@ export class GitLabClient {
       state?: string;
       labels?: string;
       assignee_username?: string;
+      scope?: 'assigned_to_me' | 'created_by_me' | 'all';
       limit?: number;
     } = {}
   ): Promise<unknown[]> {
@@ -1060,6 +1148,7 @@ export class GitLabClient {
       state: options.state as 'opened' | 'closed' | 'all' | undefined,
       labels: options.labels,
       assigneeUsername: options.assignee_username,
+      scope: options.scope,
       perPage: options.limit || 20,
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
     // Handle both array and paginated response
@@ -1071,7 +1160,8 @@ export class GitLabClient {
    * Gets a single issue by its internal ID (IID)
    * @param projectId - Project ID or path (e.g., 123 or "group/project")
    * @param issueIid - Issue internal ID (IID) shown in the UI (e.g., #42)
-   * @returns Issue details or null if not found
+   * @returns Issue details
+   * @throws {Error} if no issue with that IID exists in the project
    */
   async getIssue(projectId: string | number, issueIid: number): Promise<unknown> {
     // Use Issues.all with specific project and iid filter
@@ -1080,7 +1170,12 @@ export class GitLabClient {
       iids: [issueIid],
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
     const result = Array.isArray(issues) ? issues : (issues as { data: unknown[] }).data || [];
-    return result[0] || null;
+    if (!result[0]) {
+      throw new Error(
+        `Issue #${issueIid} not found in project '${projectId}'. List valid issue IIDs first via listIssues.`
+      );
+    }
+    return result[0];
   }
 
   /**
@@ -1334,6 +1429,26 @@ export class GitLabClient {
   //═════════════════════════════════════════════════════════════════════════════
   // Tags & Releases
   //═════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Lists tags in a project, newest first, with optional search
+   * @param projectId - Project ID or path (e.g., 123 or "group/project")
+   * @param options - Tag listing options
+   * @param options.search - Filter tags by name pattern
+   * @param options.limit - Maximum tags to return (default: 20)
+   * @returns Array of tag objects with name, target commit, and message
+   */
+  async listTags(
+    projectId: string | number,
+    options: { search?: string; limit?: number } = {}
+  ): Promise<unknown[]> {
+    this.validateRequired({ project_id: projectId });
+    const tags = await this.gitlab.Tags.all(projectId, {
+      search: options.search,
+      perPage: options.limit || 20,
+    });
+    return tags.slice(0, options.limit || 20);
+  }
 
   /**
    * Creates a new git tag pointing to a specific commit

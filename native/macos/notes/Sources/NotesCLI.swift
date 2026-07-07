@@ -35,7 +35,7 @@ struct NotesCLI {
         "list_notes": { params in
             try NotesClient.listNotes(
                 limit: params["limit"] as? Int ?? 20,
-                folder: params["folder"] as? String
+                folder: params["folder_id"] as? String
             )
         },
         "get_note": { params in
@@ -44,14 +44,18 @@ struct NotesCLI {
         },
         "search_notes": { params in
             guard let query = params["query"] as? String else { throw NotesCLIError.missingField("query") }
-            return try NotesClient.searchNotes(query: query, limit: params["limit"] as? Int ?? 20)
+            return try NotesClient.searchNotes(
+                query: query,
+                limit: params["limit"] as? Int ?? 20,
+                folder: params["folder_id"] as? String
+            )
         },
         "create_note": { params in
             guard let title = params["title"] as? String else { throw NotesCLIError.missingField("title") }
             return try NotesClient.createNote(
                 title: title,
                 body: params["body"] as? String,
-                folder: params["folder"] as? String
+                folder: params["folder_id"] as? String
             )
         },
         "update_note": { params in

@@ -94,6 +94,47 @@ describe('MR Tools', () => {
       });
     });
 
+    it('should filter merge requests by reviewer username', async () => {
+      mockClient.listMergeRequests.mockResolvedValue([]);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listMrIds');
+      await listTool!.handler({ project_id: 123, reviewer_username: 'janedoe' });
+
+      expect(mockClient.listMergeRequests).toHaveBeenCalledWith(123, {
+        reviewer_username: 'janedoe',
+      });
+    });
+
+    it('should filter merge requests by labels', async () => {
+      mockClient.listMergeRequests.mockResolvedValue([]);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listMrIds');
+      await listTool!.handler({ project_id: 123, labels: 'bug,urgent' });
+
+      expect(mockClient.listMergeRequests).toHaveBeenCalledWith(123, { labels: 'bug,urgent' });
+    });
+
+    it('should filter merge requests by identity scope without a username ("my MRs")', async () => {
+      mockClient.listMergeRequests.mockResolvedValue([]);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listMrIds');
+      await listTool!.handler({ project_id: 123, scope: 'assigned_to_me' });
+
+      expect(mockClient.listMergeRequests).toHaveBeenCalledWith(123, { scope: 'assigned_to_me' });
+    });
+
+    it('should declare reviewer_username, labels, and scope in the input schema', () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listMrIds');
+
+      expect(listTool?.tool.inputSchema.properties).toHaveProperty('reviewer_username');
+      expect(listTool?.tool.inputSchema.properties).toHaveProperty('labels');
+      expect(listTool?.tool.inputSchema.properties).toHaveProperty('scope');
+    });
+
     it('should limit merge request results', async () => {
       const mockMRs = [
         { iid: 1, title: 'MR 1' },
@@ -220,6 +261,38 @@ describe('MR Tools', () => {
         content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
         isError: true,
       });
+    });
+
+    it('should accept a numeric-string mr_iid', async () => {
+      const mockMR = { id: 1, iid: 10, title: 'Test' };
+      mockClient.showMergeRequest.mockResolvedValue(mockMR);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const getTool = tools.find((t) => t.tool.name === 'getMrFull');
+      await getTool!.handler({ project_id: 123, mr_iid: '10' });
+
+      expect(mockClient.showMergeRequest).toHaveBeenCalledWith(123, 10);
+    });
+
+    it('should accept a "#"-prefixed mr_iid', async () => {
+      const mockMR = { id: 1, iid: 10, title: 'Test' };
+      mockClient.showMergeRequest.mockResolvedValue(mockMR);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const getTool = tools.find((t) => t.tool.name === 'getMrFull');
+      await getTool!.handler({ project_id: 123, mr_iid: '#10' });
+
+      expect(mockClient.showMergeRequest).toHaveBeenCalledWith(123, 10);
+    });
+
+    it('should return a teaching error for a non-numeric mr_iid without calling the client', async () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const getTool = tools.find((t) => t.tool.name === 'getMrFull');
+      const result = await getTool!.handler({ project_id: 123, mr_iid: 'not-a-number' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('mr_iid');
+      expect(mockClient.showMergeRequest).not.toHaveBeenCalled();
     });
   });
 
@@ -385,6 +458,23 @@ describe('MR Tools', () => {
         isError: true,
       });
     });
+
+    it('should accept a "#"-prefixed mr_iid', async () => {
+      mockClient.approveMergeRequest.mockResolvedValue(undefined);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const approveTool = tools.find((t) => t.tool.name === 'approveMergeRequest');
+      await approveTool!.handler({ project_id: 123, mr_iid: '#10' });
+
+      expect(mockClient.approveMergeRequest).toHaveBeenCalledWith(123, 10);
+    });
+
+    it('should state in its description that approval is identity-bound to the token owner', () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const approveTool = tools.find((t) => t.tool.name === 'approveMergeRequest');
+
+      expect(approveTool?.tool.description).toContain('authenticated GitLab user');
+    });
   });
 
   describe('mergeMergeRequest', () => {
@@ -477,6 +567,25 @@ describe('MR Tools', () => {
         content: [{ type: 'text', text: 'Error: GitLab API error' }],
         isError: true,
       });
+    });
+
+    it('should accept a numeric-string mr_iid', async () => {
+      mockClient.mergeMergeRequest.mockResolvedValue({ id: 1, iid: 10, state: 'merged' });
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const mergeTool = tools.find((t) => t.tool.name === 'mergeMergeRequest');
+      await mergeTool!.handler({ project_id: 123, mr_iid: '10' });
+
+      expect(mockClient.mergeMergeRequest).toHaveBeenCalledWith(123, 10, {});
+    });
+
+    it('should return a teaching error and skip the client call for an invalid mr_iid', async () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const mergeTool = tools.find((t) => t.tool.name === 'mergeMergeRequest');
+      const result = await mergeTool!.handler({ project_id: 123, mr_iid: 'abc' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.mergeMergeRequest).not.toHaveBeenCalled();
     });
   });
 
@@ -613,6 +722,18 @@ describe('MR Tools', () => {
         isError: true,
       });
     });
+
+    it('should accept a "#"-prefixed mr_iid', async () => {
+      mockClient.updateMergeRequest.mockResolvedValue({ id: 1, iid: 10 });
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const updateTool = tools.find((t) => t.tool.name === 'updateMergeRequest');
+      await updateTool!.handler({ project_id: 123, mr_iid: '#10', title: 'New Title' });
+
+      expect(mockClient.updateMergeRequest).toHaveBeenCalledWith(123, 10, {
+        title: 'New Title',
+      });
+    });
   });
 
   describe('getMrChanges', () => {
@@ -680,6 +801,15 @@ describe('MR Tools', () => {
         content: [{ type: 'text', text: 'Error: GitLab API error' }],
         isError: true,
       });
+    });
+
+    it('should return a teaching error for a non-numeric mr_iid', async () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const changesTool = tools.find((t) => t.tool.name === 'getMrChanges');
+      const result = await changesTool!.handler({ project_id: 123, mr_iid: 'nope' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.getMrChanges).not.toHaveBeenCalled();
     });
   });
 

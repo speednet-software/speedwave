@@ -9,15 +9,22 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation } from './validation.js';
+import { withValidation, normalizeIid } from './validation.js';
 
 const listMrIdsTool: Tool = {
   name: 'listMrIds',
-  description: 'List merge request IIDs. Use get_mr_full for details.',
+  description:
+    'List merge request IIDs. Use getMrFull for details. For "my MRs"/"MRs I need to review", pass scope: "assigned_to_me" or "created_by_me" (or author_username/reviewer_username for a specific user).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.SELF_PARAM]: "scope: 'assigned_to_me' | 'created_by_me'",
+  },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'list', 'pull', 'ids'],
   example:
     'const { mrs, count } = await gitlab.listMrIds({ project_id: "speedwave/core", state: "opened" })',
@@ -31,6 +38,17 @@ const listMrIdsTool: Tool = {
         description: 'MR state',
       },
       author_username: { type: 'string', description: 'Filter by author' },
+      reviewer_username: {
+        type: 'string',
+        description: "Filter by reviewer's username (MRs assigned to this user for review)",
+      },
+      labels: { type: 'string', description: 'Filter by comma-separated labels' },
+      scope: {
+        type: 'string',
+        enum: ['assigned_to_me', 'created_by_me', 'all'],
+        description:
+          "Filter by identity relative to the authenticated user. Use with getCurrentUser to resolve 'me' without needing a username.",
+      },
       limit: { type: 'number', description: 'Max results (default 100)' },
     },
     required: ['project_id'],
@@ -69,11 +87,11 @@ const listMrIdsTool: Tool = {
       input: { project_id: 'my-group/my-project', state: 'opened' },
     },
     {
-      description: 'Full: my open MRs',
+      description: 'Full: MRs assigned to me for review',
       input: {
         project_id: 'my-group/my-project',
         state: 'opened',
-        author_username: 'john.doe',
+        scope: 'assigned_to_me',
         limit: 50,
       },
     },
@@ -84,14 +102,17 @@ const getMrFullTool: Tool = {
   name: 'getMrFull',
   description: 'Get complete merge request data. No truncation.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'show', 'detail', 'full'],
   example: 'const mr = await gitlab.getMrFull({ project_id: "speedwave/core", mr_iid: 123 })',
   inputSchema: {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'MR internal ID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'MR internal ID as a number or string, e.g. 42 or "#42"',
+      },
     },
     required: ['project_id', 'mr_iid'],
   },
@@ -149,7 +170,7 @@ const createMergeRequestTool: Tool = {
   name: 'createMergeRequest',
   description: 'Create a new merge request',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'create', 'new', 'pull'],
   example:
     'const mr = await gitlab.createMergeRequest({ project_id: "speedwave/core", source_branch: "feature/x", target_branch: "main", title: "Add feature X" })',
@@ -211,16 +232,24 @@ const createMergeRequestTool: Tool = {
 
 const approveMergeRequestTool: Tool = {
   name: 'approveMergeRequest',
-  description: 'Approve a merge request',
+  description:
+    'Approve a merge request. Approves as the currently authenticated GitLab user (the configured token owner); does not accept an approver parameter.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['gitlab', 'merge', 'request', 'approve', 'review', 'accept'],
   example: 'await gitlab.approveMergeRequest({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
     },
     required: ['project_id', 'mr_iid'],
   },
@@ -254,7 +283,7 @@ const mergeMergeRequestTool: Tool = {
   name: 'mergeMergeRequest',
   description: 'Merge a merge request',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'accept', 'complete', 'finish'],
   example:
     'await gitlab.mergeMergeRequest({ project_id: "speedwave/core", mr_iid: 42, auto_merge: true })',
@@ -262,7 +291,10 @@ const mergeMergeRequestTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       squash: { type: 'boolean', description: 'Squash commits on merge' },
       should_remove_source_branch: {
         type: 'boolean',
@@ -317,7 +349,7 @@ const updateMergeRequestTool: Tool = {
   name: 'updateMergeRequest',
   description: 'Update an existing merge request',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'update', 'edit', 'modify'],
   example:
     'await gitlab.updateMergeRequest({ project_id: "speedwave/core", mr_iid: 42, title: "Updated: Add authentication flow", state_event: "close" })',
@@ -325,7 +357,10 @@ const updateMergeRequestTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       title: { type: 'string', description: 'New title' },
       description: { type: 'string', description: 'New description' },
       target_branch: { type: 'string', description: 'New target branch' },
@@ -383,7 +418,7 @@ const getMrChangesTool: Tool = {
   name: 'getMrChanges',
   description: 'Get diff/changes of a merge request',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'diff', 'changes', 'files'],
   example:
     'const changes = await gitlab.getMrChanges({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -391,7 +426,10 @@ const getMrChangesTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
     },
     required: ['project_id', 'mr_iid'],
   },
@@ -446,6 +484,9 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
           project_id: string | number;
           state?: string;
           author_username?: string;
+          reviewer_username?: string;
+          labels?: string;
+          scope?: 'assigned_to_me' | 'created_by_me' | 'all';
           limit?: number;
         };
         const result = await c.listMergeRequests(project_id, options);
@@ -461,8 +502,10 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
     {
       tool: getMrFullTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
-        const result = await c.showMergeRequest(project_id, mr_iid);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
+        const iid = normalizeIid(mr_iid, 'mr_iid');
+        if (!iid.ok) return iid.error;
+        const result = await c.showMergeRequest(project_id, iid.value);
         return jsonResult(result);
       }),
     },
@@ -485,8 +528,10 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
     {
       tool: approveMergeRequestTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
-        await c.approveMergeRequest(project_id, mr_iid);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
+        const iid = normalizeIid(mr_iid, 'mr_iid');
+        if (!iid.ok) return iid.error;
+        await c.approveMergeRequest(project_id, iid.value);
         return jsonResult({ success: true, message: 'Merge request approved' });
       }),
     },
@@ -495,13 +540,15 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...options } = params as {
           project_id: string | number;
-          mr_iid: number;
+          mr_iid: unknown;
           squash?: boolean;
           should_remove_source_branch?: boolean;
           auto_merge?: boolean;
           sha?: string;
         };
-        const result = await c.mergeMergeRequest(project_id, mr_iid, options);
+        const iid = normalizeIid(mr_iid, 'mr_iid');
+        if (!iid.ok) return iid.error;
+        const result = await c.mergeMergeRequest(project_id, iid.value, options);
         return jsonResult(result);
       }),
     },
@@ -510,22 +557,26 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...options } = params as {
           project_id: string | number;
-          mr_iid: number;
+          mr_iid: unknown;
           title?: string;
           description?: string;
           target_branch?: string;
           state_event?: string;
           labels?: string;
         };
-        const result = await c.updateMergeRequest(project_id, mr_iid, options);
+        const iid = normalizeIid(mr_iid, 'mr_iid');
+        if (!iid.ok) return iid.error;
+        const result = await c.updateMergeRequest(project_id, iid.value, options);
         return jsonResult(result);
       }),
     },
     {
       tool: getMrChangesTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
-        const result = await c.getMrChanges(project_id, mr_iid);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
+        const iid = normalizeIid(mr_iid, 'mr_iid');
+        if (!iid.ok) return iid.error;
+        const result = await c.getMrChanges(project_id, iid.value);
         return jsonResult(result);
       }),
     },

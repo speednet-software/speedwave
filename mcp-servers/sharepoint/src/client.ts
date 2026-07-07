@@ -320,6 +320,14 @@ export class SharePointClient {
       return 'Resource not found in SharePoint.';
     }
 
+    if (message.includes('429') || message.includes('activityLimitReached')) {
+      return 'Rate limited by Microsoft Graph (429). Wait and retry the same call.';
+    }
+
+    if (message.includes('423') || message.includes('resourceLocked')) {
+      return 'Resource is locked in SharePoint (checked out or being edited elsewhere). Retry later.';
+    }
+
     if (message.includes('security check failed') || message.includes('traversal')) {
       return 'Invalid path: security check failed (path traversal not allowed).';
     }
@@ -350,6 +358,14 @@ export class SharePointClient {
    * @throws {OAuthScopeMismatchError} when refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
+    // Distinguish "the whole site never resolved" from "this item was not found" —
+    // otherwise a model retries individual params against a config-level failure.
+    if (this.statusTracker.getStatus() === 'failed') {
+      throw new Error(
+        'SharePoint site connection is not established (siteId resolve failed). ' +
+          'This is a configuration issue, not a parameter problem: ask the user to check the SharePoint integration settings.'
+      );
+    }
     // Live view onto config.accessToken so the helper's writes are shared.
     const config = this.config;
     const state: AuthedTokenState = {
@@ -683,7 +699,9 @@ export class SharePointClient {
     const downloadUrl = metadata['@microsoft.graph.downloadUrl'];
 
     if (!downloadUrl) {
-      throw new Error('No download URL available for file');
+      throw new Error(
+        'No download URL available for file. This can happen if the item is a folder, is checked out to another user, or is an online-only document type; verify with getFileFull or listFileIds first.'
+      );
     }
 
     // Ensure parent directory exists

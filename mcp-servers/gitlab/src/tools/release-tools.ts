@@ -1,22 +1,72 @@
 /**
- * Release Tools - 3 tools for GitLab tags and releases
+ * Release Tools - 4 tools for GitLab tags and releases
  */
 
 import {
   Tool,
   ToolDefinition,
   jsonResult,
+  READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
+
+const listTagsTool: Tool = {
+  name: 'listTags',
+  description:
+    'List tags in a project, newest first. Use before createRelease to find a valid tag_name.',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['gitlab', 'tags', 'list', 'release', 'version', 'git'],
+  example: 'const { tags } = await gitlab.listTags({ project_id: "speedwave/core" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project_id: { type: ['string', 'number'], description: 'Project ID or path' },
+      search: { type: 'string', description: 'Filter tags by name pattern' },
+      limit: { type: 'number', description: 'Max results (default 20)' },
+    },
+    required: ['project_id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      tags: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            target: { type: 'string', description: 'Commit SHA' },
+            message: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List all tags',
+      input: { project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'Search tags by pattern',
+      input: { project_id: 'my-group/my-project', search: 'v1.' },
+    },
+  ],
+};
 
 const createTagTool: Tool = {
   name: 'createTag',
   description: 'Create a new Git tag',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'tag', 'create', 'release', 'version', 'git'],
   example:
     'const tag = await gitlab.createTag({ project_id: "speedwave/core", tag_name: "v1.0.0", ref: "main", message: "Release v1.0.0 - Initial stable release" })',
@@ -71,7 +121,7 @@ const deleteTagTool: Tool = {
   name: 'deleteTag',
   description: 'Delete a Git tag from the repository',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'tag', 'delete', 'remove', 'git', 'version', 'release'],
   example: 'await gitlab.deleteTag({ project_id: "speedwave/core", tag_name: "v1.0.0" })',
   inputSchema: {
@@ -87,6 +137,15 @@ const deleteTagTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       message: { type: 'string' },
+      deleted_tag: {
+        type: 'object',
+        description: 'Audit info captured before deletion, when readable',
+        properties: {
+          name: { type: 'string' },
+          target: { type: 'string', description: 'Commit SHA' },
+          message: { type: 'string' },
+        },
+      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -107,7 +166,7 @@ const createReleaseTool: Tool = {
   name: 'createRelease',
   description: 'Create a new release from a tag',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'release', 'create', 'changelog', 'version', 'publish'],
   example:
     'const release = await gitlab.createRelease({ project_id: "speedwave/core", tag_name: "v1.0.0", name: "Initial Release", description: "## Changelog\\n- Feature: Authentication\\n- Feature: MCP integration" })',
@@ -115,7 +174,11 @@ const createReleaseTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      tag_name: { type: 'string', description: 'Tag name (must exist)' },
+      tag_name: {
+        type: 'string',
+        description:
+          'Tag name (must exist — list existing tags via listTags first, or create one via createTag)',
+      },
       name: { type: 'string', description: 'Release name (optional, defaults to tag name)' },
       description: { type: 'string', description: 'Release description/notes (optional)' },
     },
@@ -167,6 +230,18 @@ const createReleaseTool: Tool = {
 export function createReleaseTools(client: GitLabClient | null): ToolDefinition[] {
   return [
     {
+      tool: listTagsTool,
+      handler: withValidation(client, async (c, params) => {
+        const { project_id, ...options } = params as {
+          project_id: string | number;
+          search?: string;
+          limit?: number;
+        };
+        const result = await c.listTags(project_id, options);
+        return jsonResult({ tags: result });
+      }),
+    },
+    {
       tool: createTagTool,
       handler: withValidation(client, async (c, params) => {
         const { project_id, ...options } = params as {
@@ -186,8 +261,12 @@ export function createReleaseTools(client: GitLabClient | null): ToolDefinition[
           project_id: string | number;
           tag_name: string;
         };
-        await c.deleteTag(project_id, tag_name);
-        return jsonResult({ success: true, message: `Tag '${tag_name}' deleted successfully` });
+        const result = await c.deleteTag(project_id, tag_name);
+        return jsonResult({
+          success: true,
+          message: `Tag '${tag_name}' deleted successfully`,
+          deleted_tag: result.deleted_tag,
+        });
       }),
     },
     {

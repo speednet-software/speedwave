@@ -65,6 +65,14 @@ describe('mail-tools', () => {
       expect(result.success).toBe(true);
       expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { limit: 10, offset: 0 });
     });
+
+    it('passes client through to the native CLI', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+
+      await handleListEmails({ client: 'outlook' });
+
+      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { client: 'outlook' });
+    });
   });
 
   describe('handleGetEmail', () => {
@@ -89,6 +97,17 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
+
+    it('passes client through to the native CLI', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { id: 'msg-1' } });
+
+      await handleGetEmail({ id: 'msg-1', client: 'outlook' });
+
+      expect(runCommand).toHaveBeenCalledWith('mail', 'get_email', {
+        id: 'msg-1',
+        client: 'outlook',
+      });
+    });
   });
 
   describe('handleSearchEmails', () => {
@@ -102,6 +121,17 @@ describe('mail-tools', () => {
 
       expect(result.success).toBe(true);
       expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', { query: 'invoice' });
+    });
+
+    it('passes client through to the native CLI', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+
+      await handleSearchEmails({ query: 'invoice', client: 'outlook' });
+
+      expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', {
+        query: 'invoice',
+        client: 'outlook',
+      });
     });
 
     it('fails when query is empty', async () => {
@@ -153,6 +183,28 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('EMPTY_FIELDS');
       expect(result.error?.message).toContain('to');
     });
+
+    it('passes bcc and client through to the native CLI', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
+
+      await handleSendEmail({
+        to: 'bob@example.com',
+        subject: 'Test',
+        body: 'Hello Bob',
+        bcc: 'carol@example.com',
+        client: 'outlook',
+        confirm_send: true,
+      });
+
+      expect(runCommand).toHaveBeenCalledWith('mail', 'send_email', {
+        to: 'bob@example.com',
+        subject: 'Test',
+        body: 'Hello Bob',
+        bcc: 'carol@example.com',
+        client: 'outlook',
+        confirm_send: true,
+      });
+    });
   });
 
   describe('handleReplyToEmail', () => {
@@ -190,6 +242,24 @@ describe('mail-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
+    });
+
+    it('passes client through to the native CLI', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
+
+      await handleReplyToEmail({
+        id: 'msg-1',
+        body: 'Thanks!',
+        client: 'outlook',
+        confirm_send: true,
+      });
+
+      expect(runCommand).toHaveBeenCalledWith('mail', 'reply_to_email', {
+        id: 'msg-1',
+        body: 'Thanks!',
+        client: 'outlook',
+        confirm_send: true,
+      });
     });
   });
 
@@ -249,6 +319,12 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
+
+      it('rejects client with control characters', async () => {
+        const result = await handleGetEmail({ id: 'msg-1', client: 'out\x01look' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
     });
 
     describe('handleListMailboxes', () => {
@@ -283,6 +359,12 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
+
+      it('rejects client with control characters', async () => {
+        const result = await handleListEmails({ client: 'out\x01look' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
     });
 
     describe('handleSearchEmails', () => {
@@ -296,6 +378,12 @@ describe('mail-tools', () => {
         const result = await handleSearchEmails({ query: 'test', limit: -1 });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('OUT_OF_RANGE');
+      });
+
+      it('rejects client exceeding max length', async () => {
+        const result = await handleSearchEmails({ query: 'test', client: 'a'.repeat(1001) });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('FIELD_TOO_LONG');
       });
     });
 
@@ -332,6 +420,30 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
+
+      it('rejects bcc with control characters', async () => {
+        const result = await handleSendEmail({
+          to: 'bob@example.com',
+          subject: 'Test',
+          body: 'Hello',
+          bcc: 'carol\x00@example.com',
+          confirm_send: true,
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
+
+      it('rejects client exceeding max length', async () => {
+        const result = await handleSendEmail({
+          to: 'bob@example.com',
+          subject: 'Test',
+          body: 'Hello',
+          client: 'a'.repeat(1001),
+          confirm_send: true,
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('FIELD_TOO_LONG');
+      });
     });
 
     describe('handleReplyToEmail', () => {
@@ -354,6 +466,17 @@ describe('mail-tools', () => {
         });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects client with control characters', async () => {
+        const result = await handleReplyToEmail({
+          id: 'msg-1',
+          body: 'Thanks!',
+          confirm_send: true,
+          client: 'out\x01look',
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
     });
   });

@@ -1,7 +1,7 @@
 /** Tests for GitHub Pull Request Tools. */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createPrTools } from './pr-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -108,11 +108,13 @@ describe('Pull Request Tools', () => {
     it('returns 7 tools when configured, listPullRequests is eager-loaded', () => {
       const tools = createPrTools(mockClient as unknown as GitHubClient);
       expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOL_NAMES);
-      expect(tools.find((t) => t.tool.name === 'listPullRequests')?.tool._meta?.deferLoading).toBe(
-        false
-      );
+      expect(
+        tools.find((t) => t.tool.name === 'listPullRequests')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(false);
       for (const name of ALL_TOOL_NAMES.filter((n) => n !== 'listPullRequests')) {
-        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.deferLoading).toBe(true);
+        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(
+          true
+        );
       }
     });
 
@@ -223,6 +225,26 @@ describe('Pull Request Tools', () => {
       const result = await handler!({ owner: 'o', repo: 'r', number: 99 });
 
       expect(result).toMatchObject({ isError: true });
+    });
+
+    it('tolerates a "#42" style PR number', async () => {
+      mockClient.getPullRequest.mockResolvedValue(makePr({ number: 42 }));
+
+      const tools = createPrTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
+      await handler!({ owner: 'octocat', repo: 'hello-world', number: '#42' });
+
+      expect(mockClient.getPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', 42);
+    });
+
+    it('splits a combined owner/repo string passed in repo', async () => {
+      mockClient.getPullRequest.mockResolvedValue(makePr({ number: 7 }));
+
+      const tools = createPrTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
+      await handler!({ repo: 'octocat/hello-world', number: 7 });
+
+      expect(mockClient.getPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', 7);
     });
   });
 

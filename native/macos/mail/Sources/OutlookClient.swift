@@ -5,6 +5,15 @@ import SharedCLI
 enum OutlookClient {
     static let name = "Microsoft Outlook"
 
+    /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
+    static func recipientClauses(_ addresses: String, kind: String) -> String {
+        splitAddressList(addresses)
+            .map { addr in
+                "        make new \(kind) recipient at end of \(kind) recipients with properties {email address:{address:\"\(escapeAppleScript(addr))\"}}"
+            }
+            .joined(separator: "\n")
+    }
+
     /// Whether the Outlook process is running. Rethrows `.automationPermission`/`.timeout`;
     /// a genuine script failure maps to `false`.
     static func isAvailable() throws -> Bool {
@@ -124,25 +133,21 @@ enum OutlookClient {
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 
-    static func sendEmail(to: String, subject: String, body: String, cc: String?) throws -> [String: Any] {
-        let toEsc = escapeAppleScript(to)
+    static func sendEmail(to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
         let subjectEsc = escapeAppleScript(subject)
         let bodyEsc = escapeAppleScript(body)
 
-        var ccClause = ""
-        if let cc = cc {
-            let ccEsc = escapeAppleScript(cc)
-            ccClause = """
-                        make new cc recipient at end of cc recipients with properties {email address:{address:"\(ccEsc)"}}
-            """
-        }
+        let toClause = recipientClauses(to, kind: "to")
+        let ccClause = cc.map { recipientClauses($0, kind: "cc") } ?? ""
+        let bccClause = bcc.map { recipientClauses($0, kind: "bcc") } ?? ""
 
         let script = """
         tell application "Microsoft Outlook"
             set newMsg to make new outgoing message with properties {subject:"\(subjectEsc)", plain text content:"\(bodyEsc)"}
             tell newMsg
-                make new to recipient at end of to recipients with properties {email address:{address:"\(toEsc)"}}
+        \(toClause)
         \(ccClause)
+        \(bccClause)
             end tell
             send newMsg
         end tell

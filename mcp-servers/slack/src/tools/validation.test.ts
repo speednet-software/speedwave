@@ -1,7 +1,7 @@
 /** Tests for withValidation wrapper. */
 
 import { describe, it, expect, vi } from 'vitest';
-import { withValidation, ToolResult } from './validation.js';
+import { withValidation, missingParamResult, ToolResult } from './validation.js';
 
 describe('withValidation', () => {
   describe('parameter validation', () => {
@@ -197,5 +197,35 @@ describe('withValidation', () => {
       expect(parsed.code).toBe('HANDLER_ERROR');
       expect(parsed.message).toBe('async failure');
     });
+  });
+});
+
+describe('missingParamResult', () => {
+  it('names the param, the received value, and the next step', () => {
+    const result = missingParamResult('message', undefined, 'Provide the text to send.');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('MISSING_PARAM');
+    expect(result.error?.message).toContain("'message' is required");
+    expect(result.error?.message).toContain('undefined');
+    expect(result.error?.message).toContain('Provide the text to send.');
+  });
+
+  it('quotes a received string value', () => {
+    const result = missingParamResult('channel', '', 'Provide a channel name.');
+
+    expect(result.error?.message).toContain('received: ""');
+  });
+
+  it('renders a received null value', () => {
+    const result = missingParamResult('users', null, 'Provide an array of user IDs.');
+
+    expect(result.error?.message).toContain('received: null');
+  });
+
+  it('stringifies a non-string, non-null received value', () => {
+    const result = missingParamResult('limit', 0, 'Provide a positive number.');
+
+    expect(result.error?.message).toContain('received: 0');
   });
 });

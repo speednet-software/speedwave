@@ -146,6 +146,30 @@ describe('channel-tools', () => {
       expect(result.error?.code).toBe('SEND_FAILED');
       expect(result.error?.message).toContain('Authentication failed');
     });
+
+    it('rejects a missing message with a teaching error before calling Slack', async () => {
+      const result = await handleSendChannel(mockClients, {
+        channel: '#general',
+        message: '',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain("'message' is required");
+      expect(client.sendChannel).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing channel with a teaching error before calling Slack', async () => {
+      const result = await handleSendChannel(mockClients, {
+        channel: '',
+        message: 'Hello',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain("'channel' is required");
+      expect(client.sendChannel).not.toHaveBeenCalled();
+    });
   });
 
   describe('handleGetChannelMessages', () => {
@@ -289,6 +313,15 @@ describe('channel-tools', () => {
       expect(result.error?.code).toBe('READ_FAILED');
       expect(result.error?.message).toContain('Rate limit exceeded');
     });
+
+    it('rejects a missing channel with a teaching error before calling Slack', async () => {
+      const result = await handleGetChannelMessages(mockClients, { channel: '' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain("'channel' is required");
+      expect(client.readChannel).not.toHaveBeenCalled();
+    });
   });
 
   describe('handleGetThreadMessages', () => {
@@ -352,6 +385,30 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('READ_FAILED');
+    });
+
+    it('rejects a missing thread_ts with a teaching error before calling Slack', async () => {
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '#general',
+        thread_ts: '',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain("'thread_ts' is required");
+      expect(client.readThread).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing channel with a teaching error before calling Slack', async () => {
+      const result = await handleGetThreadMessages(mockClients, {
+        channel: '',
+        thread_ts: '1.0',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain("'channel' is required");
+      expect(client.readThread).not.toHaveBeenCalled();
     });
   });
 

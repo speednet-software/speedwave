@@ -6,19 +6,28 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  textResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation } from './validation.js';
+import { withValidation, normalizeIid } from './validation.js';
+
+const PIPELINE_STATUSES = [
+  'running',
+  'pending',
+  'success',
+  'failed',
+  'canceled',
+  'skipped',
+] as const;
 
 const listPipelineIdsTool: Tool = {
   name: 'listPipelineIds',
-  description: 'List pipeline IDs. Use get_pipeline_full for details.',
+  description: 'List pipeline IDs. Use getPipelineFull for details.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'pipeline', 'ci', 'cd', 'list', 'build', 'ids'],
   example:
     'const { pipelines, count } = await gitlab.listPipelineIds({ project_id: "speedwave/core", status: "failed" })',
@@ -27,7 +36,11 @@ const listPipelineIdsTool: Tool = {
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
       ref: { type: 'string', description: 'Branch/tag name' },
-      status: { type: 'string', description: 'Pipeline status' },
+      status: {
+        type: 'string',
+        enum: [...PIPELINE_STATUSES],
+        description: 'Pipeline status',
+      },
       limit: { type: 'number', description: 'Max results (default 100)' },
     },
     required: ['project_id'],
@@ -44,7 +57,7 @@ const listPipelineIdsTool: Tool = {
             id: { type: 'number' },
             status: {
               type: 'string',
-              enum: ['running', 'pending', 'success', 'failed', 'canceled'],
+              enum: [...PIPELINE_STATUSES],
             },
             ref: { type: 'string', description: 'Branch or tag name' },
             sha: { type: 'string', description: 'Commit SHA' },
@@ -77,7 +90,7 @@ const getPipelineFullTool: Tool = {
   name: 'getPipelineFull',
   description: 'Get complete pipeline data. No truncation.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'pipeline', 'ci', 'details', 'jobs', 'status', 'full'],
   example:
     'const pipeline = await gitlab.getPipelineFull({ project_id: "speedwave/core", pipeline_id: 123456 })',
@@ -85,7 +98,10 @@ const getPipelineFullTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      pipeline_id: { type: 'number', description: 'Pipeline ID' },
+      pipeline_id: {
+        type: ['number', 'string'],
+        description: 'Pipeline ID as a number or string, e.g. 123456 or "#123456"',
+      },
     },
     required: ['project_id', 'pipeline_id'],
   },
@@ -103,7 +119,10 @@ const getPipelineFullTool: Tool = {
           web_url: { type: 'string' },
           created_at: { type: 'string' },
           updated_at: { type: 'string' },
-          duration: { type: 'number', description: 'Duration in seconds' },
+          duration: {
+            type: 'number',
+            description: 'Duration in seconds. Absent or null while the pipeline is still running.',
+          },
         },
       },
       jobs: {
@@ -142,7 +161,7 @@ const getJobLogTool: Tool = {
   name: 'getJobLog',
   description: 'Get log output of a pipeline job',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'job', 'log', 'ci', 'build', 'debug'],
   example:
     'const log = await gitlab.getJobLog({ project_id: "speedwave/core", job_id: 12345, tail_lines: 50 })',
@@ -150,7 +169,11 @@ const getJobLogTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      job_id: { type: 'number', description: 'Job ID' },
+      job_id: {
+        type: ['number', 'string'],
+        description:
+          'Job ID as a number or string, e.g. 42 or "#42" (from the jobs array returned by getPipelineFull)',
+      },
       tail_lines: { type: 'number', description: 'Number of lines from end of log (default 100)' },
     },
     required: ['project_id', 'job_id'],
@@ -160,14 +183,6 @@ const getJobLogTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       log: { type: 'string', description: 'Job log content (plain text)' },
-      job: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          name: { type: 'string' },
-          status: { type: 'string' },
-        },
-      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -188,14 +203,17 @@ const retryPipelineTool: Tool = {
   name: 'retryPipeline',
   description: 'Retry a failed pipeline',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'pipeline', 'retry', 'rerun', 'ci', 'build'],
   example: 'await gitlab.retryPipeline({ project_id: "speedwave/core", pipeline_id: 123456 })',
   inputSchema: {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      pipeline_id: { type: 'number', description: 'Pipeline ID' },
+      pipeline_id: {
+        type: ['number', 'string'],
+        description: 'Pipeline ID as a number or string, e.g. 123456 or "#123456"',
+      },
     },
     required: ['project_id', 'pipeline_id'],
   },
@@ -235,7 +253,7 @@ const triggerPipelineTool: Tool = {
   name: 'triggerPipeline',
   description: 'Trigger a new pipeline with optional variables',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'pipeline', 'trigger', 'create', 'run', 'ci', 'release', 'variables'],
   example: `// Trigger pipeline with CI variable
 await gitlab.triggerPipeline({
@@ -338,9 +356,11 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, pipeline_id } = params as {
           project_id: string | number;
-          pipeline_id: number;
+          pipeline_id: unknown;
         };
-        const result = await c.showPipeline(project_id, pipeline_id);
+        const iid = normalizeIid(pipeline_id, 'pipeline_id');
+        if (!iid.ok) return iid.error;
+        const result = await c.showPipeline(project_id, iid.value);
         return jsonResult(result);
       }),
     },
@@ -349,11 +369,13 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, job_id, tail_lines } = params as {
           project_id: string | number;
-          job_id: number;
+          job_id: unknown;
           tail_lines?: number;
         };
-        const result = await c.getJobLog(project_id, job_id, tail_lines);
-        return textResult(result);
+        const iid = normalizeIid(job_id, 'job_id');
+        if (!iid.ok) return iid.error;
+        const result = await c.getJobLog(project_id, iid.value, tail_lines);
+        return jsonResult({ log: result });
       }),
     },
     {
@@ -361,9 +383,11 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, pipeline_id } = params as {
           project_id: string | number;
-          pipeline_id: number;
+          pipeline_id: unknown;
         };
-        const result = await c.retryPipeline(project_id, pipeline_id);
+        const iid = normalizeIid(pipeline_id, 'pipeline_id');
+        if (!iid.ok) return iid.error;
+        const result = await c.retryPipeline(project_id, iid.value);
         return jsonResult(result);
       }),
     },

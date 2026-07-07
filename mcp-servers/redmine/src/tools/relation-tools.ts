@@ -18,7 +18,7 @@ const listRelationsTool: Tool = {
   name: 'listRelations',
   description: 'List all relations for an issue (blocks, precedes, duplicates, etc.)',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'relation', 'link', 'dependency', 'blocks', 'precedes', 'follows', 'list'],
   example: `const { relations } = await redmine.listRelations({ issue_id: 12345 })`,
   inputSchema: {
@@ -76,7 +76,7 @@ const createRelationTool: Tool = {
   name: 'createRelation',
   description: 'Create a relation between two issues',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'relation', 'create', 'link', 'dependency', 'blocks', 'precedes'],
   example: `await redmine.createRelation({ issue_id: 100, issue_to_id: 101, relation_type: 'blocks' })`,
   inputSchema: {
@@ -156,13 +156,17 @@ const deleteRelationTool: Tool = {
   name: 'deleteRelation',
   description: 'Delete a relation between issues',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'relation', 'delete', 'remove', 'unlink'],
   example: `await redmine.deleteRelation({ relation_id: 456 })`,
   inputSchema: {
     type: 'object',
     properties: {
-      relation_id: { type: 'number', description: 'Relation ID to delete' },
+      relation_id: {
+        type: 'number',
+        description:
+          'Relation ID to delete — obtained from listRelations(issue_id); look for relations[].id',
+      },
     },
     required: ['relation_id'],
   },
@@ -212,25 +216,25 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
     {
       tool: listRelationsTool,
       handler: async (params) => {
+        const { issue_id } = params as { issue_id: number };
         try {
-          const { issue_id } = params as { issue_id: number };
           const result = await client.listRelations(issue_id);
           return jsonResult(result);
         } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
+          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
         }
       },
     },
     {
       tool: createRelationTool,
       handler: async (params) => {
+        const { issue_id, issue_to_id, relation_type, delay } = params as {
+          issue_id: number;
+          issue_to_id: number;
+          relation_type?: RelationType;
+          delay?: number;
+        };
         try {
-          const { issue_id, issue_to_id, relation_type, delay } = params as {
-            issue_id: number;
-            issue_to_id: number;
-            relation_type?: RelationType;
-            delay?: number;
-          };
           const result = await client.createRelation({
             issue_id,
             issue_to_id,
@@ -239,19 +243,21 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
           });
           return jsonResult(result);
         } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
+          return errorResult(
+            RedmineClient.formatError(error, `issue_id=${issue_id}, issue_to_id=${issue_to_id}`)
+          );
         }
       },
     },
     {
       tool: deleteRelationTool,
       handler: async (params) => {
+        const { relation_id } = params as { relation_id: number };
         try {
-          const { relation_id } = params as { relation_id: number };
           await client.deleteRelation(relation_id);
           return jsonResult({ ok: true });
         } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
+          return errorResult(RedmineClient.formatError(error, `relation_id=${relation_id}`));
         }
       },
     },

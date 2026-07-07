@@ -4,6 +4,7 @@
  * @module mcp-atlassian/domains/confluence-spaces
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
 import type { ConfluenceSpace } from '../types.js';
@@ -25,7 +26,7 @@ export function createConfluenceSpacesClient(client: AtlassianClient): Confluenc
   return {
     async list(options = {}) {
       const params: Record<string, unknown> = {
-        limit: Math.min(Math.max(options.limit ?? 50, 1), 100),
+        limit: clampPageSize(options.limit, 50, 100),
       };
       if (options.keys && options.keys.length > 0) params.keys = options.keys.join(',');
       const res = await client.get<{ results?: unknown[] }>('/wiki/api/v2/spaces', params);

@@ -226,10 +226,24 @@ describe('officeToPdf', () => {
     await expect(officeToPdf('a.txt')).rejects.toThrow(/does not support .txt/);
   });
 
-  it('throws when LibreOffice produces nothing', async () => {
+  it('throws a ValidationError when LibreOffice produces nothing', async () => {
     readdir.mockResolvedValueOnce([]);
     resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
-    await expect(officeToPdf('a.docx')).rejects.toThrow(/produced no output/);
+    await expect(officeToPdf('a.docx')).rejects.toThrow(/produced no output.*simplify\/re-save/s);
+  });
+
+  it('translates a password/encrypted soffice failure into actionable guidance', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
+    runOk.mockRejectedValueOnce(new Error('soffice exited with code 1: password required'));
+    await expect(officeToPdf('a.docx')).rejects.toThrow(/password-protected or encrypted/);
+  });
+
+  it('wraps any other soffice failure with generic guidance', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
+    runOk.mockRejectedValueOnce(new Error('soffice exited with code 1: segfault'));
+    await expect(officeToPdf('a.docx')).rejects.toThrow(
+      /LibreOffice conversion failed.*feature LibreOffice cannot render/s
+    );
   });
 });
 

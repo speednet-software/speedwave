@@ -334,6 +334,12 @@ describe('platform-runner', () => {
       await expect(runCommand('reminders', 'evil_command')).rejects.toThrow('Unknown command');
     });
 
+    it('unknown command error names the bad command, the domain, and the allowed list', async () => {
+      await expect(runCommand('reminders', 'evil_command')).rejects.toThrow(
+        "Unknown command 'evil_command' for domain 'reminders'. Allowed: "
+      );
+    });
+
     it('rejects path traversal in command name', async () => {
       await expect(runCommand('reminders', '../../../etc/passwd')).rejects.toThrow(
         'Unknown command'

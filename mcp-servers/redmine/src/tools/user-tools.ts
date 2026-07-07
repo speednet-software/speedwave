@@ -14,9 +14,10 @@ import { RedmineClient } from '../client.js';
 
 const listUsersTool: Tool = {
   name: 'listUsers',
-  description: 'List users (optionally filtered by project membership)',
+  description:
+    'List users (optionally filtered by project membership). If this worker is scoped to a single project, project_id is forced to that project and a different value throws an error.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'users', 'list', 'members', 'team', 'assignable'],
   example: `const users = await redmine.listUsers({ project_id: "my-project" })`,
   inputSchema: {
@@ -67,9 +68,13 @@ const resolveUserTool: Tool = {
   name: 'resolveUser',
   description: "Resolve user identifier to user ID (supports 'me', user ID, or username)",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    'speedwave.pl/defer-loading': true,
+    'speedwave.pl/user-scoped': true,
+    'speedwave.pl/self-param': "identifier: 'me'",
+  },
   keywords: ['redmine', 'user', 'resolve', 'lookup', 'identity', 'id'],
-  example: `const user = await redmine.resolveUser({ identifier: "john@example.com" })`,
+  example: `const { user_id } = await redmine.resolveUser({ identifier: "john@example.com" })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -81,15 +86,9 @@ const resolveUserTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      user: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          login: { type: 'string' },
-          firstname: { type: 'string' },
-          lastname: { type: 'string' },
-          mail: { type: 'string' },
-        },
+      user_id: {
+        type: ['number', 'null'],
+        description: 'Resolved user ID, or null if not found',
       },
       error: { type: 'string' },
     },
@@ -115,12 +114,30 @@ const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
   description: "Get current authenticated user's profile (id, login, email, name)",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true, 'speedwave.pl/user-scoped': true },
   keywords: ['redmine', 'user', 'profile', 'current', 'me', 'authenticated'],
   example: `const user = await redmine.getCurrentUser()`,
   inputSchema: {
     type: 'object',
     properties: {},
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      user: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          login: { type: 'string' },
+          firstname: { type: 'string' },
+          lastname: { type: 'string' },
+          mail: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
   },
 };
 
@@ -142,12 +159,14 @@ export function createUserTools(client: RedmineClient | null): ToolDefinition[] 
     {
       tool: listUsersTool,
       handler: async (params) => {
+        const { project_id } = params as { project_id?: string };
         try {
-          const { project_id } = params as { project_id?: string };
           const result = await client.listUsers(project_id);
           return jsonResult(result);
         } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
+          return errorResult(
+            RedmineClient.formatError(error, project_id ? `project_id=${project_id}` : undefined)
+          );
         }
       },
     },

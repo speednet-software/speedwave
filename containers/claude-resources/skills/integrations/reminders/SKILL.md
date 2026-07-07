@@ -27,9 +27,9 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 
 - **All methods are on `os.*`, not `reminders.*`** — there is no separate reminders global.
 - **List names are case-sensitive.** Call `os.listReminderLists()` first if the user refers to a list by name; pass the resolved `id` to other calls.
-- **`list_id` accepts the list's ID string** returned by `listReminderLists`, not a display name.
+- **`list_id` accepts either the list's ID or its exact display name** (used by `listReminders`/`createReminder` to filter/target a list). The `id` passed to `getReminder`/`completeReminder`, by contrast, must be the exact id string from a list/get/create call — a display name is not accepted there.
 - **`show_completed` defaults to `false`** — completed reminders are excluded unless explicitly requested.
-- **`priority` encoding:** 0 = none, 1 = high, 5 = medium, 9 = low.
+- **`priority` encoding:** 0 = none, 1-4 = high, 5 = medium, 6-9 = low (EventKit treats 1-9 as a gradient; any value in range is accepted).
 - **Tags are stored in the notes field** as `[#tag]` markers (EventKit has no native tag property). `listReminders` and `getReminder` extract them into a separate `tags` array; pass `tags: ["work"]` to `createReminder` — do not embed `[#tag]` manually.
 - **Due dates must be ISO 8601** (e.g. `"2025-06-01T10:00:00Z"`). Relative phrases ("tomorrow") must be resolved to an absolute timestamp before passing.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.

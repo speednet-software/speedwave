@@ -122,6 +122,49 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x202A)!)), String(UnicodeScalar(0x202A)!), "U+202A should be preserved")
     }
 
+    // MARK: - isAppleScriptNotFoundError
+
+    func testIsAppleScriptNotFoundErrorMatchesCurlyApostropheWording() {
+        XCTAssertTrue(isAppleScriptNotFoundError("Notes got an error: Can\u{2019}t get folder \"X\". (-1728)"))
+    }
+
+    func testIsAppleScriptNotFoundErrorMatchesBareErrorCode() {
+        XCTAssertTrue(isAppleScriptNotFoundError("some wrapped message (-1728)"))
+    }
+
+    func testIsAppleScriptNotFoundErrorFalseForUnrelatedError() {
+        XCTAssertFalse(isAppleScriptNotFoundError("syntax error: expected end of line"))
+    }
+
+    func testIsAppleScriptNotFoundErrorFalseForEmptyString() {
+        XCTAssertFalse(isAppleScriptNotFoundError(""))
+    }
+
+    // MARK: - splitAddressList
+
+    func testSplitAddressListSingle() {
+        XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListMultipleTrimsWhitespace() {
+        XCTAssertEqual(
+            splitAddressList("alice@example.com,  bob@example.com , carol@example.com"),
+            ["alice@example.com", "bob@example.com", "carol@example.com"]
+        )
+    }
+
+    func testSplitAddressListDropsEmptyEntries() {
+        XCTAssertEqual(splitAddressList(",alice@example.com,,"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListEmptyString() {
+        XCTAssertEqual(splitAddressList(""), [])
+    }
+
+    func testSplitAddressListWhitespaceOnlyEntriesDropped() {
+        XCTAssertEqual(splitAddressList("  ,  "), [])
+    }
+
     // MARK: - Parse Delimited
 
     func testParseDelimitedBasic4Field() {

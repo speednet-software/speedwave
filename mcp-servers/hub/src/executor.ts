@@ -579,10 +579,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     console.error(`${ts()} ❌ Execution error: ${message}`);
     console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
 
-    // Sanitize error message (remove paths, line numbers)
+    // Redact host file paths and their positions; keep user-code line:column
+    // (e.g. "<anonymous>:3:7") — it teaches the model where its snippet broke.
     let sanitizedMessage = message
       .replace(/\/[a-zA-Z0-9_\-./]+\.(ts|js|json)/g, '[file]')
-      .replace(/:\d+:\d+/g, '')
+      .replace(/\[file\]:\d+:\d+/g, '[file]')
       .substring(0, 500);
 
     // Smart error enhancement: if "X.Y is not a function", show available methods

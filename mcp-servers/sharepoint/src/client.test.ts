@@ -280,6 +280,20 @@ describe('SharePointClient', () => {
       );
     });
 
+    it('rewrites 429 / activityLimitReached with a retry hint', () => {
+      expect(SharePointClient.formatError(new Error('429 Too Many Requests'))).toMatch(
+        /Rate limited.*retry/
+      );
+      expect(SharePointClient.formatError(new Error('activityLimitReached'))).toMatch(
+        /Rate limited/
+      );
+    });
+
+    it('rewrites 423 / resourceLocked', () => {
+      expect(SharePointClient.formatError(new Error('423 Locked'))).toMatch(/locked/i);
+      expect(SharePointClient.formatError(new Error('resourceLocked'))).toMatch(/locked/i);
+    });
+
     it('rewrites security check / traversal errors', () => {
       expect(SharePointClient.formatError(new Error('security check failed'))).toMatch(
         /security check failed/
@@ -299,6 +313,23 @@ describe('SharePointClient', () => {
   });
 
   describe('callGraphAPI', () => {
+    it('short-circuits with a config-issue error when statusTracker is failed', async () => {
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+
+      await expect(client.listFiles()).rejects.toThrow(
+        /SharePoint site connection is not established/
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('does not short-circuit when statusTracker is unknown (default) or ok', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      client.statusTracker.setOk();
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
     it('should call Graph API with authorization header', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1140,7 +1171,7 @@ describe('SharePointClient', () => {
       );
     });
 
-    it('throws when no download URL in metadata', async () => {
+    it('throws when no download URL in metadata, with a hint on likely causes', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1151,7 +1182,7 @@ describe('SharePointClient', () => {
       });
 
       await expect(client.downloadFile('docs/file.txt', '/workspace/file.txt')).rejects.toThrow(
-        'No download URL available for file'
+        'No download URL available for file. This can happen if the item is a folder, is checked out to another user, or is an online-only document type; verify with getFileFull or listFileIds first.'
       );
     });
 

@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -16,7 +17,7 @@ const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get a repository file tree (file/directory listing), optionally recursive.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'tree', 'files', 'repository', 'ls', 'directory'],
   example:
     'const { tree, count } = await github.getTree({ owner: "octocat", repo: "hello", recursive: true })',
@@ -69,9 +70,10 @@ const getTreeTool: Tool = {
 
 const getFileContentsTool: Tool = {
   name: 'getFileContents',
-  description: "Reads a file's contents from a repository. Errors if the path is a directory.",
+  description:
+    "Reads a file's contents from a repository, already decoded to UTF-8 text. Errors if the path is a directory.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'file', 'content', 'read', 'cat', 'source'],
   example:
     'const file = await github.getFileContents({ owner: "octocat", repo: "hello", path: "README.md" })',
@@ -118,7 +120,7 @@ const createOrUpdateFileTool: Tool = {
   name: 'createOrUpdateFile',
   description: 'Creates a new file or updates an existing one with a commit.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'file', 'create', 'update', 'write', 'commit'],
   example:
     'const { commit_sha } = await github.createOrUpdateFile({ owner: "octocat", repo: "hello", path: "docs/x.md", content: "# Hi", message: "add doc" })',

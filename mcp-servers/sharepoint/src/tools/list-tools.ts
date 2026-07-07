@@ -24,6 +24,7 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, validateGraphId, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
@@ -75,29 +76,44 @@ export interface SharePointListItem {
 
 const listListsTool: Tool = {
   name: 'listLists',
-  description: 'List all SharePoint lists in the configured site.',
+  description:
+    'List all SharePoint lists in the configured site (returns both document libraries and custom lists — Graph does not separate them at this endpoint). Provides the listId used by getList/updateList/deleteList/listItems/getItem/createItem/updateItem/deleteItem/addListColumn/removeListColumn.',
   inputSchema: { type: 'object', properties: {} },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists'],
   example: 'const lists = await sharepoint.listLists()',
   outputSchema: {
     type: 'object',
-    properties: { success: { type: 'boolean' }, lists: { type: 'array' } },
+    properties: {
+      success: { type: 'boolean' },
+      lists: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            displayName: { type: 'string' },
+            description: { type: 'string' },
+            webUrl: { type: 'string' },
+          },
+        },
+      },
+    },
     required: ['success'],
   },
 };
 
 const getListTool: Tool = {
   name: 'getList',
-  description: 'Get a list with its column schema.',
+  description: 'Get a list with its column schema. Get listId from listLists.',
   inputSchema: {
     type: 'object',
-    properties: { listId: { type: 'string' } },
+    properties: { listId: { type: 'string', description: 'Graph list id, from listLists.' } },
     required: ['listId'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'get'],
   example: 'const list = await sharepoint.getList({ listId: "L1" })',
   outputSchema: {
@@ -109,7 +125,8 @@ const getListTool: Tool = {
 
 const createListTool: Tool = {
   name: 'createList',
-  description: 'Create a new SharePoint list (requires Sites.Manage.All).',
+  description:
+    'Create a new SharePoint list (requires Sites.Manage.All). To add columns after creation, use addListColumn instead of the columns param below (simpler and avoids the per-type payload shape).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -118,14 +135,15 @@ const createListTool: Tool = {
       template: { type: 'string', description: 'List template, e.g. "genericList"' },
       columns: {
         type: 'array',
-        description: 'Optional initial column definitions',
+        description:
+          'Optional initial column definitions, one Graph ColumnDefinition object per column (name, displayName, required, plus one type-specific sub-object: text/number/boolean/dateTime/choice/lookup — the same shape addListColumn builds). Prefer calling addListColumn after creation unless you already have this exact shape.',
         items: { type: 'object' },
       },
     },
     required: ['displayName'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'create'],
   example: 'const list = await sharepoint.createList({ displayName: "Tasks" })',
   outputSchema: {
@@ -141,18 +159,18 @@ const createListTool: Tool = {
 
 const updateListTool: Tool = {
   name: 'updateList',
-  description: 'Rename or update description of a list.',
+  description: 'Rename or update description of a list. Get listId from listLists.',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
       displayName: { type: 'string' },
       description: { type: 'string' },
     },
     required: ['listId'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'update', 'rename'],
   example: 'await sharepoint.updateList({ listId: "L1", displayName: "Renamed" })',
   outputSchema: {
@@ -164,14 +182,14 @@ const updateListTool: Tool = {
 
 const deleteListTool: Tool = {
   name: 'deleteList',
-  description: 'Delete a list. Destructive.',
+  description: 'Delete a list. Destructive. Get listId from listLists.',
   inputSchema: {
     type: 'object',
-    properties: { listId: { type: 'string' } },
+    properties: { listId: { type: 'string', description: 'Graph list id, from listLists.' } },
     required: ['listId'],
   },
   annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true },
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'delete'],
   example: 'await sharepoint.deleteList({ listId: "L1" })',
   outputSchema: {
@@ -184,11 +202,11 @@ const deleteListTool: Tool = {
 const addListColumnTool: Tool = {
   name: 'addListColumn',
   description:
-    'Add a column to a list. Supported types: text, number, boolean, dateTime, choice, lookup.',
+    "Add a column to a list. Supported types: text, number, boolean, dateTime, choice, lookup. Get listId from listLists. For type 'lookup', lookupListId must be the Graph id of an existing list (get it via listLists) and lookupColumnName must be an existing column name on that list (get it via getList).",
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
       name: { type: 'string' },
       displayName: { type: 'string' },
       type: {
@@ -198,13 +216,19 @@ const addListColumnTool: Tool = {
       required: { type: 'boolean' },
       // Type-specific config (one of these is consulted based on `type`)
       choices: { type: 'array', items: { type: 'string' } },
-      lookupListId: { type: 'string' },
-      lookupColumnName: { type: 'string' },
+      lookupListId: {
+        type: 'string',
+        description: "Graph id of the source list (type: 'lookup' only), from listLists.",
+      },
+      lookupColumnName: {
+        type: 'string',
+        description: "Existing column name on the source list (type: 'lookup' only), from getList.",
+      },
     },
     required: ['listId', 'name', 'type'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'column', 'schema', 'add'],
   example:
     'await sharepoint.addListColumn({ listId: "L1", name: "Status", type: "choice", choices: ["Open","Closed"] })',
@@ -217,17 +241,18 @@ const addListColumnTool: Tool = {
 
 const removeListColumnTool: Tool = {
   name: 'removeListColumn',
-  description: 'Remove a column from a list by id. Destructive.',
+  description:
+    'Remove a column from a list by id. Destructive. Get listId from listLists and columnId from getList (columns[].id).',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
-      columnId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
+      columnId: { type: 'string', description: 'Graph column id, from getList (columns[].id).' },
     },
     required: ['listId', 'columnId'],
   },
   annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true },
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'column', 'remove', 'delete'],
   example: 'await sharepoint.removeListColumn({ listId: "L1", columnId: "C1" })',
   outputSchema: {
@@ -239,18 +264,27 @@ const removeListColumnTool: Tool = {
 
 const listItemsTool: Tool = {
   name: 'listItems',
-  description: 'List items in a list, expanding their fields.',
+  description:
+    'List items in a list, expanding their fields. Only list-defined fields are returned: creator/last-editor identity (createdBy/lastModifiedBy) is not exposed. Get listId from listLists. To scope by the current user ("items assigned to me" or "items I created"), call getCurrentUser first to resolve the caller\'s email/id, then build filter against a list-specific author/assignee column, e.g. fields/AssignedTo/EMail eq \'<email>\' (inspect getList\'s column schema first to find the right column name).',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
-      filter: { type: 'string', description: 'Optional OData $filter expression' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
+      filter: {
+        type: 'string',
+        description:
+          "Optional OData $filter expression. String literals use single quotes, e.g. fields/Status eq 'Open'.",
+      },
       top: { type: 'number', description: 'Optional max items (default Graph paging)' },
     },
     required: ['listId'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['sharepoint', 'lists', 'items', 'list'],
   example: 'const items = await sharepoint.listItems({ listId: "L1" })',
   outputSchema: {
@@ -262,17 +296,18 @@ const listItemsTool: Tool = {
 
 const getItemTool: Tool = {
   name: 'getItem',
-  description: 'Get a single list item with its fields.',
+  description:
+    'Get a single list item with its fields. Only list-defined fields are returned, not creator/modifier metadata. Get listId from listLists and itemId from listItems.',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
-      itemId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
+      itemId: { type: 'string', description: 'Graph item id, from listItems.' },
     },
     required: ['listId', 'itemId'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'items', 'get'],
   example: 'const item = await sharepoint.getItem({ listId: "L1", itemId: "1" })',
   outputSchema: {
@@ -284,11 +319,11 @@ const getItemTool: Tool = {
 
 const createItemTool: Tool = {
   name: 'createItem',
-  description: 'Create a new list item with the given fields.',
+  description: 'Create a new list item with the given fields. Get listId from listLists.',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
       fields: {
         type: 'object',
         description: 'Field name → value mapping',
@@ -298,7 +333,7 @@ const createItemTool: Tool = {
     required: ['listId', 'fields'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'items', 'create'],
   example: 'const item = await sharepoint.createItem({ listId: "L1", fields: { Title: "X" } })',
   outputSchema: {
@@ -313,12 +348,13 @@ const createItemTool: Tool = {
 
 const updateItemTool: Tool = {
   name: 'updateItem',
-  description: 'Update fields on a list item (PATCH on /fields).',
+  description:
+    'Update fields on a list item (PATCH on /fields). Get listId from listLists and itemId from listItems.',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
-      itemId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
+      itemId: { type: 'string', description: 'Graph item id, from listItems.' },
       fields: {
         type: 'object',
         description: 'Field name → new value mapping (replaces matching keys only)',
@@ -328,7 +364,7 @@ const updateItemTool: Tool = {
     required: ['listId', 'itemId', 'fields'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'items', 'update'],
   example: 'await sharepoint.updateItem({ listId: "L1", itemId: "1", fields: { Status: "Done" } })',
   outputSchema: {
@@ -340,17 +376,18 @@ const updateItemTool: Tool = {
 
 const deleteItemTool: Tool = {
   name: 'deleteItem',
-  description: 'Delete a list item. Destructive.',
+  description:
+    'Delete a list item. Destructive. Get listId from listLists and itemId from listItems.',
   inputSchema: {
     type: 'object',
     properties: {
-      listId: { type: 'string' },
-      itemId: { type: 'string' },
+      listId: { type: 'string', description: 'Graph list id, from listLists.' },
+      itemId: { type: 'string', description: 'Graph item id, from listItems.' },
     },
     required: ['listId', 'itemId'],
   },
   annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true },
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'lists', 'items', 'delete'],
   example: 'await sharepoint.deleteItem({ listId: "L1", itemId: "1" })',
   outputSchema: {
@@ -362,14 +399,15 @@ const deleteItemTool: Tool = {
 
 const deletePageTool: Tool = {
   name: 'deletePage',
-  description: 'Delete a SharePoint page. Destructive (bundled with PR5 delete ops).',
+  description:
+    'Delete a SharePoint page. Destructive (bundled with PR5 delete ops). Get pageId from listPages.',
   inputSchema: {
     type: 'object',
-    properties: { pageId: { type: 'string' } },
+    properties: { pageId: { type: 'string', description: 'Graph page id, from listPages.' } },
     required: ['pageId'],
   },
   annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true },
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'delete'],
   example: 'await sharepoint.deletePage({ pageId: "P1" })',
   outputSchema: {
@@ -487,7 +525,7 @@ async function handleGetList(
   client: SharePointClient,
   params: { listId: string }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.listId, 'listId');
+  const e = validateGraphId(params.listId, 'listId', 'listLists');
   if (e) return e;
   try {
     const list = (await lists(client).getList(params.listId)) as SharePointList | undefined;
@@ -542,7 +580,7 @@ async function handleUpdateList(
   client: SharePointClient,
   params: { listId: string; displayName?: string; description?: string }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.listId, 'listId');
+  const e = validateGraphId(params.listId, 'listId', 'listLists');
   if (e) return e;
   try {
     const body: Record<string, unknown> = {};
@@ -565,7 +603,7 @@ async function handleDeleteList(
   client: SharePointClient,
   params: { listId: string }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.listId, 'listId');
+  const e = validateGraphId(params.listId, 'listId', 'listLists');
   if (e) return e;
   try {
     await lists(client).deleteList(params.listId);
@@ -601,10 +639,10 @@ async function handleAddListColumn(
     lookupColumnName?: string;
   }
 ): Promise<ToolResult> {
-  const e1 = validateGraphId(params.listId, 'listId');
+  const e1 = validateGraphId(params.listId, 'listId', 'listLists');
   if (e1) return e1;
   if (params.lookupListId !== undefined) {
-    const e2 = validateGraphId(params.lookupListId, 'lookupListId');
+    const e2 = validateGraphId(params.lookupListId, 'lookupListId', 'listLists');
     if (e2) return e2;
   }
   try {
@@ -629,9 +667,9 @@ async function handleRemoveListColumn(
   client: SharePointClient,
   params: { listId: string; columnId: string }
 ): Promise<ToolResult> {
-  const e1 = validateGraphId(params.listId, 'listId');
+  const e1 = validateGraphId(params.listId, 'listId', 'listLists');
   if (e1) return e1;
-  const e2 = validateGraphId(params.columnId, 'columnId');
+  const e2 = validateGraphId(params.columnId, 'columnId', 'getList');
   if (e2) return e2;
   try {
     await columns(client).removeColumn(params.listId, params.columnId);
@@ -653,7 +691,7 @@ async function handleListItems(
   client: SharePointClient,
   params: { listId: string; filter?: string; top?: number }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.listId, 'listId');
+  const e = validateGraphId(params.listId, 'listId', 'listLists');
   if (e) return e;
   try {
     const extra: string[] = [];
@@ -673,7 +711,15 @@ async function handleListItems(
       },
     };
   } catch (e) {
-    return wrapErr('LIST_ITEMS_FAILED', e);
+    // A malformed $filter (e.g. double-quoted string literals) surfaces as a raw
+    // Graph 400 — steer the model to the fix instead of an opaque error dump.
+    const hint = params.filter?.includes('"')
+      ? " OData $filter requires single-quoted string literals, e.g. fields/Status eq 'Open' (not double quotes)."
+      : '';
+    return {
+      success: false,
+      error: { code: 'LIST_ITEMS_FAILED', message: `${SharePointClient.formatError(e)}${hint}` },
+    };
   }
 }
 
@@ -688,9 +734,9 @@ async function handleGetItem(
   client: SharePointClient,
   params: { listId: string; itemId: string }
 ): Promise<ToolResult> {
-  const e1 = validateGraphId(params.listId, 'listId');
+  const e1 = validateGraphId(params.listId, 'listId', 'listLists');
   if (e1) return e1;
-  const e2 = validateGraphId(params.itemId, 'itemId');
+  const e2 = validateGraphId(params.itemId, 'itemId', 'listItems');
   if (e2) return e2;
   try {
     const item = (await lists(client).getItem(params.listId, params.itemId)) as
@@ -713,7 +759,7 @@ async function handleCreateItem(
   client: SharePointClient,
   params: { listId: string; fields: Record<string, unknown> }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.listId, 'listId');
+  const e = validateGraphId(params.listId, 'listId', 'listLists');
   if (e) return e;
   try {
     const created = (await lists(client).createItem(params.listId, {
@@ -737,9 +783,9 @@ async function handleUpdateItem(
   client: SharePointClient,
   params: { listId: string; itemId: string; fields: Record<string, unknown> }
 ): Promise<ToolResult> {
-  const e1 = validateGraphId(params.listId, 'listId');
+  const e1 = validateGraphId(params.listId, 'listId', 'listLists');
   if (e1) return e1;
-  const e2 = validateGraphId(params.itemId, 'itemId');
+  const e2 = validateGraphId(params.itemId, 'itemId', 'listItems');
   if (e2) return e2;
   try {
     await lists(client).updateItem(params.listId, params.itemId, params.fields);
@@ -760,9 +806,9 @@ async function handleDeleteItem(
   client: SharePointClient,
   params: { listId: string; itemId: string }
 ): Promise<ToolResult> {
-  const e1 = validateGraphId(params.listId, 'listId');
+  const e1 = validateGraphId(params.listId, 'listId', 'listLists');
   if (e1) return e1;
-  const e2 = validateGraphId(params.itemId, 'itemId');
+  const e2 = validateGraphId(params.itemId, 'itemId', 'listItems');
   if (e2) return e2;
   try {
     await lists(client).deleteItem(params.listId, params.itemId);
@@ -782,7 +828,7 @@ async function handleDeletePage(
   client: SharePointClient,
   params: { pageId: string }
 ): Promise<ToolResult> {
-  const e = validateGraphId(params.pageId, 'pageId');
+  const e = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (e) return e;
   try {
     await pages(client).deletePage(params.pageId);

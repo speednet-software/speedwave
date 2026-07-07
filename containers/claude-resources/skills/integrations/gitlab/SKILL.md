@@ -17,8 +17,11 @@ Always run step 1–2 before guessing a tool name. The live schema is the source
 
 ## GitLab-specific pitfalls
 
-- **IID vs DB ID.** Issues and MRs use per-project `issue_iid` / `merge_request_iid` — the numbers users see in URLs (`/-/issues/42`). Not the internal database ID.
+- **IID vs DB ID.** Issues and MRs use per-project `issue_iid` / `mr_iid` — the numbers users see in URLs (`/-/issues/42`, `/-/merge_requests/42`). Not the internal database ID. Accepts a plain number or a string, with or without a leading `#` (e.g. `42` or `"#42"`).
 - **Project paths.** Pass `group/subgroup/project` as a plain string. The tool URL-encodes slashes for you — do not pre-encode `%2F`.
+- **"My MRs"/"my issues"/"my projects".** Use `listMrIds`/`listIssues` with `scope: "assigned_to_me"` or `"created_by_me"`, or `listProjectIds` with `owned: true` — these resolve identity server-side without needing a username.
 - **Pipeline triggers cost CI minutes.** Confirm before retrying or triggering a pipeline.
 - **Search beats tree-walking.** When looking for a symbol or file, reach for `searchCode` before listing directories blindly.
+- **Job IDs come from pipelines.** `getJobLog`, `downloadArtifact`, and `deleteArtifacts` take a `job_id` — get valid values from `getPipelineFull`'s `jobs` array, not by guessing.
+- **`downloadArtifact` returns a job log, not the CI artifact zip.** This worker cannot fetch raw artifact bundle contents.
 - **Write/delete confirmation.** Per `claude-resources/CLAUDE.md`, every create/update/close/merge/delete needs explicit user approval before execution. Read operations (list/get/search/compare/diff/blame) never need confirmation.

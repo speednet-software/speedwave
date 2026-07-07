@@ -252,10 +252,13 @@ describe('discussion-tools', () => {
 
       const result = await handler!({ project_id: 1, mr_iid: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('handles network errors', async () => {
@@ -285,15 +288,29 @@ describe('discussion-tools', () => {
 
       const result = await handler!({ project_id: 1, mr_iid: 10 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
+    });
+
+    it('accepts a numeric-string mr_iid', async () => {
+      mockClient.listMrDiscussions.mockResolvedValue([]);
+
+      const tools = createDiscussionTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listMrDiscussions')?.handler;
+
+      await handler!({ project_id: 1, mr_iid: '10' });
+
+      expect(mockClient.listMrDiscussions).toHaveBeenCalledWith(1, 10, undefined);
+    });
+
+    it('returns a teaching error for a non-numeric mr_iid without calling the client', async () => {
+      const tools = createDiscussionTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listMrDiscussions')?.handler;
+
+      const result = await handler!({ project_id: 1, mr_iid: 'invalid' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.listMrDiscussions).not.toHaveBeenCalled();
     });
   });
 
@@ -465,10 +482,13 @@ describe('discussion-tools', () => {
         body: 'Comment',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('handles permission errors', async () => {
@@ -483,15 +503,26 @@ describe('discussion-tools', () => {
         body: 'Comment',
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
+    });
+
+    it('accepts a "#"-prefixed mr_iid', async () => {
+      mockClient.createMrDiscussion.mockResolvedValue({ id: 'disc1', notes: [] });
+
+      const tools = createDiscussionTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createMrDiscussion')?.handler;
+
+      await handler!({ project_id: 1, mr_iid: '#10', body: 'Comment' });
+
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, 'Comment');
+    });
+
+    it('states in its description that the discussion is posted as the authenticated user', () => {
+      const tools = createDiscussionTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'createMrDiscussion')?.tool;
+
+      expect(tool?.description).toContain('authenticated GitLab user');
     });
 
     it('handles validation errors for empty body', async () => {

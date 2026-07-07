@@ -14,9 +14,10 @@ import { RedmineClient } from '../client.js';
 
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
-  description: 'List project IDs with optional filters. Returns only IDs for efficiency.',
+  description:
+    'List project IDs with optional filters. Returns only IDs for efficiency. If this Redmine integration is scoped to a single project, this always returns just that one project regardless of limit/offset.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'projects', 'list', 'ids', 'filter', 'active', 'closed'],
   example: `const { ids } = await redmine.listProjectIds({ status: 'active' })`,
   inputSchema: {
@@ -31,34 +32,112 @@ const listProjectIdsTool: Tool = {
       offset: { type: 'number', description: 'Pagination offset' },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      ids: { type: 'array', items: { type: 'number' } },
+      identifiers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'number' }, identifier: { type: 'string' } },
+        },
+      },
+      total_count: { type: 'number' },
+      offset: { type: 'number' },
+      limit: { type: 'number' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list all projects',
+      input: {},
+    },
+    {
+      description: 'Partial: active projects only',
+      input: { status: 'active' },
+    },
+    {
+      description: 'Full: paginated active projects',
+      input: { status: 'active', limit: 10, offset: 0 },
+    },
+  ],
 };
 
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
-  description: 'Get complete project data including trackers, categories, modules. No truncation.',
+  description:
+    'Get complete project data including trackers, categories, modules. No truncation. If scoped to a single project, requesting a different project_id fails with a scope error.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'project', 'details', 'full', 'trackers', 'categories', 'modules'],
   example: `const project = await redmine.getProjectFull({ project_id: 'my-project' })`,
   inputSchema: {
     type: 'object',
     properties: {
-      project_id: { type: ['string', 'number'], description: 'Project ID or identifier' },
+      project_id: {
+        type: ['string', 'number'],
+        description: 'Project ID or identifier — obtained from listProjectIds or searchProjectIds',
+      },
       include: {
         type: 'array',
-        items: { type: 'string' },
+        items: {
+          type: 'string',
+          enum: [
+            'trackers',
+            'issue_categories',
+            'enabled_modules',
+            'time_entry_activities',
+            'issue_custom_fields',
+          ],
+        },
         description: 'Additional data to include',
       },
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      project: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          identifier: { type: 'string' },
+          name: { type: 'string' },
+          description: { type: 'string' },
+          status: { type: 'number' },
+          is_public: { type: 'boolean' },
+          created_on: { type: 'string' },
+          updated_on: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get basic project data',
+      input: { project_id: 'my-project' },
+    },
+    {
+      description: 'Full: get project with trackers and categories',
+      input: { project_id: 'my-project', include: ['trackers', 'issue_categories'] },
+    },
+  ],
 };
 
 const searchProjectIdsTool: Tool = {
   name: 'searchProjectIds',
-  description: 'Search projects by name, identifier or description. Returns matching IDs only.',
+  description:
+    'Search projects by name, identifier or description. Returns matching IDs only. If scoped to a single project, only that project is searched.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { 'speedwave.pl/defer-loading': true },
   keywords: ['redmine', 'projects', 'search', 'find', 'query', 'name'],
   example: `const { ids } = await redmine.searchProjectIds({ query: 'mobile' })`,
   inputSchema: {
@@ -69,6 +148,37 @@ const searchProjectIdsTool: Tool = {
     },
     required: ['query'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      ids: { type: 'array', items: { type: 'number' } },
+      projects: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            identifier: { type: 'string' },
+            name: { type: 'string' },
+          },
+        },
+      },
+      total_count: { type: 'number' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: search all projects',
+      input: { query: 'mobile' },
+    },
+    {
+      description: 'Full: search with limit',
+      input: { query: 'mobile', limit: 10 },
+    },
+  ],
 };
 
 /**
@@ -114,15 +224,15 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
     {
       tool: getProjectFullTool,
       handler: async (params) => {
+        const { project_id, include = [] } = params as {
+          project_id: string | number;
+          include?: string[];
+        };
         try {
-          const { project_id, include = [] } = params as {
-            project_id: string | number;
-            include?: string[];
-          };
           const result = await client.showProject(project_id, { include });
           return jsonResult(result);
         } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
+          return errorResult(RedmineClient.formatError(error, `project_id=${project_id}`));
         }
       },
     },

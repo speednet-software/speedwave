@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -26,11 +27,19 @@ const PR_ITEM_PROPERTIES = {
   html_url: { type: 'string' },
 };
 
+/** Output schema shared by tools returning a single PR at the TOP level (never nested under a 'pr' key). */
+const PR_OUTPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: { success: { type: 'boolean' }, ...PR_ITEM_PROPERTIES, error: { type: 'string' } },
+  required: ['success'],
+};
+
 const listPullRequestsTool: Tool = {
   name: 'listPullRequests',
-  description: 'List pull requests in a repository with optional filters.',
+  description:
+    "List pull requests in a repository with optional filters. There is no author filter — for 'my PRs' questions, resolve the login with getCurrentUser, then match it against each PR's user field yourself (this worker has no PR-search tool).",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'pr', 'pull', 'request', 'list', 'merge'],
   example:
     'const { prs, count } = await github.listPullRequests({ owner: "octocat", repo: "hello", state: "open" })',
@@ -80,7 +89,7 @@ const getPullRequestTool: Tool = {
   name: 'getPullRequest',
   description: 'Get detailed information about a specific pull request.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'get', 'show', 'detail'],
   example:
     'const pr = await github.getPullRequest({ owner: "octocat", repo: "hello", number: 42 })',
@@ -93,15 +102,7 @@ const getPullRequestTool: Tool = {
     },
     required: ['owner', 'repo', 'number'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      pr: { type: 'object', properties: PR_ITEM_PROPERTIES },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: PR_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Get a pull request by number',
@@ -114,7 +115,7 @@ const createPullRequestTool: Tool = {
   name: 'createPullRequest',
   description: 'Create a new pull request.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'create', 'new', 'open'],
   example:
     'const pr = await github.createPullRequest({ owner: "octocat", repo: "hello", title: "Add feature", head: "feature/x", base: "main" })',
@@ -131,15 +132,7 @@ const createPullRequestTool: Tool = {
     },
     required: ['owner', 'repo', 'title', 'head', 'base'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      pr: { type: 'object', properties: PR_ITEM_PROPERTIES },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: PR_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: create a PR with required fields',
@@ -170,7 +163,7 @@ const mergePullRequestTool: Tool = {
   name: 'mergePullRequest',
   description: 'Merge a pull request.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'merge', 'squash', 'rebase'],
   example:
     'await github.mergePullRequest({ owner: "octocat", repo: "hello", number: 42, merge_method: "squash" })',
@@ -226,7 +219,7 @@ const updatePullRequestTool: Tool = {
   name: 'updatePullRequest',
   description: 'Update properties of an existing pull request.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'update', 'edit', 'modify', 'close', 'reopen'],
   example:
     'await github.updatePullRequest({ owner: "octocat", repo: "hello", number: 42, title: "Updated title", state: "closed" })',
@@ -243,15 +236,7 @@ const updatePullRequestTool: Tool = {
     },
     required: ['owner', 'repo', 'number'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      pr: { type: 'object', properties: PR_ITEM_PROPERTIES },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: PR_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: rename a PR',
@@ -278,9 +263,9 @@ const updatePullRequestTool: Tool = {
 const getPrDiffTool: Tool = {
   name: 'getPrDiff',
   description:
-    'Get the unified diff for a pull request. Returns the unified diff as plain text. Large for big PRs.',
+    'Get the unified diff for a pull request, as a plain-text result (not JSON). Large for big PRs.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'diff', 'patch', 'changes'],
   example: 'const diff = await github.getPrDiff({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {
@@ -293,10 +278,8 @@ const getPrDiffTool: Tool = {
     required: ['owner', 'repo', 'number'],
   },
   outputSchema: {
-    type: 'object',
-    properties: {
-      diff: { type: 'string', description: 'Raw unified diff text' },
-    },
+    type: 'string',
+    description: 'The unified diff as plain text (returned directly, not as a JSON object).',
   },
   inputExamples: [
     {
@@ -310,7 +293,7 @@ const getPrFilesTool: Tool = {
   name: 'getPrFiles',
   description: 'List the files changed in a pull request with per-file stats and patches.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'files', 'changes', 'diff'],
   example:
     'const { files, count } = await github.getPrFiles({ owner: "octocat", repo: "hello", number: 42 })',

@@ -98,10 +98,13 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listBranchCommits');
       const result = await tool!.handler({ project_id: 123, branch: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('should handle API errors', async () => {
@@ -303,10 +306,13 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listCommits');
       const result = await tool!.handler({ project_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('should handle network errors', async () => {
@@ -326,9 +332,29 @@ describe('commit-tools', () => {
         isError: true,
       });
     });
+
+    it('declares only fields the client actually returns (no authored_date/web_url)', () => {
+      const tools = createCommitTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listBranchCommits')?.tool;
+
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      const itemProps = (outputProps.commits as { items: { properties: Record<string, unknown> } })
+        .items.properties;
+      expect(itemProps).not.toHaveProperty('authored_date');
+      expect(itemProps).not.toHaveProperty('web_url');
+      expect(itemProps).toHaveProperty('created_at');
+    });
   });
 
   describe('searchCommits', () => {
+    it('describes the client-side substring search over the last 100 commits', () => {
+      const tools = createCommitTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'searchCommits')?.tool;
+
+      expect(tool?.description).toContain('100 commits');
+      expect(tool?.description).toContain('client-side');
+    });
+
     it('should search commits successfully', async () => {
       const mockCommits = [
         {
@@ -485,15 +511,11 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'searchCommits');
       const result = await tool!.handler({ project_id: 123, query: 'test' });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
+      expect((result.content[0] as { text: string }).text).toContain(
+        'required scope (api or write_repository)'
+      );
     });
   });
 
@@ -646,10 +668,13 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'getCommitDiff');
       const result = await tool!.handler({ project_id: 123, commit_sha: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('should handle invalid SHA errors', async () => {

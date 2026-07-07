@@ -38,6 +38,20 @@ beforeAll(() => {
     'process.stdout.write(JSON.stringify({ ok: false, error: "nope" }))'
   );
   fs.writeFileSync(path.join(SCRIPTS_DIR, 'crash.py'), 'process.exit(2)');
+  // Mirrors the real `script_runner.fail()` contract: JSON error on stdout, a much longer
+  // traceback on stderr, AND a non-zero exit — the case `runOk`'s generic path cannot see through.
+  fs.writeFileSync(
+    path.join(SCRIPTS_DIR, 'teaching-fail.py'),
+    [
+      "process.stdout.write(JSON.stringify({ ok: false, error: \"sheet 'X' not found; workbook sheets are: ['Y']\" }));",
+      'process.stderr.write("Traceback (most recent call last):\\n".repeat(50));',
+      'process.exit(1);',
+    ].join('\n')
+  );
+  fs.writeFileSync(
+    path.join(SCRIPTS_DIR, 'crash-with-junk-stdout.py'),
+    'process.stdout.write("not json"); process.stderr.write("stack trace"); process.exit(1);'
+  );
 });
 
 afterAll(() => {
@@ -59,5 +73,21 @@ describe('runPythonScript', () => {
 
   it('throws when the script exits non-zero', async () => {
     await expect(runPythonScript('crash.py', [])).rejects.toBeInstanceOf(SubprocessError);
+  });
+
+  it('surfaces the JSON error field verbatim even though the process exits non-zero with a long stderr traceback', async () => {
+    await expect(runPythonScript('teaching-fail.py', [])).rejects.toThrow(
+      /sheet 'X' not found; workbook sheets are: \['Y'\]/
+    );
+    // The traceback must not leak into the thrown message (it stayed on stderr only).
+    await expect(runPythonScript('teaching-fail.py', [])).rejects.not.toThrow(
+      /Traceback \(most recent call last\)/
+    );
+  });
+
+  it('falls back to the raw exit/stderr detail when a non-zero exit produced no parseable JSON', async () => {
+    await expect(runPythonScript('crash-with-junk-stdout.py', [])).rejects.toThrow(
+      /exited with code 1: stack trace/
+    );
   });
 });

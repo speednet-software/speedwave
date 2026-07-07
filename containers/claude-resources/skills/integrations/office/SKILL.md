@@ -112,11 +112,20 @@ Charts in `.docx` are images, not native chart objects (python-docx limitation).
 }
 ```
 
+## PDF manipulation
+
+- `mergePdf` — concatenate 2-200 PDFs, in call order.
+- `splitPdf` — one output file per `[start, end]` range (1-indexed, inclusive), e.g. `[[1,3],[5,5]]`; at most 200 ranges per call; parts are named `<base>-partN.pdf`.
+- `rotatePdf` — rotate given 1-indexed pages by 90, 180, or 270 degrees; other pages are unchanged.
+- `watermarkPdf` — stamps a single-page watermark PDF onto every page of a document PDF.
+- `fillPdfForm` — fills an AcroForm's text fields from a name→value map; `flatten` defaults to `true`. Always check the returned `flattened` (false if flatten was requested but could not be applied) and `fieldWarnings` (e.g. an unknown field name) before declaring success.
+- `pdfMetadata` — call it first on an unfamiliar PDF; the `encrypted` flag predicts whether the operations above will fail on a password-protected input.
+
 ## Pitfalls
 
 - **`/workspace` confinement** — inputs and outputs must be under `/workspace`. Default output dir is `/workspace/.speedwave/office/`; use `outName` to pin the filename.
 - **Overwrite gate** — existing files are not replaced by default. Pass `overwrite: true` only when the user explicitly asks to replace.
-- **Limits** — 50 MB input cap; 2 000-page PDF cap.
-- **No macros / active content** — scripts, VBA, and embedded OLE objects are stripped.
+- **Limits** — 50 MB input file cap; 2 000-page PDF cap; inline `markdown`/`html`/`spec` payloads ≤200 KB (write larger content to a `/workspace` file and pass `{ path }` instead); `mergePdf`/`splitPdf` accept at most 200 inputs/ranges per call.
+- **No macros / active content, as a side effect, not a guarantee** — generated/converted files go through python-docx/openpyxl/python-pptx or LibreOffice, none of which carry forward a source file's VBA macros or embedded OLE objects. This is a side effect of those libraries, not an active security scan; do not rely on it as a guarantee when processing untrusted macro-enabled input.
 - **No internet** — the worker runs egress-less; no remote assets in HTML/Markdown.
 - **Write/delete confirmation** — follow the global write/delete confirmation rule from CLAUDE.md.

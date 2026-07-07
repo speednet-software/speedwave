@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createCommitTools } from './commit-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -59,10 +59,21 @@ describe('commit-tools', () => {
   it('marks listCommits as the eagerly-loaded tool and the rest as deferred', () => {
     const tools = createCommitTools(null);
     expect(tools.find((t) => t.tool.name === 'listCommits')!.tool._meta).toEqual({
-      deferLoading: false,
+      [META_KEYS.DEFER_LOADING]: false,
+      [META_KEYS.USER_SCOPED]: true,
+      [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
     });
     expect(tools.find((t) => t.tool.name === 'getCommitDiff')!.tool._meta).toEqual({
-      deferLoading: true,
+      [META_KEYS.DEFER_LOADING]: true,
+    });
+  });
+
+  it('marks searchCommits as user-scoped with getCurrentUser as the identity resolver', () => {
+    const tools = createCommitTools(null);
+    expect(tools.find((t) => t.tool.name === 'searchCommits')!.tool._meta).toEqual({
+      [META_KEYS.DEFER_LOADING]: true,
+      [META_KEYS.USER_SCOPED]: true,
+      [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
     });
   });
 

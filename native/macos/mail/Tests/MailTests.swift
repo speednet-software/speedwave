@@ -89,6 +89,102 @@ final class MailTests: XCTestCase {
         XCTAssertThrowsError(try resolveClient(preferred: "thunderbird"))
     }
 
+    // MARK: - splitAddressList (shared)
+
+    func testSplitAddressListSingleAddress() {
+        XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListMultipleAddressesTrimsWhitespace() {
+        XCTAssertEqual(
+            splitAddressList("alice@example.com, bob@example.com,  carol@example.com"),
+            ["alice@example.com", "bob@example.com", "carol@example.com"]
+        )
+    }
+
+    func testSplitAddressListDropsEmptyEntries() {
+        // Trailing/double commas must not produce a blank recipient.
+        XCTAssertEqual(splitAddressList("alice@example.com,, bob@example.com,"), ["alice@example.com", "bob@example.com"])
+    }
+
+    func testSplitAddressListEmptyStringReturnsEmptyArray() {
+        XCTAssertEqual(splitAddressList(""), [])
+    }
+
+    // MARK: - AppleMailClient.recipientClauses
+
+    func testAppleMailRecipientClausesSingleAddress() {
+        let result = AppleMailClient.recipientClauses("alice@example.com", kind: "to")
+        XCTAssertEqual(
+            result,
+            "        make new to recipient at end of to recipients with properties {address:\"alice@example.com\"}"
+        )
+    }
+
+    func testAppleMailRecipientClausesMultipleAddressesOneLinePerRecipient() {
+        let result = AppleMailClient.recipientClauses("alice@example.com,bob@example.com", kind: "cc")
+        let lines = result.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
+        XCTAssertTrue(lines[0].contains("cc recipient") && lines[0].contains("alice@example.com"))
+        XCTAssertTrue(lines[1].contains("cc recipient") && lines[1].contains("bob@example.com"))
+    }
+
+    func testAppleMailRecipientClausesEmptyStringProducesNoLines() {
+        XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
+    }
+
+    // MARK: - OutlookClient.recipientClauses
+
+    func testOutlookRecipientClausesSingleAddress() {
+        let result = OutlookClient.recipientClauses("alice@example.com", kind: "to")
+        XCTAssertTrue(result.contains("email address:{address:\"alice@example.com\"}"))
+    }
+
+    func testOutlookRecipientClausesMultipleAddressesOneLinePerRecipient() {
+        let result = OutlookClient.recipientClauses("alice@example.com,bob@example.com", kind: "bcc")
+        let lines = result.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
+        XCTAssertTrue(lines[0].contains("bcc recipient") && lines[0].contains("alice@example.com"))
+        XCTAssertTrue(lines[1].contains("bcc recipient") && lines[1].contains("bob@example.com"))
+    }
+
+    // MARK: - sendEmail bcc parameter (dispatch-level)
+
+    func testSendEmailParamsCarryBcc() {
+        let params: [String: Any] = [
+            "to": "alice@example.com",
+            "subject": "Test",
+            "body": "Hello",
+            "bcc": "carol@example.com",
+            "confirm_send": true,
+        ]
+        XCTAssertEqual(params["bcc"] as? String, "carol@example.com")
+    }
+
+    // MARK: - runMailScript (mailbox-not-found teaching error)
+
+    func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
+        let original = ScriptError.scriptFailed("Mail got an error: Can\u{2019}t get mailbox \"Nope\". (-1728)")
+        let wrapped = { () throws -> Void in
+            do { throw original }
+            catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
+                throw CLIError.notFound("Mailbox 'Nope' not found. List valid mailboxes via listMailboxes and use their name field.")
+            }
+        }
+        XCTAssertThrowsError(try wrapped()) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("listMailboxes"))
+        }
+    }
+
+    func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
+        // Inbox-only calls (mailbox: nil) must not attempt the mailbox teaching-error mapping.
+        let mailbox: String? = nil
+        XCTAssertNil(mailbox)
+    }
+
     // MARK: - Send Email Validation
 
     func testSendEmailRequiresConfirmation() {

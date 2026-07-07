@@ -15,7 +15,7 @@ allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 
 # GitHub
 
-GitHub access goes through MCP Hub. You do not see `github__*` tools directly — they are discovered at call time via `search_tools` and invoked through `execute_code` using the injected `github` global. The token (fine-grained PAT) is pre-configured at the worker and mounted read-only — never pass it, ask the user for it, or shell out to `gh` / the raw REST API.
+GitHub access goes through MCP Hub. You do not see `github__*` tools directly — they are discovered at call time via `search_tools` and invoked through `execute_code` using the injected `github` global. The token is normally obtained via GitHub OAuth App device flow (or a manually-provided fine-grained PAT as an advanced fallback); it is pre-configured at the worker and mounted read-only — never pass it, ask the user for it, or shell out to `gh` / the raw REST API.
 
 ## Workflow
 
@@ -27,7 +27,9 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 ## GitHub-specific pitfalls
 
-**Repo identifier** — every tool takes `owner` and `repo` as two separate strings. Decompose a URL (`https://github.com/foo/bar/pull/1` → `owner: "foo"`, `repo: "bar"`, `pull_number: 1`). Never pass the full URL or include the `.git` suffix.
+**Identity ('my issues/PRs/commits')** — call `getCurrentUser` first to resolve the token's authenticated login before using any identity-scoped filter: `listRepos` (no owner defaults to this account), `listIssues`' `assignee`/`creator`, `createIssue`/`updateIssue`'s `assignees`, `listCommits`' `author`, `searchCommits`' query. None of GitHub's REST filters here accept a literal `'me'` — pass the resolved login instead. `listPullRequests` has no author filter at all; resolve the login and match `pr.user` yourself. If you cannot resolve a login and the user asks about "mine", ask them rather than guessing or silently returning unscoped results.
+
+**Repo identifier** — every tool takes `owner` and `repo` as two separate strings, but a combined `owner/repo` passed in `repo` (e.g. a `full_name` value from `listRepos`) is split automatically when `owner` is omitted. Decompose a URL (`https://github.com/foo/bar/pull/1` → `owner: "foo"`, `repo: "bar"`, `pull_number: 1`). Never pass the full URL or include the `.git` suffix.
 
 **GitHub.com only** — GitHub Enterprise Server (self-hosted, `*.ghe.com`, custom domains) is not supported. There is no `host_url` field. If the user mentions a self-hosted instance, say so and stop.
 
@@ -41,7 +43,7 @@ Always do steps 1–2 before calling a tool for the first time in a conversation
 
 **Write/delete confirmation** — follow the global rule in `claude-resources/CLAUDE.md`: always restate the action and wait for explicit user go-ahead before any create, update, merge, close, delete, trigger, or comment operation.
 
-**Token scope** — fine-grained PATs carry only the permissions the user selected at creation. A `403` from a tool includes the GitHub error body; surface the missing-permission hint rather than retrying.
+**Token scope** — OAuth App tokens carry the scopes granted during the device-flow authorization; a manually supplied fine-grained PAT carries only the repository permissions selected at creation. A `403` from a tool includes the GitHub error body; surface the missing-permission hint rather than retrying.
 
 ## When not to use this skill
 

@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -16,7 +17,7 @@ const listLabelsTool: Tool = {
   name: 'listLabels',
   description: 'List labels defined in a repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'labels', 'list', 'tags'],
   example: 'const { labels, count } = await github.listLabels({ owner: "octocat", repo: "hello" })',
   inputSchema: {
@@ -69,7 +70,7 @@ const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a new label in a repository.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'label', 'create', 'new', 'tag'],
   example:
     'const label = await github.createLabel({ owner: "octocat", repo: "hello", name: "urgent", color: "FF0000" })',

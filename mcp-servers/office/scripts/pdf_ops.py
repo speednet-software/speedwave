@@ -27,7 +27,13 @@ def _write_pdf(writer, dest: str) -> None:
 def _open_reader(path: str):
     from pypdf import PdfReader
 
-    return PdfReader(path)
+    try:
+        return PdfReader(path)
+    except Exception as exc:  # noqa: BLE001 — turn any pypdf parse failure into one actionable line
+        fail(
+            f"could not read '{path}' as a PDF ({type(exc).__name__}: {exc}) -- verify the "
+            "file is a valid, non-corrupted PDF and not renamed from another format"
+        )
 
 
 def _metadata(path: str) -> None:

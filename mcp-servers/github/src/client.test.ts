@@ -401,6 +401,38 @@ describe('GitHubClient', () => {
     });
   });
 
+  // ── users ──────────────────────────────────────────────────────────────────
+  describe('getCurrentUser', () => {
+    it('returns the normalized authenticated user', async () => {
+      octokit.rest.users.getAuthenticated.mockResolvedValue({
+        data: { login: 'octocat', name: 'The Octocat', email: 'octocat@github.com', html_url: 'h' },
+      });
+      const user = await client.getCurrentUser();
+      expect(user).toEqual({
+        login: 'octocat',
+        name: 'The Octocat',
+        email: 'octocat@github.com',
+        html_url: 'h',
+      });
+    });
+
+    it('omits name/email when absent', async () => {
+      octokit.rest.users.getAuthenticated.mockResolvedValue({
+        data: { login: 'octocat', html_url: 'h' },
+      });
+      const user = await client.getCurrentUser();
+      expect(user).toEqual({ login: 'octocat', name: undefined, email: undefined, html_url: 'h' });
+    });
+
+    it('propagates an authentication failure', async () => {
+      octokit.rest.users.getAuthenticated.mockRejectedValue({
+        status: 401,
+        message: 'Bad credentials',
+      });
+      await expect(client.getCurrentUser()).rejects.toMatchObject({ status: 401 });
+    });
+  });
+
   // ── repos ──────────────────────────────────────────────────────────────────
   describe('listRepos', () => {
     it('lists the authenticated user repos via paginate', async () => {
@@ -597,6 +629,13 @@ describe('GitHubClient', () => {
         pull_number: 7,
       });
       expect(pr).toMatchObject({ number: 7, state: 'closed', merged: true, draft: false });
+    });
+
+    it('throws a teaching 404 naming the PR number and source tools', async () => {
+      octokit.rest.pulls.get.mockRejectedValue({ status: 404 });
+      await expect(client.getPullRequest('o', 'r', 999)).rejects.toThrow(
+        'PR #999 not found in o/r. Check the number with listPullRequests, or the owner/repo with getRepo.'
+      );
     });
   });
 
@@ -946,6 +985,13 @@ describe('GitHubClient', () => {
       });
       expect(branch).toEqual({ name: 'dev', commit: { sha: 'def' }, protected: false });
     });
+
+    it('throws a teaching 404 naming the branch and source tools', async () => {
+      octokit.rest.repos.getBranch.mockRejectedValue({ status: 404 });
+      await expect(client.getBranch('o', 'r', 'ghost')).rejects.toThrow(
+        "Branch 'ghost' not found in o/r. Check the name with listBranches, or the owner/repo with getRepo."
+      );
+    });
   });
 
   describe('createBranch', () => {
@@ -962,6 +1008,18 @@ describe('GitHubClient', () => {
         sha: 'abc',
       });
       expect(branch.name).toBe('feat');
+    });
+
+    it('throws a teaching 422 when the branch already exists', async () => {
+      octokit.rest.git.createRef.mockRejectedValue({
+        status: 422,
+        message: 'Reference already exists',
+      });
+      await expect(
+        client.createBranch('o', 'r', { branch: 'feat', from_sha: 'abc' })
+      ).rejects.toThrow(
+        "Could not create branch 'feat' in o/r (it may already exist — check with listBranches): Reference already exists"
+      );
     });
 
     it('resolves from_branch to its head SHA', async () => {
@@ -1189,7 +1247,7 @@ describe('GitHubClient', () => {
   });
 
   describe('getFileContents', () => {
-    it('returns a file with base64 content', async () => {
+    it('decodes base64 content to UTF-8 text', async () => {
       octokit.rest.repos.getContent.mockResolvedValue({
         data: {
           type: 'file',
@@ -1209,24 +1267,31 @@ describe('GitHubClient', () => {
       });
       expect(file).toEqual({
         path: 'README.md',
-        content: 'aGVsbG8=',
-        encoding: 'base64',
+        content: 'hello',
+        encoding: 'utf-8',
         sha: 'fsha',
         size: 5,
       });
     });
 
+    it('throws a teaching 404 naming the path, owner/repo, and source tools', async () => {
+      octokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
+      await expect(client.getFileContents('o', 'r', 'missing.txt', { ref: 'dev' })).rejects.toThrow(
+        "File not found: 'missing.txt' in o/r at ref 'dev'. Check the path with getTree, or the ref with listBranches."
+      );
+    });
+
     it('throws when the path is a directory (array response)', async () => {
       octokit.rest.repos.getContent.mockResolvedValue({ data: [{ type: 'file', path: 'a' }] });
       await expect(client.getFileContents('o', 'r', 'src')).rejects.toThrow(
-        'Path is a directory, not a file'
+        "Path 'src' is a directory, not a file."
       );
     });
 
     it('throws when the entry is not a file type', async () => {
       octokit.rest.repos.getContent.mockResolvedValue({ data: { type: 'dir', path: 'src' } });
       await expect(client.getFileContents('o', 'r', 'src')).rejects.toThrow(
-        'Path is a directory, not a file'
+        "Path 'src' is a directory, not a file."
       );
     });
   });
@@ -1278,11 +1343,11 @@ describe('GitHubClient', () => {
       expect(result.commit_sha).toBe('s');
     });
 
-    it('re-throws non-404 errors from the SHA lookup', async () => {
+    it('wraps non-404 errors from the SHA lookup with write-flow context', async () => {
       octokit.rest.repos.getContent.mockRejectedValue({ status: 403, message: 'forbidden' });
       await expect(
         client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
-      ).rejects.toMatchObject({ status: 403 });
+      ).rejects.toThrow("Could not check whether 'a.txt' already exists in o/r before writing");
       expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
     });
 
@@ -1616,6 +1681,13 @@ describe('GitHubClient', () => {
       });
       expect(issue.number).toBe(8);
     });
+
+    it('throws a teaching 404 naming the issue number and source tools', async () => {
+      octokit.rest.issues.get.mockRejectedValue({ status: 404 });
+      await expect(client.getIssue('o', 'r', 404)).rejects.toThrow(
+        'Issue #404 not found in o/r. Check the number with listIssues, or the owner/repo with getRepo.'
+      );
+    });
   });
 
   describe('createIssue', () => {
@@ -1747,6 +1819,16 @@ describe('GitHubClient', () => {
         'Missing required parameter'
       );
     });
+
+    it('throws a teaching 422 when the label already exists', async () => {
+      octokit.rest.issues.createLabel.mockRejectedValue({
+        status: 422,
+        message: 'Validation Failed',
+      });
+      await expect(client.createLabel('o', 'r', { name: 'bug', color: 'fff' })).rejects.toThrow(
+        "Could not create label 'bug' in o/r (it may already exist — check with listLabels): Validation Failed"
+      );
+    });
   });
 
   // ── tags & releases ────────────────────────────────────────────────────────
@@ -1792,6 +1874,23 @@ describe('GitHubClient', () => {
     it('throws when tag or sha is missing', async () => {
       await expect(client.createTag('o', 'r', { tag: '', sha: 'abc' })).rejects.toThrow(
         'Missing required parameter'
+      );
+    });
+
+    it('throws a teaching 404 naming the SHA and source tools when annotating', async () => {
+      octokit.rest.git.createTag.mockRejectedValue({ status: 404 });
+      await expect(
+        client.createTag('o', 'r', { tag: 'v1.0.0', sha: 'bogus', message: 'm' })
+      ).rejects.toThrow("SHA 'bogus' not found in o/r. Check it with listCommits or getBranch.");
+    });
+
+    it('throws a teaching 422 when the tag ref already exists', async () => {
+      octokit.rest.git.createRef.mockRejectedValue({
+        status: 422,
+        message: 'Reference already exists',
+      });
+      await expect(client.createTag('o', 'r', { tag: 'v1.0.0', sha: 'abc' })).rejects.toThrow(
+        "Could not create tag 'v1.0.0' in o/r (it may already exist): Reference already exists"
       );
     });
   });
@@ -1862,6 +1961,16 @@ describe('GitHubClient', () => {
     it('throws when tag_name is missing', async () => {
       await expect(client.createRelease('o', 'r', { tag_name: '' })).rejects.toThrow(
         'Missing required parameter'
+      );
+    });
+
+    it('throws a teaching 422 when a release for the tag already exists', async () => {
+      octokit.rest.repos.createRelease.mockRejectedValue({
+        status: 422,
+        message: 'Validation Failed',
+      });
+      await expect(client.createRelease('o', 'r', { tag_name: 'v1.0.0' })).rejects.toThrow(
+        "Could not create a release for tag 'v1.0.0' in o/r (a release for this tag may already exist): Validation Failed"
       );
     });
   });
@@ -2317,7 +2426,7 @@ describe('Response mappers — defensive fallbacks', () => {
     expect(file).toEqual({
       path: 'docs/x.md',
       content: '',
-      encoding: 'base64',
+      encoding: 'utf-8',
       sha: '',
       size: 0,
     });

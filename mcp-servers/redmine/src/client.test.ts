@@ -813,6 +813,16 @@ describe('RedmineClient', () => {
         },
       });
     });
+
+    it("should pass user_id: 'me' through to the API verbatim", async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ user_id: 'me' });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 25, user_id: 'me' },
+      });
+    });
   });
 
   describe('createTimeEntry', () => {
@@ -1520,6 +1530,42 @@ describe('RedmineClient', () => {
       expect(result).toContain('Resource not found');
     });
 
+    it('should include the entity identifier and a recovery hint in a 404 with context', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, 'issue_id=99999');
+      expect(result).toContain('issue_id=99999');
+      expect(result).toContain('listIssueIds');
+    });
+
+    it('should give a distinct recovery hint per entity type on 404', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      expect(RedmineClient.formatError(error, 'journal_id=42')).toContain('listJournals');
+      expect(RedmineClient.formatError(error, 'relation_id=7')).toContain('listRelations');
+      expect(RedmineClient.formatError(error, 'time_entry_id=789')).toContain('listTimeEntries');
+      expect(RedmineClient.formatError(error, 'project_id=my-project')).toContain('listProjectIds');
+    });
+
+    it('should fall back to the generic 404 message for an unknown context key', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, 'weird_key=1');
+      expect(result).toContain('Resource not found in Redmine: weird_key=1.');
+    });
+
     it('should format 422 validation error with details', () => {
       const error = {
         isAxiosError: true,
@@ -1535,6 +1581,34 @@ describe('RedmineClient', () => {
       const result = RedmineClient.formatError(error);
       expect(result).toContain('Validation error');
       expect(result).toContain('Subject cannot be blank');
+    });
+
+    it('should append a resolveUser hint when a 422 validation error names assigned_to', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Assigned to is invalid'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('resolveUser');
+    });
+
+    it('should append a getMappings hint when a 422 validation error names status/priority/tracker/activity', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Tracker is invalid'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('getMappings');
     });
 
     it('should format generic HTTP error with status', () => {

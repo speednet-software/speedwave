@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -39,7 +40,11 @@ const listCommitsTool: Tool = {
   description:
     'List commits in a repository with optional filters (branch/tag, path, author, date range).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['github', 'commits', 'history', 'log', 'git', 'list'],
   example:
     'const { commits, count } = await github.listCommits({ owner: "octocat", repo: "hello", sha: "main", limit: 10 })',
@@ -50,7 +55,11 @@ const listCommitsTool: Tool = {
       repo: { type: 'string', description: 'Repository name' },
       sha: { type: 'string', description: 'Branch/tag/SHA to start from' },
       path: { type: 'string', description: 'Only commits touching this path' },
-      author: { type: 'string', description: 'GitHub login or email' },
+      author: {
+        type: 'string',
+        description:
+          "GitHub login or email. Does NOT accept 'me' — resolve the authenticated user's login via getCurrentUser first, then pass it here.",
+      },
       since: { type: 'string', description: 'ISO 8601 date' },
       until: { type: 'string', description: 'ISO 8601 date' },
       limit: { type: 'number', description: 'Max results (default 100)' },
@@ -107,7 +116,7 @@ const listBranchCommitsTool: Tool = {
   name: 'listBranchCommits',
   description: 'List commits on a specific branch.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'commits', 'branch', 'history', 'log', 'git'],
   example:
     'const { commits, count } = await github.listBranchCommits({ owner: "octocat", repo: "hello", branch: "main" })',
@@ -163,14 +172,22 @@ const searchCommitsTool: Tool = {
   name: 'searchCommits',
   description: 'Search commits across GitHub, optionally scoped to a single repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['github', 'commits', 'search', 'find', 'git'],
   example:
     'const { commits, count } = await github.searchCommits({ query: "fix login", owner: "octocat", repo: "hello" })',
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Commit search query (GitHub commit-search syntax)' },
+      query: {
+        type: 'string',
+        description:
+          "Commit search query (GitHub commit-search syntax), e.g. 'author:octocat' or 'author:@me' for the authenticated user's own commits.",
+      },
       owner: {
         type: 'string',
         description: 'Repository owner to scope the search to (requires repo)',
@@ -223,9 +240,10 @@ const searchCommitsTool: Tool = {
 
 const getCommitDiffTool: Tool = {
   name: 'getCommitDiff',
-  description: 'Returns the unified diff for a commit as plain text.',
+  description:
+    'Returns the unified diff for a commit as a plain-text result (not JSON) — the raw diff text, not wrapped in an object.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'commit', 'diff', 'changes', 'patch', 'git'],
   example:
     'const diff = await github.getCommitDiff({ owner: "octocat", repo: "hello", ref: "abc123" })',
@@ -234,18 +252,17 @@ const getCommitDiffTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      ref: { type: 'string', description: 'Commit SHA, branch, or tag' },
+      ref: {
+        type: 'string',
+        description:
+          'Commit SHA, branch, or tag. Obtain a SHA from listCommits, or a branch name from listBranches.',
+      },
     },
     required: ['owner', 'repo', 'ref'],
   },
   outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      diff: { type: 'string', description: 'Unified diff (plain text)' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
+    type: 'string',
+    description: 'The unified diff as plain text (returned directly, not as a JSON object).',
   },
   inputExamples: [
     {

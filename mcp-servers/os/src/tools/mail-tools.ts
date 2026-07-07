@@ -7,6 +7,7 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
@@ -34,12 +35,16 @@ interface ListEmailsParams {
   offset?: number;
   /** Only return unread emails. */
   unread_only?: boolean;
+  /** Mail client to use. */
+  client?: string;
 }
 
 /** Input parameters for the getEmail tool. */
 interface GetEmailParams {
   /** Email message ID. */
   id: string;
+  /** Mail client to use. */
+  client?: string;
 }
 
 /** Input parameters for the searchEmails tool. */
@@ -50,6 +55,8 @@ interface SearchEmailsParams {
   mailbox?: string;
   /** Max results to return. */
   limit?: number;
+  /** Mail client to use. */
+  client?: string;
 }
 
 /** Input parameters for the sendEmail tool. */
@@ -64,6 +71,8 @@ interface SendEmailParams {
   cc?: string;
   /** BCC recipient(s), comma-separated. */
   bcc?: string;
+  /** Mail client to use. */
+  client?: string;
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
 }
@@ -76,6 +85,8 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
+  /** Mail client to use. */
+  client?: string;
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
 }
@@ -88,7 +99,11 @@ const detectMailClientsTool: Tool = {
   name: 'detectMailClients',
   description: 'Detect available mail clients on this device (Apple Mail, Outlook, etc.)',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'detect', 'clients', 'outlook', 'thunderbird'],
   example: 'const { clients } = await os.detectMailClients()',
   inputSchema: {
@@ -120,9 +135,14 @@ const detectMailClientsTool: Tool = {
 
 const listMailboxesTool: Tool = {
   name: 'listMailboxes',
-  description: 'List mail accounts and mailboxes/folders',
+  description:
+    "List mail accounts and mailboxes/folders. Use each mailbox's name field (not id, which is not returned) as listEmails/searchEmails's mailbox parameter — exact case-sensitive match.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'mailboxes', 'accounts', 'inbox', 'folders'],
   example: 'const { mailboxes } = await os.listMailboxes()',
   inputSchema: {
@@ -139,10 +159,12 @@ const listMailboxesTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            account_name: { type: 'string' },
-            unread_count: { type: 'number' },
+            name: {
+              type: 'string',
+              description: 'Mailbox name; pass this to listEmails/searchEmails',
+            },
+            account: { type: 'string', description: 'Account this mailbox belongs to' },
+            message_count: { type: 'number', description: 'Total message count in this mailbox' },
           },
         },
       },
@@ -162,18 +184,27 @@ const listMailboxesTool: Tool = {
 
 const listEmailsTool: Tool = {
   name: 'listEmails',
-  description: 'List emails in a mailbox',
+  description: 'List emails in a mailbox. If limit is omitted, defaults to 10.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'list', 'inbox', 'messages'],
   example: 'const { emails } = await os.listEmails({ limit: 10 })',
   inputSchema: {
     type: 'object',
     properties: {
-      mailbox: { type: 'string', description: 'Mailbox/folder name (default: INBOX)' },
-      limit: { type: 'number', description: 'Max emails to return (default 20)' },
+      mailbox: {
+        type: 'string',
+        description:
+          "Mailbox/folder name (default: INBOX). Use the name field from listMailboxes' output.",
+      },
+      limit: { type: 'number', description: 'Max emails to return (default 10)' },
       offset: { type: 'number', description: 'Skip first N emails (for pagination)' },
       unread_only: { type: 'boolean', description: 'Only return unread emails' },
+      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
   },
   outputSchema: {
@@ -202,22 +233,28 @@ const listEmailsTool: Tool = {
     },
     {
       description: 'Full: paginated from specific mailbox',
-      input: { mailbox_id: 'inbox-work', limit: 20, offset: 40 },
+      input: { mailbox: 'Archive', limit: 20, offset: 40 },
     },
   ],
 };
 
 const getEmailTool: Tool = {
   name: 'getEmail',
-  description: 'Get a specific email by ID with full body',
+  description:
+    'Get a specific email by ID with full body. Only searches the Inbox — ids from other mailboxes are not resolvable by this tool.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
   example: 'const email = await os.getEmail({ id: "msg-456" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Email message ID' },
+      id: { type: 'string', description: 'Email message ID (must be from the Inbox)' },
+      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
     required: ['id'],
   },
@@ -254,17 +291,26 @@ const getEmailTool: Tool = {
 
 const searchEmailsTool: Tool = {
   name: 'searchEmails',
-  description: 'Search emails by query string',
+  description:
+    'Search emails by query string. Searches the Inbox only (subject and body content); the mailbox parameter is not honored. If limit is omitted, defaults to 10.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'search', 'find', 'query'],
   example: 'const { emails } = await os.searchEmails({ query: "quarterly report" })',
   inputSchema: {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Search query (searches subject, body, sender)' },
-      mailbox: { type: 'string', description: 'Limit search to specific mailbox' },
-      limit: { type: 'number', description: 'Max results (default 20)' },
+      mailbox: {
+        type: 'string',
+        description: 'Not currently supported — searchEmails always searches the Inbox only',
+      },
+      limit: { type: 'number', description: 'Max results (default 10)' },
+      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
     required: ['query'],
   },
@@ -289,12 +335,12 @@ const searchEmailsTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'Minimal: search all mailboxes',
+      description: 'Minimal: search the inbox',
       input: { query: 'quarterly report' },
     },
     {
-      description: 'Full: search specific mailbox with limit',
-      input: { query: 'invoice', mailbox_id: 'inbox-work', limit: 10 },
+      description: 'Full: search with a result limit',
+      input: { query: 'invoice', limit: 10 },
     },
   ],
 };
@@ -303,10 +349,14 @@ const sendEmailTool: Tool = {
   name: 'sendEmail',
   description: 'Send a new email. Requires confirm_send=true as safety check.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'send', 'compose', 'write', 'new'],
   example:
-    'await os.sendEmail({ to: ["alice@example.com"], subject: "Meeting notes", body: "See attached.", confirm_send: true })',
+    'await os.sendEmail({ to: "alice@example.com", subject: "Meeting notes", body: "See attached.", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -315,6 +365,7 @@ const sendEmailTool: Tool = {
       body: { type: 'string', description: 'Email body (plain text)' },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
+      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
       confirm_send: {
         type: 'boolean',
         description: 'Must be true to actually send (safety check)',
@@ -333,19 +384,20 @@ const sendEmailTool: Tool = {
     {
       description: 'Minimal: send to one recipient',
       input: {
-        to: ['alice@example.com'],
+        to: 'alice@example.com',
         subject: 'Quick update',
         body: 'Everything looks good.',
         confirm_send: true,
       },
     },
     {
-      description: 'Full: send with CC',
+      description: 'Full: send with CC and BCC',
       input: {
-        to: ['alice@example.com'],
+        to: 'alice@example.com',
         subject: 'Q4 Report',
         body: 'Please review the attached report.',
-        cc: ['bob@example.com'],
+        cc: 'bob@example.com',
+        bcc: 'carol@example.com',
         confirm_send: true,
       },
     },
@@ -355,18 +407,24 @@ const sendEmailTool: Tool = {
 // Email reply is irreversible (destructive operation)
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
-  description: 'Reply to an existing email. Requires confirm_send=true as safety check.',
+  description:
+    'Reply to an existing email. Requires confirm_send=true as safety check. Only searches the Inbox — ids from other mailboxes are not resolvable by this tool.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
   example:
     'await os.replyToEmail({ id: "msg-456", body: "Sounds good, let\'s proceed.", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Email message ID to reply to' },
+      id: { type: 'string', description: 'Email message ID to reply to (must be from the Inbox)' },
       body: { type: 'string', description: 'Reply body (plain text)' },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
+      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
       confirm_send: {
         type: 'boolean',
         description: 'Must be true to actually send (safety check)',
@@ -435,7 +493,10 @@ export async function handleListEmails(params: ListEmailsParams): Promise<ToolRe
   const p = asRecord(params);
   const v = validateAll(p, {
     booleans: ['unread_only'],
-    strings: [['mailbox', MAX_LENGTHS.short, false]],
+    strings: [
+      ['mailbox', MAX_LENGTHS.short, false],
+      ['client', MAX_LENGTHS.short, false],
+    ],
     numbers: [
       ['limit', 1, 10_000],
       ['offset', 0, 1_000_000],
@@ -454,7 +515,10 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['id'],
-    strings: [['id', MAX_LENGTHS.id, false]],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['client', MAX_LENGTHS.short, false],
+    ],
   });
   if (!v.valid) return v.error;
   const result = await runCommand('mail', 'get_email', p);
@@ -472,6 +536,7 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],
+      ['client', MAX_LENGTHS.short, false],
     ],
     numbers: [['limit', 1, 10_000]],
   });
@@ -505,6 +570,7 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
       ['body', MAX_LENGTHS.body, true],
       ['cc', MAX_LENGTHS.short, false],
       ['bcc', MAX_LENGTHS.short, false],
+      ['client', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;
@@ -534,6 +600,7 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['body', MAX_LENGTHS.body, true],
+      ['client', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;

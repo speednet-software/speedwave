@@ -4,12 +4,14 @@ import { createReleaseTools } from './release-tools.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
+  listTags: Mock;
   createTag: Mock;
   deleteTag: Mock;
   createRelease: Mock;
 };
 
 const createMockClient = (): MockClient => ({
+  listTags: vi.fn(),
   createTag: vi.fn(),
   deleteTag: vi.fn(),
   createRelease: vi.fn(),
@@ -20,6 +22,61 @@ describe('release-tools', () => {
 
   beforeEach(() => {
     mockClient = createMockClient();
+  });
+
+  describe('listTags', () => {
+    it('lists tags successfully', async () => {
+      const mockTags = [
+        { name: 'v2.0.0', target: 'def456' },
+        { name: 'v1.0.0', target: 'abc123' },
+      ];
+
+      mockClient.listTags.mockResolvedValue(mockTags);
+
+      const tools = createReleaseTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listTags')?.handler;
+
+      const result = await handler!({ project_id: 'my-project' });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ tags: mockTags }, null, 2) }],
+      });
+      expect(mockClient.listTags).toHaveBeenCalledWith('my-project', {});
+    });
+
+    it('filters tags by search pattern and limit', async () => {
+      mockClient.listTags.mockResolvedValue([]);
+
+      const tools = createReleaseTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listTags')?.handler;
+
+      await handler!({ project_id: 'my-project', search: 'v1.', limit: 5 });
+
+      expect(mockClient.listTags).toHaveBeenCalledWith('my-project', { search: 'v1.', limit: 5 });
+    });
+
+    it('works with numeric project_id', async () => {
+      mockClient.listTags.mockResolvedValue([]);
+
+      const tools = createReleaseTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listTags')?.handler;
+
+      await handler!({ project_id: 123 });
+
+      expect(mockClient.listTags).toHaveBeenCalledWith(123, {});
+    });
+
+    it('handles errors gracefully', async () => {
+      mockClient.listTags.mockRejectedValue(new Error('404 not found'));
+
+      const tools = createReleaseTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listTags')?.handler;
+
+      const result = await handler!({ project_id: 'missing-project' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+    });
   });
 
   describe('createTag', () => {
@@ -249,16 +306,21 @@ describe('release-tools', () => {
         ref: 'main',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
   });
 
   describe('deleteTag', () => {
-    it('deletes tag successfully', async () => {
-      mockClient.deleteTag.mockResolvedValue(undefined);
+    it('deletes tag successfully and surfaces the pre-deletion audit info', async () => {
+      mockClient.deleteTag.mockResolvedValue({
+        deleted_tag: { name: 'v1.0.0', target: 'abc123' },
+      });
 
       const tools = createReleaseTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'deleteTag')?.handler;
@@ -273,7 +335,11 @@ describe('release-tools', () => {
           {
             type: 'text',
             text: JSON.stringify(
-              { success: true, message: "Tag 'v1.0.0' deleted successfully" },
+              {
+                success: true,
+                message: "Tag 'v1.0.0' deleted successfully",
+                deleted_tag: { name: 'v1.0.0', target: 'abc123' },
+              },
               null,
               2
             ),
@@ -284,7 +350,7 @@ describe('release-tools', () => {
     });
 
     it('deletes tag with numeric project_id', async () => {
-      mockClient.deleteTag.mockResolvedValue(undefined);
+      mockClient.deleteTag.mockResolvedValue({ deleted_tag: undefined });
 
       const tools = createReleaseTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'deleteTag')?.handler;
@@ -299,7 +365,11 @@ describe('release-tools', () => {
           {
             type: 'text',
             text: JSON.stringify(
-              { success: true, message: "Tag 'v2.0.0' deleted successfully" },
+              {
+                success: true,
+                message: "Tag 'v2.0.0' deleted successfully",
+                deleted_tag: undefined,
+              },
               null,
               2
             ),
@@ -310,7 +380,7 @@ describe('release-tools', () => {
     });
 
     it('deletes tag with special characters', async () => {
-      mockClient.deleteTag.mockResolvedValue(undefined);
+      mockClient.deleteTag.mockResolvedValue({ deleted_tag: undefined });
 
       const tools = createReleaseTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'deleteTag')?.handler;
@@ -325,7 +395,11 @@ describe('release-tools', () => {
           {
             type: 'text',
             text: JSON.stringify(
-              { success: true, message: "Tag 'release/v1.0.0-beta.1' deleted successfully" },
+              {
+                success: true,
+                message: "Tag 'release/v1.0.0-beta.1' deleted successfully",
+                deleted_tag: undefined,
+              },
               null,
               2
             ),
@@ -346,10 +420,8 @@ describe('release-tools', () => {
         tag_name: 'non-existent-tag',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles permission errors', async () => {
@@ -404,10 +476,8 @@ describe('release-tools', () => {
         tag_name: 'v1.0.0',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
   });
 
@@ -638,10 +708,13 @@ describe('release-tools', () => {
         name: 'Release',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        'Resource not found in GitLab.'
+      );
+      expect((result.content[0] as { text: string }).text).toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
   });
 
@@ -649,7 +722,7 @@ describe('release-tools', () => {
     it('returns error for all tools when client is null', async () => {
       const tools = createReleaseTools(null);
 
-      expect(tools).toHaveLength(3);
+      expect(tools).toHaveLength(4);
 
       for (const { tool, handler } of tools) {
         const result = await handler({});
@@ -663,6 +736,23 @@ describe('release-tools', () => {
           isError: true,
         });
       }
+    });
+
+    it('returns error for list_tags when client is null', async () => {
+      const tools = createReleaseTools(null);
+      const handler = tools.find((t) => t.tool.name === 'listTags')?.handler;
+
+      const result = await handler!({ project_id: 'test' });
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
+        ],
+        isError: true,
+      });
     });
 
     it('returns error for create_tag when client is null', async () => {

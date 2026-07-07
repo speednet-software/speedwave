@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 
 // Mock the domain factory: `createJiraIssuesClient` returns our scripted stub.
 const issuesStub = {
@@ -73,9 +74,19 @@ describe('definitions', () => {
     const byName = Object.fromEntries(
       createJiraIssueTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
-    expect(byName.searchIssues._meta).toEqual({ deferLoading: false });
-    expect(byName.createIssue._meta).toEqual({ deferLoading: true });
+    expect(byName.searchIssues._meta).toMatchObject({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.createIssue._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
     expect(byName.searchIssues.annotations).toBeDefined();
+  });
+
+  it('searchIssues and assignIssue declare user-scoped identity metadata pointing at getMyself', () => {
+    const byName = Object.fromEntries(
+      createJiraIssueTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
+    );
+    for (const name of ['searchIssues', 'assignIssue']) {
+      expect(byName[name]._meta?.[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(byName[name]._meta?.[META_KEYS.CURRENT_USER_TOOL]).toBe('getMyself');
+    }
   });
 });
 

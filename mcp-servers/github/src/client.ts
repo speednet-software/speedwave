@@ -5,7 +5,7 @@
  * Architecture:
  * - Token mounted RO from /tokens/token
  * - github.com only in v1 — no host_url file (unlike GitLab). baseUrl stays default (https://api.github.com).
- * - Exposes 45 tools via `@octokit/rest`
+ * - Exposes 46 tools via `@octokit/rest`
  * Security:
  * - Blast radius containment: only GitHub tokens if compromised
  * - Token never exposed in responses
@@ -41,6 +41,7 @@ import type {
   GitHubComment,
   GitHubReviewComment,
   GitHubCommitComparison,
+  GitHubUser,
 } from './types.js';
 import type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
@@ -62,6 +63,7 @@ export type {
   GitHubComment,
   GitHubReviewComment,
   GitHubCommitComparison,
+  GitHubUser,
 } from './types.js';
 export type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
@@ -163,6 +165,44 @@ function classifyOctokitError(error: unknown): ErrorCategory {
     return 'network';
   }
   return 'unknown';
+}
+
+/**
+ * Runs `fn`; on a 404, rethrows with `notFoundMessage` instead of Octokit's generic text so the
+ * caller learns which param was wrong and which tool supplies a correct value.
+ * @param fn - The Octokit call to run
+ * @param notFoundMessage - Replacement message naming the failing param + a fix-it tool
+ */
+async function withNotFoundMessage<T>(fn: () => Promise<T>, notFoundMessage: string): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if ((error as OctokitErrorLike)?.status === 404) {
+      throw new Error(notFoundMessage);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Runs `fn`; on a 422, rethrows with `validationMessage` prefixed to Octokit's own detail so the
+ * caller sees both the tool's own param vocabulary and GitHub's raw reason.
+ * @param fn - The Octokit call to run
+ * @param validationMessage - Replacement message prefix naming the failing param
+ */
+async function withValidationMessage<T>(
+  fn: () => Promise<T>,
+  validationMessage: string
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    const err = error as OctokitErrorLike;
+    if (err?.status === 422) {
+      throw new Error(`${validationMessage}: ${err.message || 'invalid request'}`);
+    }
+    throw error;
+  }
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -514,6 +554,20 @@ export class GitHubClient {
     };
   }
 
+  /**
+   * Maps a raw GitHub user response to the normalized {@link GitHubUser} shape.
+   * @param u - Raw user object from the GitHub API
+   * @returns Normalized user
+   */
+  private mapUser(u: Record<string, unknown>): GitHubUser {
+    return {
+      login: String(u.login || ''),
+      name: u.name ? String(u.name) : undefined,
+      email: u.email ? String(u.email) : undefined,
+      html_url: String(u.html_url || ''),
+    };
+  }
+
   //═════════════════════════════════════════════════════════════════════════════
   // Error Handling
   //═════════════════════════════════════════════════════════════════════════════
@@ -590,6 +644,20 @@ export class GitHubClient {
 
       return { success: false, error: errorMessage, errorType };
     }
+  }
+
+  //═════════════════════════════════════════════════════════════════════════════
+  // Users
+  //═════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Gets the GitHub user authenticated by the mounted token — the account every
+   * `owner`/`assignee`/`creator`/`author` "me" question resolves against.
+   * @returns Normalized authenticated user
+   */
+  async getCurrentUser(): Promise<GitHubUser> {
+    const res = await this.octokit.rest.users.getAuthenticated();
+    return this.mapUser(res.data as Record<string, unknown>);
   }
 
   //═════════════════════════════════════════════════════════════════════════════
@@ -712,7 +780,10 @@ export class GitHubClient {
    */
   async getPullRequest(owner: string, repo: string, number: number): Promise<GitHubPullRequest> {
     this.validateRequired({ owner, repo, number });
-    const res = await this.octokit.rest.pulls.get({ owner, repo, pull_number: number });
+    const res = await withNotFoundMessage(
+      () => this.octokit.rest.pulls.get({ owner, repo, pull_number: number }),
+      `PR #${number} not found in ${owner}/${repo}. Check the number with listPullRequests, or the owner/repo with getRepo.`
+    );
     return this.mapPullRequest(res.data as Record<string, unknown>);
   }
 
@@ -1085,7 +1156,10 @@ export class GitHubClient {
    */
   async getBranch(owner: string, repo: string, branch: string): Promise<GitHubBranch> {
     this.validateRequired({ owner, repo, branch });
-    const res = await this.octokit.rest.repos.getBranch({ owner, repo, branch });
+    const res = await withNotFoundMessage(
+      () => this.octokit.rest.repos.getBranch({ owner, repo, branch }),
+      `Branch '${branch}' not found in ${owner}/${repo}. Check the name with listBranches, or the owner/repo with getRepo.`
+    );
     return this.mapBranch(res.data as unknown as Record<string, unknown>);
   }
 
@@ -1113,12 +1187,16 @@ export class GitHubClient {
       const source = await this.getBranch(owner, repo, params.from_branch);
       sha = source.commit.sha;
     }
-    await this.octokit.rest.git.createRef({
-      owner,
-      repo,
-      ref: `refs/heads/${params.branch}`,
-      sha,
-    });
+    await withValidationMessage(
+      () =>
+        this.octokit.rest.git.createRef({
+          owner,
+          repo,
+          ref: `refs/heads/${params.branch}`,
+          sha,
+        }),
+      `Could not create branch '${params.branch}' in ${owner}/${repo} (it may already exist — check with listBranches)`
+    );
     return this.getBranch(owner, repo, params.branch);
   }
 
@@ -1323,7 +1401,7 @@ export class GitHubClient {
    * @param path - File path from the repository root
    * @param options - Read options
    * @param options.ref - Branch, tag, or commit SHA to read from (default: the repo's default branch)
-   * @returns Normalized file content (GitHub returns `content` base64-encoded)
+   * @returns Normalized file content, decoded to UTF-8 text (GitHub returns it base64-encoded)
    * @throws {Error} if the path resolves to a directory rather than a file
    */
   async getFileContents(
@@ -1333,19 +1411,39 @@ export class GitHubClient {
     options: { ref?: string } = {}
   ): Promise<GitHubFileContent> {
     this.validateRequired({ owner, repo, path });
-    const res = await this.octokit.rest.repos.getContent({ owner, repo, path, ref: options.ref });
+    let res;
+    try {
+      res = await this.octokit.rest.repos.getContent({ owner, repo, path, ref: options.ref });
+    } catch (error) {
+      if ((error as OctokitErrorLike)?.status === 404) {
+        throw new Error(
+          `File not found: '${path}' in ${owner}/${repo}${options.ref ? ` at ref '${options.ref}'` : ''}. ` +
+            `Check the path with getTree, or the ref with listBranches.`
+        );
+      }
+      throw error;
+    }
     const data = res.data as unknown;
     if (Array.isArray(data)) {
-      throw new Error('Path is a directory, not a file');
+      throw new Error(
+        `Path '${path}' is a directory, not a file. Use getTree to list its contents.`
+      );
     }
     const file = data as Record<string, unknown>;
     if (file.type !== 'file' || typeof file.content !== 'string') {
-      throw new Error('Path is a directory, not a file');
+      throw new Error(
+        `Path '${path}' is a directory, not a file. Use getTree to list its contents.`
+      );
     }
+    const rawEncoding = String(file.encoding || 'base64');
+    const content =
+      rawEncoding === 'base64'
+        ? Buffer.from(String(file.content || ''), 'base64').toString('utf-8')
+        : String(file.content || '');
     return {
       path: String(file.path || path),
-      content: String(file.content || ''),
-      encoding: String(file.encoding || 'base64'),
+      content,
+      encoding: 'utf-8',
       sha: String(file.sha || ''),
       size: Number(file.size || 0),
     };
@@ -1373,14 +1471,20 @@ export class GitHubClient {
     let sha = params.sha;
     if (!sha) {
       try {
-        const existing = await this.getFileContents(owner, repo, params.path, {
+        const existing = await this.octokit.rest.repos.getContent({
+          owner,
+          repo,
+          path: params.path,
           ref: params.branch,
         });
-        sha = existing.sha;
+        const file = existing.data as Record<string, unknown>;
+        sha = typeof file.sha === 'string' ? file.sha : undefined;
       } catch (error) {
-        // 404 means the file does not exist yet; re-throw anything else.
+        // 404 means the file does not exist yet (a normal create); anything else blocks the write.
         if ((error as OctokitErrorLike)?.status !== 404) {
-          throw error;
+          throw new Error(
+            `Could not check whether '${params.path}' already exists in ${owner}/${repo} before writing: ${GitHubClient.formatError(error)}`
+          );
         }
       }
     }
@@ -1636,7 +1740,10 @@ export class GitHubClient {
    */
   async getIssue(owner: string, repo: string, number: number): Promise<GitHubIssue> {
     this.validateRequired({ owner, repo, number });
-    const res = await this.octokit.rest.issues.get({ owner, repo, issue_number: number });
+    const res = await withNotFoundMessage(
+      () => this.octokit.rest.issues.get({ owner, repo, issue_number: number }),
+      `Issue #${number} not found in ${owner}/${repo}. Check the number with listIssues, or the owner/repo with getRepo.`
+    );
     return this.mapIssue(res.data as Record<string, unknown>);
   }
 
@@ -1761,13 +1868,17 @@ export class GitHubClient {
     params: { name: string; color: string; description?: string }
   ): Promise<GitHubLabel> {
     this.validateRequired({ owner, repo, name: params.name, color: params.color });
-    const res = await this.octokit.rest.issues.createLabel({
-      owner,
-      repo,
-      name: params.name,
-      color: params.color.replace(/^#/, ''),
-      description: params.description,
-    });
+    const res = await withValidationMessage(
+      () =>
+        this.octokit.rest.issues.createLabel({
+          owner,
+          repo,
+          name: params.name,
+          color: params.color.replace(/^#/, ''),
+          description: params.description,
+        }),
+      `Could not create label '${params.name}' in ${owner}/${repo} (it may already exist — check with listLabels)`
+    );
     return this.mapLabel(res.data as Record<string, unknown>);
   }
 
@@ -1794,23 +1905,32 @@ export class GitHubClient {
   ): Promise<{ tag: string; sha: string; ref: string }> {
     this.validateRequired({ owner, repo, tag: params.tag, sha: params.sha });
     let targetSha = params.sha;
-    if (params.message) {
-      const tagObj = await this.octokit.rest.git.createTag({
-        owner,
-        repo,
-        tag: params.tag,
-        message: params.message,
-        object: params.sha,
-        type: 'commit',
-      });
+    const message = params.message;
+    if (message) {
+      const tagObj = await withNotFoundMessage(
+        () =>
+          this.octokit.rest.git.createTag({
+            owner,
+            repo,
+            tag: params.tag,
+            message,
+            object: params.sha,
+            type: 'commit',
+          }),
+        `SHA '${params.sha}' not found in ${owner}/${repo}. Check it with listCommits or getBranch.`
+      );
       targetSha = String((tagObj.data as Record<string, unknown>).sha || params.sha);
     }
-    await this.octokit.rest.git.createRef({
-      owner,
-      repo,
-      ref: `refs/tags/${params.tag}`,
-      sha: targetSha,
-    });
+    await withValidationMessage(
+      () =>
+        this.octokit.rest.git.createRef({
+          owner,
+          repo,
+          ref: `refs/tags/${params.tag}`,
+          sha: targetSha,
+        }),
+      `Could not create tag '${params.tag}' in ${owner}/${repo} (it may already exist)`
+    );
     return { tag: params.tag, sha: targetSha, ref: `refs/tags/${params.tag}` };
   }
 
@@ -1857,16 +1977,20 @@ export class GitHubClient {
     }
   ): Promise<GitHubRelease> {
     this.validateRequired({ owner, repo, tag_name: params.tag_name });
-    const res = await this.octokit.rest.repos.createRelease({
-      owner,
-      repo,
-      tag_name: params.tag_name,
-      name: params.name || params.tag_name,
-      body: params.body,
-      draft: params.draft,
-      prerelease: params.prerelease,
-      target_commitish: params.target_commitish,
-    });
+    const res = await withValidationMessage(
+      () =>
+        this.octokit.rest.repos.createRelease({
+          owner,
+          repo,
+          tag_name: params.tag_name,
+          name: params.name || params.tag_name,
+          body: params.body,
+          draft: params.draft,
+          prerelease: params.prerelease,
+          target_commitish: params.target_commitish,
+        }),
+      `Could not create a release for tag '${params.tag_name}' in ${owner}/${repo} (a release for this tag may already exist)`
+    );
     return this.mapRelease(res.data as Record<string, unknown>);
   }
 }

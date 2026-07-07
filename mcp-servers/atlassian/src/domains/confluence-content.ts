@@ -4,7 +4,7 @@
  * @module mcp-atlassian/domains/confluence-content
  */
 
-import { ts } from '@speedwave/mcp-shared';
+import { ts, clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
 import { assertConfluenceSpaceAllowed } from '../scope.js';
@@ -31,7 +31,9 @@ export interface ConfluenceContentClient {
  */
 export function createConfluenceContentClient(client: AtlassianClient): ConfluenceContentClient {
   /**
-   * Enforce the space allowlist for a page by resolving its space.
+   * Enforce the space allowlist for a page by resolving its space. A 404 on the
+   * space lookup means "no key" (allowlist denial); any other lookup failure is
+   * rethrown so it isn't misread as a scope decision.
    * @param pageId - The Confluence page ID.
    */
   const enforcePage = async (pageId: string): Promise<void> => {
@@ -47,11 +49,13 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
         );
         key = sp.key ? String(sp.key) : undefined;
       } catch (error) {
-        // 404 means the space isn't visible; other statuses are warned, not swallowed.
         const status = (error as { response?: { status?: number } })?.response?.status;
         if (status !== 404) {
           console.warn(
             `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${page.spaceId}': ${error}`
+          );
+          throw new Error(
+            `Could not verify the Confluence space for this page (space lookup failed); retry, or confirm the space is accessible.`
           );
         }
         key = undefined;
@@ -74,7 +78,7 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
       await enforcePage(pageId);
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/footer-comments`,
-        { limit: Math.min(Math.max(options.limit ?? 25, 1), 100), 'body-format': 'storage' }
+        { limit: clampPageSize(options.limit, 25, 100), 'body-format': 'storage' }
       );
       return (res.results ?? []).map((c) => mapComment(c, pageId));
     },
@@ -94,7 +98,7 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
       await enforcePage(pageId);
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/labels`,
-        { limit: Math.min(Math.max(options.limit ?? 50, 1), 100) }
+        { limit: clampPageSize(options.limit, 50, 100) }
       );
       return (res.results ?? []).map(mapLabel);
     },
@@ -103,7 +107,7 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
       await enforcePage(pageId);
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/attachments`,
-        { limit: Math.min(Math.max(options.limit ?? 50, 1), 100) }
+        { limit: clampPageSize(options.limit, 50, 100) }
       );
       return (res.results ?? []).map((a) => mapAttachment(a, pageId));
     },

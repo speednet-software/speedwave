@@ -156,12 +156,13 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
 
     let client = try resolveClient(preferred: params["client"] as? String)
     let cc = params["cc"] as? String
+    let bcc = params["bcc"] as? String
 
     switch client {
     case "outlook":
-        return try OutlookClient.sendEmail(to: to, subject: subject, body: body, cc: cc)
+        return try OutlookClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
     default:
-        return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc)
+        return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
     }
 }
 

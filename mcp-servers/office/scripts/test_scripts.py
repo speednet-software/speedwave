@@ -183,6 +183,23 @@ def test_docx_errors(tmp_path: Path) -> None:
     run_script_expect_fail("docx_build.py", "edit", str(src), str(out), json.dumps([{"op": "delete_paragraph", "index": 99}]))
 
 
+def test_docx_replace_text_zero_matches_is_a_reported_failure(tmp_path: Path) -> None:
+    src = tmp_path / "src.docx"
+    run_script("docx_build.py", "create", str(src), json.dumps({"elements": [{"type": "paragraph", "text": "hello world"}]}))
+    out = tmp_path / "edited.docx"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "docx_build.py"), "edit", str(src), str(out), json.dumps([{"op": "replace_text", "find": "not-present", "replace": "x"}])],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    result = json.loads(proc.stdout)
+    assert result["ok"] is False
+    assert "not-present" in result["error"]
+    assert "was not found" in result["error"]
+    assert not out.exists()
+
+
 # ── xlsx_build.py ────────────────────────────────────────────────────────────
 
 
@@ -234,6 +251,22 @@ def test_xlsx_errors(tmp_path: Path) -> None:
     out = tmp_path / "x.xlsx"
     run_script_expect_fail("xlsx_build.py", "create", str(out), json.dumps({"sheets": []}))
     run_script_expect_fail("xlsx_build.py", "create", str(out), json.dumps({"sheets": [{"name": "S", "rows": [], "charts": [{"type": "donut", "dataRange": "S!A1:A2", "anchor": "B1"}]}]}))
+
+
+def test_xlsx_unknown_sheet_name_is_a_teaching_error(tmp_path: Path) -> None:
+    src = tmp_path / "src.xlsx"
+    run_script("xlsx_build.py", "create", str(src), json.dumps({"sheets": [{"name": "Q1", "rows": [[1, 2]]}]}))
+    out = tmp_path / "edited.xlsx"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "xlsx_build.py"), "edit", str(src), str(out), json.dumps([{"op": "set_cell", "sheet": "Q1 Data", "cell": "A1", "value": 5}])],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    result = json.loads(proc.stdout)
+    assert result["ok"] is False
+    assert "Q1 Data" in result["error"]
+    assert "['Q1']" in result["error"]
 
 
 # ── pptx_build.py ────────────────────────────────────────────────────────────
@@ -372,6 +405,21 @@ def test_pdf_errors(tmp_path: Path) -> None:
     run_script_expect_fail("pdf_ops.py", "split", str(p), str(out), "1", "99")  # out of range
     run_script_expect_fail("pdf_ops.py", "rotate", str(p), str(out), "45", "1")  # bad degrees
     run_script_expect_fail("pdf_ops.py", "bogus")
+
+
+def test_pdf_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
+    not_a_pdf = tmp_path / "fake.pdf"
+    not_a_pdf.write_text("<html><body>this is not a PDF</body></html>")
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "pdf_ops.py"), "metadata", str(not_a_pdf)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    result = json.loads(proc.stdout)
+    assert result["ok"] is False
+    assert "could not read" in result["error"]
+    assert "valid, non-corrupted PDF" in result["error"]
 
 
 # ── python_docx_extract.py ───────────────────────────────────────────────────

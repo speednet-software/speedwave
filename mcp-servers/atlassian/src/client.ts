@@ -280,7 +280,11 @@ export class AtlassianClient {
         return 'Atlassian rate limit exceeded. Try again shortly.';
       }
       if (typeof status === 'number' && status >= 400 && status < 500) {
-        return `Atlassian request error (${status})${apiMessage ? `: ${apiMessage}` : ''}`;
+        return `Atlassian request error (${status})${
+          apiMessage
+            ? `: ${apiMessage}`
+            : '. Check the request parameters (field names, enum values like issue type/priority, and JQL/CQL syntax) against the tool schema.'
+        }`;
       }
       if (typeof status === 'number' && status >= 500) {
         return 'Atlassian server error. Try again later.';

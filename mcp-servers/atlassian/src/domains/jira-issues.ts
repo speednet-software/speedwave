@@ -3,6 +3,7 @@
  * @module mcp-atlassian/domains/jira-issues
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { toAdf } from '../adf.js';
 import {
@@ -109,7 +110,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     async search({ jql, maxResults = 50, nextPageToken }) {
       const body: Record<string, unknown> = {
         jql,
-        maxResults: Math.min(Math.max(maxResults, 1), 100),
+        maxResults: clampPageSize(maxResults, 50, 100),
         fields: [...ISSUE_FIELDS],
       };
       if (nextPageToken) body.nextPageToken = nextPageToken;

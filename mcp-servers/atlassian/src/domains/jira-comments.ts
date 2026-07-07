@@ -4,6 +4,7 @@
  * @module mcp-atlassian/domains/jira-comments
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { toAdf } from '../adf.js';
 import { assertJiraIssueKeyAllowed } from '../scope.js';
@@ -55,7 +56,7 @@ export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsC
       enforce(issueIdOrKey);
       const res = await client.get<{ comments?: unknown[] }>(
         `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`,
-        { maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100) }
+        { maxResults: clampPageSize(options.maxResults, 50, 100) }
       );
       return (res.comments ?? []).map(mapComment);
     },

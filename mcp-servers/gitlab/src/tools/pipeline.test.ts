@@ -161,6 +161,29 @@ describe('pipeline-tools', () => {
         isError: true,
       });
     });
+
+    it('references getPipelineFull (not the non-existent get_pipeline_full) for details', () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listPipelineIds')?.tool;
+
+      expect(tool?.description).toContain('getPipelineFull');
+      expect(tool?.description).not.toContain('get_pipeline_full');
+    });
+
+    it('declares a status enum on input and output that includes "skipped"', () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listPipelineIds')?.tool;
+
+      const inputStatus = tool?.inputSchema.properties.status as { enum?: string[] };
+      expect(inputStatus.enum).toContain('skipped');
+
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      const pipelinesItemProps = (
+        outputProps.pipelines as { items: { properties: Record<string, unknown> } }
+      ).items.properties;
+      const outputStatus = pipelinesItemProps.status as { enum?: string[] };
+      expect(outputStatus.enum).toContain('skipped');
+    });
   });
 
   describe('getPipelineFull', () => {
@@ -209,6 +232,17 @@ describe('pipeline-tools', () => {
       expect(mockClient.showPipeline).toHaveBeenCalledWith(456, 123);
     });
 
+    it('documents that duration can be absent/null while the pipeline is running', () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'getPipelineFull')?.tool;
+
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      const pipelineProps = (outputProps.pipeline as { properties: Record<string, unknown> })
+        .properties;
+      const durationProp = pipelineProps.duration as { description?: string };
+      expect(durationProp.description).toContain('running');
+    });
+
     it('handles non-existent pipeline', async () => {
       mockClient.showPipeline.mockRejectedValue(new Error('404 Pipeline not found'));
 
@@ -217,10 +251,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles permission errors', async () => {
@@ -231,20 +263,34 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 123 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
+    });
+
+    it('accepts a "#"-prefixed pipeline_id', async () => {
+      mockClient.showPipeline.mockResolvedValue({ id: 123, status: 'success' });
+
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getPipelineFull')?.handler;
+
+      await handler!({ project_id: 'test-project', pipeline_id: '#123' });
+
+      expect(mockClient.showPipeline).toHaveBeenCalledWith('test-project', 123);
+    });
+
+    it('returns a teaching error for a non-numeric pipeline_id without calling the client', async () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getPipelineFull')?.handler;
+
+      const result = await handler!({ project_id: 'test-project', pipeline_id: 'bad' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.showPipeline).not.toHaveBeenCalled();
     });
   });
 
   describe('getJobLog', () => {
-    it('retrieves job log successfully', async () => {
+    it('retrieves job log successfully as structured JSON (not a bare text string)', async () => {
       const mockLog = 'Running tests...\nAll tests passed!\nBuild complete.';
 
       mockClient.getJobLog.mockResolvedValue(mockLog);
@@ -255,7 +301,7 @@ describe('pipeline-tools', () => {
       const result = await handler!({ project_id: 'test-project', job_id: 456 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: mockLog }],
+        content: [{ type: 'text', text: JSON.stringify({ log: mockLog }, null, 2) }],
       });
       expect(mockClient.getJobLog).toHaveBeenCalledWith('test-project', 456, undefined);
     });
@@ -284,7 +330,7 @@ describe('pipeline-tools', () => {
       expect(mockClient.getJobLog).toHaveBeenCalledWith('test-project', 456, 50);
     });
 
-    it('returns text result for empty log', async () => {
+    it('returns a structured result for an empty log', async () => {
       mockClient.getJobLog.mockResolvedValue('');
 
       const tools = createPipelineTools(mockClient as unknown as GitLabClient);
@@ -293,8 +339,29 @@ describe('pipeline-tools', () => {
       const result = await handler!({ project_id: 'test-project', job_id: 456 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: '' }],
+        content: [{ type: 'text', text: JSON.stringify({ log: '' }, null, 2) }],
       });
+    });
+
+    it('accepts a numeric-string job_id', async () => {
+      mockClient.getJobLog.mockResolvedValue('log');
+
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getJobLog')?.handler;
+
+      await handler!({ project_id: 'test-project', job_id: '456' });
+
+      expect(mockClient.getJobLog).toHaveBeenCalledWith('test-project', 456, undefined);
+    });
+
+    it('returns a teaching error for a non-numeric job_id without calling the client', async () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getJobLog')?.handler;
+
+      const result = await handler!({ project_id: 'test-project', job_id: 'nope' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.getJobLog).not.toHaveBeenCalled();
     });
 
     it('handles non-existent job', async () => {
@@ -305,10 +372,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', job_id: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles log retrieval errors', async () => {
@@ -375,10 +440,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles permission errors', async () => {
@@ -389,15 +452,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 123 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
     });
 
     it('handles already running pipeline', async () => {
@@ -412,6 +468,27 @@ describe('pipeline-tools', () => {
         content: [{ type: 'text', text: 'Error: 400 Pipeline is already running' }],
         isError: true,
       });
+    });
+
+    it('accepts a numeric-string pipeline_id', async () => {
+      mockClient.retryPipeline.mockResolvedValue({ id: 123, status: 'pending' });
+
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'retryPipeline')?.handler;
+
+      await handler!({ project_id: 'test-project', pipeline_id: '123' });
+
+      expect(mockClient.retryPipeline).toHaveBeenCalledWith('test-project', 123);
+    });
+
+    it('returns a teaching error for a non-numeric pipeline_id without calling the client', async () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'retryPipeline')?.handler;
+
+      const result = await handler!({ project_id: 'test-project', pipeline_id: 'oops' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.retryPipeline).not.toHaveBeenCalled();
     });
   });
 
@@ -510,10 +587,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles permission errors', async () => {
@@ -524,15 +599,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'main' });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
     });
 
     it('handles pipeline configuration errors', async () => {
@@ -543,10 +611,8 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'main' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
   });
 

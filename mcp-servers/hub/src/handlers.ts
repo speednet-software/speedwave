@@ -107,14 +107,28 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
         };
       }
 
+      const VALID_DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
+      const rawDetail = params.detail_level;
+      if (
+        rawDetail !== undefined &&
+        !VALID_DETAIL_LEVELS.includes(rawDetail as (typeof VALID_DETAIL_LEVELS)[number])
+      ) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error: detail_level ${JSON.stringify(rawDetail)} is not valid. Use one of: ${VALID_DETAIL_LEVELS.join(', ')}. Omit it to default to names_only.`,
+            },
+          ],
+          isError: true,
+        };
+      }
       const searchParams: SearchToolsParams = {
         query: params.query,
         detailLevel:
-          params.detail_level === 'names_only' ||
-          params.detail_level === 'with_descriptions' ||
-          params.detail_level === 'full_schema'
-            ? params.detail_level
-            : 'names_only',
+          rawDetail === undefined
+            ? 'names_only'
+            : (rawDetail as (typeof VALID_DETAIL_LEVELS)[number]),
         service: typeof params.service === 'string' ? params.service : undefined,
         includeDeferred:
           typeof params.include_deferred === 'boolean' ? params.include_deferred : undefined,

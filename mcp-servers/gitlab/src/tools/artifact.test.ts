@@ -108,31 +108,55 @@ describe('artifact-tools', () => {
 
       const result = await handler!({ project_id: 'my-project', pipeline_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
 
     it('handles permission errors', async () => {
-      mockClient.listArtifacts.mockRejectedValue(
-        new Error('Permission denied. Your GitLab token may not have sufficient permissions.')
-      );
+      mockClient.listArtifacts.mockRejectedValue(new Error('403 Forbidden'));
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
 
       const result = await handler!({ project_id: 'private-project', pipeline_id: 456 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
+    });
+
+    it('accepts a numeric-string pipeline_id', async () => {
+      mockClient.listArtifacts.mockResolvedValue([]);
+
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
+
+      await handler!({ project_id: 'my-project', pipeline_id: '456' });
+
+      expect(mockClient.listArtifacts).toHaveBeenCalledWith('my-project', 456);
+    });
+
+    it('returns a teaching error for a non-numeric pipeline_id without calling the client', async () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
+
+      const result = await handler!({ project_id: 'my-project', pipeline_id: 'bad' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.listArtifacts).not.toHaveBeenCalled();
+    });
+
+    it('describes the real per-job-grouped output shape and references getPipelineFull', () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listArtifacts')?.tool;
+
+      expect(tool?.description).toContain('getPipelineFull');
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      const itemProps = (
+        outputProps.artifacts as { items: { properties: Record<string, unknown> } }
+      ).items.properties;
+      expect(itemProps).toHaveProperty('job_id');
+      expect(itemProps).toHaveProperty('job_name');
+      expect(itemProps).toHaveProperty('artifacts');
     });
   });
 
@@ -217,24 +241,45 @@ describe('artifact-tools', () => {
 
       const result = await handler!({ project_id: 'my-project', job_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+    });
+
+    it('accepts a "#"-prefixed job_id', async () => {
+      mockClient.downloadArtifact.mockResolvedValue({
+        data: Buffer.from('log'),
+        filename: 'job-42-log.txt',
       });
+
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'downloadArtifact')?.handler;
+
+      await handler!({ project_id: 'my-project', job_id: '#42' });
+
+      expect(mockClient.downloadArtifact).toHaveBeenCalledWith('my-project', 42);
+    });
+
+    it('describes accurately that this fetches a job log, not the CI artifact bundle', () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'downloadArtifact')?.tool;
+
+      expect(tool?.description).toContain('job log');
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      expect(outputProps).toHaveProperty('filename');
+      expect(outputProps).toHaveProperty('size');
+      expect(outputProps).not.toHaveProperty('artifact');
     });
 
     it('handles non-existent job', async () => {
-      mockClient.downloadArtifact.mockRejectedValue(new Error('Resource not found in GitLab.'));
+      mockClient.downloadArtifact.mockRejectedValue(new Error('404 Job Not Found'));
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'downloadArtifact')?.handler;
 
       const result = await handler!({ project_id: 'my-project', job_id: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
     });
   });
 
@@ -292,38 +337,55 @@ describe('artifact-tools', () => {
     });
 
     it('handles permission errors', async () => {
-      mockClient.deleteArtifacts.mockRejectedValue(
-        new Error('Permission denied. Your GitLab token may not have sufficient permissions.')
-      );
+      mockClient.deleteArtifacts.mockRejectedValue(new Error('403 Forbidden'));
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'deleteArtifacts')?.handler;
 
       const result = await handler!({ project_id: 'my-project', job_id: 123 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Permission denied');
     });
 
     it('handles non-existent job', async () => {
-      mockClient.deleteArtifacts.mockRejectedValue(new Error('Resource not found in GitLab.'));
+      mockClient.deleteArtifacts.mockRejectedValue(new Error('404 Job Not Found'));
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'deleteArtifacts')?.handler;
 
       const result = await handler!({ project_id: 'my-project', job_id: 9999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+    });
+
+    it('accepts a numeric-string job_id', async () => {
+      mockClient.deleteArtifacts.mockResolvedValue(undefined);
+
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'deleteArtifacts')?.handler;
+
+      await handler!({ project_id: 'my-project', job_id: '123' });
+
+      expect(mockClient.deleteArtifacts).toHaveBeenCalledWith('my-project', 123);
+    });
+
+    it('returns a teaching error for a non-numeric job_id without calling the client', async () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'deleteArtifacts')?.handler;
+
+      const result = await handler!({ project_id: 'my-project', job_id: 'oops' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.deleteArtifacts).not.toHaveBeenCalled();
+    });
+
+    it('describes that erase removes the job log too, not just artifacts', () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'deleteArtifacts')?.tool;
+
+      expect(tool?.description).toContain('job log');
     });
   });
 

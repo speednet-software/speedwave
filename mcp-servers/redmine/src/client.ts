@@ -758,6 +758,54 @@ function sanitizeTextile(textile: string): string {
   return result;
 }
 
+/** Recovery hint per entity-type context key, appended to a 404 error message. */
+const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
+  issue_id: 'Verify the issue ID with listIssueIds or searchIssueIds.',
+  project_id: 'Verify the project ID with listProjectIds or searchProjectIds.',
+  journal_id: 'Verify the journal ID with listJournals(issue_id).',
+  relation_id: 'Verify the relation ID with listRelations(issue_id).',
+  time_entry_id: 'Verify the time entry ID with listTimeEntries.',
+  user_id: 'Verify the user ID with listUsers or resolveUser.',
+};
+
+/**
+ * Build a 404 error message, naming the attempted resource and a recovery tool
+ * when the context identifies a known entity type (e.g. "issue_id=12345").
+ * @param context - Attempted resource identifier, e.g. "issue_id=12345".
+ */
+function formatNotFoundError(context?: string): string {
+  if (!context) return 'Resource not found in Redmine.';
+  const key = context.split('=')[0];
+  const hint = NOT_FOUND_RECOVERY_HINTS[key];
+  return hint
+    ? `Resource not found in Redmine: ${context}. ${hint}`
+    : `Resource not found in Redmine: ${context}.`;
+}
+
+/**
+ * Build a 422 validation error message, appending a recovery hint when the raw
+ * Redmine error text names a field with a known lookup tool.
+ * @param errors - Raw Redmine validation errors (array or object).
+ * @param context - Attempted resource identifier, included verbatim when present.
+ */
+function formatValidationError(errors: unknown, context?: string): string {
+  const base = `Validation error: ${JSON.stringify(errors)}`;
+  const prefixed = context ? `${base} (${context})` : base;
+  const text = JSON.stringify(errors).toLowerCase();
+  if (text.includes('assigned_to') || text.includes('assigned to') || text.includes('assignee')) {
+    return `${prefixed}. Call resolveUser or listUsers to find a valid assignee.`;
+  }
+  if (
+    text.includes('tracker') ||
+    text.includes('status') ||
+    text.includes('priority') ||
+    text.includes('activity')
+  ) {
+    return `${prefixed}. Call getMappings for valid values in this project.`;
+  }
+  return prefixed;
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -1165,7 +1213,7 @@ export class RedmineClient {
    * @param options - Filter options.
    * @param options.issue_id - Filter by issue ID.
    * @param options.project_id - Filter by project ID.
-   * @param options.user_id - Filter by user ID.
+   * @param options.user_id - Filter by user ID, or 'me' for the current authenticated user (passed to Redmine verbatim).
    * @param options.from - From date (YYYY-MM-DD format).
    * @param options.to - To date (YYYY-MM-DD format).
    * @param options.limit - Maximum number of results (default 25).
@@ -1176,7 +1224,7 @@ export class RedmineClient {
     options: {
       issue_id?: number;
       project_id?: string;
-      user_id?: number;
+      user_id?: number | string;
       from?: string;
       to?: string;
       limit?: number;
@@ -1611,9 +1659,10 @@ export class RedmineClient {
    * Format error objects into user-friendly error messages.
    * Handles Axios errors with appropriate HTTP status code messages.
    * @param error - The error object to format.
+   * @param context - Attempted resource identifier (e.g. "issue_id=12345"), included in 404/validation messages.
    * @returns Formatted error message string.
    */
-  static formatError(error: unknown): string {
+  static formatError(error: unknown, context?: string): string {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
 
@@ -1625,9 +1674,8 @@ export class RedmineClient {
           return withSetupGuidance('Authentication failed. Check your Redmine API key.');
         if (status === 403)
           return 'Permission denied. Your Redmine API key may not have sufficient permissions.';
-        if (status === 404) return 'Resource not found in Redmine.';
-        if (status === 422 && data?.errors)
-          return `Validation error: ${JSON.stringify(data.errors)}`;
+        if (status === 404) return formatNotFoundError(context);
+        if (status === 422 && data?.errors) return formatValidationError(data.errors, context);
         if (data?.errors) return `Error: ${JSON.stringify(data.errors)}`;
 
         return `HTTP ${status}: ${axiosError.message}`;

@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS, metaValue } from '@speedwave/mcp-shared';
 
 /** Build a fake FileResult-shaped object for the given format. */
 function fr(format: string) {
@@ -123,25 +124,34 @@ function payload(res: { content: Array<{ text?: string }>; isError?: boolean }):
 }
 
 describe('tool metadata', () => {
-  it('exposes 21 tools, each with a description, keywords, _meta and inputSchema', () => {
+  it('exposes 21 tools, each with a description, keywords, example, _meta and inputSchema', () => {
     expect(defs).toHaveLength(21);
     for (const { tool } of defs) {
       expect(typeof tool.description).toBe('string');
       expect(tool.description.length).toBeGreaterThan(20);
       expect(Array.isArray(tool.keywords) && tool.keywords.length > 0).toBe(true);
       expect(tool._meta).toBeTruthy();
+      expect(typeof tool.example).toBe('string');
+      expect((tool.example as string).length).toBeGreaterThan(10);
       expect(tool.inputSchema.type).toBe('object');
     }
   });
 
-  it('shows readDocument and markdownToPdf upfront and defers the rest', () => {
+  it('shows readDocument and markdownToPdf upfront and defers the rest, via the prefixed _meta key', () => {
     const shown = defs
-      .filter((d) => (d.tool._meta as { deferLoading?: boolean }).deferLoading === false)
+      .filter(
+        (d) =>
+          metaValue(
+            d.tool._meta as Record<string, unknown>,
+            META_KEYS.DEFER_LOADING,
+            'deferLoading'
+          ) === false
+      )
       .map((d) => d.tool.name);
     expect(shown.sort()).toEqual(['markdownToPdf', 'readDocument']);
   });
 
-  it('marks LibreOffice/weasyprint/matplotlib tools with timeoutClass long', () => {
+  it('marks LibreOffice/weasyprint/matplotlib tools with timeout-class long, via the prefixed _meta key', () => {
     const longTools = new Set([
       'markdownToPdf',
       'htmlToPdf',
@@ -150,7 +160,11 @@ describe('tool metadata', () => {
       'convertOffice',
     ]);
     for (const { tool } of defs) {
-      const tc = (tool._meta as { timeoutClass?: string }).timeoutClass;
+      const tc = metaValue(
+        tool._meta as Record<string, unknown>,
+        META_KEYS.TIMEOUT_CLASS,
+        'timeoutClass'
+      );
       if (longTools.has(tool.name)) {
         expect(tc).toBe('long');
       } else {
@@ -159,8 +173,76 @@ describe('tool metadata', () => {
     }
   });
 
+  it('never emits legacy unprefixed _meta keys (fully migrated to the prefixed contract)', () => {
+    for (const { tool } of defs) {
+      const meta = tool._meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty('deferLoading');
+      expect(meta).not.toHaveProperty('timeoutClass');
+      expect(meta).not.toHaveProperty('timeoutMs');
+      expect(meta).not.toHaveProperty('osCategory');
+    }
+  });
+
+  it('carries no identity _meta (egress-less, credential-free worker with no user concept)', () => {
+    for (const { tool } of defs) {
+      const meta = tool._meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty(META_KEYS.USER_SCOPED);
+      expect(meta).not.toHaveProperty(META_KEYS.CURRENT_USER_TOOL);
+      expect(meta).not.toHaveProperty(META_KEYS.SELF_PARAM);
+    }
+  });
+
   it('re-exports the conversion matrix', () => {
     expect(CONVERT_MATRIX['.docx']).toBeTruthy();
+  });
+
+  it('fillPdfForm declares flattened/fieldWarnings in outputSchema', () => {
+    const schema = byName.get('fillPdfForm')?.tool.outputSchema as
+      | { properties?: Record<string, unknown>; required?: string[] }
+      | undefined;
+    expect(schema?.properties).toHaveProperty('flattened');
+    expect(schema?.properties).toHaveProperty('fieldWarnings');
+    expect(schema?.required).toContain('flattened');
+  });
+
+  it('pdfMetadata declares the actual metadata shape in outputSchema', () => {
+    const schema = byName.get('pdfMetadata')?.tool.outputSchema as
+      | { properties?: { metadata?: { properties?: Record<string, unknown> } } }
+      | undefined;
+    const metadataProps = schema?.properties?.metadata?.properties;
+    expect(metadataProps).toHaveProperty('pages');
+    expect(metadataProps).toHaveProperty('encrypted');
+    expect(metadataProps).toHaveProperty('title');
+    expect(metadataProps).toHaveProperty('author');
+    expect(metadataProps).toHaveProperty('producer');
+  });
+
+  it('documents the renderChart width/height defaults', () => {
+    const specProp = byName.get('renderChart')?.tool.inputSchema.properties?.spec as
+      | { description?: string }
+      | undefined;
+    expect(specProp?.description ?? '').toMatch(/default 8/);
+    expect(specProp?.description ?? '').toMatch(/default 5/);
+  });
+
+  it('documents the mergePdf/splitPdf batch caps', () => {
+    expect(byName.get('mergePdf')?.tool.description).toMatch(/200 input PDFs/);
+    expect(byName.get('splitPdf')?.tool.description).toMatch(/200 ranges/);
+  });
+
+  it('documents replace_text formatting loss and zero-match behavior on editDocx', () => {
+    const desc = byName.get('editDocx')?.tool.description ?? '';
+    expect(desc).toMatch(/per-run formatting/);
+    expect(desc).toMatch(/fails if `find` is not present/);
+  });
+
+  it('documents that createDocx table cells must be strings', () => {
+    expect(byName.get('createDocx')?.tool.description).toMatch(/cells must be strings/);
+  });
+
+  it('documents the non-empty sheets/slides requirement', () => {
+    expect(byName.get('createXlsx')?.tool.description).toMatch(/at least one sheet/);
+    expect(byName.get('createPptx')?.tool.description).toMatch(/at least one slide/);
   });
 });
 

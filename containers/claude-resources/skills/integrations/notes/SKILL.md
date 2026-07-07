@@ -18,7 +18,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 ## Key methods
 
 - `os.listNoteFolders()` — list all folders across all accounts (no params). Returns `id`, `name`, `account_name`, `note_count`.
-- `os.listNotes({ folder_id?, limit? })` — list notes, optionally filtered by folder. Default limit: 50.
+- `os.listNotes({ folder_id?, limit? })` — list notes, optionally filtered by folder. Default limit: 20.
 - `os.getNote({ id })` — fetch a single note by ID with full `body` (HTML) and `plaintext` fields.
 - `os.searchNotes({ query, folder_id?, limit? })` — search by title and body text. Default limit: 20.
 - `os.createNote({ title, body?, folder_id? })` — create a note; `folder_id` optional (uses default folder if omitted).
@@ -29,7 +29,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 
 - **All methods are on `os.*`, not `notes.*`** — there is no separate notes global.
 - **Accounts reflect System Settings → Internet Accounts.** Notes.app supports iCloud, On My Mac, and IMAP-based accounts. `listNoteFolders` returns folders from all accounts; `account_name` distinguishes them.
-- **Folder names are case-sensitive.** Call `os.listNoteFolders()` first if the user refers to a folder by name; pass the resolved `id` to other calls. Nested folders are supported — the returned `name` is the folder's own name, not its full path.
+- **`folder_id` is matched by folder name, not the opaque `id` field.** Call `os.listNoteFolders()` first and pass its `name` field as `folder_id` to `listNotes`/`searchNotes`/`createNote` — the `id` field is not usable as a lookup key here. Folder names are case-sensitive. Nested folders are supported — the returned `name` is the folder's own name, not its full path.
 - **`body` field is HTML; `plaintext` is the stripped text.** `getNote` returns both. Use `plaintext` for text processing; use `body` only if you need to inspect or preserve rich formatting.
 - **`searchNotes` matches against `plaintext`, not raw HTML.** Exact-substring matches on HTML-formatted content (bold, tables) may miss text that is visually present. If a search returns no results, try a shorter or simpler query.
 - **Write/delete confirmation.** Per `CLAUDE.md`: `createNote`, `updateNote`, and `deleteNote` require explicit user confirmation before execution. `listNoteFolders`, `listNotes`, `getNote`, and `searchNotes` are read-only and need no confirmation.

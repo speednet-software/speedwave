@@ -4,11 +4,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { META_KEYS, metaValue } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './index.js';
 
 const ALL_TOOLS = createToolDefinitions(null).map((td) => td.tool);
 
-const EXPECTED_TOOL_COUNT = 46;
+const EXPECTED_TOOL_COUNT = 48;
 
 describe('GitLab tool metadata', () => {
   it(`should expose exactly ${EXPECTED_TOOL_COUNT} tools`, () => {
@@ -62,12 +63,18 @@ describe('GitLab tool metadata', () => {
       }
     });
 
-    it('has _meta with deferLoading', () => {
+    it('has _meta with a prefixed defer-loading key', () => {
       expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
+      const deferLoading = metaValue(
+        tool._meta as Record<string, unknown>,
+        META_KEYS.DEFER_LOADING,
+        'deferLoading'
+      );
+      expect(typeof deferLoading, `${tool.name} missing defer-loading`).toBe('boolean');
       expect(
-        typeof (tool._meta as Record<string, unknown>).deferLoading,
-        `${tool.name} missing deferLoading`
-      ).toBe('boolean');
+        META_KEYS.DEFER_LOADING in (tool._meta as Record<string, unknown>),
+        `${tool.name} uses legacy unprefixed deferLoading key`
+      ).toBe(true);
     });
   });
 });

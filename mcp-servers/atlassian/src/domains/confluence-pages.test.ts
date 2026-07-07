@@ -113,10 +113,17 @@ describe('get', () => {
     expect(client.get).toHaveBeenNthCalledWith(1, '/wiki/api/v2/pages/123', {});
   });
 
-  it('tolerates a failed space lookup (space_key undefined) when no allowlist', async () => {
-    client.get.mockResolvedValueOnce(v2Page()).mockRejectedValueOnce(new Error('boom'));
+  it('tolerates a 404 space lookup (space_key undefined) when no allowlist', async () => {
+    const notFound = Object.assign(new Error('not found'), { response: { status: 404 } });
+    client.get.mockResolvedValueOnce(v2Page()).mockRejectedValueOnce(notFound);
     const c = createConfluencePagesClient(client);
     expect((await c.get('123')).space_key).toBeUndefined();
+  });
+
+  it('rethrows a non-404 space lookup failure instead of conflating it with scope denial', async () => {
+    client.get.mockResolvedValueOnce(v2Page()).mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const c = createConfluencePagesClient(client);
+    await expect(c.get('123')).rejects.toThrow(/space lookup failed/i);
   });
 
   it('rejects a page outside the space allowlist', async () => {

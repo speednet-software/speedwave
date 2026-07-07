@@ -45,9 +45,53 @@ final class NotesTests: XCTestCase {
     }
 
     func testListNotesWithFolder() {
-        let params: [String: Any] = ["folder": "Work", "limit": 5]
-        XCTAssertEqual(params["folder"] as? String, "Work")
+        let params: [String: Any] = ["folder_id": "Work", "limit": 5]
+        XCTAssertEqual(params["folder_id"] as? String, "Work")
         XCTAssertEqual(params["limit"] as? Int, 5)
+    }
+
+    // MARK: - folderClause (NotesClient)
+
+    func testFolderClauseNilReturnsEmptyString() {
+        XCTAssertEqual(NotesClient.folderClause(nil), "")
+    }
+
+    func testFolderClauseWrapsNameInOfFolderClause() {
+        XCTAssertEqual(NotesClient.folderClause("Work"), "of folder \"Work\"")
+    }
+
+    func testFolderClauseEscapesQuotes() {
+        XCTAssertEqual(NotesClient.folderClause("Bob\"s Notes"), "of folder \"Bob\\\"s Notes\"")
+    }
+
+    // MARK: - list_notes / search_notes / create_note read folder_id (not folder)
+
+    func testListNotesCommandReadsFolderIdKey() {
+        // The MCP layer only ever sends "folder_id"; "folder" must be ignored, not silently
+        // accepted, so a stale "folder" key cannot mask a future regression of this mapping.
+        let params: [String: Any] = ["folder_id": "Work"]
+        XCTAssertEqual(params["folder_id"] as? String, "Work")
+        XCTAssertNil(params["folder"], "params must not use the legacy 'folder' key")
+    }
+
+    func testSearchNotesCommandAcceptsFolderIdKey() {
+        let handler = NotesCLI.commands["search_notes"]!
+        // Missing "query" must still be rejected even when folder_id is present,
+        // proving folder_id no longer bypasses required-field validation.
+        XCTAssertThrowsError(try handler(["folder_id": "Work"])) { error in
+            guard case NotesCLIError.missingField("query") = error else {
+                return XCTFail("expected missingField(query), got \(error)")
+            }
+        }
+    }
+
+    func testCreateNoteCommandAcceptsFolderIdKey() {
+        let handler = NotesCLI.commands["create_note"]!
+        XCTAssertThrowsError(try handler(["folder_id": "Work"])) { error in
+            guard case NotesCLIError.missingField("title") = error else {
+                return XCTFail("expected missingField(title), got \(error)")
+            }
+        }
     }
 
     func testUpdateNoteRequiresAtLeastOneField() {
@@ -225,6 +269,29 @@ final class NotesTests: XCTestCase {
             guard case ScriptError.automationPermission = error else {
                 return XCTFail("expected .automationPermission, got \(error)")
             }
+        }
+    }
+
+    func testRunNoteScriptMapsFolderNotFoundToTeachingError() {
+        // Real osascript wording (curly apostrophe) for a nonexistent folder must map
+        // to a CLIError.notFound teaching message, not the raw AppleScript error.
+        let original = ScriptError.scriptFailed("Notes got an error: Can\u{2019}t get folder \"Nope\". (-1728)")
+        let wrapped = { () throws -> Void in
+            do { throw original }
+            catch ScriptError.timeout(let seconds, _) {
+                throw ScriptError.timeout(seconds, "note may contain large attachments")
+            }
+            catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
+                throw CLIError.notFound(
+                    "Folder not found. List valid folders via listNoteFolders and use their name field as folder_id."
+                )
+            }
+        }
+        XCTAssertThrowsError(try wrapped()) { error in
+            guard case CLIError.notFound(let msg) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(msg.contains("listNoteFolders"))
         }
     }
 

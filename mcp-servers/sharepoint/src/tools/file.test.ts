@@ -51,8 +51,8 @@ describe('file-tools', () => {
       expect(result.success).toBe(true);
       expect(result.data).toEqual({
         files: [
-          { id: '1', name: 'test.txt', isFolder: false },
-          { id: '2', name: 'folder', isFolder: true },
+          { id: '1', name: 'test.txt', path: 'test.txt', isFolder: false },
+          { id: '2', name: 'folder', path: 'folder', isFolder: true },
         ],
         count: 2,
         exists: true,
@@ -73,7 +73,7 @@ describe('file-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual({
-        files: [{ id: '3', name: 'doc.pdf', isFolder: false }],
+        files: [{ id: '3', name: 'doc.pdf', path: 'docs/doc.pdf', isFolder: false }],
         count: 1,
         exists: true,
       });
@@ -121,6 +121,25 @@ describe('file-tools', () => {
         files: [],
         count: 0,
       });
+    });
+
+    it('returns the full relative path for a nested-folder entry, reusable as sharepointPath', async () => {
+      const client = createMockClient();
+      client.listFiles.mockResolvedValue({
+        files: [
+          { id: '9', name: 'hero.jpg', isFolder: false, path: 'documents/reports/2024/hero.jpg' },
+        ],
+        exists: true,
+      });
+
+      const result = await handleListFileIds(client as unknown as SharePointClient, {
+        path: 'documents/reports/2024',
+      });
+
+      expect(result.success).toBe(true);
+      expect((result.data as { files: Array<{ path: string }> }).files[0].path).toBe(
+        'documents/reports/2024/hero.jpg'
+      );
     });
 
     it('returns error when API call fails', async () => {
@@ -207,7 +226,7 @@ describe('file-tools', () => {
       expect(result.data).toEqual(metadata);
     });
 
-    it('returns error when file not found', async () => {
+    it('returns error when file not found, with a hint to call listFileIds', async () => {
       const client = createMockClient();
       client.getFileMetadata.mockRejectedValue(new Error('Resource not found in SharePoint.'));
 
@@ -218,7 +237,7 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toEqual({
         code: 'GET_FAILED',
-        message: 'Resource not found in SharePoint.',
+        message: 'Resource not found in SharePoint. Call listFileIds first to get a valid file_id.',
       });
     });
 
@@ -247,6 +266,18 @@ describe('file-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('GET_FAILED');
+    });
+
+    it('does not append the listFileIds hint when the error is not "not found"', async () => {
+      const client = createMockClient();
+      client.getFileMetadata.mockRejectedValue(new Error('API error'));
+
+      const result = await handleGetFileFull(client as unknown as SharePointClient, {
+        file_id: '123',
+      });
+
+      expect(result.error?.message).toBe('API error');
+      expect(result.error?.message).not.toContain('listFileIds');
     });
   });
 

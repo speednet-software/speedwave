@@ -150,6 +150,17 @@ describe('Relation Tools', () => {
         content: [{ type: 'text', text: 'Error: Issue not found' }],
       });
     });
+
+    it('passes issue_id as formatError context on failure', async () => {
+      mockClient.listRelations.mockRejectedValue(new Error('Not found'));
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const listRelationsTool = tools.find((t) => t.tool.name === 'listRelations');
+
+      await listRelationsTool!.handler({ issue_id: 404 });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), 'issue_id=404');
+    });
   });
 
   describe('createRelation', () => {
@@ -323,6 +334,20 @@ describe('Relation Tools', () => {
         content: [{ type: 'text', text: 'Error: Issue cannot be related to itself' }],
       });
     });
+
+    it('passes both issue IDs as formatError context on failure', async () => {
+      mockClient.createRelation.mockRejectedValue(new Error('Not found'));
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const createRelationTool = tools.find((t) => t.tool.name === 'createRelation');
+
+      await createRelationTool!.handler({ issue_id: 10, issue_to_id: 20 });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'issue_id=10, issue_to_id=20'
+      );
+    });
   });
 
   describe('deleteRelation', () => {
@@ -380,6 +405,17 @@ describe('Relation Tools', () => {
         isError: true,
         content: [{ type: 'text', text: 'Error: Permission denied' }],
       });
+    });
+
+    it('passes relation_id as formatError context on failure', async () => {
+      mockClient.deleteRelation.mockRejectedValue(new Error('Not found'));
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const deleteRelationTool = tools.find((t) => t.tool.name === 'deleteRelation');
+
+      await deleteRelationTool!.handler({ relation_id: 404 });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), 'relation_id=404');
     });
   });
 
