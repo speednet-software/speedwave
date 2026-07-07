@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 
 @testable import audio_capture_cli
@@ -147,6 +148,20 @@ final class AudioCaptureTests: XCTestCase {
         } else {
             XCTFail("expected micOnly(_)")
         }
+    }
+
+    // MARK: - Mic restart gating
+
+    @available(macOS 14.4, *)
+    func testMicRestartNeededWhenEngineIsGone() {
+        // No engine (start failed earlier) — a config change is a chance to recover.
+        XCTAssertTrue(micRestartNeeded(nil))
+    }
+
+    @available(macOS 14.4, *)
+    func testMicRestartNeededWhenEngineStopped() {
+        // A real configuration change stops the engine; a stopped engine restarts.
+        XCTAssertTrue(micRestartNeeded(AVAudioEngine()))
     }
 
     // MARK: - Mic restart debounce
