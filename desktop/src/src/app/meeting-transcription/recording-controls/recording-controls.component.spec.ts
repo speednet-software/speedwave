@@ -3,7 +3,12 @@ import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { AudioSourceInfo, CapabilitiesAck, StartAck } from '../../models/transcript';
+import type {
+  AudioSourceInfo,
+  CapabilitiesAck,
+  MicPermission,
+  StartAck,
+} from '../../models/transcript';
 
 const SOURCES: AudioSourceInfo[] = [
   { source: { kind: 'system_wide' }, label: 'System (everything)' },
@@ -52,6 +57,8 @@ describe('RecordingControlsComponent', () => {
     listModels: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
+    requestMicrophonePermission: ReturnType<typeof vi.fn>;
+    openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
   };
 
@@ -92,6 +99,8 @@ describe('RecordingControlsComponent', () => {
       stopRecording: vi.fn(async (id: string) => {
         if (recordingSessionId() === id) recordingSessionId.set(null);
       }),
+      requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
+      openMicrophonePrivacyPane: vi.fn(async () => undefined),
       recordingSessionId,
     };
     await TestBed.configureTestingModule({
@@ -268,6 +277,58 @@ describe('RecordingControlsComponent', () => {
     expect(component.error()).toBe('model not downloaded');
     expect(errSpy).toHaveBeenCalledWith('model not downloaded');
     expect(component.recording()).toBe(false);
+  });
+
+  describe('mic consent gate', () => {
+    it('resolves mic consent before starting a mic-including source', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.requestMicrophonePermission).toHaveBeenCalledTimes(1);
+      expect(svc.startRecording).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the consent check for a system-only source', async () => {
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.requestMicrophonePermission).not.toHaveBeenCalled();
+      expect(svc.startRecording).toHaveBeenCalledTimes(1);
+    });
+
+    it('blocks the start and surfaces the error when consent is denied', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockResolvedValueOnce('denied');
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(component.error()).toContain('microphone permission');
+      expect(errSpy).toHaveBeenCalled();
+      // A refusal on the prompt just shown must not throw System Settings at the user.
+      expect(svc.openMicrophonePrivacyPane).not.toHaveBeenCalled();
+      expect(component.busy()).toBe(false);
+    });
+
+    it('deep-links to System Settings when consent was refused earlier', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockResolvedValueOnce('previously_denied');
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(svc.openMicrophonePrivacyPane).toHaveBeenCalledTimes(1);
+      expect(component.error()).toContain('microphone permission');
+    });
+
+    it('surfaces a consent-check failure as a start error', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockRejectedValueOnce(new Error('ipc down'));
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(component.error()).toBe('ipc down');
+      expect(component.busy()).toBe(false);
+    });
   });
 
   it('onLanguage ignores invalid values', async () => {

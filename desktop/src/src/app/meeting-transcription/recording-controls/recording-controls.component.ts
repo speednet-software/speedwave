@@ -290,15 +290,38 @@ export class RecordingControlsComponent implements OnInit {
     this.busy.set(true);
     this.error.set('');
     try {
+      if (src.kind !== 'system_wide' && !(await this.ensureMicConsent())) {
+        return;
+      }
       const ack = await this.transcription.startRecording(src, this.language());
       this.started.emit(ack.session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
       this.errorOccurred.emit(msg);
+    } finally {
+      this.busy.set(false);
+      this.cdr.markForCheck();
     }
-    this.busy.set(false);
-    this.cdr.markForCheck();
+  }
+
+  /**
+   * Resolves mic consent before a mic-including capture starts; on refusal
+   * surfaces the error and, for an earlier refusal, deep-links to Settings.
+   */
+  private async ensureMicConsent(): Promise<boolean> {
+    const verdict = await this.transcription.requestMicrophonePermission();
+    if (verdict === 'granted') return true;
+    if (verdict === 'previously_denied') {
+      // Nothing to re-prompt — only the Settings pane can restore access.
+      await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
+    }
+    const msg =
+      'microphone permission denied — enable Speedwave under System Settings → ' +
+      'Privacy & Security → Microphone, then start again';
+    this.error.set(msg);
+    this.errorOccurred.emit(msg);
+    return false;
   }
 
   /** Stops the in-progress recording. */

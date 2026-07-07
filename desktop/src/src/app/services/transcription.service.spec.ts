@@ -278,6 +278,18 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('requestMicrophonePermission', () => {
+    it('passes the backend verdict through', async () => {
+      let invoked = '';
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked = cmd;
+        return 'previously_denied';
+      };
+      expect(await svc.requestMicrophonePermission()).toBe('previously_denied');
+      expect(invoked).toBe('request_microphone_permission');
+    });
+  });
+
   describe('detach', () => {
     it('stops listening (a later event is ignored)', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));

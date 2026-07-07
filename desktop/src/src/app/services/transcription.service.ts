@@ -8,6 +8,7 @@ import type {
   CaptureWarning,
   DownloadProgress,
   Language,
+  MicPermission,
   ModelsAck,
   RecommendedModelAck,
   StartAck,
@@ -239,6 +240,14 @@ export class TranscriptionService {
    */
   deleteModel(modelId: string): Promise<void> {
     return this.tauri.invoke<void>('delete_transcription_model', { modelId });
+  }
+
+  /**
+   * Resolves mic consent in-process (main-app TCC identity); macOS shows the
+   * prompt when undetermined, other platforms always report granted.
+   */
+  requestMicrophonePermission(): Promise<MicPermission> {
+    return this.tauri.invoke<MicPermission>('request_microphone_permission');
   }
 
   /** Opens the macOS System Settings → Privacy → Microphone pane (no-op elsewhere). */
