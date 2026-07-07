@@ -3345,6 +3345,51 @@ services:
         );
     }
 
+    /// Renders the REAL `containers/compose.template.yml` (not a hand-written
+    /// fixture) with every built-in worker enabled and runs the full
+    /// SecurityCheck on it. `test_rendered_compose_passes_security_check`
+    /// above renders with everything disabled, so it never actually reaches
+    /// any worker's volume mounts — this is what would have caught a bad
+    /// edit to the real template (e.g. atlassian's /workspace mode).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_with_all_workers_enabled_passes_security_check() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &all_enabled_integrations(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            tmp.path(),
+        );
+        assert!(
+            violations.is_empty(),
+            "Generated compose with all workers enabled should pass security check. Violations: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_inject_worker_env() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
