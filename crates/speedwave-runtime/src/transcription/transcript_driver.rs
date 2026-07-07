@@ -302,16 +302,24 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         DriverError::Transcribe(reason)
     };
 
+    // A capture that produced no samples (mic denied + nothing playing, a dead
+    // tap) leaves an empty or header-only WAV. Both mean the same actionable
+    // thing to the user, not a cryptic "Failed to read enough bytes".
+    const NO_AUDIO: &str =
+        "no audio was captured — check that audio was playing and that microphone / \
+         system-audio recording permission is granted";
+
     // 1) Load the recorded audio.
     if !audio_path.exists() {
-        return Err(fail(
-            &store,
-            format!("recorded audio missing at {}", audio_path.display()),
-        ));
+        return Err(fail(&store, NO_AUDIO.to_string()));
     }
     let pcm = match read_wav_to_mono_f32(&audio_path) {
         Ok(p) if !p.is_empty() => p,
-        Ok(_) => return Err(fail(&store, "recorded audio is empty".to_string())),
+        Ok(_) => return Err(fail(&store, NO_AUDIO.to_string())),
+        // A 0-byte / truncated WAV fails the hound header read — same cause.
+        Err(_) if wav_has_no_samples(&audio_path) => {
+            return Err(fail(&store, NO_AUDIO.to_string()))
+        }
         Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
     };
 
@@ -413,6 +421,16 @@ fn read_wav_to_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
     super::audio::parse_wav_to_mono_f32(path)
         .map(|(mono, _rate)| mono)
         .map_err(|e| e.to_string())
+}
+
+/// `true` when the file is too small to hold any PCM (0-byte or header-only) —
+/// the signature of a recording that captured nothing.
+fn wav_has_no_samples(path: &Path) -> bool {
+    // A canonical 16 kHz mono int16 WAV header is 44 bytes; anything at or
+    // below that carries no samples.
+    std::fs::metadata(path)
+        .map(|m| m.len() <= 44)
+        .unwrap_or(true)
 }
 
 /// Tiny `hound`-backed WAV writer (16 kHz mono int16 — Whisper's canonical
@@ -827,6 +845,33 @@ mod tests {
         assert!(matches!(snap.status, TranscriptStatus::Failed { .. }));
         // The live transcript (such as it is) is untouched.
         assert!(snap.final_segments.is_none());
+    }
+
+    #[test]
+    fn finalize_with_a_zero_byte_wav_reports_no_audio_not_a_hound_error() {
+        // A capture that produced nothing (mic denied + silence) leaves a
+        // 0-byte / header-only WAV; the user should see an actionable reason.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 4.0);
+        std::fs::write(&wav, b"").unwrap(); // truncate to 0 bytes
+
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        let DriverError::Transcribe(reason) = err else {
+            panic!("expected Transcribe, got {err:?}")
+        };
+        assert!(reason.contains("no audio was captured"), "got: {reason}");
+        assert!(
+            !reason.contains("read enough bytes"),
+            "must not leak the raw hound error: {reason}"
+        );
     }
 
     /// A transcriber that always errors — to exercise the offline-decode failure
