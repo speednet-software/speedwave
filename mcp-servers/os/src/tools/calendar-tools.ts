@@ -144,7 +144,7 @@ const listEventsTool: Tool = {
         description: 'Filter by calendar id or its exact display name',
       },
       start: { type: 'string', description: 'Start date in ISO8601 format (default: now)' },
-      end: { type: 'string', description: 'End date in ISO8601 format (default: start + 7 days)' },
+      end: { type: 'string', description: 'End date in ISO8601 format (default: now + 7 days)' },
       limit: { type: 'number', description: 'Max events to return (default 20)' },
     },
   },

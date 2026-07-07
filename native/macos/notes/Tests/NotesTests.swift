@@ -66,12 +66,24 @@ final class NotesTests: XCTestCase {
 
     // MARK: - list_notes / search_notes / create_note read folder_id (not folder)
 
-    func testListNotesCommandReadsFolderIdKey() {
-        // The MCP layer only ever sends "folder_id"; "folder" must be ignored, not silently
-        // accepted, so a stale "folder" key cannot mask a future regression of this mapping.
-        let params: [String: Any] = ["folder_id": "Work"]
-        XCTAssertEqual(params["folder_id"] as? String, "Work")
-        XCTAssertNil(params["folder"], "params must not use the legacy 'folder' key")
+    func testListNotesCommandHonorsFolderIdKey() {
+        // A folder_id that resolves to no folder must surface the real AppleScript
+        // "Can't get folder" as a teaching CLIError.notFound, proving folder_id reaches the script.
+        let handler = NotesCLI.commands["list_notes"]!
+        XCTAssertThrowsError(try handler(["folder_id": "SPW-Nonexistent-Folder-XYZ-123", "limit": 1])) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("listNoteFolders"))
+        }
+    }
+
+    func testListNotesCommandIgnoresLegacyFolderKey() {
+        // The legacy "folder" key must NOT be honored: passing the same nonexistent name
+        // under "folder" instead of "folder_id" must not scope the query, so it must not
+        // throw the folder-not-found error that testListNotesCommandHonorsFolderIdKey hits.
+        let handler = NotesCLI.commands["list_notes"]!
+        XCTAssertNoThrow(try handler(["folder": "SPW-Nonexistent-Folder-XYZ-123", "limit": 1]))
     }
 
     func testSearchNotesCommandAcceptsFolderIdKey() {

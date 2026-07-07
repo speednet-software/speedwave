@@ -241,7 +241,7 @@ const listEmailsTool: Tool = {
 const getEmailTool: Tool = {
   name: 'getEmail',
   description:
-    'Get a specific email by ID with full body. Only searches the Inbox — ids from other mailboxes are not resolvable by this tool.',
+    'Get a specific email by ID with full body. On Apple Mail (the default client), only searches the Inbox — ids from other mailboxes are not resolvable. On Outlook (client: "outlook"), any id in the account is resolvable regardless of mailbox.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -253,7 +253,11 @@ const getEmailTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Email message ID (must be from the Inbox)' },
+      id: {
+        type: 'string',
+        description:
+          'Email message ID (must be from the Inbox on Apple Mail; any mailbox on Outlook)',
+      },
       client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
     required: ['id'],
@@ -408,7 +412,7 @@ const sendEmailTool: Tool = {
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an existing email. Requires confirm_send=true as safety check. Only searches the Inbox — ids from other mailboxes are not resolvable by this tool.',
+    'Reply to an existing email. Requires confirm_send=true as safety check. On Apple Mail (the default client), only searches the Inbox — ids from other mailboxes are not resolvable. On Outlook (client: "outlook"), any id in the account is resolvable regardless of mailbox.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -421,7 +425,11 @@ const replyToEmailTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Email message ID to reply to (must be from the Inbox)' },
+      id: {
+        type: 'string',
+        description:
+          'Email message ID to reply to (must be from the Inbox on Apple Mail; any mailbox on Outlook)',
+      },
       body: { type: 'string', description: 'Reply body (plain text)' },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
       client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },

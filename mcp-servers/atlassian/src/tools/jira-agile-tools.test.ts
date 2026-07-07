@@ -48,6 +48,10 @@ describe('definitions', () => {
       expect(tool.outputSchema?.required).toContain('success');
     }
   });
+  it('getBoard documents the project allowlist restriction it enforces', () => {
+    const tool = createJiraAgileTools(FAKE_CLIENT).find((d) => d.tool.name === 'getBoard')?.tool;
+    expect(tool?.description).toContain('configured project allowlist');
+  });
 });
 
 describe('unconfigured', () => {

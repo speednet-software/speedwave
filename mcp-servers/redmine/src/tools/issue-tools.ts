@@ -483,7 +483,7 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
               return teachingErrorResult({
                 paramName: 'assigned_to',
                 received: resolved.assigned_to,
-                correctValueTool: 'resolveUser or listUsers',
+                correctValueTool: 'resolveUser',
                 nextStep:
                   'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
               });
@@ -545,7 +545,7 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
               return teachingErrorResult({
                 paramName: 'assigned_to',
                 received: resolved.assigned_to,
-                correctValueTool: 'resolveUser or listUsers',
+                correctValueTool: 'resolveUser',
                 nextStep:
                   'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
               });
@@ -578,7 +578,7 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
               return teachingErrorResult({
                 paramName: 'assigned_to',
                 received: resolved.assigned_to,
-                correctValueTool: 'resolveUser or listUsers',
+                correctValueTool: 'resolveUser',
                 nextStep:
                   'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
               });

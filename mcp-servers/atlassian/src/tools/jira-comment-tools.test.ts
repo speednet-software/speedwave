@@ -39,12 +39,12 @@ describe('definitions', () => {
       expect(tool.inputExamples?.length).toBeGreaterThan(0);
     }
   });
-  it('addWorklog declares user-scoped identity metadata pointing at getMyself', () => {
+  it('addWorklog carries no identity metadata but documents the fixed-account attribution in its description', () => {
     const tool = createJiraCommentTools(FAKE_CLIENT).find(
       (d) => d.tool.name === 'addWorklog'
     )?.tool;
-    expect(tool?._meta?.[META_KEYS.USER_SCOPED]).toBe(true);
-    expect(tool?._meta?.[META_KEYS.CURRENT_USER_TOOL]).toBe('getMyself');
+    expect(tool?._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
+    expect(tool?.description).toContain('shared Atlassian account');
   });
 });
 

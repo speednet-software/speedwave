@@ -85,6 +85,24 @@ describe('identity metadata', () => {
       );
       expect(userScoped).toBe(true);
     });
+
+    it(`${name} declares a current-user tool or self-param resolving its identity`, () => {
+      const tool = allTools.find((t) => t.tool.name === name)!.tool;
+      const currentUserTool = metaValue(
+        tool._meta as Record<string, unknown>,
+        META_KEYS.CURRENT_USER_TOOL,
+        'currentUserTool'
+      );
+      const selfParam = metaValue(
+        tool._meta as Record<string, unknown>,
+        META_KEYS.SELF_PARAM,
+        'selfParam'
+      );
+      expect(
+        currentUserTool !== undefined || selfParam !== undefined,
+        `${name} is user-scoped but declares neither ${META_KEYS.CURRENT_USER_TOOL} nor ${META_KEYS.SELF_PARAM}`
+      ).toBe(true);
+    });
   }
 
   for (const name of ['getChannelMessages', 'getThreadMessages']) {

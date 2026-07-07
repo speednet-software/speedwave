@@ -1,6 +1,6 @@
 /** Tests for searchTools, getServiceTools, getToolMetadata in search-tools.ts. */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
 import { resetServiceCaches, TOOL_REGISTRY, _setServiceNamesForTesting } from './tool-registry.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
@@ -991,5 +991,38 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
     expect(desc).toContain('Results depend on the authenticated user.');
     expect(desc).not.toContain('resolve the current user');
     expect(desc).not.toContain('reference yourself');
+  });
+
+  it('warns when a userScoped tool declares neither currentUserTool nor selfParam', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['getConfig'] = {
+      ...mutableRegistry['redmine']['getConfig'],
+      userScoped: true,
+      currentUserTool: undefined,
+      selfParam: undefined,
+    };
+
+    await searchTools({
+      query: 'getConfig',
+      detailLevel: 'with_descriptions',
+      service: 'redmine',
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('getConfig'));
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn when a userScoped tool declares currentUserTool or selfParam', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await searchTools({
+      query: 'getCurrentUser',
+      detailLevel: 'with_descriptions',
+      service: 'redmine',
+    });
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });

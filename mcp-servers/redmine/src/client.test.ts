@@ -1566,6 +1566,18 @@ describe('RedmineClient', () => {
       expect(result).toContain('Resource not found in Redmine: weird_key=1.');
     });
 
+    it('should give a hint for every key in a compound relation-style context', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, 'issue_id=5, issue_to_id=9');
+      expect(result).toContain('issue_id=5, issue_to_id=9');
+      expect(result).toContain('listIssueIds');
+    });
+
     it('should format 422 validation error with details', () => {
       const error = {
         isAxiosError: true,

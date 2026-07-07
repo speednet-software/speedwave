@@ -93,11 +93,7 @@ const addWorklogTool: Tool = {
   description:
     'Log work against a Jira issue (time in seconds; optional comment and start time). Speedwave authenticates as one shared Atlassian account per project, not a per-human login — every worklog is attributed to that account, so "my hours" always means it.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: {
-    [META_KEYS.DEFER_LOADING]: true,
-    [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-  },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'worklog', 'time', 'log work', 'timesheet', 'effort'],
   example:
     'await atlassian.addWorklog({ issueIdOrKey: "PROJ-123", timeSpentSeconds: 3600, comment: "Pairing on the fix" })',

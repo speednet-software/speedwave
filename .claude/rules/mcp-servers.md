@@ -15,7 +15,7 @@ paths:
 
 Tool `_meta` fields use MCP-spec-compliant prefixed keys from mcp-shared's `META_KEYS`: `speedwave.pl/defer-loading`, `speedwave.pl/timeout-class`, `speedwave.pl/timeout-ms`, `speedwave.pl/os-category`, plus the identity trio `speedwave.pl/user-scoped`, `speedwave.pl/current-user-tool`, `speedwave.pl/self-param`. Read every key via `metaValue(meta, META_KEYS.X, 'legacyKey')`: prefixed key wins if present, else fall back to the legacy unprefixed key (`deferLoading`, `userScoped`, …) so third-party plugin workers still emitting the old shape keep working. Never hand-write a `_meta` key string; import `META_KEYS`.
 
-A tool whose result depends on the caller's identity (a "my X" question) MUST declare `speedwave.pl/user-scoped: true`, and any worker exposing user-scoped tools MUST also expose a current-user tool (its name declared via `speedwave.pl/current-user-tool` on the user-scoped tools, or a self-reference param via `speedwave.pl/self-param`). The hub renders this into the tool's `full_schema` description automatically and boosts the current-user tool in `search_tools` for self-reference queries (e.g. "me").
+A tool whose result depends on the caller's identity (a "my X" question) MUST declare `speedwave.pl/user-scoped: true`, and any worker exposing user-scoped tools MUST also expose a current-user tool (its name declared via `speedwave.pl/current-user-tool` on the user-scoped tools, or a self-reference param via `speedwave.pl/self-param`). The hub renders this into the tool's `full_schema` description automatically and boosts user-scoped tools for self-reference queries (e.g. "me") in `search_tools`.
 
 ## Error and pagination contract
 

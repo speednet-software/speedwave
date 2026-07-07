@@ -3,6 +3,7 @@
 import {
   withClientValidation,
   ts,
+  teachingErrorResult,
   type ToolsCallResult,
   type jsonResult,
   type textResult,
@@ -15,34 +16,59 @@ const NUMERIC_ID_PARAMS = ['number', 'run_id', 'artifact_id'] as const;
 /**
  * Splits a combined `owner/repo` string passed in `repo` when `owner` is missing,
  * so a `full_name` value round-tripped from `listRepos`/`getRepo` still resolves.
+ * Teaches the caller instead of silently passing through when the split is malformed
+ * (e.g. a leading/trailing slash yields an empty owner or repo segment).
  * @param params - Raw params object (mutated copy is returned; input is untouched)
  */
-function normalizeOwnerRepo(params: Record<string, unknown>): Record<string, unknown> {
+function normalizeOwnerRepo(
+  params: Record<string, unknown>
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: ToolsCallResult } {
   if (params.owner || typeof params.repo !== 'string' || !params.repo.includes('/')) {
-    return params;
+    return { ok: true, value: params };
   }
   const [owner, ...rest] = params.repo.split('/');
   const repo = rest.join('/');
-  if (!owner || !repo) return params;
-  return { ...params, owner, repo };
+  if (!owner || !repo) {
+    return {
+      ok: false,
+      error: teachingErrorResult({
+        paramName: 'repo',
+        received: params.repo,
+        nextStep:
+          "Pass repo as either a bare repository name (with a separate 'owner' param) or a full 'owner/repo' string with non-empty segments on both sides of the slash.",
+      }),
+    };
+  }
+  return { ok: true, value: { ...params, owner, repo } };
 }
 
 /**
  * Strips a leading '#' and coerces to a number for params that identify a PR/issue/run/artifact
- * by number, so a user-style '#42' reference does not fail before the handler runs.
+ * by number. Teaches the caller instead of silently passing through a non-numeric value, so a
+ * malformed id fails fast with guidance rather than as an opaque error from the GitHub API.
  * @param params - Raw params object (mutated copy is returned; input is untouched)
  */
-function normalizeNumericIds(params: Record<string, unknown>): Record<string, unknown> {
+function normalizeNumericIds(
+  params: Record<string, unknown>
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: ToolsCallResult } {
   let result = params;
   for (const key of NUMERIC_ID_PARAMS) {
     const value = result[key];
     if (typeof value !== 'string') continue;
     const n = Number(value.replace(/^#/, ''));
-    if (Number.isFinite(n)) {
-      result = { ...result, [key]: n };
+    if (!Number.isFinite(n)) {
+      return {
+        ok: false,
+        error: teachingErrorResult({
+          paramName: key,
+          received: value,
+          nextStep: `Pass ${key} as a number or a numeric string, optionally prefixed with '#' (e.g. 42 or "#42").`,
+        }),
+      };
     }
+    result = { ...result, [key]: n };
   }
-  return result;
+  return { ok: true, value: result };
 }
 
 /**
@@ -61,11 +87,14 @@ export function withValidation<T>(
     client,
     (c, params: T) => {
       const raw = params as Record<string, unknown>;
-      const normalized =
-        raw && typeof raw === 'object'
-          ? normalizeNumericIds(normalizeOwnerRepo(raw))
-          : (raw as Record<string, unknown>);
-      return handler(c, normalized as T);
+      if (!raw || typeof raw !== 'object') {
+        return handler(c, raw as T);
+      }
+      const ownerRepo = normalizeOwnerRepo(raw);
+      if (!ownerRepo.ok) return Promise.resolve(ownerRepo.error);
+      const numericIds = normalizeNumericIds(ownerRepo.value);
+      if (!numericIds.ok) return Promise.resolve(numericIds.error);
+      return handler(c, numericIds.value as T);
     },
     {
       serviceName: 'GitHub',

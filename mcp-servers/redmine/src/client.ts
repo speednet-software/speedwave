@@ -761,6 +761,7 @@ function sanitizeTextile(textile: string): string {
 /** Recovery hint per entity-type context key, appended to a 404 error message. */
 const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
   issue_id: 'Verify the issue ID with listIssueIds or searchIssueIds.',
+  issue_to_id: 'Verify the issue ID with listIssueIds or searchIssueIds.',
   project_id: 'Verify the project ID with listProjectIds or searchProjectIds.',
   journal_id: 'Verify the journal ID with listJournals(issue_id).',
   relation_id: 'Verify the relation ID with listRelations(issue_id).',
@@ -769,16 +770,16 @@ const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
 };
 
 /**
- * Build a 404 error message, naming the attempted resource and a recovery tool
- * when the context identifies a known entity type (e.g. "issue_id=12345").
- * @param context - Attempted resource identifier, e.g. "issue_id=12345".
+ * Build a 404 error message, naming the attempted resource and a recovery tool per
+ * entity type named in the context (e.g. "issue_id=1, issue_to_id=2" yields one hint each).
+ * @param context - Attempted resource identifier(s), comma-separated "key=value" pairs.
  */
 function formatNotFoundError(context?: string): string {
   if (!context) return 'Resource not found in Redmine.';
-  const key = context.split('=')[0];
-  const hint = NOT_FOUND_RECOVERY_HINTS[key];
-  return hint
-    ? `Resource not found in Redmine: ${context}. ${hint}`
+  const keys = context.split(',').map((pair) => pair.split('=')[0].trim());
+  const hints = [...new Set(keys.map((key) => NOT_FOUND_RECOVERY_HINTS[key]).filter(Boolean))];
+  return hints.length > 0
+    ? `Resource not found in Redmine: ${context}. ${hints.join(' ')}`
     : `Resource not found in Redmine: ${context}.`;
 }
 

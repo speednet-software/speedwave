@@ -129,6 +129,8 @@ describe('user-tools', () => {
       expect(tool).toBeDefined();
       const meta = tool!._meta as Record<string, unknown>;
       expect(meta[META_KEYS.DEFER_LOADING]).toBe(true);
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
     });
 
     it('has a valid tool definition (annotations, keywords, example, schema)', () => {

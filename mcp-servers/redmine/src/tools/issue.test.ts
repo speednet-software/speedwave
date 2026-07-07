@@ -237,7 +237,7 @@ describe('issue-tools', () => {
       expect(result).toMatchObject({ isError: true });
       const text = (result as { content: Array<{ text: string }> }).content[0].text;
       expect(text).toContain('nonexistent');
-      expect(text).toContain('resolveUser');
+      expect(text).toContain('Get a valid value from resolveUser.');
     });
 
     it('preserves assigned_to_id when already provided', async () => {
@@ -564,7 +564,7 @@ describe('issue-tools', () => {
       expect(result).toMatchObject({ isError: true });
       const text = (result as { content: Array<{ text: string }> }).content[0].text;
       expect(text).toContain('nonexistent');
-      expect(text).toContain('resolveUser');
+      expect(text).toContain('Get a valid value from resolveUser.');
     });
 
     it('handles parent_id to parent_issue_id conversion', async () => {
@@ -737,7 +737,7 @@ describe('issue-tools', () => {
       expect(result).toMatchObject({ isError: true });
       const text = (result as { content: Array<{ text: string }> }).content[0].text;
       expect(text).toContain('nonexistent');
-      expect(text).toContain('resolveUser');
+      expect(text).toContain('Get a valid value from resolveUser.');
     });
 
     it('handles non-existent issue', async () => {

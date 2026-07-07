@@ -68,6 +68,7 @@ const sendChannelTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
   keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
   example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
@@ -297,6 +298,7 @@ const listChannelIdsTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
   keywords: ['slack', 'channels', 'list', 'get', 'member'],
   example: 'const channels = await slack.listChannelIds()',

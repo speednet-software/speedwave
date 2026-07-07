@@ -150,28 +150,28 @@ final class MailTests: XCTestCase {
 
     // MARK: - sendEmail bcc parameter (dispatch-level)
 
-    func testSendEmailParamsCarryBcc() {
+    func testSendEmailParamsCarryBccUpToConfirmGate() {
+        // Real sendEmail(params:) dispatch: to/subject/body parse cleanly even with bcc
+        // present, and confirm_send=false still stops the call before any AppleScript runs.
         let params: [String: Any] = [
             "to": "alice@example.com",
             "subject": "Test",
             "body": "Hello",
             "bcc": "carol@example.com",
-            "confirm_send": true,
+            "confirm_send": false,
         ]
-        XCTAssertEqual(params["bcc"] as? String, "carol@example.com")
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.confirmRequired = error else {
+                return XCTFail("expected confirmRequired (proves to/subject/body/bcc parsed), got \(error)")
+            }
+        }
     }
 
     // MARK: - runMailScript (mailbox-not-found teaching error)
 
     func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
-        let original = ScriptError.scriptFailed("Mail got an error: Can\u{2019}t get mailbox \"Nope\". (-1728)")
-        let wrapped = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
-                throw CLIError.notFound("Mailbox 'Nope' not found. List valid mailboxes via listMailboxes and use their name field.")
-            }
-        }
-        XCTAssertThrowsError(try wrapped()) { error in
+        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: "Nope")) { error in
             guard case CLIError.notFound(let message) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
@@ -180,9 +180,28 @@ final class MailTests: XCTestCase {
     }
 
     func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
-        // Inbox-only calls (mailbox: nil) must not attempt the mailbox teaching-error mapping.
-        let mailbox: String? = nil
-        XCTAssertNil(mailbox)
+        // Inbox-only calls (mailbox: nil) must surface the raw scriptFailed, not the
+        // mailbox teaching-error mapping, even for AppleScript output that looks like a miss.
+        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: nil)) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testOutlookListEmailsMapsMailboxNotFoundToTeachingError() throws {
+        guard (try? OutlookClient.isAvailable()) == true else {
+            throw XCTSkip("Microsoft Outlook not installed/running in this environment")
+        }
+        XCTAssertThrowsError(
+            try OutlookClient.listEmails(limit: 1, mailbox: "SPW-Nonexistent-Folder-XYZ-123")
+        ) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("listMailboxes"))
+        }
     }
 
     // MARK: - Send Email Validation

@@ -4,6 +4,7 @@
  * @module search-tools
  */
 
+import { ts } from '@speedwave/mcp-shared';
 import { ToolSearchResult, ToolMetadata } from './hub-types.js';
 import {
   getToolMetadata as getToolMetadataFromRegistry,
@@ -251,6 +252,11 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
   }
   if (tool.selfParam) {
     parts.push(`Pass "${tool.selfParam}" to reference yourself.`);
+  }
+  if (!tool.currentUserTool && !tool.selfParam) {
+    console.warn(
+      `${ts()} [search-tools] userScoped tool "${tool.name}" declares neither currentUserTool nor selfParam; serving a degraded identity sentence`
+    );
   }
 
   return `${tool.description} ${parts.join(' ')}`;

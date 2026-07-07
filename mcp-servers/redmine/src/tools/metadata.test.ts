@@ -101,6 +101,19 @@ describe('Redmine tool metadata', () => {
       expect(metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped')).toBe(true);
     });
 
+    it.each(USER_SCOPED_TOOLS)(
+      '%s declares a current-user-tool or a self-param companion key',
+      (name) => {
+        const meta = byName(name)._meta as Record<string, unknown>;
+        const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
+        const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
+        expect(
+          currentUserTool !== undefined || selfParam !== undefined,
+          `${name} is user-scoped but declares neither a current-user-tool nor a self-param`
+        ).toBe(true);
+      }
+    );
+
     it('listTimeEntries points to getCurrentUser as its current-user-tool', () => {
       const meta = byName('listTimeEntries')._meta as Record<string, unknown>;
       expect(metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool')).toBe(

@@ -17,7 +17,11 @@ const getCurrentUserTool: Tool = {
   description:
     "Get the currently authenticated GitLab user (the configured token owner). Resolves 'me'/'my' for other tools' identity-scoped filters.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['gitlab', 'user', 'me', 'myself', 'current', 'whoami', 'identity'],
   example: 'const me = await gitlab.getCurrentUser()',
   inputSchema: {

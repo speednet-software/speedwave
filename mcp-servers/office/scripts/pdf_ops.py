@@ -126,6 +126,16 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
+    known_fields = reader.get_fields() or {}
+    fill_warnings: list[str] = (
+        [
+            f"unknown field name: {name!r} — not present in this PDF's AcroForm"
+            for name in str_fields
+            if name not in known_fields
+        ]
+        if known_fields
+        else []
+    )
     # pypdf raises when a page has no form fields (the common case for most of a PDF's pages),
     # so we silently skip those and only flag if NO page accepted the fields — that means the
     # caller asked to fill a form that doesn't exist in this PDF.
@@ -136,7 +146,6 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
             pages_filled += 1
         except Exception:  # noqa: BLE001
             pass
-    fill_warnings: list[str] = []
     if pages_filled == 0:
         fill_warnings.append("no AcroForm fields found in the input PDF — values not written")
     flattened = False

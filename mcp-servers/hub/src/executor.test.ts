@@ -458,6 +458,11 @@ describe('executor', () => {
       const result = closestMatches('aax', ['aab', 'aaa']);
       expect(result).toEqual(['aaa', 'aab']);
     });
+
+    it('returns no suggestions when every candidate is too far from the attempted name', () => {
+      const result = closestMatches('getIssue', ['listProjects', 'unrelatedName']);
+      expect(result).toEqual([]);
+    });
   });
 
   describe('formatErrorMessage', () => {

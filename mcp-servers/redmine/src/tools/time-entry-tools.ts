@@ -93,7 +93,11 @@ const createTimeEntryTool: Tool = {
   description:
     "Log time on an issue or project. The entry is always attributed to the current authenticated user (getCurrentUser) — there is no way to log time on another user's behalf.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { 'speedwave.pl/defer-loading': true, 'speedwave.pl/user-scoped': true },
+  _meta: {
+    'speedwave.pl/defer-loading': true,
+    'speedwave.pl/user-scoped': true,
+    'speedwave.pl/current-user-tool': 'getCurrentUser',
+  },
   keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
   example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
   inputSchema: {

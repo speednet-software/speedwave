@@ -155,7 +155,7 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'message' is required");
+      expect(result.error?.message).toContain('Invalid message');
       expect(client.sendChannel).not.toHaveBeenCalled();
     });
 
@@ -167,7 +167,7 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'channel' is required");
+      expect(result.error?.message).toContain('Invalid channel');
       expect(client.sendChannel).not.toHaveBeenCalled();
     });
   });
@@ -319,7 +319,7 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'channel' is required");
+      expect(result.error?.message).toContain('Invalid channel');
       expect(client.readChannel).not.toHaveBeenCalled();
     });
   });
@@ -395,7 +395,7 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'thread_ts' is required");
+      expect(result.error?.message).toContain('Invalid thread_ts');
       expect(client.readThread).not.toHaveBeenCalled();
     });
 
@@ -407,7 +407,7 @@ describe('channel-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'channel' is required");
+      expect(result.error?.message).toContain('Invalid channel');
       expect(client.readThread).not.toHaveBeenCalled();
     });
   });

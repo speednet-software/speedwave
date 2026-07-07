@@ -68,6 +68,42 @@ def _make_pdf(path: Path, pages: int) -> None:
         writer.write(fh)
 
 
+def _make_form_pdf(path: Path, field_name: str) -> None:
+    """Write a one-page PDF with a single AcroForm text field named `field_name`."""
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        ArrayObject,
+        BooleanObject,
+        DictionaryObject,
+        NameObject,
+        NumberObject,
+        TextStringObject,
+    )
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    field = DictionaryObject(
+        {
+            NameObject("/FT"): NameObject("/Tx"),
+            NameObject("/T"): TextStringObject(field_name),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/Rect"): ArrayObject(
+                [NumberObject(10), NumberObject(10), NumberObject(100), NumberObject(30)]
+            ),
+        }
+    )
+    field_ref = writer.add_object(field)
+    page[NameObject("/Annots")] = ArrayObject([field_ref])
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject(
+        {
+            NameObject("/Fields"): ArrayObject([field_ref]),
+            NameObject("/NeedAppearances"): BooleanObject(True),
+        }
+    )
+    with open(path, "wb") as fh:
+        writer.write(fh)
+
+
 def run_script(name: str, *args: str) -> dict:
     """Run `scripts/<name>` with the current interpreter; assert exit 0; return the parsed stdout JSON."""
     proc = subprocess.run(
@@ -395,6 +431,33 @@ def test_pdf_watermark_and_fillform(tmp_path: Path) -> None:
     filled = tmp_path / "filled.pdf"
     res = run_script("pdf_ops.py", "fillform", str(doc), str(filled), "1", json.dumps({"name": "Ada"}))
     assert is_pdf(filled)
+
+
+def test_pdf_fillform_warns_on_unknown_field_name(tmp_path: Path) -> None:
+    form = tmp_path / "form.pdf"
+    _make_form_pdf(form, "applicant_name")
+    out = tmp_path / "filled.pdf"
+    res = run_script(
+        "pdf_ops.py",
+        "fillform",
+        str(form),
+        str(out),
+        "0",
+        json.dumps({"applicant_name": "Ada", "does_not_exist": "x"}),
+    )
+    assert is_pdf(out)
+    assert res["fill_warnings"] == ["unknown field name: 'does_not_exist' — not present in this PDF's AcroForm"]
+
+
+def test_pdf_fillform_no_warnings_when_all_fields_known(tmp_path: Path) -> None:
+    form = tmp_path / "form.pdf"
+    _make_form_pdf(form, "applicant_name")
+    out = tmp_path / "filled.pdf"
+    res = run_script(
+        "pdf_ops.py", "fillform", str(form), str(out), "0", json.dumps({"applicant_name": "Ada"})
+    )
+    assert is_pdf(out)
+    assert res["fill_warnings"] is None
 
 
 def test_pdf_errors(tmp_path: Path) -> None:

@@ -131,7 +131,7 @@ describe('dm-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'users' is required");
+      expect(result.error?.message).toContain('Invalid users');
       expect(client.openDm).not.toHaveBeenCalled();
     });
 
@@ -140,7 +140,7 @@ describe('dm-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain("'users' is required");
+      expect(result.error?.message).toContain('Invalid users');
       expect(client.openDm).not.toHaveBeenCalled();
     });
   });

@@ -1,6 +1,7 @@
 /** Tests for withValidation wrapper. */
 
 import { describe, it, expect, vi } from 'vitest';
+import { teachingErrorResult } from '@speedwave/mcp-shared';
 import { withValidation, missingParamResult, ToolResult } from './validation.js';
 
 describe('withValidation', () => {
@@ -201,12 +202,20 @@ describe('withValidation', () => {
 });
 
 describe('missingParamResult', () => {
-  it('names the param, the received value, and the next step', () => {
+  it('wraps the shared teachingErrorResult message into a MISSING_PARAM ToolResult', () => {
+    const teaching = teachingErrorResult({
+      paramName: 'message',
+      received: undefined,
+      nextStep: 'Provide the text to send.',
+    });
+    const expectedMessage = (teaching.content[0].text as string).replace(/^Error: /, '');
+
     const result = missingParamResult('message', undefined, 'Provide the text to send.');
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('MISSING_PARAM');
-    expect(result.error?.message).toContain("'message' is required");
+    expect(result.error?.message).toBe(expectedMessage);
+    expect(result.error?.message).toContain('Invalid message');
     expect(result.error?.message).toContain('undefined');
     expect(result.error?.message).toContain('Provide the text to send.');
   });

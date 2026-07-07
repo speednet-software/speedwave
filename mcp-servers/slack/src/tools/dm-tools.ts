@@ -29,6 +29,7 @@ const listDirectMessagesTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
   keywords: ['slack', 'dm', 'direct', 'message', 'im', 'mpim', 'conversation', 'list', 'private'],
   example: 'const { dms } = await slack.listDirectMessages({})',
@@ -90,6 +91,7 @@ const openDirectMessageTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
   keywords: ['slack', 'dm', 'direct', 'message', 'open', 'start', 'conversation', 'person'],
   example: 'const { id } = await slack.openDirectMessage({ users: ["U0123ABC456"] })',

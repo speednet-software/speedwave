@@ -136,6 +136,25 @@ describe('withValidation', () => {
 
       expect(seen).toEqual({ owner: 'octocat', repo: 'hello/world' });
     });
+
+    it('returns a teaching error and never calls the handler when the repo split yields an empty segment', async () => {
+      const client = new GitHubClient({ token: 'x' });
+      let handlerCalled = false;
+      const wrapped = withValidation<{ repo: string }>(client, async () => {
+        handlerCalled = true;
+        return jsonResult({ ok: true });
+      });
+
+      const result = await wrapped({ repo: '/hello-world' });
+
+      expect(handlerCalled).toBe(false);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe(
+        'Error: Invalid repo (received: "/hello-world"). Pass repo as either a bare repository name ' +
+          "(with a separate 'owner' param) or a full 'owner/repo' string with non-empty segments on " +
+          'both sides of the slash.'
+      );
+    });
   });
 
   describe('numeric-id forgiveness', () => {
@@ -168,17 +187,40 @@ describe('withValidation', () => {
       expect(seen).toEqual({ number: 42 });
     });
 
-    it('leaves a non-numeric string id untouched (validation surfaces the error downstream)', async () => {
+    it('returns a teaching error and never calls the handler for a non-numeric string id', async () => {
       const client = new GitHubClient({ token: 'x' });
-      let seen: Record<string, unknown> | undefined;
-      const wrapped = withValidation<{ number: unknown }>(client, async (_c, params) => {
-        seen = params as unknown as Record<string, unknown>;
+      let handlerCalled = false;
+      const wrapped = withValidation<{ number: unknown }>(client, async () => {
+        handlerCalled = true;
         return jsonResult({ ok: true });
       });
 
-      await wrapped({ number: 'not-a-number' });
+      const result = await wrapped({ number: 'not-a-number' });
 
-      expect(seen).toEqual({ number: 'not-a-number' });
+      expect(handlerCalled).toBe(false);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe(
+        'Error: Invalid number (received: "not-a-number"). Pass number as a number or a numeric ' +
+          'string, optionally prefixed with \'#\' (e.g. 42 or "#42").'
+      );
     });
+
+    it.each(['run_id', 'artifact_id'] as const)(
+      'returns a teaching error naming %s when it is a non-numeric string',
+      async (key) => {
+        const client = new GitHubClient({ token: 'x' });
+        let handlerCalled = false;
+        const wrapped = withValidation<Record<string, unknown>>(client, async () => {
+          handlerCalled = true;
+          return jsonResult({ ok: true });
+        });
+
+        const result = await wrapped({ [key]: 'abc' });
+
+        expect(handlerCalled).toBe(false);
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(`Invalid ${key} (received: "abc")`);
+      }
+    );
   });
 });

@@ -82,7 +82,7 @@ enum OutlookClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runMailScript(script, timeout: 30, mailbox: mailbox)
         return parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"])
     }
 

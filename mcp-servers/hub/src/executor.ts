@@ -448,14 +448,17 @@ function levenshteinLite(a: string, b: string): number {
 }
 
 /**
- * Find the N closest candidate names to an attempted name by edit distance (ascending).
+ * Find the N closest candidate names to an attempted name by edit distance (ascending),
+ * dropping suggestions whose best distance exceeds half the attempted name's length.
  * @param attempted - The name that failed to resolve.
  * @param candidates - Available names to rank against.
  * @param limit - Maximum number of suggestions to return (default 3).
  */
 export function closestMatches(attempted: string, candidates: string[], limit = 3): string[] {
+  const maxDistance = Math.max(1, Math.floor(attempted.length / 2));
   return [...candidates]
     .map((c) => ({ name: c, distance: levenshteinLite(attempted.toLowerCase(), c.toLowerCase()) }))
+    .filter((c) => c.distance <= maxDistance)
     .sort((x, y) => x.distance - y.distance || x.name.localeCompare(y.name))
     .slice(0, limit)
     .map((c) => c.name);

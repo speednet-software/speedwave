@@ -56,7 +56,8 @@ const listBoardsTool: Tool = {
 
 const getBoardTool: Tool = {
   name: 'getBoard',
-  description: 'Get a single Jira Agile board by ID.',
+  description:
+    'Get a single Jira Agile board by ID. Restricted to the configured project allowlist, if any.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'board', 'get', 'detail'],

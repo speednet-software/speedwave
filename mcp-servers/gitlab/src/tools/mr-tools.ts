@@ -20,7 +20,7 @@ const listMrIdsTool: Tool = {
     'List merge request IIDs. Use getMrFull for details. For "my MRs"/"MRs I need to review", pass scope: "assigned_to_me" or "created_by_me" (or author_username/reviewer_username for a specific user).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
     [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
     [META_KEYS.SELF_PARAM]: "scope: 'assigned_to_me' | 'created_by_me'",
