@@ -115,6 +115,10 @@ pub struct TranscriptDriver {
     /// Last logged "PCM is big" threshold (in seconds), so we warn once per
     /// step instead of every chunk.
     next_pcm_warn_at: f32,
+    /// Previous live decode (absolute timestamps) — the agreement reference.
+    last_live_decode: Vec<Segment>,
+    /// End of the last committed live segment; the live view is append-only.
+    published_until: Duration,
 }
 
 impl TranscriptDriver {
@@ -130,6 +134,8 @@ impl TranscriptDriver {
             pcm: Vec::new(),
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
+            last_live_decode: Vec::new(),
+            published_until: Duration::ZERO,
         }
     }
 
@@ -149,9 +155,9 @@ impl TranscriptDriver {
 
         match result {
             Ok(()) => {
-                // Final live decode over what's left (so the user sees the last
-                // chunk), then hand off to the finalize pass.
-                let _ = self.decode_window();
+                // Final live decode flushes the not-yet-agreed tail (no further
+                // pass will confirm it), then hand off to the finalize pass.
+                let _ = self.decode_window(true);
                 let _ = self
                     .store
                     .set_status(self.id, TranscriptStatus::Finalizing { progress: 0.0 });
@@ -203,19 +209,17 @@ impl TranscriptDriver {
                 self.next_pcm_warn_at += PCM_WARN_STEP_SECS;
             }
             if accumulated_secs - self.last_decode_at >= LIVE_DECODE_EVERY_SECS {
-                self.decode_window()?;
+                self.decode_window(false)?;
                 self.last_decode_at = accumulated_secs;
             }
         }
     }
 
-    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and replaces exactly
-    /// the segments that fall inside that window. `feed()` returns segments for
-    /// the *whole* window each time, so the splice index must be "the first
-    /// `live_segments` entry whose start is ≥ the window's start" — not a
-    /// running count, which would duplicate the earlier segments once the
-    /// window starts at offset 0 and re-covers them.
-    fn decode_window(&mut self) -> Result<(), DriverError> {
+    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and appends only
+    /// segments two consecutive decodes agree on (LocalAgreement) — the live
+    /// view is append-only, so shown text never flickers away. `flush` commits
+    /// the unconfirmed tail (used for the last decode before finalize).
+    fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
         }
@@ -239,15 +243,46 @@ impl TranscriptDriver {
             })
             .collect();
 
-        let splice_at = self
-            .store
-            .live_splice_at(self.id, window_start)
-            .map_err(|e| DriverError::Store(e.to_string()))?;
-        self.store
-            .replace_segments(self.id, splice_at, absolute)
-            .map_err(|e| DriverError::Store(e.to_string()))?;
+        let candidates: Vec<Segment> = uncommitted(&absolute, self.published_until);
+        let commit: Vec<Segment> = if flush {
+            candidates
+        } else {
+            let prev = uncommitted(&self.last_live_decode, self.published_until);
+            agreed_prefix(&prev, &candidates)
+        };
+        for seg in commit {
+            self.published_until = seg.end;
+            self.store
+                .append_segment(self.id, seg)
+                .map_err(|e| DriverError::Store(e.to_string()))?;
+        }
+        self.last_live_decode = absolute;
         Ok(())
     }
+}
+
+/// Segments whose midpoint lies past the committed horizon (midpoint, not
+/// start: window re-decodes jitter boundaries of the already-committed edge).
+fn uncommitted(segs: &[Segment], published_until: Duration) -> Vec<Segment> {
+    segs.iter()
+        .filter(|s| s.start + (s.end.saturating_sub(s.start)) / 2 >= published_until)
+        .cloned()
+        .collect()
+}
+
+/// Two decodes agree on a segment when the text matches and the start drifted
+/// less than [`AGREEMENT_START_TOLERANCE`] between passes.
+const AGREEMENT_START_TOLERANCE: Duration = Duration::from_secs(1);
+
+/// Longest prefix of `cur` that agrees, pairwise, with `prev` (LocalAgreement).
+fn agreed_prefix(prev: &[Segment], cur: &[Segment]) -> Vec<Segment> {
+    cur.iter()
+        .zip(prev.iter())
+        .take_while(|(c, p)| {
+            c.text.trim() == p.text.trim() && c.start.abs_diff(p.start) <= AGREEMENT_START_TOLERANCE
+        })
+        .map(|(c, _)| c.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -581,10 +616,9 @@ mod tests {
     fn live_segments_stay_monotonic_and_unique_across_re_decodes() {
         // 30 s of audio at 16 kHz: with LIVE_DECODE_EVERY_SECS=5, the sliding
         // window re-decodes ~6 times and (since the recording exceeds
-        // LIVE_WINDOW_SECS) the window slides forward. The splice index must be
-        // "first segment at/after the window start", not a running count — if it
-        // were a count, the earlier segments would be duplicated and timestamps
-        // would go backwards. MockTranscriber emits one segment per 2 s.
+        // LIVE_WINDOW_SECS) the window slides forward. Append-only commits must
+        // keep timestamps monotonic and never duplicate the earlier segments.
+        // MockTranscriber emits one segment per 2 s.
         let (_fixture_guard, fixture) = make_fixture_wav(30.0);
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
@@ -623,6 +657,111 @@ mod tests {
             "too many segments ({}) — the splice is duplicating",
             segs.len()
         );
+    }
+
+    /// Returns canned window-relative segment lists, one per `feed()` call
+    /// (the last list repeats once the script runs out).
+    struct ScriptedTranscriber {
+        script: Vec<Vec<Segment>>,
+        call: usize,
+    }
+    impl crate::transcription::transcriber::Transcriber for ScriptedTranscriber {
+        fn transcribe(
+            &mut self,
+            _pcm: &[f32],
+            _opts: &TranscribeOptions,
+        ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError> {
+            let idx = self.call.min(self.script.len().saturating_sub(1));
+            self.call += 1;
+            Ok(self.script[idx].clone())
+        }
+    }
+
+    fn seg_at(start_s: f32, end_s: f32, text: &str) -> Segment {
+        Segment {
+            start: Duration::from_secs_f32(start_s),
+            end: Duration::from_secs_f32(end_s),
+            text: text.to_string(),
+            words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn live_view_is_append_only_and_holds_back_disagreeing_tails() {
+        // 15 s fixture → decodes at 5 s (win 0-5), 10 s (win 0-10), 15 s
+        // (win 3-15), then the final flush (win 3-15 again).
+        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let script = vec![
+            // Decode 1: "ala" plus a mid-utterance misread of the tail.
+            vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")],
+            // Decode 2 fixes the tail: "ala" agrees → committed; "ma kota" not yet.
+            vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")],
+            // Decode 3 (window starts at 3 s, window-relative times): "ma kota"
+            // now agrees at abs 3-5 (rel 0-2); "i psa" appears (rel 9-11).
+            vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
+            // Final flush: same decode — "i psa" is committed without agreement.
+            vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
+        ];
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let texts: Vec<String> = store
+            .get(id)
+            .unwrap()
+            .live_segments
+            .iter()
+            .map(|s| s.text.clone())
+            .collect();
+        assert_eq!(texts, vec!["ala", "ma kota", "i psa"]);
+
+        // The misread tail was never published, and nothing was ever replaced:
+        // the whole live stream is SegmentAppended events.
+        let mut rx = sub.events;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::TranscriptEvent::SegmentAppended { segment, .. } = ev {
+                assert_ne!(
+                    segment.text, "mo kata",
+                    "unconfirmed text must never be shown"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agreed_prefix_needs_matching_text_and_stable_starts() {
+        let prev = vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")];
+        let cur = vec![seg_at(0.2, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")];
+        let agreed = agreed_prefix(&prev, &cur);
+        assert_eq!(agreed.len(), 1, "tolerant start drift, strict text");
+        assert_eq!(agreed[0].text, "ala");
+        // A start that drifted more than the tolerance is not the same segment.
+        let drifted = vec![seg_at(4.0, 6.0, "ala")];
+        assert!(agreed_prefix(&prev, &drifted).is_empty());
+        // No previous decode → nothing agreed yet.
+        assert!(agreed_prefix(&[], &cur).is_empty());
+    }
+
+    #[test]
+    fn uncommitted_filters_by_midpoint_not_start() {
+        let segs = vec![seg_at(0.0, 2.0, "done"), seg_at(3.0, 7.0, "fresh")];
+        // Horizon at 4 s: "done" (mid 1 s) is out; "fresh" (mid 5 s) stays even
+        // though its start (3 s) sits before the horizon.
+        let rest = uncommitted(&segs, Duration::from_secs(4));
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].text, "fresh");
     }
 
     #[test]

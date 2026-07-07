@@ -305,9 +305,6 @@ export class TranscriptionService {
       case 'segment_appended':
         next.live_segments = [...cur.live_segments, ev.segment];
         break;
-      case 'segments_replaced':
-        next.live_segments = [...cur.live_segments.slice(0, ev.from_index), ...ev.segments];
-        break;
       case 'status_changed':
         next.status = ev.status;
         break;

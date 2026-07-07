@@ -219,21 +219,6 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.live_segments[0].text).toBe('a');
     });
 
-    it('replaces the tail on segments_replaced', () => {
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'segment_appended',
-        seq: 1,
-        segment: seg(0, 2, 'keep'),
-      });
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'segments_replaced',
-        seq: 2,
-        from_index: 1,
-        segments: [seg(2, 4, 'new1'), seg(4, 6, 'new2')],
-      });
-      expect(svc.active()?.live_segments.map((s) => s.text)).toEqual(['keep', 'new1', 'new2']);
-    });
-
     it('updates status on status_changed and finalize_progress', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'finalize_progress',

@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -31,15 +30,6 @@ pub enum TranscriptEvent {
         seq: u64,
         /// The segment.
         segment: Segment,
-    },
-    /// The sliding window re-decoded its tail; replace the trailing range.
-    SegmentsReplaced {
-        /// Monotonic seq.
-        seq: u64,
-        /// Index in `live_segments` at which to splice in `segments`.
-        from_index: usize,
-        /// The replacement segments.
-        segments: Vec<Segment>,
     },
     /// The lifecycle status changed.
     StatusChanged {
@@ -89,7 +79,6 @@ impl TranscriptEvent {
     pub fn seq(&self) -> u64 {
         match self {
             TranscriptEvent::SegmentAppended { seq, .. }
-            | TranscriptEvent::SegmentsReplaced { seq, .. }
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
@@ -307,40 +296,6 @@ impl TranscriptStore {
             seq_out = seq;
             s.live_segments.push(segment.clone());
             TranscriptEvent::SegmentAppended { seq, segment }
-        })?;
-        Ok(seq_out)
-    }
-
-    /// Splice point for a window re-decode: first segment overlapping the
-    /// window (`end > threshold`). Keying on `end` (not `start`) drops segments
-    /// whose text runs into the window, which would otherwise duplicate.
-    pub fn live_splice_at(&self, id: Uuid, threshold: Duration) -> Result<usize, StoreError> {
-        let entry = self.sessions.get(&id).ok_or(StoreError::NotFound(id))?;
-        let session = entry.session.read();
-        Ok(session
-            .live_segments
-            .iter()
-            .position(|s| s.end > threshold)
-            .unwrap_or(session.live_segments.len()))
-    }
-
-    /// Replaces the tail of `live_segments` starting at `from_index`.
-    pub fn replace_segments(
-        &self,
-        id: Uuid,
-        from_index: usize,
-        segments: Vec<Segment>,
-    ) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
-            s.live_segments.truncate(from_index);
-            s.live_segments.extend(segments.iter().cloned());
-            TranscriptEvent::SegmentsReplaced {
-                seq,
-                from_index,
-                segments,
-            }
         })?;
         Ok(seq_out)
     }
@@ -565,7 +520,7 @@ mod tests {
         let mut rx = store.subscribe(id).unwrap().events;
         let s1 = store.append_segment(id, seg(0.0, 1.0, "a")).unwrap();
         let s2 = store
-            .replace_segments(id, 0, vec![seg(0.0, 1.0, "A")])
+            .capture_warning(id, crate::transcription::CaptureWarning::SystemAudioSilent)
             .unwrap();
         let s3 = store
             .set_status(id, TranscriptStatus::Finalizing { progress: 0.5 })
@@ -590,7 +545,7 @@ mod tests {
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, s5);
         assert!(matches!(snap.status, TranscriptStatus::Done));
-        assert_eq!(snap.live_segments[0].text, "A");
+        assert_eq!(snap.live_segments[0].text, "a");
         // Persisted on disk (cache-independent).
         let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
         assert_eq!(loaded.last_seq, s5);
@@ -728,11 +683,6 @@ mod tests {
                 seq: 1,
                 segment: seg(0.0, 1.0, "x"),
             },
-            TranscriptEvent::SegmentsReplaced {
-                seq: 2,
-                from_index: 0,
-                segments: vec![],
-            },
             TranscriptEvent::StatusChanged {
                 seq: 4,
                 status: TranscriptStatus::Done,
@@ -757,7 +707,6 @@ mod tests {
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
-                TranscriptEvent::SegmentsReplaced { seq, .. } => *seq,
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
@@ -845,26 +794,5 @@ mod tests {
             serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),
             ev
         );
-    }
-
-    /// Regression: a kept segment whose text spans into the re-decode window
-    /// (start before threshold, end after) must be spliced out so the fresh
-    /// decode doesn't duplicate it. Splicing on `start` wrongly kept it.
-    #[tokio::test]
-    async fn live_splice_drops_segment_overlapping_the_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path());
-        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        store
-            .append_segment(id, seg(0.0, 10.0, "long packed"))
-            .unwrap();
-        store.append_segment(id, seg(10.0, 12.0, "after")).unwrap();
-        let at = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at, 0, "segment overlapping the window must be spliced out");
-        store
-            .replace_segments(id, 0, vec![seg(0.0, 8.0, "kept")])
-            .unwrap();
-        let at2 = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at2, 1, "a segment ending exactly at the threshold is kept");
     }
 }
