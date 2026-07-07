@@ -270,16 +270,27 @@ fn uncommitted(segs: &[Segment], published_until: Duration) -> Vec<Segment> {
         .collect()
 }
 
-/// Two decodes agree on a segment when the text matches and the start drifted
+/// Two decodes agree on a segment when the words match and the start drifted
 /// less than [`AGREEMENT_START_TOLERANCE`] between passes.
 const AGREEMENT_START_TOLERANCE: Duration = Duration::from_secs(1);
 
-/// Longest prefix of `cur` that agrees, pairwise, with `prev` (LocalAgreement).
+/// Whisper's punctuation and casing wobble between passes over the same audio;
+/// agreement therefore compares only lowercased letters and digits.
+fn normalized_for_agreement(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Longest prefix of `cur` that agrees, pairwise, with `prev` (LocalAgreement);
+/// the newer decode's rendering is what gets published.
 fn agreed_prefix(prev: &[Segment], cur: &[Segment]) -> Vec<Segment> {
     cur.iter()
         .zip(prev.iter())
         .take_while(|(c, p)| {
-            c.text.trim() == p.text.trim() && c.start.abs_diff(p.start) <= AGREEMENT_START_TOLERANCE
+            normalized_for_agreement(&c.text) == normalized_for_agreement(&p.text)
+                && c.start.abs_diff(p.start) <= AGREEMENT_START_TOLERANCE
         })
         .map(|(c, _)| c.clone())
         .collect()
@@ -745,13 +756,28 @@ mod tests {
         let prev = vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")];
         let cur = vec![seg_at(0.2, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")];
         let agreed = agreed_prefix(&prev, &cur);
-        assert_eq!(agreed.len(), 1, "tolerant start drift, strict text");
+        assert_eq!(agreed.len(), 1, "tolerant start drift, strict words");
         assert_eq!(agreed[0].text, "ala");
         // A start that drifted more than the tolerance is not the same segment.
         let drifted = vec![seg_at(4.0, 6.0, "ala")];
         assert!(agreed_prefix(&prev, &drifted).is_empty());
         // No previous decode → nothing agreed yet.
         assert!(agreed_prefix(&[], &cur).is_empty());
+    }
+
+    #[test]
+    fn agreement_ignores_whisper_punctuation_and_casing_wobble() {
+        // Field failure: passes emit "Raz, dwa, trzy." then "Raz, dwa, trzy!"
+        // for the same audio — strict equality starved the live view empty.
+        let prev = vec![seg_at(0.0, 2.0, "Raz, dwa, trzy.")];
+        let cur = vec![seg_at(0.0, 2.0, "raz dwa trzy!")];
+        let agreed = agreed_prefix(&prev, &cur);
+        assert_eq!(agreed.len(), 1);
+        // The newer decode's rendering is what gets published.
+        assert_eq!(agreed[0].text, "raz dwa trzy!");
+        // Different words still disagree.
+        let other = vec![seg_at(0.0, 2.0, "raz dwa cztery")];
+        assert!(agreed_prefix(&prev, &other).is_empty());
     }
 
     #[test]
