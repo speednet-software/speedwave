@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { TelemetrySectionComponent } from './telemetry-section.component';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import type { TelemetryConfigResponse } from '../../models/telemetry';
 
@@ -91,6 +92,20 @@ describe('TelemetrySectionComponent', () => {
     expect(component.config()?.locks.endpoint).toBe(true);
   });
 
+  it('renders the saved non-first protocol as the selected option (@for options)', async () => {
+    setup(baseResponse({ protocol: 'http/protobuf' }));
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    const select = fixture.nativeElement.querySelector(
+      '[data-testid="telemetry-protocol"]'
+    ) as HTMLSelectElement;
+    expect(select.value).toBe('http/protobuf');
+    const selected = select.querySelector('option:checked') as HTMLOptionElement;
+    expect(selected.value).toBe('http/protobuf');
+  });
+
   it('greys the whole section when kill_switch is set', async () => {
     setup(baseResponse({ kill_switch: true, enabled: false }));
     await create();
@@ -99,6 +114,62 @@ describe('TelemetrySectionComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="telemetry-killswitch"]')
     ).not.toBeNull();
+  });
+
+  it('shows a managed indicator at a section header when any field in it is MDM-locked', async () => {
+    setup(
+      baseResponse({
+        locks: { ...baseResponse().locks, protocol: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    // protocol lives in "Transport & signals" — its header must show the indicator.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).not.toBeNull();
+    // Other section headers stay clean.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-advanced-managed"]')
+    ).toBeNull();
+  });
+
+  it('shows no section managed indicators when nothing is locked', async () => {
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-advanced-managed"]')
+    ).toBeNull();
+  });
+
+  it('flags the Privacy header when a privacy gate is MDM-locked', async () => {
+    setup(
+      baseResponse({
+        locks: { ...baseResponse().locks, log_user_prompts: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
+    ).toBeNull();
   });
 
   it('renders the enable control as a toggle (like integrations), not a bare checkbox', async () => {
@@ -285,5 +356,73 @@ describe('TelemetrySectionComponent', () => {
     await component.ngOnInit();
     const update = await savedUpdate();
     expect('metric_export_interval_ms' in update).toBe(false);
+  });
+
+  it('save() requests a container restart on success (OTEL env is baked at create time)', async () => {
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    await component.save();
+    expect(spy).toHaveBeenCalledOnce();
+  });
+
+  it('save() does NOT request a restart when the write fails', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') return baseResponse();
+      if (cmd === 'update_telemetry_config') throw new Error('save failed');
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    await component.save();
+    expect(spy).not.toHaveBeenCalled();
+    expect(component.saveError()).toBe('save failed');
+  });
+
+  it('save() shows a transient saved confirmation on success', async () => {
+    await create();
+    await component.ngOnInit();
+    expect(component.saved()).toBe(false);
+    await component.save();
+    expect(component.saved()).toBe(true);
+  });
+
+  it('save() shows no false success when the write succeeds but the post-save refresh fails', async () => {
+    let allowRead = true;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') {
+        if (!allowRead) throw new Error('read failed');
+        return baseResponse();
+      }
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    const projectState = TestBed.inject(ProjectStateService);
+    const spy = vi.spyOn(projectState, 'requestRestart');
+    allowRead = false; // update succeeds, the refresh read that follows fails
+    await component.save();
+    expect(spy).not.toHaveBeenCalled();
+    expect(component.saved()).toBe(false);
+    expect(component.saveError()).toBe('read failed');
+  });
+
+  it('a save error renders once (inline), not duplicated by the top load banner', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_telemetry_config') return baseResponse();
+      if (cmd === 'update_telemetry_config') throw new Error('save failed');
+      return undefined;
+    };
+    await create();
+    await component.ngOnInit();
+    await component.save();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="telemetry-save-error"]')
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="telemetry-error"]')).toBeNull();
   });
 });

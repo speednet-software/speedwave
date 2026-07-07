@@ -586,6 +586,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Fail-closed on an invalid MDM telemetry policy, mirroring the Desktop boot
+    // check — an org policy never silently vanishes on an admin typo.
+    if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
+        err!("Organization policy error: {}", redact_err(&e));
+        err!("Contact your administrator to correct the managed configuration.");
+        std::process::exit(2);
+    }
+
     // Handle `speedwave init [name]` — register CWD as a project (no running VM required)
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;

@@ -3,12 +3,14 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
@@ -37,7 +39,7 @@ import type {
         Send Speedwave usage telemetry to your own OpenTelemetry (OTLP) collector.
       </p>
 
-      @if (error()) {
+      @if (error() && !saveError()) {
         <p class="mt-2 text-[12px] text-[var(--red)]" data-testid="telemetry-error">
           {{ error() }}
         </p>
@@ -117,7 +119,15 @@ import type {
                     >
                       {{ probing() ? 'testing…' : 'Test connection' }}
                     </button>
-                    @if (probeResult(); as result) {
+                    @if (probing()) {
+                      <span
+                        class="mono text-[11px] text-[var(--ink-mute)]"
+                        data-testid="telemetry-probing"
+                      >
+                        Probing {{ endpoint() }}…
+                      </span>
+                    }
+                    @if (!probing() && probeResult(); as result) {
                       <span
                         class="mono text-[11px]"
                         [class]="
@@ -134,9 +144,16 @@ import type {
                 <!-- Protocol + exporters -->
                 <div>
                   <div
-                    class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    class="mono mb-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Transport &amp; signals
+                    @if (transportManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-transport-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </div>
                   <div class="flex flex-wrap items-center gap-4 text-[11px] text-[var(--ink)]">
                     <label class="mono flex items-center gap-1.5">
@@ -149,7 +166,10 @@ import type {
                         data-testid="telemetry-protocol"
                       >
                         @for (o of protocolOptions; track o.value) {
-                          <option [value]="o.value">{{ o.label }}</option>
+                          <!-- Select on the option, not [value] on select: @for options mount after the select's bindings flush. -->
+                          <option [value]="o.value" [selected]="o.value === protocol()">
+                            {{ o.label }}
+                          </option>
                         }
                       </select>
                     </label>
@@ -210,6 +230,13 @@ import type {
                     class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Advanced (resource attributes, intervals)
+                    @if (advancedManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-advanced-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </summary>
                   <div class="mt-2 space-y-3">
                     <div>
@@ -302,6 +329,13 @@ import type {
                     class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                   >
                     Privacy (advanced)
+                    @if (privacyManaged()) {
+                      <span
+                        class="normal-case tracking-normal"
+                        data-testid="telemetry-privacy-managed"
+                        >🔒 managed</span
+                      >
+                    }
                   </summary>
                   <p
                     class="mt-2 text-[11px] leading-relaxed text-[var(--red)]"
@@ -355,7 +389,23 @@ import type {
                   </div>
                 </details>
 
-                <div class="flex justify-end border-t border-[var(--line)] pt-4">
+                <div class="flex items-center justify-end gap-3 border-t border-[var(--line)] pt-4">
+                  @if (saveError()) {
+                    <span
+                      class="mono text-[11px] text-[var(--red)]"
+                      data-testid="telemetry-save-error"
+                    >
+                      {{ saveError() }}
+                    </span>
+                  }
+                  @if (saved()) {
+                    <span
+                      class="mono text-[11px] text-[var(--green)]"
+                      data-testid="telemetry-saved"
+                    >
+                      Saved — restart to apply
+                    </span>
+                  }
                   <button
                     type="button"
                     class="mono rounded bg-[var(--accent)] px-4 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
@@ -380,7 +430,38 @@ export class TelemetrySectionComponent implements OnInit {
 
   readonly config = signal<TelemetryConfigResponse | null>(null);
   readonly error = signal('');
+  /** Save-specific error, shown by the Save button (not the top load banner). */
+  readonly saveError = signal('');
+
+  // Section-level managed indicators: true when any field in the section is
+  // MDM-locked, so the header shows 🔒 even for fields without a per-field badge.
+  readonly transportManaged = computed(() => {
+    const l = this.config()?.locks;
+    return !!l && (l.protocol || l.export_metrics || l.export_logs);
+  });
+  readonly advancedManaged = computed(() => {
+    const l = this.config()?.locks;
+    return (
+      !!l &&
+      (l.resource_attributes ||
+        l.include_account_uuid ||
+        l.metric_export_interval_ms ||
+        l.logs_export_interval_ms)
+    );
+  });
+  readonly privacyManaged = computed(() => {
+    const l = this.config()?.locks;
+    return (
+      !!l &&
+      (l.log_user_prompts ||
+        l.log_assistant_responses ||
+        l.log_tool_details ||
+        l.log_raw_api_bodies)
+    );
+  });
   readonly saving = signal(false);
+  /** Transient success flag; true for ~2s after a save persists. */
+  readonly saved = signal(false);
   readonly probing = signal(false);
   /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
@@ -408,6 +489,7 @@ export class TelemetrySectionComponent implements OnInit {
 
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
+  private readonly projectState = inject(ProjectStateService);
 
   /** Loads the effective telemetry config on first paint. */
   async ngOnInit(): Promise<void> {
@@ -548,6 +630,7 @@ export class TelemetrySectionComponent implements OnInit {
   /** Persists the editable fields (MDM-locked ones are ignored server-side). */
   async save(): Promise<void> {
     this.saving.set(true);
+    this.saved.set(false);
     this.cdr.markForCheck();
     const update: TelemetryConfigUpdate = {
       enabled: this.enabled(),
@@ -578,11 +661,27 @@ export class TelemetrySectionComponent implements OnInit {
     if (this.logsIntervalTouched()) {
       update.logs_export_interval_ms = this.logsExportIntervalMs();
     }
+    this.saveError.set('');
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
       await this.refresh();
+      // refresh() swallows its own errors into error(), so gate success feedback
+      // on it being clear — never show "Saved" next to an error.
+      if (this.error()) {
+        this.saveError.set(this.error());
+      } else {
+        // OTEL_* env is baked into the claude container at create time, so a saved
+        // change only takes effect after a restart (as with an LLM claude-env change).
+        this.projectState.requestRestart();
+        this.saved.set(true);
+        setTimeout(() => {
+          this.saved.set(false);
+          this.cdr.markForCheck();
+        }, 2000);
+      }
     } catch (e: unknown) {
       this.emitError(e);
+      this.saveError.set(this.error());
     }
     this.saving.set(false);
     this.cdr.markForCheck();

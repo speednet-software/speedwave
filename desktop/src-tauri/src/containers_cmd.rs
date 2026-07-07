@@ -1145,6 +1145,9 @@ pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), Stri
                 rejected.join(", ")
             );
         }
+        // Validate the post-update state through the same SSOT the renderer uses,
+        // so an invalid save is rejected here instead of bricking the next render.
+        config::resolve_telemetry(Some(&telemetry), managed.as_ref())?;
         user_config.telemetry = Some(telemetry);
         config::save_user_config(&user_config)?;
         Ok(())
@@ -3433,6 +3436,57 @@ mod tests {
         assert!(
             resolve_telemetry(None, Some(&managed)).is_err(),
             "fail-closed MDM state must be an Err the update path propagates"
+        );
+    }
+
+    #[test]
+    fn save_time_validation_rejects_enabled_without_valid_endpoint() {
+        // The A1 guard: the post-update state is re-resolved before persisting,
+        // so enabling telemetry without a valid endpoint is rejected at save time.
+        use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
+        let resolved = resolve_telemetry(None, None).unwrap();
+
+        let mut enabled_no_endpoint = TelemetryConfig::default();
+        apply_telemetry_update_with(
+            &mut enabled_no_endpoint,
+            TelemetryConfigUpdate {
+                enabled: Some(true),
+                ..Default::default()
+            },
+            &resolved,
+        );
+        assert!(
+            resolve_telemetry(Some(&enabled_no_endpoint), None).is_err(),
+            "enabled=true without an endpoint must be rejected at save time"
+        );
+
+        let mut enabled_bad_url = TelemetryConfig::default();
+        apply_telemetry_update_with(
+            &mut enabled_bad_url,
+            TelemetryConfigUpdate {
+                enabled: Some(true),
+                endpoint: Some(Some("ftp://x/".into())),
+                ..Default::default()
+            },
+            &resolved,
+        );
+        assert!(
+            resolve_telemetry(Some(&enabled_bad_url), None).is_err(),
+            "enabled=true with a non-http endpoint must be rejected at save time"
+        );
+
+        let mut disabled_ok = TelemetryConfig::default();
+        apply_telemetry_update_with(
+            &mut disabled_ok,
+            TelemetryConfigUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            &resolved,
+        );
+        assert!(
+            resolve_telemetry(Some(&disabled_ok), None).is_ok(),
+            "disabled telemetry without an endpoint must still save"
         );
     }
 

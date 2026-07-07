@@ -22,7 +22,9 @@ An administrator can force any subset of the telemetry settings by deploying a `
 - macOS: `/Library/Application Support/Speedwave/managed-config.json`
 - Windows: `%ProgramData%\Speedwave\managed-config.json`
 
-**Presence is the lock:** any field the file sets becomes read-only for the user (shown as "managed by your organization"). Omit a field to leave it user-editable. A malformed file is a hard error — Speedwave fails closed rather than silently ignoring the policy.
+**Presence is the lock:** any field the file sets becomes read-only for the user (shown as "managed by your organization"). Omit a field to leave it user-editable. A malformed file is a hard error, so Speedwave fails closed rather than silently ignoring the policy.
+
+The policy is validated once, at startup. An invalid `managed-config.json` (bad JSON, an unknown key, or `enabled: true` without a valid endpoint) blocks Speedwave from starting: the app shows a native "Organization policy error" dialog (the CLI prints the error and exits non-zero) and does not open until an administrator corrects the file. A bad push therefore blocks every user on that machine, so validate the file before deploying it.
 
 ### Example: force a corporate collector, disable content logging
 

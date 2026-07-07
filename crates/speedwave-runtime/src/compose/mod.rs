@@ -346,11 +346,8 @@ pub fn render_compose_in(
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
-    // Native managed-settings.json (MDM telemetry): fail-closed on a resolve error,
-    // then mount it :ro only when MDM locked at least one telemetry key.
-    if let Some(err) = &resolved_config.telemetry_error {
-        anyhow::bail!("telemetry configuration invalid: {err}");
-    }
+    // Native managed-settings.json (MDM telemetry): mounted :ro only when MDM
+    // locked a key. An invalid policy is hard-stopped at boot, not here (ADR-076).
     if resolved_config.telemetry.any_locked {
         crate::claude_managed::write_managed_settings(
             data_dir,
@@ -1236,13 +1233,8 @@ mod tests {
         user: Option<&crate::config::TelemetryConfig>,
         managed: Option<&crate::config::ManagedTelemetryConfig>,
     ) -> ResolvedClaudeConfig {
-        let (telemetry, telemetry_error) = match crate::config::resolve_telemetry(user, managed) {
-            Ok(t) => (t, None),
-            Err(e) => (
-                crate::config::ResolvedTelemetry::disabled(),
-                Some(e.to_string()),
-            ),
-        };
+        let telemetry = crate::config::resolve_telemetry(user, managed)
+            .unwrap_or_else(|_| crate::config::ResolvedTelemetry::disabled());
         let mut llm = crate::config::LlmConfig {
             provider: Some("local".to_string()),
             model: Some("test/model".to_string()),
@@ -1255,7 +1247,6 @@ mod tests {
             flags: default_flags(),
             llm,
             telemetry,
-            telemetry_error,
         }
     }
 
@@ -1303,7 +1294,60 @@ mod tests {
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn render_hard_errors_on_invalid_telemetry_endpoint() {
+    fn telemetry_env_reaches_the_claude_service() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("otel-env-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let user = crate::config::TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            protocol: Some(crate::config::OtlpProtocol::HttpProtobuf),
+            headers: Some("Authorization=Bearer abc==".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let mut resolved = resolved_with_telemetry(Some(&user), None);
+        // The shared fixture zeroes env; the renderer injects OTEL only from env.
+        resolved.env = crate::telemetry_env::telemetry_env_map(&resolved.telemetry);
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        assert_eq!(
+            find_env_value(&env, "CLAUDE_CODE_ENABLE_TELEMETRY=").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_ENDPOINT=").as_deref(),
+            Some("https://c.example.com:4318")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_PROTOCOL=").as_deref(),
+            Some("http/protobuf")
+        );
+        // The header value keeps its '=' (the de-dup keys only on the pre-'=' segment).
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_HEADERS=").as_deref(),
+            Some("Authorization=Bearer abc==")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_omits_managed_mount_when_telemetry_failed_to_resolve() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("mdm-badurl-{}", std::process::id());
         let tmp = tempfile::tempdir().unwrap();
@@ -1317,7 +1361,7 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolved_with_telemetry(Some(&user), None);
-        let err = render_compose_isolated(
+        let yaml = render_compose_isolated(
             data_dir.path(),
             &project,
             project_dir.to_str().unwrap(),
@@ -1325,41 +1369,11 @@ mod tests {
             &ResolvedIntegrationsConfig::default(),
             None,
             &HostBridgesInfo::default(),
-        );
+        )
+        .expect("render must succeed (fail-closed handled at boot, not render)");
         assert!(
-            err.is_err(),
-            "invalid OTLP endpoint must abort render/start"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn render_hard_errors_on_crlf_header() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let project = format!("mdm-crlf-{}", std::process::id());
-        let tmp = tempfile::tempdir().unwrap();
-        let project_dir = tmp.path().join("project");
-        std::fs::create_dir_all(&project_dir).unwrap();
-
-        let managed = crate::config::ManagedTelemetryConfig {
-            enabled: Some(true),
-            endpoint: Some("https://c:4318".into()),
-            headers: Some("Authorization=Bearer x\r\nInjected: y".into()),
-            ..Default::default()
-        };
-        let resolved = resolved_with_telemetry(None, Some(&managed));
-        let err = render_compose_isolated(
-            data_dir.path(),
-            &project,
-            project_dir.to_str().unwrap(),
-            &resolved,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-            &HostBridgesInfo::default(),
-        );
-        assert!(
-            err.is_err(),
-            "CRLF-bearing MDM header must abort render/start"
+            !yaml.contains("/etc/claude-code/managed-settings.json"),
+            "an unresolvable telemetry policy must not produce a managed-settings mount"
         );
     }
 
