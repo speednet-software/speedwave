@@ -1233,11 +1233,20 @@ pub(crate) fn resolve_project_config_in_with_managed(
     // injection) reads the resolved config, so this is the single sync point.
     llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
-    // Local LLMs get the full default Claude Code system prompt.
-    let flags: Vec<String> = defaults::DEFAULT_FLAGS
+    // Local LLMs keep the full default system prompt; two local-only additions
+    // help small open models: stable prompt prefix (KV cache) + skill recall.
+    let mut flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
         .map(|s| s.to_string())
         .collect();
+    if llm
+        .active_provider()
+        .is_some_and(|e| e.kind == LlmProviderKind::Local)
+    {
+        flags.push("--exclude-dynamic-system-prompt-sections".to_string());
+        flags.push("--append-system-prompt".to_string());
+        flags.push(crate::prompts::local_llm_skills_nudge().to_string());
+    }
 
     // Fail-closed: an unresolvable policy degrades to disabled(); the invalid
     // policy is hard-stopped at boot by check_telemetry_policy_at_boot.
@@ -3989,16 +3998,74 @@ mod tests {
     }
 
     #[test]
-    fn resolve_does_not_inject_provider_specific_flags_for_local_provider() {
-        // Local providers are configured via env vars (compose::apply_llm_config), not CLI flags.
+    fn resolve_never_replaces_prompt_or_pins_model_for_local_provider() {
+        // Routing/model stay env-driven (compose::apply_llm_config); only the
+        // append-style skill nudge is allowed as a CLI flag.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
-        for forbidden in ["--system-prompt-file", "--append-system-prompt", "--model"] {
+        for forbidden in ["--system-prompt-file", "--model"] {
             assert!(
                 !flags.iter().any(|f| f == forbidden),
                 "must not inject {forbidden} for local provider; flags: {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_injects_skills_nudge_and_dynamic_section_exclusion_for_local_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            flags
+                .iter()
+                .any(|f| f == "--exclude-dynamic-system-prompt-sections"),
+            "local provider must get the dynamic-section exclusion; flags: {flags:?}"
+        );
+        let pos = flags
+            .iter()
+            .position(|f| f == "--append-system-prompt")
+            .unwrap_or_else(|| panic!("expected --append-system-prompt; flags: {flags:?}"));
+        assert_eq!(
+            flags.get(pos + 1).map(String::as_str),
+            Some(crate::prompts::local_llm_skills_nudge()),
+            "append flag must carry the skills nudge as its value"
+        );
+    }
+
+    #[test]
+    fn resolve_injects_no_local_only_flags_for_openrouter_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".to_string(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("qwen/qwen3-coder".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        for forbidden in [
+            "--append-system-prompt",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(
+                !flags.iter().any(|f| f == forbidden),
+                "must not inject {forbidden} for openrouter provider; flags: {flags:?}"
             );
         }
     }
@@ -4033,7 +4100,12 @@ mod tests {
         };
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
-        for forbidden in ["--system-prompt-file", "--append-system-prompt", "--model"] {
+        for forbidden in [
+            "--system-prompt-file",
+            "--append-system-prompt",
+            "--model",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
             assert!(
                 !flags.iter().any(|f| f == forbidden),
                 "must not inject {forbidden} for anthropic provider; flags: {flags:?}"
