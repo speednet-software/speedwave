@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter, Router } from '@angular/router';
 import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
@@ -45,7 +46,10 @@ describe('LiveTranscriptComponent', () => {
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
-      providers: [{ provide: TranscriptionService, useValue: svc }],
+      providers: [
+        { provide: TranscriptionService, useValue: svc },
+        provideRouter([{ path: '**', children: [] }]),
+      ],
     }).compileComponents();
     fixture = TestBed.createComponent(LiveTranscriptComponent);
     component = fixture.componentInstance;
@@ -88,28 +92,44 @@ describe('LiveTranscriptComponent', () => {
     expect(bar.textContent).toContain('40%');
   });
 
-  it('confirms before sending to Claude', async () => {
+  it('confirms, sends, then navigates to the chat tab', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hi')] }));
     fixture.detectChanges();
-    await component.sendToClaude();
+    await component.sendToChat();
     expect(confirmSpy).toHaveBeenCalled();
     expect(svc.sendToChat).toHaveBeenCalledWith('sess-1');
+    expect(navSpy).toHaveBeenCalledWith(['/chat']);
   });
 
-  it('does not send to Claude when the confirm is dismissed', async () => {
+  it('does not send or navigate when the confirm is dismissed', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hi')] }));
     fixture.detectChanges();
-    await component.sendToClaude();
+    await component.sendToChat();
     expect(svc.sendToChat).not.toHaveBeenCalled();
+    expect(navSpy).not.toHaveBeenCalled();
   });
 
-  it('shows the "sends to your LLM provider" disclaimer', () => {
+  it('stays on the tab (no navigation) if sending fails', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    svc.sendToChat.mockRejectedValueOnce(new Error('chat busy'));
+    const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hi')] }));
     fixture.detectChanges();
-    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain(
-      'configured llm provider'
-    );
+    await component.sendToChat();
+    expect(navSpy).not.toHaveBeenCalled();
+    expect(component.error()).toBe('chat busy');
+  });
+
+  it('labels the button "Send to chat" and describes opening the chat', () => {
+    fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hi')] }));
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
+    expect(btn).not.toBeNull();
+    expect(btn.textContent).toContain('Send to chat');
+    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain('chat');
   });
 });
