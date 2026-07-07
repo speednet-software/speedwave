@@ -188,12 +188,12 @@ impl WhisperCppTranscriber {
         params.set_print_timestamps(false);
         // Anti-hallucination: no cross-window context (a hallucinated segment
         // would otherwise seed the next window), deterministic decoding, and
-        // whisper.cpp's own silence/low-confidence gates.
+        // whisper.cpp's blank/non-speech-token suppression. (`no_speech_thold`
+        // is a no-op in whisper.cpp; we gate on per-segment prob below instead.)
         params.set_no_context(true);
         params.set_temperature(0.0);
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
-        params.set_no_speech_thold(0.6);
         params.set_entropy_thold(2.4);
         params.set_logprob_thold(-1.0);
         if opts.word_timestamps {
@@ -210,11 +210,17 @@ impl WhisperCppTranscriber {
             let Some(seg) = state.get_segment(i) else {
                 continue;
             };
+            // The model's own no-speech probability drops silence-hallucinated
+            // segments by signal, not by matching text (which would eat real
+            // short utterances).
+            if seg.no_speech_probability() > NO_SPEECH_MAX {
+                continue;
+            }
             // whisper_rs timestamps are centiseconds.
             let start = cs_to_duration(seg.start_timestamp());
             let end = cs_to_duration(seg.end_timestamp());
             let text = format!("{seg}").trim().to_string();
-            if text.is_empty() || is_hallucinated_filler(&text) {
+            if text.is_empty() {
                 continue;
             }
             out.push(Segment {
@@ -263,6 +269,10 @@ fn cs_to_duration(centiseconds: i64) -> Duration {
 /// near-silence emits trained filler, so we skip the decode entirely.
 const SILENCE_RMS: f32 = 0.0055;
 
+/// Drop a segment whose no-speech probability exceeds this — whisper.cpp's own
+/// estimate that the span is not speech (the filler-on-silence signature).
+const NO_SPEECH_MAX: f32 = 0.6;
+
 /// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
 fn is_silent(pcm: &[f32]) -> bool {
     if pcm.is_empty() {
@@ -270,28 +280,6 @@ fn is_silent(pcm: &[f32]) -> bool {
     }
     let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
     ((sum_sq / pcm.len() as f64).sqrt() as f32) < SILENCE_RMS
-}
-
-/// A lone trained-in filler phrase Whisper emits on silence — dropped when it
-/// is the entire segment (real speech carries more than just this token).
-fn is_hallucinated_filler(text: &str) -> bool {
-    let t = text
-        .trim()
-        .trim_end_matches(['.', '!', '?', '…'])
-        .trim()
-        .to_lowercase();
-    matches!(
-        t.as_str(),
-        "dziękuję"
-            | "dziękuje"
-            | "dzięki"
-            | "thank you"
-            | "thanks"
-            | "thanks for watching"
-            | "you"
-            | "napisy stworzone przez społeczność amara.org"
-            | "subscribe"
-    )
 }
 
 /// Deterministic fake transcriber for orchestration tests — one segment per
@@ -389,28 +377,6 @@ mod tests {
             .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
             .collect();
         assert!(!is_silent(&tone));
-    }
-
-    #[test]
-    fn hallucinated_filler_is_dropped_case_and_punctuation_insensitive() {
-        for s in [
-            "Dziękuję",
-            "dziękuję.",
-            " Dziękuję ",
-            "Thank you.",
-            "you",
-            "Thanks",
-        ] {
-            assert!(is_hallucinated_filler(s), "should drop {s:?}");
-        }
-        // Real content — even when it contains the word — is kept.
-        for s in [
-            "Dziękuję za spotkanie",
-            "thank you for the demo",
-            "no dzięki, robimy",
-        ] {
-            assert!(!is_hallucinated_filler(s), "should keep {s:?}");
-        }
     }
 
     #[test]
