@@ -115,8 +115,6 @@ pub struct TranscriptDriver {
     /// Last logged "PCM is big" threshold (in seconds), so we warn once per
     /// step instead of every chunk.
     next_pcm_warn_at: f32,
-    /// Previous live decode (absolute timestamps) — the agreement reference.
-    last_live_decode: Vec<Segment>,
     /// End of the last committed live segment; the live view is append-only.
     published_until: Duration,
 }
@@ -134,7 +132,6 @@ impl TranscriptDriver {
             pcm: Vec::new(),
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
-            last_live_decode: Vec::new(),
             published_until: Duration::ZERO,
         }
     }
@@ -216,9 +213,9 @@ impl TranscriptDriver {
     }
 
     /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and appends only
-    /// segments two consecutive decodes agree on (LocalAgreement) — the live
-    /// view is append-only, so shown text never flickers away. `flush` commits
-    /// the unconfirmed tail (used for the last decode before finalize).
+    /// segments older than [`LIVE_COMMIT_HOLDBACK`] — the window tail is still
+    /// unstable between passes, so the live view stays append-only and never
+    /// flickers. `flush` commits the held-back tail before finalize.
     fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -243,56 +240,35 @@ impl TranscriptDriver {
             })
             .collect();
 
-        let candidates: Vec<Segment> = uncommitted(&absolute, self.published_until);
-        let commit: Vec<Segment> = if flush {
-            candidates
-        } else {
-            let prev = uncommitted(&self.last_live_decode, self.published_until);
-            agreed_prefix(&prev, &candidates)
-        };
+        let total = Duration::from_secs_f32(self.pcm.len() as f32 / SAMPLE_RATE_HZ as f32);
+        let horizon = total.saturating_sub(LIVE_COMMIT_HOLDBACK);
+        let commit = uncommitted(&absolute, self.published_until)
+            .into_iter()
+            .filter(|s| flush || s.end <= horizon);
         for seg in commit {
             self.published_until = seg.end;
             self.store
                 .append_segment(self.id, seg)
                 .map_err(|e| DriverError::Store(e.to_string()))?;
         }
-        self.last_live_decode = absolute;
         Ok(())
     }
 }
 
-/// Segments whose midpoint lies past the committed horizon (midpoint, not
-/// start: window re-decodes jitter boundaries of the already-committed edge).
+/// A live segment is published once it is at least this much older than the
+/// newest captured audio; anything younger may still be re-segmented.
+const LIVE_COMMIT_HOLDBACK: Duration = Duration::from_secs(5);
+
+/// Boundary jitter tolerated at the committed edge — window re-decodes shift
+/// segment starts slightly between passes.
+const BOUNDARY_JITTER: Duration = Duration::from_secs(1);
+
+/// Segments not yet committed: those starting at/past the committed horizon
+/// (within [`BOUNDARY_JITTER`]); merged re-decodes of committed audio are out.
 fn uncommitted(segs: &[Segment], published_until: Duration) -> Vec<Segment> {
     segs.iter()
-        .filter(|s| s.start + (s.end.saturating_sub(s.start)) / 2 >= published_until)
+        .filter(|s| s.start + BOUNDARY_JITTER >= published_until)
         .cloned()
-        .collect()
-}
-
-/// Two decodes agree on a segment when the words match and the start drifted
-/// less than [`AGREEMENT_START_TOLERANCE`] between passes.
-const AGREEMENT_START_TOLERANCE: Duration = Duration::from_secs(1);
-
-/// Whisper's punctuation and casing wobble between passes over the same audio;
-/// agreement therefore compares only lowercased letters and digits.
-fn normalized_for_agreement(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-/// Longest prefix of `cur` that agrees, pairwise, with `prev` (LocalAgreement);
-/// the newer decode's rendering is what gets published.
-fn agreed_prefix(prev: &[Segment], cur: &[Segment]) -> Vec<Segment> {
-    cur.iter()
-        .zip(prev.iter())
-        .take_while(|(c, p)| {
-            normalized_for_agreement(&c.text) == normalized_for_agreement(&p.text)
-                && c.start.abs_diff(p.start) <= AGREEMENT_START_TOLERANCE
-        })
-        .map(|(c, _)| c.clone())
         .collect()
 }
 
@@ -698,8 +674,8 @@ mod tests {
     }
 
     #[test]
-    fn live_view_is_append_only_and_holds_back_disagreeing_tails() {
-        // 15 s fixture → decodes at 5 s (win 0-5), 10 s (win 0-10), 15 s
+    fn live_view_is_append_only_and_holds_back_the_unstable_tail() {
+        // 15 s fixture → decodes at ~5 s (win 0-5), ~10 s (win 0-10), ~15 s
         // (win 3-15), then the final flush (win 3-15 again).
         let (_fixture_guard, fixture) = make_fixture_wav(15.0);
         let store_dir = tempfile::tempdir().unwrap();
@@ -708,14 +684,17 @@ mod tests {
         let sub = store.subscribe(id).unwrap();
 
         let script = vec![
-            // Decode 1: "ala" plus a mid-utterance misread of the tail.
+            // Decode 1 (horizon ≈ 0): a mid-utterance misread sits in the
+            // held-back tail and must never be published.
             vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")],
-            // Decode 2 fixes the tail: "ala" agrees → committed; "ma kota" not yet.
+            // Decode 2 (horizon ≈ 5): both ripe segments commit, with the
+            // corrected tail text.
             vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")],
-            // Decode 3 (window starts at 3 s, window-relative times): "ma kota"
-            // now agrees at abs 3-5 (rel 0-2); "i psa" appears (rel 9-11).
+            // Decode 3 (window starts at 3 s, window-relative times): the
+            // committed audio re-decodes (filtered out); "i psa" (rel 9-11,
+            // abs 12-14) is younger than the holdback → held.
             vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
-            // Final flush: same decode — "i psa" is committed without agreement.
+            // Final flush publishes the held-back tail.
             vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
         ];
         let driver = TranscriptDriver::new(DriverConfig {
@@ -745,49 +724,24 @@ mod tests {
             if let crate::transcription::TranscriptEvent::SegmentAppended { segment, .. } = ev {
                 assert_ne!(
                     segment.text, "mo kata",
-                    "unconfirmed text must never be shown"
+                    "held-back text must never be shown"
                 );
             }
         }
     }
 
     #[test]
-    fn agreed_prefix_needs_matching_text_and_stable_starts() {
-        let prev = vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")];
-        let cur = vec![seg_at(0.2, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")];
-        let agreed = agreed_prefix(&prev, &cur);
-        assert_eq!(agreed.len(), 1, "tolerant start drift, strict words");
-        assert_eq!(agreed[0].text, "ala");
-        // A start that drifted more than the tolerance is not the same segment.
-        let drifted = vec![seg_at(4.0, 6.0, "ala")];
-        assert!(agreed_prefix(&prev, &drifted).is_empty());
-        // No previous decode → nothing agreed yet.
-        assert!(agreed_prefix(&[], &cur).is_empty());
-    }
-
-    #[test]
-    fn agreement_ignores_whisper_punctuation_and_casing_wobble() {
-        // Field failure: passes emit "Raz, dwa, trzy." then "Raz, dwa, trzy!"
-        // for the same audio — strict equality starved the live view empty.
-        let prev = vec![seg_at(0.0, 2.0, "Raz, dwa, trzy.")];
-        let cur = vec![seg_at(0.0, 2.0, "raz dwa trzy!")];
-        let agreed = agreed_prefix(&prev, &cur);
-        assert_eq!(agreed.len(), 1);
-        // The newer decode's rendering is what gets published.
-        assert_eq!(agreed[0].text, "raz dwa trzy!");
-        // Different words still disagree.
-        let other = vec![seg_at(0.0, 2.0, "raz dwa cztery")];
-        assert!(agreed_prefix(&prev, &other).is_empty());
-    }
-
-    #[test]
-    fn uncommitted_filters_by_midpoint_not_start() {
-        let segs = vec![seg_at(0.0, 2.0, "done"), seg_at(3.0, 7.0, "fresh")];
-        // Horizon at 4 s: "done" (mid 1 s) is out; "fresh" (mid 5 s) stays even
-        // though its start (3 s) sits before the horizon.
+    fn uncommitted_tolerates_boundary_jitter_but_drops_committed_redecodes() {
+        let segs = vec![
+            seg_at(0.0, 4.0, "merged redecode of committed audio"),
+            seg_at(3.5, 6.0, "jittered boundary"),
+            seg_at(6.0, 8.0, "fresh"),
+        ];
+        // Committed horizon at 4 s: a segment reaching back to 0 is a re-decode
+        // of committed audio; one starting within the jitter tolerance stays.
         let rest = uncommitted(&segs, Duration::from_secs(4));
-        assert_eq!(rest.len(), 1);
-        assert_eq!(rest[0].text, "fresh");
+        let texts: Vec<&str> = rest.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["jittered boundary", "fresh"]);
     }
 
     #[test]
