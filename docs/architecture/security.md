@@ -293,6 +293,16 @@ Because the full project directory is mounted as `/workspace:rw`, the `path-vali
 
 `SecurityExpectedPaths` is computed once and shared between `render_compose()` and `SecurityCheck::run()` to prevent path drift. On Windows, paths are translated from `C:\Users\...` to `/mnt/c/Users/...` for WSL2 compatibility.
 
+## Claude Code Hook Execution
+
+Since [ADR-078](../adr/ADR-078-claude-hook-registration.md), hooks shipped by the bundle, by enabled integrations, and by enabled plugins actually execute: the entrypoint merges each enabled source's `hooks/hooks.json` declaration into the `hooks` key of the container's `~/.claude/settings.json`. This is entrypoint behavior, not a compose `SecurityRule` — the rendered compose is unchanged by it. It is an execution surface — hooks are arbitrary commands run inside the claude container on Claude Code lifecycle events — with these properties:
+
+- **Trust anchor:** a plugin's `hooks.json` and hook scripts live in the Ed25519-signed tree; tampering fails `verify_plugin_signature_cached` before the tree is ever mounted. Bundle/integration declarations ship inside the Speedwave bundle. The signature covers the files, not runtime behavior — a signed command can still fetch remote content at event time, so enabling a plugin remains a trust decision about its author.
+- **Consent gate (honest sources):** a declaration is registered only while its plugin/integration is enabled for the project; disabling unregisters it on the next start (tracked in `~/.claude/.speedwave-managed-hooks`). This binds sources that stop being mounted; it is not a defense against code already running in the container — `settings.json` lives in the writable claude-home volume, so in-container code could add hook entries directly, at the same trust level it already executes with. Structural-identity dedupe keeps registration duplicate-free even if the tracking manifest is corrupted or deleted.
+- **Blast radius:** hooks run in the token-free, hardened claude container — no service credentials, no container socket. Like any in-container code (including Claude itself) a hook can read `/workspace` and use the container's network.
+- **Shape validation:** the entrypoint validates each declaration (object of event → matcher groups, `type: "command"` hooks with non-empty commands only) and rejects malformed files whole, with a warning; a rejected declaration never blocks container start.
+- User- and team-authored hook entries in any settings scope are never modified by the registration step.
+
 ## OS Prerequisite Checks
 
 `os_prereqs::check_os_prereqs()` validates host-level requirements before any container operations:

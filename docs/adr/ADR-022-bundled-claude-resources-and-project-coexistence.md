@@ -7,7 +7,7 @@
 
 ## Context
 
-Speedwave ships its own Claude Code resources — skills, a status line, an output style, a `CLAUDE.md`, and a `settings.json` — mounted read-only into the container at `/speedwave/resources/`. (`commands`, `agents`, and `hooks` are resource buckets the wiring supports but the bundle does not currently fill; they come from plugins or a team's own `.claude/`.)
+Speedwave ships its own Claude Code resources — skills, a status line, an output style, a `CLAUDE.md`, and a `settings.json` — mounted read-only into the container at `/speedwave/resources/`. (`commands`, `agents`, and `hooks` are resource buckets the wiring supports but the bundle does not currently fill; they come from plugins or a team's own `.claude/`. Note that for `hooks`, symlinking files is not enough — Claude Code executes only hooks registered under a settings `hooks` key, which the entrypoint generates from `hooks/hooks.json` declarations; see [ADR-078](ADR-078-claude-hook-registration.md).)
 
 Teams independently commit their own `.claude/` directory to their repo (project-specific agents, commands, instructions). It arrives in the container as `/workspace/.claude/`.
 
@@ -36,7 +36,7 @@ Claude Code has five settings scopes, highest precedence first:[^2]
 4. **Project** — `.claude/settings.json` (team, via git)
 5. **User** — `~/.claude/settings.json` (Speedwave bundle)
 
-Speedwave uses only **User** (its defaults) and leaves **Project** to teams. Because User is the lowest scope, a team's project-level value overrides Speedwave's for scalar/object keys. Array-valued keys (`permissions.allow`, `hooks`) are the exception — they merge across scopes rather than override, so both Speedwave's and the team's entries apply.
+Speedwave uses only **User** (its defaults) and leaves **Project** to teams. Because User is the lowest scope, a team's project-level value overrides Speedwave's for scalar/object keys. Array-valued keys (`permissions.allow`, `hooks`) are the exception — they merge across scopes rather than override, so both Speedwave's and the team's entries apply. That merge concerns the `hooks` **settings key**, not hook files: content symlinked into `~/.claude/hooks/` never runs by itself. Speedwave-managed hook entries are written into the user-scope `settings.json` by the entrypoint per [ADR-078](ADR-078-claude-hook-registration.md).
 
 ## Rationale
 

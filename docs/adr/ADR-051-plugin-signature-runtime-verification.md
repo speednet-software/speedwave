@@ -16,7 +16,7 @@ The defect was structural — `verify_plugin_signature` was called from exactly 
 
 `~/.speedwave/plugins/<slug>/` is writable by the user. A local attacker (npm postinstall, browser RCE, malware running as the user) could either:
 
-1. **Drop a fresh directory** with a forged `plugin.json` (and no `SIGNATURE`), and Speedwave would build its `Containerfile` (`RUN <arbitrary>` runs at build time) and bind-mount its `claude-resources/hooks/` into the claude container (executed on every Claude tool call), or
+1. **Drop a fresh directory** with a forged `plugin.json` (and no `SIGNATURE`), and Speedwave would build its `Containerfile` (`RUN <arbitrary>` runs at build time) and bind-mount its `claude-resources/hooks/` into the claude container (executed on every Claude tool call — at the time of writing this was believed-current behavior; hooks in fact only started executing with [ADR-078](ADR-078-claude-hook-registration.md), which makes this verification invariant load-bearing for the hook surface), or
 2. **Modify a legitimately-signed plugin** post-install. The signature was never reread, so any later change to the tree was invisible — including swapping the `Containerfile` or replacing a skill with attacker-supplied content.
 
 The signing system was therefore an install-time gate, not a runtime integrity invariant. The fix is to treat the signature as the latter: every read of the tree must observe a state that matches the signature, and any mutation must invalidate the verdict.

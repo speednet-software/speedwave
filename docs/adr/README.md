@@ -84,6 +84,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-075](ADR-075-remove-speaker-diarization.md)                       | Remove speaker diarization — clean timestamped transcript, full sherpa-onnx removal                                    | Accepted                      |
 | [ADR-076](ADR-076-mdm-enforceable-otlp-telemetry.md)                   | MDM-enforceable OTLP telemetry — user self-service + org policy via a system managed-config file                       | Accepted                      |
 | [ADR-077](ADR-077-bundled-official-anthropic-plugins.md)               | Bundle official Anthropic Claude Code plugins (runtime install at start + pre-baked TS server)                         | Accepted                      |
+| [ADR-078](ADR-078-claude-hook-registration.md)                         | Claude Code hook registration — hooks.json declarations merged into settings.json at container start                   | Accepted                      |
 
 ## Creating a New ADR
 
