@@ -1970,6 +1970,9 @@ pub struct PluginListEntry {
     pub dir: PathBuf,
     /// Parsed manifest, present iff verification succeeded.
     pub manifest: Option<PluginManifest>,
+    /// `CHANGELOG.md` contents, present only for verified entries with a
+    /// readable, within-cap changelog (read alongside the verify verdict).
+    pub changelog: Option<String>,
     /// Signature verification status.
     pub verification_status: VerificationStatus,
     /// Verification error message for non-verified entries.
@@ -1980,11 +1983,17 @@ impl PluginListEntry {
     /// Constructs a `Verified` entry. The manifest is required (a
     /// verified plugin always parsed its manifest) and the error is
     /// always `None`.
-    pub(crate) fn verified(slug: String, dir: PathBuf, manifest: PluginManifest) -> Self {
+    pub(crate) fn verified(
+        slug: String,
+        dir: PathBuf,
+        manifest: PluginManifest,
+        changelog: Option<String>,
+    ) -> Self {
         Self {
             slug,
             dir,
             manifest: Some(manifest),
+            changelog,
             verification_status: VerificationStatus::Verified,
             verification_error: None,
         }
@@ -2011,6 +2020,7 @@ impl PluginListEntry {
             slug,
             dir,
             manifest,
+            changelog: None,
             verification_status: status,
             verification_error: Some(error),
         }
@@ -2273,7 +2283,51 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
     if let Err(e) = validate_manifest(&m, plugin_dir) {
         return failed(VerificationStatus::ManifestInvalid, e.to_string(), Some(m));
     }
-    PluginListEntry::verified(slug, dir, m)
+    // Read the changelog here — inside the same verify-then-read pass as the
+    // manifest — so the surfaced bytes are the verified tree's bytes.
+    let changelog = read_changelog_for_ui(plugin_dir);
+    PluginListEntry::verified(slug, dir, m, changelog)
+}
+
+/// Reads the plugin's `CHANGELOG.md` for the UI listing. `None` when absent,
+/// non-UTF-8, unreadable, or over `PLUGIN_CHANGELOG_MAX_BYTES` (withheld with
+/// a warn — the Changelog tab simply stays hidden; never an install error).
+fn read_changelog_for_ui(plugin_dir: &Path) -> Option<String> {
+    use std::io::Read;
+    let path = plugin_dir.join(consts::PLUGIN_CHANGELOG_FILE);
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log::warn!("cannot open plugin changelog {}: {e}", path.display());
+            return None;
+        }
+    };
+    // Bounded read: at most cap+1 bytes ever enter memory, and the cap check
+    // sees the bytes actually read — no stat-then-read window.
+    let mut buf = Vec::new();
+    let cap = consts::PLUGIN_CHANGELOG_MAX_BYTES;
+    if let Err(e) = file.take(cap as u64 + 1).read_to_end(&mut buf) {
+        log::warn!("cannot read plugin changelog {}: {e}", path.display());
+        return None;
+    }
+    if buf.len() > cap {
+        log::warn!(
+            "plugin changelog {} exceeds {cap} bytes — withholding from UI",
+            path.display()
+        );
+        return None;
+    }
+    match String::from_utf8(buf) {
+        Ok(body) => Some(body),
+        Err(_) => {
+            log::warn!(
+                "plugin changelog {} is not valid UTF-8 — withholding from UI",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 /// Audits every installed plugin and returns a list of `(slug, reason)`
@@ -4493,6 +4547,97 @@ mod tests {
             slugs,
             vec!["okplugin"],
             "transient .installing.* / .removing.* dirs must not appear in UI listing"
+        );
+    }
+
+    #[test]
+    fn read_changelog_for_ui_reads_within_cap_and_withholds_over_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file → None (a plugin without a changelog is normal).
+        assert_eq!(read_changelog_for_ui(dir.path()), None);
+
+        let body = "# Changelog\n\n## 1.0.0 (2026-07-06)\n- initial release\n";
+        std::fs::write(dir.path().join(consts::PLUGIN_CHANGELOG_FILE), body).unwrap();
+        assert_eq!(read_changelog_for_ui(dir.path()).as_deref(), Some(body));
+
+        // Exactly at cap → passes (cap is inclusive); one over → withheld.
+        let at_cap = "a".repeat(consts::PLUGIN_CHANGELOG_MAX_BYTES);
+        std::fs::write(dir.path().join(consts::PLUGIN_CHANGELOG_FILE), &at_cap).unwrap();
+        assert!(read_changelog_for_ui(dir.path()).is_some());
+        let over_cap = "a".repeat(consts::PLUGIN_CHANGELOG_MAX_BYTES + 1);
+        std::fs::write(dir.path().join(consts::PLUGIN_CHANGELOG_FILE), &over_cap).unwrap();
+        assert_eq!(read_changelog_for_ui(dir.path()), None);
+    }
+
+    #[test]
+    fn read_changelog_for_ui_rejects_non_utf8_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(consts::PLUGIN_CHANGELOG_FILE),
+            [0xff, 0xfe, 0x00, 0x9f],
+        )
+        .unwrap();
+        assert_eq!(read_changelog_for_ui(dir.path()), None);
+    }
+
+    #[test]
+    fn test_list_for_ui_verified_plugin_carries_changelog() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        make_resource_only_plugin_dir(&plugins, "withlog", "1.0.0");
+        std::fs::write(
+            plugins.join("withlog").join(consts::PLUGIN_CHANGELOG_FILE),
+            "## 1.0.0\n- shipped\n",
+        )
+        .unwrap();
+        make_resource_only_plugin_dir(&plugins, "nolog", "1.0.0");
+
+        let entries = list_for_ui_from_dir(&plugins);
+        let by_slug = |s: &str| entries.iter().find(|e| e.slug == s).unwrap();
+        assert_eq!(
+            by_slug("withlog").changelog.as_deref(),
+            Some("## 1.0.0\n- shipped\n")
+        );
+        assert_eq!(
+            by_slug("nolog").changelog,
+            None,
+            "a package without CHANGELOG.md lists with changelog: None"
+        );
+    }
+
+    /// An unverified plugin's changelog must be withheld at the source —
+    /// the listing itself — not just by a downstream UI guard.
+    #[test]
+    fn test_list_for_ui_withholds_changelog_for_unverified() {
+        let _g = unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("pasted");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"pasted","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join(consts::PLUGIN_CHANGELOG_FILE),
+            "## 1.0.0\n- attacker-authored markdown\n",
+        )
+        .unwrap();
+        // No SIGNATURE → MissingSignature.
+
+        let entries = list_for_ui_from_dir(&plugins);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::MissingSignature
+        );
+        assert_eq!(
+            entries[0].changelog, None,
+            "unverified plugin must not surface changelog content"
         );
     }
 

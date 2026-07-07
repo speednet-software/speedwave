@@ -421,7 +421,7 @@ The list lives in `defaults::BUNDLED_PLUGINS`; `containers/entrypoint.sh` instal
 Speedwave supports extending integrations via the plugin system:
 
 - `speedwave plugin install <path.zip>` verifies the Ed25519 signature and extracts the plugin to `~/.speedwave/plugins/<slug>/`
-- Each plugin contains a `plugin.json` manifest, an optional MCP service (`src/`, `Containerfile`), and optional claude-resources (`skills/`, `commands/`)
+- Each plugin contains a `plugin.json` manifest, an optional MCP service (`src/`, `Containerfile`), optional claude-resources (`skills/`, `commands/`), and an optional `CHANGELOG.md` — release notes rendered on the plugin's Changelog tab in the Desktop app. The tab appears only for verified plugins whose changelog is present, UTF-8, and at most 64 KiB; otherwise it is hidden (installs never fail because of the changelog)
 - `compose.rs` generates plugin service containers via `apply_plugins()`
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 - Plugin images are automatically rebuilt if missing (e.g. after a VM reset or `nerdctl system prune`) — you do not need to reinstall the plugin

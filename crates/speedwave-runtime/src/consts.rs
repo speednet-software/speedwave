@@ -1072,6 +1072,14 @@ pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 /// the plugin Dashboard). 16 KiB bounds UI/`PluginStatusEntry` size, not safety.
 pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
 
+/// Filename of the optional release-notes file shipped inside a plugin ZIP,
+/// rendered on the plugin Changelog tab. Part of the signed tree.
+pub const PLUGIN_CHANGELOG_FILE: &str = "CHANGELOG.md";
+
+/// Byte cap for a plugin's `CHANGELOG.md` (grows with every release, so it
+/// gets more headroom than `instructions`). Bounds `PluginStatusEntry` size.
+pub const PLUGIN_CHANGELOG_MAX_BYTES: usize = 64 * 1024;
+
 /// Max length of an `auth_fields[].validation.pattern` regex. 512 chars is an
 /// engine-agnostic guard (the JS `<input pattern>` engine can backtrack).
 pub const PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN: usize = 512;
