@@ -36,6 +36,28 @@ fn classify_authorization_status(raw: isize) -> StatusDecision {
     }
 }
 
+/// Non-prompting mic-consent state; mirrored by `models/transcript.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicPermissionStatus {
+    /// Mic access is granted.
+    Granted,
+    /// Consent was refused (or restricted by policy).
+    Denied,
+    /// Never asked — the prompt will appear on the first request.
+    Undetermined,
+}
+
+/// Status shown in Settings for a pre-prompt decision.
+#[cfg(any(target_os = "macos", test))]
+fn status_from_decision(d: StatusDecision) -> MicPermissionStatus {
+    match d {
+        StatusDecision::Granted => MicPermissionStatus::Granted,
+        StatusDecision::NeedsPrompt => MicPermissionStatus::Undetermined,
+        StatusDecision::PreviouslyDenied | StatusDecision::Denied => MicPermissionStatus::Denied,
+    }
+}
+
 #[cfg(target_os = "macos")]
 // FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.
 #[allow(unsafe_code)]
@@ -46,8 +68,8 @@ mod imp {
 
     use super::{classify_authorization_status, MicPermission, StatusDecision};
 
-    /// Resolves consent: prompts when undetermined, never re-prompts otherwise.
-    pub async fn resolve() -> Result<MicPermission, String> {
+    /// Current `AVAuthorizationStatus` for audio, classified — never prompts.
+    pub fn status_decision() -> Result<StatusDecision, String> {
         // SAFETY: pure status query; AVMediaTypeAudio is a linked constant.
         let raw = unsafe {
             let Some(media) = AVMediaTypeAudio else {
@@ -55,7 +77,12 @@ mod imp {
             };
             AVCaptureDevice::authorizationStatusForMediaType(media).0
         };
-        match classify_authorization_status(raw) {
+        Ok(classify_authorization_status(raw))
+    }
+
+    /// Resolves consent: prompts when undetermined, never re-prompts otherwise.
+    pub async fn resolve() -> Result<MicPermission, String> {
+        match status_decision()? {
             StatusDecision::Granted => Ok(MicPermission::Granted),
             StatusDecision::PreviouslyDenied => Ok(MicPermission::PreviouslyDenied),
             StatusDecision::Denied => Ok(MicPermission::Denied),
@@ -107,6 +134,20 @@ pub async fn request_microphone_permission() -> Result<MicPermission, String> {
     #[cfg(not(target_os = "macos"))]
     {
         Ok(MicPermission::Granted)
+    }
+}
+
+/// Reports the mic-consent state without ever showing a prompt (Settings UI);
+/// platforms without a per-app mic prompt always report granted.
+#[tauri::command]
+pub fn microphone_permission_status() -> Result<MicPermissionStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(status_from_decision(imp::status_decision()?))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(MicPermissionStatus::Granted)
     }
 }
 
@@ -197,6 +238,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mic_permission_status_serializes_snake_case_and_matches_ts_union() {
+        let all = [
+            MicPermissionStatus::Granted,
+            MicPermissionStatus::Denied,
+            MicPermissionStatus::Undetermined,
+        ];
+        // Exhaustiveness gate: a new variant fails to compile until added above.
+        for s in all {
+            match s {
+                MicPermissionStatus::Granted
+                | MicPermissionStatus::Denied
+                | MicPermissionStatus::Undetermined => {}
+            }
+        }
+        let mut rust: Vec<String> = all
+            .iter()
+            .map(|s| {
+                serde_json::to_value(s)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust.sort();
+
+        let src = include_str!("../../src/src/app/models/transcript.ts");
+        let marker = "export type MicPermissionStatus =";
+        let idx = src
+            .find(marker)
+            .expect("transcript.ts must declare `export type MicPermissionStatus`");
+        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
+        let mut ts: Vec<String> = union
+            .split('|')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS MicPermissionStatus union must match Rust serde strings"
+        );
+    }
+
+    #[test]
+    fn status_from_decision_never_prompts_and_fails_closed() {
+        assert_eq!(
+            status_from_decision(StatusDecision::Granted),
+            MicPermissionStatus::Granted
+        );
+        assert_eq!(
+            status_from_decision(StatusDecision::NeedsPrompt),
+            MicPermissionStatus::Undetermined
+        );
+        assert_eq!(
+            status_from_decision(StatusDecision::PreviouslyDenied),
+            MicPermissionStatus::Denied
+        );
+        assert_eq!(
+            status_from_decision(StatusDecision::Denied),
+            MicPermissionStatus::Denied
+        );
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn request_microphone_permission_reports_granted_off_macos() {
@@ -204,6 +311,15 @@ mod tests {
         assert_eq!(
             request_microphone_permission().await,
             Ok(MicPermission::Granted)
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn microphone_permission_status_reports_granted_off_macos() {
+        assert_eq!(
+            microphone_permission_status(),
+            Ok(MicPermissionStatus::Granted)
         );
     }
 }

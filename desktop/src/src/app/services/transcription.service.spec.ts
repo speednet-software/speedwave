@@ -289,6 +289,16 @@ describe('TranscriptionService', () => {
       expect(await svc.requestMicrophonePermission()).toBe('previously_denied');
       expect(invoked).toBe('request_microphone_permission');
     });
+
+    it('microphonePermissionStatus queries without prompting', async () => {
+      let invoked = '';
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked = cmd;
+        return 'undetermined';
+      };
+      expect(await svc.microphonePermissionStatus()).toBe('undetermined');
+      expect(invoked).toBe('microphone_permission_status');
+    });
   });
 
   describe('detach', () => {

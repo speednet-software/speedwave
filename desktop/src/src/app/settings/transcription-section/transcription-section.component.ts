@@ -9,8 +9,9 @@ import {
   signal,
 } from '@angular/core';
 
+import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { RecommendedModelAck } from '../../models/transcript';
+import type { MicPermissionStatus, RecommendedModelAck } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 
 /**
@@ -83,6 +84,60 @@ import { formatBytes } from '../../shared/format-bytes';
           </div>
         </div>
       }
+
+      @if (isMacos()) {
+        <div
+          class="mt-4 space-y-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+          data-testid="transcription-permissions"
+        >
+          <div class="mono text-[11px] text-[var(--ink-mute)]">Permissions</div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-[12px] text-[var(--ink)]">Microphone</div>
+              <div class="text-[11px] text-[var(--ink-mute)]" data-testid="mic-permission-state">
+                {{ micStatusLabel() }}
+              </div>
+            </div>
+            @if (micStatus() === 'undetermined') {
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                data-testid="request-mic-permission"
+                (click)="requestMic()"
+              >
+                request access
+              </button>
+            } @else if (micStatus() === 'denied') {
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                data-testid="open-mic-privacy"
+                (click)="openMicPane()"
+              >
+                open System Settings
+              </button>
+            }
+          </div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-[12px] text-[var(--ink)]">System Audio Recording</div>
+              <div class="text-[11px] text-[var(--ink-mute)]">
+                Asked on the first recording; if recordings stay silent, re-enable Speedwave here.
+              </div>
+            </div>
+            <button
+              type="button"
+              class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+              data-testid="open-audio-privacy"
+              (click)="openAudioPane()"
+            >
+              open System Settings
+            </button>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -96,7 +151,27 @@ export class TranscriptionSectionComponent implements OnInit {
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
+
+  /** Permissions rows are macOS-only (TCC); Windows has no per-app prompt. */
+  readonly isMacos = signal(false);
+  /** Mic-consent state (null while loading). */
+  readonly micStatus = signal<MicPermissionStatus | null>(null);
+
+  /** Human label for the mic-consent state. */
+  readonly micStatusLabel = computed(() => {
+    switch (this.micStatus()) {
+      case 'granted':
+        return 'Granted';
+      case 'denied':
+        return 'Denied — recordings fall back to system audio only';
+      case 'undetermined':
+        return 'Not asked yet — macOS will show a prompt';
+      default:
+        return 'Checking…';
+    }
+  });
 
   /** `true` while a remove is in flight (download state lives in the service). */
   private readonly removeBusy = signal(false);
@@ -119,6 +194,44 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Reads the recommended model + its download state on first paint. */
   async ngOnInit(): Promise<void> {
     await this.refresh();
+    await this.refreshPermissions();
+  }
+
+  /** Reads the platform + mic-consent state; non-fatal on failure. */
+  private async refreshPermissions(): Promise<void> {
+    try {
+      const platform = await this.tauri.invoke<string>('get_platform');
+      this.isMacos.set(platform === 'macos');
+      if (platform === 'macos') {
+        this.micStatus.set(await this.transcription.microphonePermissionStatus());
+      }
+    } catch {
+      // Permissions rows are informational — the section still works without them.
+      this.isMacos.set(false);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Shows the mic-consent prompt, then re-reads the state. */
+  async requestMic(): Promise<void> {
+    try {
+      await this.transcription.requestMicrophonePermission();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+    }
+    await this.refreshPermissions();
+  }
+
+  /** Opens System Settings → Privacy → Microphone. */
+  async openMicPane(): Promise<void> {
+    await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
+  }
+
+  /** Opens System Settings → Privacy → Audio Recording. */
+  async openAudioPane(): Promise<void> {
+    await this.transcription.openAudioCapturePrivacyPane().catch(() => undefined);
   }
 
   /** Re-reads the recommended-model state and re-syncs download tracking. */

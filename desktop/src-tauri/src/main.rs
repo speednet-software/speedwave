@@ -1275,6 +1275,7 @@ fn main() {
             // Meeting-transcription TCC (ADR-056) — in-process mic consent plus
             // deep-links to the macOS Microphone / Audio panes.
             mic_permission_cmd::request_microphone_permission,
+            mic_permission_cmd::microphone_permission_status,
             system_settings_cmd::open_microphone_pane,
             system_settings_cmd::open_audio_capture_pane,
         ])

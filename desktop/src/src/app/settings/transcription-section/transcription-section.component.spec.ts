@@ -3,8 +3,13 @@ import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { TranscriptionSectionComponent } from './transcription-section.component';
+import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { DownloadProgress, RecommendedModelAck } from '../../models/transcript';
+import type {
+  DownloadProgress,
+  MicPermissionStatus,
+  RecommendedModelAck,
+} from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
   let component: TranscriptionSectionComponent;
@@ -17,9 +22,14 @@ describe('TranscriptionSectionComponent', () => {
     deleteModel: ReturnType<typeof vi.fn>;
     resumeDownloadTracking: ReturnType<typeof vi.fn>;
     clearDownloadTracking: ReturnType<typeof vi.fn>;
+    microphonePermissionStatus: ReturnType<typeof vi.fn>;
+    requestMicrophonePermission: ReturnType<typeof vi.fn>;
+    openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
+    openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     downloadingModelKey: typeof downloadingModelKey;
     downloadProgress: typeof downloadProgress;
   };
+  let platform: string;
 
   const notDownloaded: RecommendedModelAck = {
     key: 'large-v3',
@@ -34,12 +44,17 @@ describe('TranscriptionSectionComponent', () => {
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
     downloadProgress = signal<DownloadProgress | null>(null);
+    platform = 'macos';
     svc = {
       recommendedModel: vi.fn(async () => notDownloaded),
       downloadModel: vi.fn(async () => undefined),
       deleteModel: vi.fn(async () => undefined),
       resumeDownloadTracking: vi.fn(async () => undefined),
       clearDownloadTracking: vi.fn(() => undefined),
+      microphonePermissionStatus: vi.fn(async (): Promise<MicPermissionStatus> => 'granted'),
+      requestMicrophonePermission: vi.fn(async () => 'granted'),
+      openMicrophonePrivacyPane: vi.fn(async () => undefined),
+      openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       downloadingModelKey,
       downloadProgress,
     };
@@ -47,11 +62,79 @@ describe('TranscriptionSectionComponent', () => {
       imports: [TranscriptionSectionComponent],
       providers: [
         { provide: TranscriptionService, useValue: svc },
+        {
+          provide: TauriService,
+          useValue: {
+            invoke: vi.fn(async (cmd: string) => (cmd === 'get_platform' ? platform : undefined)),
+          },
+        },
         provideRouter([{ path: '**', children: [] }]),
       ],
     }).compileComponents();
     fixture = TestBed.createComponent(TranscriptionSectionComponent);
     component = fixture.componentInstance;
+  });
+
+  describe('permissions block', () => {
+    it('shows a granted mic state on macOS', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const block = fixture.nativeElement.querySelector(
+        '[data-testid="transcription-permissions"]'
+      );
+      expect(block).not.toBeNull();
+      const state = fixture.nativeElement.querySelector('[data-testid="mic-permission-state"]');
+      expect(state.textContent).toContain('Granted');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="request-mic-permission"]')
+      ).toBeNull();
+    });
+
+    it('is absent on Windows', async () => {
+      platform = 'windows';
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="transcription-permissions"]')
+      ).toBeNull();
+      expect(svc.microphonePermissionStatus).not.toHaveBeenCalled();
+    });
+
+    it('undetermined → request access shows the prompt and re-reads the state', async () => {
+      svc.microphonePermissionStatus
+        .mockResolvedValueOnce('undetermined')
+        .mockResolvedValueOnce('granted');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="request-mic-permission"]');
+      expect(btn).not.toBeNull();
+      await component.requestMic();
+      fixture.detectChanges();
+      expect(svc.requestMicrophonePermission).toHaveBeenCalledTimes(1);
+      expect(component.micStatus()).toBe('granted');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="request-mic-permission"]')
+      ).toBeNull();
+    });
+
+    it('denied → offers the Microphone privacy pane deep-link', async () => {
+      svc.microphonePermissionStatus.mockResolvedValue('denied');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="open-mic-privacy"]');
+      expect(btn).not.toBeNull();
+      await component.openMicPane();
+      expect(svc.openMicrophonePrivacyPane).toHaveBeenCalledTimes(1);
+    });
+
+    it('always offers the System Audio Recording pane deep-link on macOS', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="open-audio-privacy"]');
+      expect(btn).not.toBeNull();
+      await component.openAudioPane();
+      expect(svc.openAudioCapturePrivacyPane).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('shows the privacy/disclaimer text', async () => {

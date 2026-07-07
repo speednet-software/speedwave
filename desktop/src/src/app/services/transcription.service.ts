@@ -9,6 +9,7 @@ import type {
   DownloadProgress,
   Language,
   MicPermission,
+  MicPermissionStatus,
   ModelsAck,
   RecommendedModelAck,
   StartAck,
@@ -262,6 +263,11 @@ export class TranscriptionService {
    */
   requestMicrophonePermission(): Promise<MicPermission> {
     return this.tauri.invoke<MicPermission>('request_microphone_permission');
+  }
+
+  /** Mic-consent state for the Settings panel — never shows a prompt. */
+  microphonePermissionStatus(): Promise<MicPermissionStatus> {
+    return this.tauri.invoke<MicPermissionStatus>('microphone_permission_status');
   }
 
   /** Opens the macOS System Settings → Privacy → Microphone pane (no-op elsewhere). */

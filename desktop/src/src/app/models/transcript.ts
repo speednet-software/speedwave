@@ -76,6 +76,9 @@ export type CaptureWarning = 'system_audio_silent' | 'microphone_stalled' | 'sys
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
 export type MicPermission = 'granted' | 'denied' | 'previously_denied';
 
+/** `microphone_permission_status` state — mirrors Rust `MicPermissionStatus`. */
+export type MicPermissionStatus = 'granted' | 'denied' | 'undetermined';
+
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
 export type TranscriptEvent =
   | { kind: 'segment_appended'; seq: number; segment: Segment }
