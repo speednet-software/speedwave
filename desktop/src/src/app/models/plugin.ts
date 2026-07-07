@@ -71,6 +71,8 @@ export interface PluginStatusEntry {
   description: string;
   /** Optional long-form Markdown setup/usage guide from the manifest. */
   instructions?: string;
+  /** Markdown release notes from the plugin's `CHANGELOG.md`; absent when the package ships none. */
+  changelog?: string;
   enabled: boolean;
   configured: boolean;
   auth_fields: PluginAuthField[];

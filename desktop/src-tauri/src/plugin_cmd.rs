@@ -25,6 +25,10 @@ pub(crate) struct PluginStatusEntry {
     /// rendered on the Dashboard tab. `None` when the manifest omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) instructions: Option<String>,
+    /// Markdown release notes from the plugin's `CHANGELOG.md`, rendered on
+    /// the Changelog tab. `None` when the package ships no changelog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) changelog: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) configured: bool,
     pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
@@ -144,6 +148,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 version: String::new(),
                 description: String::new(),
                 instructions: None,
+                changelog: None,
                 enabled: false,
                 configured: false,
                 auth_fields: Vec::new(),
@@ -231,6 +236,8 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             description: manifest.description.clone(),
             // Free-form Markdown gated to verified plugins, with the install-time cap re-checked.
             instructions: instructions_for_ui(verified, manifest.instructions.as_deref()),
+            // Read by the runtime lister inside its verify-then-read pass; None when unverified.
+            changelog: ui.changelog.clone(),
             enabled,
             configured,
             auth_fields,
@@ -910,6 +917,7 @@ mod tests {
             version: "1.0.0".into(),
             description: "A test plugin".into(),
             instructions: None,
+            changelog: None,
             enabled: true,
             configured: false,
             auth_fields: vec![plugin::AuthFieldDef {
@@ -943,6 +951,10 @@ mod tests {
             !json.contains("instructions"),
             "None instructions must not serialize a key"
         );
+        assert!(
+            !json.contains("changelog"),
+            "None changelog must not serialize a key"
+        );
     }
 
     #[test]
@@ -954,6 +966,7 @@ mod tests {
             version: "0.1.4".into(),
             description: "short".into(),
             instructions: Some("# Setup\n1. Import the bridge plugin".into()),
+            changelog: Some("# Changelog\n\n## 0.1.4 (2026-07-01)\n- fix".into()),
             enabled: false,
             configured: false,
             auth_fields: vec![],
@@ -969,6 +982,7 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r##""instructions":"# Setup"##));
+        assert!(json.contains(r##""changelog":"# Changelog"##));
     }
 
     #[test]
@@ -1008,6 +1022,7 @@ mod tests {
             version: "1.2.0".into(),
             description: "CRM integration".into(),
             instructions: None,
+            changelog: None,
             enabled: true,
             configured: true,
             auth_fields: vec![],
