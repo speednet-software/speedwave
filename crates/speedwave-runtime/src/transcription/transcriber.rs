@@ -265,9 +265,9 @@ fn cs_to_duration(centiseconds: i64) -> Duration {
     Duration::from_millis(centiseconds.max(0) as u64 * 10)
 }
 
-/// RMS below this (16-bit-ish −45 dBFS) is treated as silence — Whisper on
-/// near-silence emits trained filler, so we skip the decode entirely.
-const SILENCE_RMS: f32 = 0.0055;
+/// RMS below this (−60 dBFS) is treated as silence and skips the decode. Only a
+/// true noise floor gates; quiet speech goes to Whisper's no-speech filter.
+const SILENCE_RMS: f32 = 0.001;
 
 /// Drop a segment whose no-speech probability exceeds this — whisper.cpp's own
 /// estimate that the span is not speech (the filler-on-silence signature).
@@ -370,8 +370,11 @@ mod tests {
     fn is_silent_flags_quiet_and_empty_but_not_speech() {
         assert!(is_silent(&[]));
         assert!(is_silent(&vec![0.0f32; 16_000]));
-        // Dither well under the threshold is still silence.
-        assert!(is_silent(&vec![0.002f32; 16_000]));
+        // A near-noise-floor level (−66 dBFS) is still silence.
+        assert!(is_silent(&vec![0.0005f32; 16_000]));
+        // Quiet real speech (−54 dBFS: low OS input volume + 0.5 mix gain) must
+        // reach the decoder — Whisper's no-speech filter owns that judgement.
+        assert!(!is_silent(&vec![0.002f32; 16_000]));
         // A half-scale tone is clearly not silence.
         let tone: Vec<f32> = (0..16_000)
             .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
