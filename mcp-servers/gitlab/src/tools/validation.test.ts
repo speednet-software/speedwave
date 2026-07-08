@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { withValidation } from './validation.js';
+import { withValidation, normalizeIid } from './validation.js';
 import { GitLabClient } from '../client.js';
 import { notConfiguredMessage, jsonResult } from '@speedwave/mcp-shared';
 
@@ -79,5 +79,35 @@ describe('withValidation', () => {
 
     expect(result.isError).toBe(true);
     expect(errSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('normalizeIid', () => {
+  it('accepts a plain number', () => {
+    expect(normalizeIid(42, 'mr_iid')).toEqual({ ok: true, value: 42 });
+  });
+
+  it('accepts a numeric string', () => {
+    expect(normalizeIid('42', 'mr_iid')).toEqual({ ok: true, value: 42 });
+  });
+
+  it('accepts a "#"-prefixed numeric string', () => {
+    expect(normalizeIid('#42', 'mr_iid')).toEqual({ ok: true, value: 42 });
+  });
+
+  it.each(['', '   ', '#'])('returns a teaching error for %j instead of coercing to 0', (value) => {
+    const result = normalizeIid(value, 'mr_iid');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.isError).toBe(true);
+      expect(result.error.content[0].text).toContain('mr_iid');
+    }
+  });
+
+  it('returns a teaching error for a non-numeric string', () => {
+    const result = normalizeIid('not-a-number', 'mr_iid');
+
+    expect(result.ok).toBe(false);
   });
 });

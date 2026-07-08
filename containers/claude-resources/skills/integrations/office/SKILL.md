@@ -1,29 +1,29 @@
 ---
 name: office
-description: Use Office integration to read, create, edit, and convert Word/Excel/PowerPoint/PDF documents, and to render charts. Use whenever the user asks about working with .docx, .xlsx, .pptx, or .pdf files, for example "turn this into a report", "make me an invoice", "convert this to PDF", or "merge these PDFs", reading content, creating reports or invoices, editing existing documents, converting between formats, merging or splitting PDFs, or rendering charts. Use even when you think you know the answer, document libraries change between framework versions, only the live tool reflects current Office/PDF format support and chart rendering capabilities. Do not use for plain text files (read them directly), generic Markdown conversion that does not need PDF output (use built-in tools), or installing document-processing libraries, they are already behind office__* tools.
+description: Use Office integration to read, create, edit, and convert Word/Excel/PowerPoint/PDF documents, and to render charts. Use whenever the user asks about working with .docx, .xlsx, .pptx, or .pdf files, for example "turn this into a report", "make me an invoice", "convert this to PDF", or "merge these PDFs", reading content, creating reports or invoices, editing existing documents, converting between formats, merging or splitting PDFs, or rendering charts. Use even when you think you know the answer, document libraries change between framework versions, only the live tool reflects current Office/PDF format support and chart rendering capabilities. Do not use for plain text files (read them directly), generic Markdown conversion that does not need PDF output (use built-in tools), or installing document-processing libraries, they are already behind office.* tools.
 user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
 
 # Office Documents
 
-Access office capabilities via `search_tools` + `execute_code`. The `office` global is injected automatically, no imports. All `office__*` tools are invoked as `await office.<toolName>({ … })` inside `execute_code`. The worker is egress-less and credential-free; it processes files from `/workspace` only.
+Access office capabilities via `search_tools` + `execute_code`. The `office` global is injected automatically, no imports. All `office.*` tools are invoked as `await office.<toolName>({ … })` inside `execute_code`. The worker is egress-less and credential-free; it processes files from `/workspace` only.
 
-**NEVER** run `pip install python-docx`, `pip install openpyxl`, `pip install python-pptx`, `pip install pypdf`, `pip install weasyprint`, `pip install matplotlib`, `npm install xlsx`, `apt install libreoffice`, or any equivalent. Those libraries are already wired behind the `office__*` tools, and the Claude container cannot install packages at runtime anyway.
+**NEVER** run `pip install python-docx`, `pip install openpyxl`, `pip install python-pptx`, `pip install pypdf`, `pip install weasyprint`, `pip install matplotlib`, `npm install xlsx`, `apt install libreoffice`, or any equivalent. Those libraries are already wired behind the `office.*` tools, and the Claude container cannot install packages at runtime anyway.
 
 ## Workflow
 
 1. `search_tools({ query: "office <keyword>", detail_level: "names_only" })`: discover available tools
-2. `search_tools({ query: "office__<toolName>", detail_level: "full_schema" })`: get exact parameter schema
+2. `search_tools({ query: "<toolName>", detail_level: "full_schema" })`: get exact parameter schema
 3. `execute_code`: call with dot notation (`await office.toolName(…)`)
 
 ## Three roads to PDF
 
-| Source                       | Tool                    |
-| ---------------------------- | ----------------------- |
-| Markdown string              | `office__markdownToPdf` |
-| HTML string / file           | `office__htmlToPdf`     |
-| Existing `.docx/.pptx/.xlsx` | `office__officeToPdf`   |
+| Source                       | Tool                   |
+| ---------------------------- | ---------------------- |
+| Markdown string              | `office.markdownToPdf` |
+| HTML string / file           | `office.htmlToPdf`     |
+| Existing `.docx/.pptx/.xlsx` | `office.officeToPdf`   |
 
 `htmlToPdf` and `markdownToPdf` only fetch `file://` URLs under `/workspace`. Strip remote `<img>` tags or pre-download assets: any non-`file://` URL or path outside `/workspace` causes the conversion to fail.
 
@@ -52,7 +52,7 @@ The `spec.elements[]` array is a JSON tree, not free-form Markdown:
 { "type": "pagebreak" }
 ```
 
-Charts in `.docx` are images, not native chart objects (python-docx limitation). Render with `office__renderChart` first, then embed the PNG via `{ "type": "image", … }`.
+Charts in `.docx` are images, not native chart objects (python-docx limitation). Render with `office.renderChart` first, then embed the PNG via `{ "type": "image", … }`.
 
 ## DSL: `createXlsx` sheets and `createPptx` slides
 

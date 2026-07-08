@@ -5,6 +5,8 @@ user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
 
+# GitLab
+
 GitLab access goes through MCP Hub. Claude does not see `gitlab__*` tools directly: use `search_tools` to discover them and `execute_code` with the injected `gitlab` global to invoke. `host_url` and `token` are pre-configured at the worker; never pass them, never ask the user for a GitLab token.
 
 ## Workflow

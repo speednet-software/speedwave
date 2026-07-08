@@ -485,6 +485,30 @@ def test_pdf_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
     assert "valid, non-corrupted PDF" in result["error"]
 
 
+def test_pdf_fillform_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
+    not_a_pdf = tmp_path / "fake.pdf"
+    not_a_pdf.write_text("<html><body>this is not a PDF</body></html>")
+    out = tmp_path / "filled.pdf"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "pdf_ops.py"),
+            "fillform",
+            str(not_a_pdf),
+            str(out),
+            "0",
+            json.dumps({"name": "Ada"}),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    result = json.loads(proc.stdout)
+    assert result["ok"] is False
+    assert "could not read" in result["error"]
+    assert "valid, non-corrupted PDF" in result["error"]
+
+
 # ── python_docx_extract.py ───────────────────────────────────────────────────
 
 

@@ -430,6 +430,27 @@ describe('GitLabClient', () => {
       });
     });
 
+    it('clamps a negative limit up to 1 instead of passing it through raw', async () => {
+      mockGitlabInstance.Projects.all.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+
+      const result = await client.listProjects({ limit: -5 });
+
+      expect(mockGitlabInstance.Projects.all).toHaveBeenCalledWith(
+        expect.objectContaining({ perPage: 1 })
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('clamps an oversized limit down to the GitLab per-page maximum of 100', async () => {
+      mockGitlabInstance.Projects.all.mockResolvedValue([{ id: 1 }]);
+
+      await client.listProjects({ limit: 999999 });
+
+      expect(mockGitlabInstance.Projects.all).toHaveBeenCalledWith(
+        expect.objectContaining({ perPage: 100 })
+      );
+    });
+
     it('should list only owned projects', async () => {
       mockGitlabInstance.Projects.all.mockResolvedValue([]);
       await client.listProjects({ owned: true });

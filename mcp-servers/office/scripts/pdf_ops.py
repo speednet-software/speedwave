@@ -120,9 +120,9 @@ def _watermark(src: str, watermark: str, output: str) -> None:
 
 
 def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
-    from pypdf import PdfReader, PdfWriter
+    from pypdf import PdfWriter
 
-    reader = PdfReader(src)
+    reader = _open_reader(src)
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}

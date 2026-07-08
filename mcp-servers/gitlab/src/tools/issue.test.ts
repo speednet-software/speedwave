@@ -331,6 +331,20 @@ describe('issue-tools', () => {
       expect(mockClient.getIssue).not.toHaveBeenCalled();
     });
 
+    it.each(['', '   ', '#'])(
+      'returns a teaching error for issue_iid %j instead of coercing to 0, without calling the client',
+      async (issue_iid) => {
+        const tools = createIssueTools(mockClient as unknown as GitLabClient);
+        const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+        const result = await handler!({ project_id: 'test/project', issue_iid });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('issue_iid');
+        expect(mockClient.getIssue).not.toHaveBeenCalled();
+      }
+    );
+
     it('handles permission errors', async () => {
       mockClient.getIssue.mockRejectedValue(new Error('403 Forbidden'));
 

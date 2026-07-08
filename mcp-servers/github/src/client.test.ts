@@ -507,6 +507,25 @@ describe('GitHubClient', () => {
         expect.objectContaining({ affiliation: 'owner' })
       );
     });
+
+    it('clamps a negative limit up to 1 instead of passing it through raw', async () => {
+      octokit.paginate.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+      const repos = await client.listRepos({ limit: -5 });
+      expect(octokit.paginate).toHaveBeenCalledWith(
+        octokit.rest.repos.listForAuthenticatedUser,
+        expect.objectContaining({ per_page: 1 })
+      );
+      expect(repos).toHaveLength(1);
+    });
+
+    it('clamps an oversized limit down to the GitHub per-page maximum of 100', async () => {
+      octokit.paginate.mockResolvedValue([{ id: 1 }]);
+      await client.listRepos({ limit: 999999 });
+      expect(octokit.paginate).toHaveBeenCalledWith(
+        octokit.rest.repos.listForAuthenticatedUser,
+        expect.objectContaining({ per_page: 100 })
+      );
+    });
   });
 
   describe('getRepo', () => {

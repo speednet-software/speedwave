@@ -55,7 +55,8 @@ function normalizeNumericIds(
   for (const key of NUMERIC_ID_PARAMS) {
     const value = result[key];
     if (typeof value !== 'string') continue;
-    const n = Number(value.replace(/^#/, ''));
+    const stripped = value.replace(/^#/, '').trim();
+    const n = stripped === '' ? NaN : Number(stripped);
     if (!Number.isFinite(n)) {
       return {
         ok: false,

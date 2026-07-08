@@ -264,5 +264,23 @@ describe('withValidation', () => {
         expect(result.content[0].text).toContain(`Invalid ${key} (received: "abc")`);
       }
     );
+
+    it.each(['', '   ', '#'])(
+      'returns a teaching error for %j instead of coercing to 0, and never calls the handler',
+      async (value) => {
+        const client = new GitHubClient({ token: 'x' });
+        let handlerCalled = false;
+        const wrapped = withValidation<Record<string, unknown>>(client, async () => {
+          handlerCalled = true;
+          return jsonResult({ ok: true });
+        });
+
+        const result = await wrapped({ number: value });
+
+        expect(handlerCalled).toBe(false);
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('number');
+      }
+    );
   });
 });

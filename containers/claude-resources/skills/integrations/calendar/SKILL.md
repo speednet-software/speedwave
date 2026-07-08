@@ -5,6 +5,8 @@ user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
 
+# Calendar
+
 Calendar access goes through the Speedwave MCP Hub. Claude does not see calendar tools directly: use `search_tools` to discover them and `execute_code` with the injected `os` global to invoke. macOS TCC permission is pre-validated at integration enable time; if the calendar reports access denied, direct the user to System Settings, Privacy & Security, Calendars.
 
 ## Workflow

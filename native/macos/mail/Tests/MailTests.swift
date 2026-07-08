@@ -228,6 +228,29 @@ final class MailTests: XCTestCase {
         }
     }
 
+    func testSendEmailRejectsCommaOnlyTo() {
+        // A raw "," is non-empty as a string but splits to zero recipients.
+        let params: [String: Any] = [
+            "to": ",", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients = error else {
+                return XCTFail("expected emptyRecipients, got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsWhitespaceAndCommaOnlyTo() {
+        let params: [String: Any] = [
+            "to": " , ", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients = error else {
+                return XCTFail("expected emptyRecipients, got \(error)")
+            }
+        }
+    }
+
     func testSendEmailEmptyRecipientsErrorMessageTeaches() {
         let error = MailError.emptyRecipients
         XCTAssertTrue(error.errorDescription!.contains("at least one recipient"))

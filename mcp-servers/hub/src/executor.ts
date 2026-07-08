@@ -447,6 +447,9 @@ function levenshteinLite(a: string, b: string): number {
   return dp[rows - 1][cols - 1];
 }
 
+/** Longest attempted name worth suggesting for; bounds the DP cost on attacker-sized input. */
+const MAX_SUGGESTION_INPUT_LENGTH = 100;
+
 /**
  * Find the N closest candidate names to an attempted name by edit distance (ascending),
  * dropping suggestions whose best distance exceeds half the attempted name's length.
@@ -455,9 +458,12 @@ function levenshteinLite(a: string, b: string): number {
  * @param limit - Maximum number of suggestions to return (default 3).
  */
 export function closestMatches(attempted: string, candidates: string[], limit = 3): string[] {
+  if (attempted.length > MAX_SUGGESTION_INPUT_LENGTH) return [];
   const maxDistance = Math.max(1, Math.floor(attempted.length / 2));
+  const attemptedLower = attempted.toLowerCase();
   return [...candidates]
-    .map((c) => ({ name: c, distance: levenshteinLite(attempted.toLowerCase(), c.toLowerCase()) }))
+    .filter((c) => Math.abs(c.length - attempted.length) <= maxDistance)
+    .map((c) => ({ name: c, distance: levenshteinLite(attemptedLower, c.toLowerCase()) }))
     .filter((c) => c.distance <= maxDistance)
     .sort((x, y) => x.distance - y.distance || x.name.localeCompare(y.name))
     .slice(0, limit)
@@ -582,9 +588,8 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     console.error(`${ts()} ❌ Execution error: ${message}`);
     console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
 
-    // Redact host file paths and their positions; keep user-code line:column
-    // (e.g. "<anonymous>:3:7") — it teaches the model where its snippet broke.
-    // Any absolute path the extension list misses still loses its :line:col (final pass).
+    // Redact host paths (unknown extensions at least lose :line:col); keep
+    // user-code positions like "<anonymous>:3:7" — they teach where the snippet broke.
     let sanitizedMessage = message
       .replace(/\/[a-zA-Z0-9_\-./]+\.(ts|js|json|mjs|cjs|tsx|jsx|node|map)/g, '[file]')
       .replace(/\[file\]:\d+:\d+/g, '[file]')
@@ -602,7 +607,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
         );
 
-        if (availableMethods.length > 0) {
+        if (availableMethods.length > 0 && attemptedMethod.length <= MAX_SUGGESTION_INPUT_LENGTH) {
           const suggestions = closestMatches(attemptedMethod, availableMethods);
           const didYouMean =
             suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';

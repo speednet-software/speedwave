@@ -22,6 +22,7 @@ import {
   withSetupGuidance,
   ConnectionStatusTracker,
   backgroundConnectionTest,
+  clampPageSize,
 } from '@speedwave/mcp-shared';
 import type { HealthStatus } from '@speedwave/mcp-shared';
 import type {
@@ -316,7 +317,7 @@ export class GitHubClient {
    * @returns A page size between 1 and 100
    */
   private perPage(limit?: number): number {
-    return Math.min(limit && limit > 0 ? limit : DEFAULT_LIMIT, MAX_PER_PAGE);
+    return clampPageSize(limit, DEFAULT_LIMIT, MAX_PER_PAGE);
   }
 
   /**
@@ -326,7 +327,7 @@ export class GitHubClient {
    * @returns The first `limit` items
    */
   private slice<T>(items: T[], limit?: number): T[] {
-    return items.slice(0, limit && limit > 0 ? limit : DEFAULT_LIMIT);
+    return items.slice(0, clampPageSize(limit, DEFAULT_LIMIT, MAX_PER_PAGE));
   }
 
   //═════════════════════════════════════════════════════════════════════════════

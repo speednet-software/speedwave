@@ -102,6 +102,13 @@ describe('handlers', () => {
     });
   });
 
+  it('moveIssuesToSprint rejects an empty array with a teaching error and does not call the domain', async () => {
+    const result = await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: [] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/issueKeysOrIds/);
+    expect(stub.moveIssuesToSprint).not.toHaveBeenCalled();
+  });
+
   it('moveIssuesToSprint rejects a batch over 50 with a teaching error and does not call the domain', async () => {
     const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
     const result = await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: many });

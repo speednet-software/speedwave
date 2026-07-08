@@ -448,6 +448,18 @@ describe('executor', () => {
       expect(closestMatches('foo', [])).toEqual([]);
     });
 
+    it('skips suggestion computation entirely for an oversized attempted name', () => {
+      // Bounds the DP cost against attacker-sized property names from execute_code bodies.
+      const huge = 'a'.repeat(100_000);
+      const start = Date.now();
+      expect(closestMatches(huge, ['listIssues', 'getIssue'])).toEqual([]);
+      expect(Date.now() - start).toBeLessThan(100);
+    });
+
+    it('skips candidates whose length difference alone exceeds the distance cap', () => {
+      expect(closestMatches('ab', ['abcdefghijklmnop'])).toEqual([]);
+    });
+
     it('is case-insensitive', () => {
       const result = closestMatches('GETISSUE', ['getIssue', 'unrelatedName']);
       expect(result[0]).toBe('getIssue');

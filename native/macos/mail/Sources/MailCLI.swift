@@ -144,7 +144,7 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
     guard let to = params["to"] as? String else {
         throw MailError.missingField("to")
     }
-    guard !to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    guard !splitAddressList(to).isEmpty else {
         throw MailError.emptyRecipients
     }
     guard let subject = params["subject"] as? String else {

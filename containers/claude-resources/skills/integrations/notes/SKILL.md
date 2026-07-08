@@ -5,6 +5,8 @@ user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
 
+# Notes
+
 Notes access goes through MCP Hub. All notes methods are on the injected `os` global: there is no separate `notes` global. Use `search_tools` to discover the live schema, then `execute_code` to call `os.*` methods.
 
 ## Workflow

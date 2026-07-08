@@ -382,9 +382,10 @@ export class GitLabClient {
       archived?: boolean;
     } = {}
   ): Promise<GitLabProject[]> {
+    const limit = clampPageSize(options.limit, 20, 100);
     const projects = await this.gitlab.Projects.all({
       search: options.search,
-      perPage: options.limit || 20,
+      perPage: limit,
       page: options.page || 1,
       pagination: 'offset' as const,
       owned: options.owned,
@@ -393,7 +394,7 @@ export class GitLabClient {
     });
 
     // Take only first page (limit results)
-    const limited = projects.slice(0, options.limit || 20);
+    const limited = projects.slice(0, limit);
 
     return limited.map((p: Record<string, unknown>) => ({
       id: p.id as number,
@@ -513,10 +514,11 @@ export class GitLabClient {
     } = {}
   ): Promise<GitLabMergeRequest[]> {
     this.validateRequired({ project_id: projectId });
+    const limit = clampPageSize(options.limit, 20, 100);
     // Use type assertion to handle state parameter
     const queryOptions: Record<string, unknown> = {
       projectId,
-      perPage: options.limit || 20,
+      perPage: limit,
     };
 
     if (options.state) {
@@ -540,7 +542,7 @@ export class GitLabClient {
     )) as unknown as Array<Record<string, unknown>>;
 
     // Take only first page
-    const limited = mrs.slice(0, options.limit || 20);
+    const limited = mrs.slice(0, limit);
 
     return limited.map((mr) => this.mapMergeRequestResponse(mr));
   }
@@ -815,11 +817,12 @@ export class GitLabClient {
     projectId: string | number,
     options: { search?: string; limit?: number } = {}
   ): Promise<unknown[]> {
+    const limit = clampPageSize(options.limit, 20, 100);
     const branches = await this.gitlab.Branches.all(projectId, {
       search: options.search,
-      perPage: options.limit || 20,
+      perPage: limit,
     });
-    return branches.slice(0, options.limit || 20);
+    return branches.slice(0, limit);
   }
 
   /**
@@ -937,14 +940,15 @@ export class GitLabClient {
       limit?: number;
     } = {}
   ): Promise<GitLabCommit[]> {
+    const limit = clampPageSize(options.limit, 20, 100);
     const commits = await this.gitlab.Commits.all(projectId, {
       refName: options.ref,
       since: options.since,
       until: options.until,
       path: options.path,
-      perPage: options.limit || 20,
+      perPage: limit,
     });
-    return commits.slice(0, options.limit || 20).map((c: Record<string, unknown>) => ({
+    return commits.slice(0, limit).map((c: Record<string, unknown>) => ({
       id: String(c.id),
       short_id: String(c.shortId || c.short_id || ''),
       title: String(c.title),
@@ -980,7 +984,7 @@ export class GitLabClient {
           String(c.message).toLowerCase().includes(query.toLowerCase()) ||
           String(c.title).toLowerCase().includes(query.toLowerCase())
       )
-      .slice(0, options.limit || 20);
+      .slice(0, clampPageSize(options.limit, 20, 100));
     return filtered.map((c: Record<string, unknown>) => ({
       id: String(c.id),
       short_id: String(c.shortId || c.short_id || ''),
@@ -1010,13 +1014,14 @@ export class GitLabClient {
     projectId: string | number,
     options: { path?: string; ref?: string; recursive?: boolean; limit?: number } = {}
   ): Promise<unknown[]> {
+    const limit = clampPageSize(options.limit, 100, 100);
     const tree = await this.gitlab.Repositories.allRepositoryTrees(projectId, {
       path: options.path,
       ref: options.ref,
       recursive: options.recursive,
-      perPage: options.limit || 100,
+      perPage: limit,
     });
-    return tree.slice(0, options.limit || 100);
+    return tree.slice(0, limit);
   }
 
   /**
@@ -1144,17 +1149,18 @@ export class GitLabClient {
       limit?: number;
     } = {}
   ): Promise<unknown[]> {
+    const limit = clampPageSize(options.limit, 20, 100);
     const result = await this.gitlab.Issues.all({
       projectId,
       state: options.state as 'opened' | 'closed' | 'all' | undefined,
       labels: options.labels,
       assigneeUsername: options.assignee_username,
       scope: options.scope,
-      perPage: options.limit || 20,
+      perPage: limit,
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
     // Handle both array and paginated response
     const issues = Array.isArray(result) ? result : (result as { data: unknown[] }).data || [];
-    return issues.slice(0, options.limit || 20);
+    return issues.slice(0, limit);
   }
 
   /**
@@ -1265,11 +1271,12 @@ export class GitLabClient {
     projectId: string | number,
     options: { search?: string; limit?: number } = {}
   ): Promise<unknown[]> {
+    const limit = clampPageSize(options.limit, 50, 100);
     const labels = await this.gitlab.ProjectLabels.all(projectId, {
       search: options.search,
-      perPage: options.limit || 50,
+      perPage: limit,
     });
-    return labels.slice(0, options.limit || 50);
+    return labels.slice(0, limit);
   }
 
   /**
@@ -1328,7 +1335,7 @@ export class GitLabClient {
         | 'skipped'
         | undefined,
       ref: options.ref,
-      perPage: options.limit || 5,
+      perPage: clampPageSize(options.limit, 5, 100),
       page: options.page || 1,
     });
 

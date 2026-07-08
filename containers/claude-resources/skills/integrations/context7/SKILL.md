@@ -5,6 +5,8 @@ user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
 
+# Context7
+
 When the user asks about a library, framework, API, CLI tool, or cloud service, use Context7 to fetch current documentation instead of relying on training data.
 
 Access is through the Speedwave MCP Hub: use `search_tools` to inspect the schema, then `execute_code` with the injected `context7` global. The two methods exposed on that global are **`resolveLibraryId`** and **`queryDocs`**.

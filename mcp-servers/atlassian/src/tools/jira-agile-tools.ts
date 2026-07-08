@@ -268,6 +268,13 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
           sprintId: number;
           issueKeysOrIds: string[];
         };
+        if (issueKeysOrIds.length === 0) {
+          return teachingErrorResult({
+            paramName: 'issueKeysOrIds',
+            received: '0 issues',
+            nextStep: 'Provide at least one issue key or ID to move into the sprint.',
+          });
+        }
         if (issueKeysOrIds.length > MOVE_ISSUES_MAX) {
           return teachingErrorResult({
             paramName: 'issueKeysOrIds',

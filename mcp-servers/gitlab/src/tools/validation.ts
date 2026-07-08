@@ -50,7 +50,7 @@ export type NormalizedIid = { ok: true; value: number } | { ok: false; error: To
  */
 export function normalizeIid(value: unknown, paramName: string): NormalizedIid {
   const raw = typeof value === 'string' ? value.replace(/^#/, '').trim() : value;
-  const n = typeof raw === 'string' || typeof raw === 'number' ? Number(raw) : NaN;
+  const n = typeof raw === 'number' || (typeof raw === 'string' && raw !== '') ? Number(raw) : NaN;
   if (typeof n !== 'number' || Number.isNaN(n) || !Number.isFinite(n)) {
     return {
       ok: false,
