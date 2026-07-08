@@ -30,13 +30,17 @@ struct NotesCLI {
         )
     }
 
+    /// Maps list_notes params to client args; only `folder_id` scopes the query
+    /// (the legacy `folder` key is deliberately ignored).
+    static func listNotesArgs(_ params: [String: Any]) -> (limit: Int, folder: String?) {
+        (limit: params["limit"] as? Int ?? 20, folder: params["folder_id"] as? String)
+    }
+
     static let commands: [String: ([String: Any]) throws -> Any] = [
         "list_folders": { _ in try NotesClient.listFolders() },
         "list_notes": { params in
-            try NotesClient.listNotes(
-                limit: params["limit"] as? Int ?? 20,
-                folder: params["folder_id"] as? String
-            )
+            let args = listNotesArgs(params)
+            return try NotesClient.listNotes(limit: args.limit, folder: args.folder)
         },
         "get_note": { params in
             guard let id = params["id"] as? String else { throw NotesCLIError.missingField("id") }

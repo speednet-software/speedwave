@@ -115,7 +115,11 @@ const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
   description: "Get current authenticated user's profile (id, login, email, name)",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.USER_SCOPED]: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['redmine', 'user', 'profile', 'current', 'me', 'authenticated'],
   example: `const user = await redmine.getCurrentUser()`,
   inputSchema: {
