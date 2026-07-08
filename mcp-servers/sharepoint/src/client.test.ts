@@ -313,13 +313,47 @@ describe('SharePointClient', () => {
   });
 
   describe('callGraphAPI', () => {
-    it('short-circuits with a config-issue error when statusTracker is failed', async () => {
+    it('retries the resolve and unwedges when a failed tracker retry succeeds', async () => {
+      // Simulate a prior warmup failure on a path-form siteId.
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Retry:';
       client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+
+      expect(client.statusTracker.getStatus()).toBe('ok');
+      // A later call must go straight through without re-resolving.
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      await expect(client.listFiles()).resolves.not.toThrow();
+    });
+
+    it('fails only the one call with a teaching error when the retry also fails', async () => {
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/StillDown:';
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock.mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
 
       await expect(client.listFiles()).rejects.toThrow(
         /SharePoint site connection is not established/
       );
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(client.statusTracker.getStatus()).toBe('failed');
+
+      // Next call retries again rather than staying permanently wedged.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+        }),
+      });
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      await expect(client.listFiles()).resolves.not.toThrow();
+      expect(client.statusTracker.getStatus()).toBe('ok');
     });
 
     it('does not short-circuit when statusTracker is unknown (default) or ok', async () => {

@@ -71,7 +71,9 @@ const getTreeTool: Tool = {
 const getFileContentsTool: Tool = {
   name: 'getFileContents',
   description:
-    "Reads a file's contents from a repository, already decoded to UTF-8 text. Errors if the path is a directory.",
+    "Reads a file's contents from a repository. Text files are decoded to UTF-8; binary files " +
+    "(images, archives, ...) are returned as raw base64 with encoding: 'base64' so content is " +
+    'never corrupted. Errors if the path is a directory.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'file', 'content', 'read', 'cat', 'source'],
@@ -92,8 +94,14 @@ const getFileContentsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       path: { type: 'string' },
-      content: { type: 'string', description: 'Decoded file text' },
-      encoding: { type: 'string' },
+      content: {
+        type: 'string',
+        description: "Decoded UTF-8 text, or raw base64 for binary files (see 'encoding')",
+      },
+      encoding: {
+        type: 'string',
+        description: "'utf-8' for decoded text, 'base64' for binary content",
+      },
       sha: { type: 'string', description: 'Blob SHA' },
       size: { type: 'number' },
       error: { type: 'string' },

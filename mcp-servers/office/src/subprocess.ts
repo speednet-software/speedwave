@@ -177,11 +177,7 @@ export async function runOk(
 
 /**
  * Invoke a bundled Python support-script (`scripts/<name>`) with the project's venv interpreter.
- * The script convention: argv carries the file paths and a JSON spec/ops blob; stdout is a single JSON object
- * `{ ok: true, ... }` on success, or `{ ok: false, "error": "<one-line teaching message>" }` (plus a non-zero
- * exit) on failure, with the full traceback on stderr only. This helper parses stdout JSON directly — it does
- * NOT go through `runOk` — so a script's own `{ok:false,"error":...}` message reaches the caller verbatim even
- * though the process also exits non-zero and writes a (possibly much longer) traceback to stderr.
+ * Parses stdout as `{ ok: true, ... }` / `{ ok: false, "error": ... }` directly (not via `runOk`), so the script's own error message reaches the caller verbatim.
  * @param scriptName - Filename under `scripts/` (e.g. `"docx_build.py"`).
  * @param args - Arguments to pass after the script path.
  * @param opts - Run options.

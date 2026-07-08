@@ -8,7 +8,7 @@ import {
   type jsonResult,
   type textResult,
 } from '@speedwave/mcp-shared';
-import { GitHubClient } from '../client.js';
+import { GitHubClient, isExpectedError } from '../client.js';
 
 /** Param names that carry a numeric GitHub ID but should tolerate a leading '#' or a string form. */
 const NUMERIC_ID_PARAMS = ['number', 'run_id', 'artifact_id'] as const;
@@ -100,7 +100,8 @@ export function withValidation<T>(
       serviceName: 'GitHub',
       formatError: (error) => GitHubClient.formatError(error),
       onUnexpectedError: (error) => {
-        if (typeof (error as { status?: unknown } | null)?.status !== 'number') {
+        const hasOctokitStatus = typeof (error as { status?: unknown } | null)?.status === 'number';
+        if (!hasOctokitStatus && !isExpectedError(error)) {
           console.error(`${ts()} Unexpected (non-Octokit) error in GitHub tool handler:`, error);
         }
       },

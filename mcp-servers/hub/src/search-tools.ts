@@ -154,6 +154,7 @@ function tokenMatchTier(tool: ToolMetadata, token: string): MatchTier | undefine
 function scoreTool(tool: ToolMetadata, tokens: string[]): MatchTier | undefined {
   const contentTokens = tokens.filter((t) => !SELF_REFERENCE_TOKENS.has(t));
   if (contentTokens.length === 0) {
+    // Intended: a pure self-reference query ("me") lists userScoped tools across every enabled service, not just one.
     return tool.userScoped ? MatchTier.Description : undefined;
   }
 

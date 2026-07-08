@@ -12,6 +12,7 @@ import {
   memoizedPromise,
   loadTokenFile,
   tokensDir,
+  clampPageSize,
 } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -1005,7 +1006,7 @@ export class RedmineClient {
     const enforcedProjectId = this._enforceProjectId(options.project_id);
 
     const params: Record<string, string | number> = {
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
       offset: options.offset || 0,
     };
 
@@ -1068,7 +1069,7 @@ export class RedmineClient {
     const params: Record<string, string | number> = {
       q: query,
       issues: 1,
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
     };
 
     if (enforcedProjectId) {
@@ -1239,7 +1240,7 @@ export class RedmineClient {
     }
 
     const params: Record<string, string | number> = {
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
     };
 
     if (options.issue_id) params.issue_id = options.issue_id;
@@ -1468,7 +1469,7 @@ export class RedmineClient {
     }
 
     const params: Record<string, number> = {
-      limit: options.limit || 100,
+      limit: clampPageSize(options.limit, 100, 100),
       offset: options.offset || 0,
     };
 
@@ -1568,7 +1569,7 @@ export class RedmineClient {
         (p.description && p.description.toLowerCase().includes(queryLower))
     );
 
-    const limited = matched.slice(0, options.limit || 25);
+    const limited = matched.slice(0, clampPageSize(options.limit, 25, 100));
 
     return {
       projects: limited.map((p: RedmineProject) => ({

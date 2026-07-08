@@ -72,6 +72,8 @@ public func isAppleScriptNotFoundError(_ stderr: String) -> Bool {
 
 /// Split a comma-separated address list into trimmed, non-empty addresses.
 /// Quote-aware: commas inside a double-quoted span (e.g. a "Last, First" display name) do not split.
+/// An unbalanced quote count falls back to a naive comma split of the original input,
+/// rather than risk swallowing recipients into one unterminated quoted span.
 public func splitAddressList(_ addresses: String) -> [String] {
     var entries: [String] = []
     var current = ""
@@ -89,6 +91,10 @@ public func splitAddressList(_ addresses: String) -> [String] {
         }
     }
     entries.append(current)
+
+    if insideQuotes {
+        entries = addresses.components(separatedBy: ",")
+    }
 
     return entries
         .map { $0.trimmingCharacters(in: .whitespaces) }

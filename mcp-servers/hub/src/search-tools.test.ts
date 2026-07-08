@@ -876,6 +876,27 @@ describe('searchTools tokenized multi-word query', () => {
 
     expect(result.matches).toEqual([]);
   });
+
+  it('a self-reference-only query with no service filter returns userScoped tools across all enabled services', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['getCurrentUser'] = {
+      ...mutableRegistry['redmine']['getCurrentUser'],
+      userScoped: true,
+    };
+    mutableRegistry['sharepoint']['getCurrentUser'] = {
+      ...mutableRegistry['sharepoint']['getCurrentUser'],
+      userScoped: true,
+    };
+
+    const result = await searchTools({
+      query: 'me',
+      detailLevel: 'names_only',
+    });
+
+    expect(result.matches.some((m) => m.tool === 'redmine/getCurrentUser')).toBe(true);
+    expect(result.matches.some((m) => m.tool === 'sharepoint/getCurrentUser')).toBe(true);
+    expect(result.matches.every((m) => m.tool.endsWith('/getCurrentUser'))).toBe(true);
+  });
 });
 
 describe('search-tools lowercase cache', () => {

@@ -81,6 +81,48 @@ describe('withValidation', () => {
     expect(errSpy).not.toHaveBeenCalled();
   });
 
+  it('does not log a translated 404 (already marked expected) rethrown by the handler', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new GitHubClient({ token: 'x' });
+    const wrapped = withValidation<{ owner: string; repo: string; path: string }>(
+      client,
+      async (c, params) => {
+        // getFileContents translates an Octokit 404 into a plain Error marked `expected`.
+        await c.getFileContents(params.owner, params.repo, params.path);
+        return jsonResult({ ok: true });
+      }
+    );
+    (
+      client as unknown as {
+        octokit: { rest: { repos: { getContent: () => Promise<never> } } };
+      }
+    ).octokit.rest.repos.getContent = () => Promise.reject({ status: 404 });
+
+    const result = await wrapped({ owner: 'o', repo: 'r', path: 'missing.txt' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("File not found: 'missing.txt'");
+    // A translated 404 is an expected, already-teaching error — never logged as a bug.
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('still logs a genuinely foreign error even when it looks like a translated one', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new GitHubClient({ token: 'x' });
+    const wrapped = withValidation<undefined>(client, async () => {
+      throw new Error("File not found: 'x.txt' but never actually marked expected");
+    });
+
+    const result = await wrapped(undefined);
+
+    expect(result.isError).toBe(true);
+    // Same text shape as a translated 404, but never passed through markExpected — still a bug.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected (non-Octokit) error'),
+      expect.any(Error)
+    );
+  });
+
   describe('owner/repo forgiveness', () => {
     it('splits a combined owner/repo string passed in repo when owner is omitted', async () => {
       const client = new GitHubClient({ token: 'x' });

@@ -358,13 +358,18 @@ export class SharePointClient {
    * @throws {OAuthScopeMismatchError} when refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
-    // Distinguish "the whole site never resolved" from "this item was not found" —
-    // otherwise a model retries individual params against a config-level failure.
+    // A prior warmup failure must not permanently wedge the worker: retry the
+    // memoized resolve (it clears its own cache on rejection) and only fail
+    // this one call if the retry also fails.
     if (this.statusTracker.getStatus() === 'failed') {
-      throw new Error(
-        'SharePoint site connection is not established (siteId resolve failed). ' +
-          'This is a configuration issue, not a parameter problem: ask the user to check the SharePoint integration settings.'
-      );
+      try {
+        await this._resolveSiteIdMemo();
+      } catch {
+        throw new Error(
+          'SharePoint site connection is not established (siteId resolve failed). ' +
+            'This is a configuration issue, not a parameter problem: ask the user to check the SharePoint integration settings.'
+        );
+      }
     }
     // Live view onto config.accessToken so the helper's writes are shared.
     const config = this.config;

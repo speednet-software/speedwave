@@ -167,6 +167,28 @@ function classifyOctokitError(error: unknown): ErrorCategory {
   return 'unknown';
 }
 
+/** An Error already translated into a teaching message for an expected (4xx) API failure. */
+interface ExpectedError extends Error {
+  expected?: true;
+}
+
+/**
+ * Marks `error` as an expected, already-translated failure so callers skip unexpected-error logging.
+ * @param error - The translated error to mark.
+ */
+function markExpected(error: Error): ExpectedError {
+  (error as ExpectedError).expected = true;
+  return error;
+}
+
+/**
+ * True when `error` was already translated by `withNotFoundMessage`/`withValidationMessage`.
+ * @param error - Candidate error to test.
+ */
+export function isExpectedError(error: unknown): boolean {
+  return (error as ExpectedError | null)?.expected === true;
+}
+
 /**
  * Runs `fn`; on a 404, rethrows with `notFoundMessage` instead of Octokit's generic text so the
  * caller learns which param was wrong and which tool supplies a correct value.
@@ -178,7 +200,7 @@ async function withNotFoundMessage<T>(fn: () => Promise<T>, notFoundMessage: str
     return await fn();
   } catch (error) {
     if ((error as OctokitErrorLike)?.status === 404) {
-      throw new Error(notFoundMessage);
+      throw markExpected(new Error(notFoundMessage));
     }
     throw error;
   }
@@ -199,7 +221,7 @@ async function withValidationMessage<T>(
   } catch (error) {
     const err = error as OctokitErrorLike;
     if (err?.status === 422) {
-      throw new Error(`${validationMessage}: ${err.message || 'invalid request'}`);
+      throw markExpected(new Error(`${validationMessage}: ${err.message || 'invalid request'}`));
     }
     throw error;
   }
@@ -1401,7 +1423,8 @@ export class GitHubClient {
    * @param path - File path from the repository root
    * @param options - Read options
    * @param options.ref - Branch, tag, or commit SHA to read from (default: the repo's default branch)
-   * @returns Normalized file content, decoded to UTF-8 text (GitHub returns it base64-encoded)
+   * @returns Normalized file content: UTF-8 text when the bytes round-trip losslessly, otherwise
+   *   the raw base64 string (with `encoding: 'base64'`) so binary files are never corrupted
    * @throws {Error} if the path resolves to a directory rather than a file
    */
   async getFileContents(
@@ -1416,34 +1439,44 @@ export class GitHubClient {
       res = await this.octokit.rest.repos.getContent({ owner, repo, path, ref: options.ref });
     } catch (error) {
       if ((error as OctokitErrorLike)?.status === 404) {
-        throw new Error(
-          `File not found: '${path}' in ${owner}/${repo}${options.ref ? ` at ref '${options.ref}'` : ''}. ` +
-            `Check the path with getTree, or the ref with listBranches.`
+        throw markExpected(
+          new Error(
+            `File not found: '${path}' in ${owner}/${repo}${options.ref ? ` at ref '${options.ref}'` : ''}. ` +
+              `Check the path with getTree, or the ref with listBranches.`
+          )
         );
       }
       throw error;
     }
     const data = res.data as unknown;
     if (Array.isArray(data)) {
-      throw new Error(
-        `Path '${path}' is a directory, not a file. Use getTree to list its contents.`
+      throw markExpected(
+        new Error(`Path '${path}' is a directory, not a file. Use getTree to list its contents.`)
       );
     }
     const file = data as Record<string, unknown>;
     if (file.type !== 'file' || typeof file.content !== 'string') {
-      throw new Error(
-        `Path '${path}' is a directory, not a file. Use getTree to list its contents.`
+      throw markExpected(
+        new Error(`Path '${path}' is a directory, not a file. Use getTree to list its contents.`)
       );
     }
     const rawEncoding = String(file.encoding || 'base64');
-    const content =
-      rawEncoding === 'base64'
-        ? Buffer.from(String(file.content || ''), 'base64').toString('utf-8')
-        : String(file.content || '');
+    const rawContent = String(file.content || '');
+    let content = rawContent;
+    let encoding = rawEncoding === 'base64' ? 'base64' : 'utf-8';
+    if (rawEncoding === 'base64') {
+      const decoded = Buffer.from(rawContent, 'base64');
+      // Only surface UTF-8 text when the decode round-trips losslessly; otherwise keep base64
+      // so binary files (images, archives, ...) are never corrupted by a forced UTF-8 decode.
+      if (Buffer.from(decoded.toString('utf-8'), 'utf-8').equals(decoded)) {
+        content = decoded.toString('utf-8');
+        encoding = 'utf-8';
+      }
+    }
     return {
       path: String(file.path || path),
       content,
-      encoding: 'utf-8',
+      encoding,
       sha: String(file.sha || ''),
       size: Number(file.size || 0),
     };

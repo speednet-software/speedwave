@@ -156,6 +156,7 @@ describe('GitHubClient', () => {
   let client: InstanceType<typeof GitHubClientType>;
   let octokit: MockOctokit;
   let config: GitHubConfig;
+  let isExpectedError: typeof import('./client.js').isExpectedError;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -171,6 +172,7 @@ describe('GitHubClient', () => {
 
     const module = await import('./client.js');
     GitHubClientClass = module.GitHubClient;
+    isExpectedError = module.isExpectedError;
     client = new GitHubClientClass(config);
   });
 
@@ -1293,6 +1295,41 @@ describe('GitHubClient', () => {
       await expect(client.getFileContents('o', 'r', 'src')).rejects.toThrow(
         "Path 'src' is a directory, not a file."
       );
+    });
+
+    it('marks the teaching 404 as an expected error', async () => {
+      octokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
+      await client.getFileContents('o', 'r', 'missing.txt').catch((error) => {
+        expect(isExpectedError(error)).toBe(true);
+      });
+    });
+
+    it('returns raw base64 (not UTF-8) for binary content that does not round-trip', async () => {
+      // A 1x1 PNG-like byte sequence with bytes invalid as UTF-8.
+      const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8]);
+      const base64 = binary.toString('base64');
+      octokit.rest.repos.getContent.mockResolvedValue({
+        data: {
+          type: 'file',
+          path: 'image.png',
+          content: base64,
+          encoding: 'base64',
+          sha: 'imgsha',
+          size: binary.length,
+        },
+      });
+
+      const file = await client.getFileContents('o', 'r', 'image.png');
+
+      expect(file).toEqual({
+        path: 'image.png',
+        content: base64,
+        encoding: 'base64',
+        sha: 'imgsha',
+        size: binary.length,
+      });
+      // Round-trip: decoding the returned base64 must reproduce the original bytes exactly.
+      expect(Buffer.from(file.content, 'base64').equals(binary)).toBe(true);
     });
   });
 

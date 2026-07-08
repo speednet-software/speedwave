@@ -183,6 +183,38 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(splitAddressList("alice@x.com,bob@x.com,"), ["alice@x.com", "bob@x.com"])
     }
 
+    func testSplitAddressListUnbalancedQuoteFallsBackToNaiveSplit() {
+        // A single stray quote never closes; falls back to a plain comma split of the
+        // original input instead of swallowing every remaining recipient into one entry.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane <jane@x.com>, bob@x.com"),
+            ["\"Smith", "Jane <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListOddQuoteCountAcrossMultipleEntriesFallsBackToNaiveSplit() {
+        // Three quotes total (odd) means the scan ends still "inside" a span.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, \"bob@x.com"),
+            ["\"Smith", "Jane\" <jane@x.com>", "\"bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListBalancedQuotesUnaffectedByFallback() {
+        // Even quote count must still take the quote-aware path, not the naive fallback.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, bob@x.com"),
+            ["\"Smith, Jane\" <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListPlainInputUnaffectedByFallback() {
+        XCTAssertEqual(
+            splitAddressList("alice@x.com,bob@x.com"),
+            ["alice@x.com", "bob@x.com"]
+        )
+    }
+
     // MARK: - Parse Delimited
 
     func testParseDelimitedBasic4Field() {

@@ -20,6 +20,7 @@ import {
   ConnectionStatusTracker,
   backgroundConnectionTest,
   tokensDir,
+  clampPageSize,
 } from '@speedwave/mcp-shared';
 import type { ConnectionTestResult, HealthStatus } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
@@ -1443,11 +1444,12 @@ export class GitLabClient {
     options: { search?: string; limit?: number } = {}
   ): Promise<unknown[]> {
     this.validateRequired({ project_id: projectId });
+    const limit = clampPageSize(options.limit, 20, 100);
     const tags = await this.gitlab.Tags.all(projectId, {
       search: options.search,
-      perPage: options.limit || 20,
+      perPage: limit,
     });
-    return tags.slice(0, options.limit || 20);
+    return tags.slice(0, limit);
   }
 
   /**

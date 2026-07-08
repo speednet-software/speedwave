@@ -951,10 +951,8 @@ export async function getUsers(
 }
 
 /**
- * Resolve the signed-in user's own identity via `auth.test`, enriched with
- * `users.info` for the display name when that lookup is cheap and succeeds.
- * This is the only ground truth for "me" — compare its `id` against the
- * `user` field on messages returned by getChannelMessages/getThreadMessages.
+ * Resolve the signed-in user's identity via `auth.test` (ground truth for "me"),
+ * enriched with `users.info` for the display name when that lookup succeeds.
  * @param {SlackClients} clients - Slack client container
  * @returns {Promise<SlackCurrentUser>} The signed-in user's identity
  * @throws {Error} If auth.test fails or does not report ok
@@ -1040,8 +1038,8 @@ export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSumm
   return { dms };
 }
 
-/** User-ID shape accepted by conversations.open (U… or enterprise W…), case-insensitive. */
-const USER_ID_RE = /^[uw][a-z0-9]+$/i;
+/** User-ID shape accepted by conversations.open (U… or enterprise W…): uppercase, Slack-length only. */
+const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
 
 /** Slack caps a single conversation at 8 participants (conversations.open). */
 const MAX_DM_PARTICIPANTS = 8;

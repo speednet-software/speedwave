@@ -144,6 +144,9 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
     guard let to = params["to"] as? String else {
         throw MailError.missingField("to")
     }
+    guard !to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw MailError.emptyRecipients
+    }
     guard let subject = params["subject"] as? String else {
         throw MailError.missingField("subject")
     }
@@ -195,6 +198,7 @@ enum MailError: LocalizedError {
     case clientNotAvailable(String)
     case unknownClient(String)
     case confirmRequired
+    case emptyRecipients
 
     var errorDescription: String? {
         switch self {
@@ -206,6 +210,8 @@ enum MailError: LocalizedError {
             return "Unknown mail client: \(client). Available: mail, outlook"
         case .confirmRequired:
             return "Send confirmation required. Set confirm_send: true to send the email."
+        case .emptyRecipients:
+            return "The 'to' field is empty. Provide at least one recipient email address."
         }
     }
 }

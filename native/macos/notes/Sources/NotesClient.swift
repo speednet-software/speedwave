@@ -57,7 +57,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30, folder: folder)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -133,7 +133,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30, folder: folder)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -150,7 +150,7 @@ enum NotesClient {
         end tell
         """
 
-        let noteId = try runNoteScript(script, timeout: 30)
+        let noteId = try runNoteScript(script, timeout: 30, folder: folder)
         return [
             "id": noteId.trimmingCharacters(in: .whitespacesAndNewlines),
             "status": "created",
@@ -196,14 +196,22 @@ enum NotesClient {
     }
 }
 
-func runNoteScript(_ script: String, timeout: TimeInterval) throws -> String {
+/// Runs a Notes-scoped AppleScript. When `folder` was passed to the script, a -1728
+/// "Can't get" failure maps to a folder-not-found teaching error; otherwise (e.g. a
+/// stale note id lookup) it maps to a note-not-found teaching error instead.
+func runNoteScript(_ script: String, timeout: TimeInterval, folder: String? = nil) throws -> String {
     do { return try ScriptRunner.run(script, timeout: timeout) }
     catch ScriptError.timeout(let seconds, _) {
         throw ScriptError.timeout(seconds, "note may contain large attachments")
     }
-    catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
+    catch ScriptError.scriptFailed(let msg) where folder != nil && isAppleScriptNotFoundError(msg) {
         throw CLIError.notFound(
             "Folder not found. List valid folders via listNoteFolders and use their name field as folder_id."
+        )
+    }
+    catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
+        throw CLIError.notFound(
+            "Note not found. List notes via listNotes/searchNotes and use its id."
         )
     }
 }

@@ -6,7 +6,7 @@
 
 import {
   withResultValidation,
-  teachingToolResult as sharedTeachingToolResult,
+  teachingToolResult,
   type ToolResult,
   type ToolsCallResult,
 } from '@speedwave/mcp-shared';
@@ -15,22 +15,12 @@ import {
 export type { ToolResult };
 
 /**
- * Positional sugar over the shared {@link sharedTeachingToolResult} for this
- * file's many call sites.
- * @param code - Machine-readable error code (e.g. `MISSING_FIELDS`).
- * @param paramName - Name of the offending parameter.
- * @param received - The value actually received.
- * @param nextStep - Concrete next step for the caller to take.
- * @param correctValueTool - Name of a tool that provides a correct value, if any.
+ * Build a `{field: value}` map of the named fields for a multi-field `received`.
+ * @param params - Tool input parameters.
+ * @param names - Field names to include in the map.
  */
-function teachingToolResult(
-  code: string,
-  paramName: string,
-  received: unknown,
-  nextStep: string,
-  correctValueTool?: string
-): ToolResult {
-  return sharedTeachingToolResult({ paramName, received, nextStep, correctValueTool }, code);
+function receivedMapFor(params: Record<string, unknown>, names: string[]): Record<string, unknown> {
+  return Object.fromEntries(names.map((name) => [name, params[name]]));
 }
 
 /**
@@ -61,10 +51,12 @@ export function requireFields(
     return {
       valid: false,
       error: teachingToolResult(
-        'MISSING_FIELDS',
-        missing.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
-        params[first],
-        `Provide a non-empty string for ${missing.join(', ')}.`
+        {
+          paramName: missing.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
+          received: missing.length > 1 ? receivedMapFor(params, missing) : params[first],
+          nextStep: `Provide a non-empty string for ${missing.join(', ')}.`,
+        },
+        'MISSING_FIELDS'
       ),
     };
   }
@@ -74,10 +66,12 @@ export function requireFields(
     return {
       valid: false,
       error: teachingToolResult(
-        'EMPTY_FIELDS',
-        empty.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
-        params[first],
-        `Provide a non-empty value for ${empty.join(', ')}.`
+        {
+          paramName: empty.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
+          received: empty.length > 1 ? receivedMapFor(params, empty) : params[first],
+          nextStep: `Provide a non-empty value for ${empty.join(', ')}.`,
+        },
+        'EMPTY_FIELDS'
       ),
     };
   }
@@ -123,17 +117,22 @@ export function validateStringFields(
     if (typeof value !== 'string') {
       return {
         valid: false,
-        error: teachingToolResult('INVALID_TYPE', name, value, `Pass ${name} as a string.`),
+        error: teachingToolResult(
+          { paramName: name, received: value, nextStep: `Pass ${name} as a string.` },
+          'INVALID_TYPE'
+        ),
       };
     }
     if (value.length > maxLength) {
       return {
         valid: false,
         error: teachingToolResult(
-          'FIELD_TOO_LONG',
-          name,
-          `${value.length} characters`,
-          `Shorten ${name} to at most ${maxLength} characters.`
+          {
+            paramName: name,
+            received: `${value.length} characters`,
+            nextStep: `Shorten ${name} to at most ${maxLength} characters.`,
+          },
+          'FIELD_TOO_LONG'
         ),
       };
     }
@@ -142,12 +141,14 @@ export function validateStringFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'INVALID_CHARACTERS',
-          name,
-          value,
-          allowNewlines
-            ? `Remove control characters from ${name} (tabs, newlines, and carriage returns are allowed).`
-            : `Remove control characters and newlines from ${name}.`
+          {
+            paramName: name,
+            received: value,
+            nextStep: allowNewlines
+              ? `Remove control characters from ${name} (tabs, newlines, and carriage returns are allowed).`
+              : `Remove control characters and newlines from ${name}.`,
+          },
+          'INVALID_CHARACTERS'
         ),
       };
     }
@@ -171,10 +172,12 @@ export function validateNumberFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'INVALID_TYPE',
-          name,
-          value,
-          `Pass ${name} as a finite number between ${min} and ${max}.`
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a finite number between ${min} and ${max}.`,
+          },
+          'INVALID_TYPE'
         ),
       };
     }
@@ -182,10 +185,12 @@ export function validateNumberFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'OUT_OF_RANGE',
-          name,
-          value,
-          `Pass ${name} as a number between ${min} and ${max}.`
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a number between ${min} and ${max}.`,
+          },
+          'OUT_OF_RANGE'
         ),
       };
     }
@@ -209,10 +214,12 @@ export function validateBooleanFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'INVALID_TYPE',
-          name,
-          value,
-          `Pass ${name} as a literal boolean (true or false), not a string or number.`
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a literal boolean (true or false), not a string or number.`,
+          },
+          'INVALID_TYPE'
         ),
       };
     }
@@ -236,10 +243,8 @@ export function validateStringArrayFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'INVALID_TYPE',
-          name,
-          value,
-          `Pass ${name} as an array of strings.`
+          { paramName: name, received: value, nextStep: `Pass ${name} as an array of strings.` },
+          'INVALID_TYPE'
         ),
       };
     }
@@ -247,10 +252,12 @@ export function validateStringArrayFields(
       return {
         valid: false,
         error: teachingToolResult(
-          'ARRAY_TOO_LONG',
-          name,
-          `${value.length} items`,
-          `Trim ${name} to at most ${maxItems} items.`
+          {
+            paramName: name,
+            received: `${value.length} items`,
+            nextStep: `Trim ${name} to at most ${maxItems} items.`,
+          },
+          'ARRAY_TOO_LONG'
         ),
       };
     }
@@ -261,10 +268,8 @@ export function validateStringArrayFields(
         return {
           valid: false,
           error: teachingToolResult(
-            'INVALID_TYPE',
-            itemName,
-            item,
-            `Pass ${itemName} as a string.`
+            { paramName: itemName, received: item, nextStep: `Pass ${itemName} as a string.` },
+            'INVALID_TYPE'
           ),
         };
       }
@@ -272,10 +277,12 @@ export function validateStringArrayFields(
         return {
           valid: false,
           error: teachingToolResult(
-            'EMPTY_FIELDS',
-            itemName,
-            item,
-            `Provide a non-empty value for ${itemName}, or remove it from ${name}.`
+            {
+              paramName: itemName,
+              received: item,
+              nextStep: `Provide a non-empty value for ${itemName}, or remove it from ${name}.`,
+            },
+            'EMPTY_FIELDS'
           ),
         };
       }
@@ -283,10 +290,12 @@ export function validateStringArrayFields(
         return {
           valid: false,
           error: teachingToolResult(
-            'FIELD_TOO_LONG',
-            itemName,
-            `${item.length} characters`,
-            `Shorten ${itemName} to at most ${maxItemLength} characters.`
+            {
+              paramName: itemName,
+              received: `${item.length} characters`,
+              nextStep: `Shorten ${itemName} to at most ${maxItemLength} characters.`,
+            },
+            'FIELD_TOO_LONG'
           ),
         };
       }
@@ -294,10 +303,12 @@ export function validateStringArrayFields(
         return {
           valid: false,
           error: teachingToolResult(
-            'INVALID_CHARACTERS',
-            itemName,
-            item,
-            `Remove control characters and newlines from ${itemName}.`
+            {
+              paramName: itemName,
+              received: item,
+              nextStep: `Remove control characters and newlines from ${itemName}.`,
+            },
+            'INVALID_CHARACTERS'
           ),
         };
       }
@@ -376,10 +387,12 @@ export function validateDateFields(
         return {
           valid: false,
           error: teachingToolResult(
-            'INVALID_DATE',
-            field,
-            value,
-            `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`
+            {
+              paramName: field,
+              received: value,
+              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`,
+            },
+            'INVALID_DATE'
           ),
         };
       }

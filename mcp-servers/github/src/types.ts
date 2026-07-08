@@ -212,16 +212,17 @@ export interface GitHubWorkflowRunArtifact {
 
 /**
  * GitHub file content - the contents and metadata of a file in a repository.
- * Note: GitHub returns file content base64-encoded; the client decodes it to UTF-8 text.
+ * Note: GitHub returns file content base64-encoded; the client decodes it to UTF-8 text when
+ * the bytes round-trip losslessly, otherwise it returns the raw base64 (see `encoding`).
  * @interface GitHubFileContent
  * @see https://docs.github.com/en/rest/repos/contents
  */
 export interface GitHubFileContent {
   /** Full path from the repository root */
   path: string;
-  /** Decoded file text (UTF-8) */
+  /** File content: UTF-8 text, or raw base64 for binary files (see `encoding`) */
   content: string;
-  /** Content encoding of `content` (always "utf-8"; the client decodes GitHub's base64) */
+  /** Content encoding of `content`: "utf-8" for decoded text, "base64" for binary content */
   encoding: string;
   /** Git blob SHA for this file (needed to update the file) */
   sha: string;

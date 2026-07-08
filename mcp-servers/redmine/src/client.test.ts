@@ -226,6 +226,32 @@ describe('RedmineClient', () => {
       expect(result.issues).toHaveLength(25);
       expect(result.total_count).toBe(100);
     });
+
+    it('should default the limit to 25 when omitted', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({});
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: {
+          limit: 25,
+          offset: 0,
+        },
+      });
+    });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({ limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: {
+          limit: 100,
+          offset: 0,
+        },
+      });
+    });
   });
 
   describe('showIssue', () => {

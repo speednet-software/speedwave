@@ -161,6 +161,26 @@ describe('validation', () => {
         expect(result.error.error?.message).toContain('Provide a non-empty string for a, b, c');
       }
     });
+
+    it('shows the received value of every missing/wrong-typed field, not just the first', () => {
+      const result = requireFields({ a: 123, b: true }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error.error?.message).toContain('"a":123');
+        expect(result.error.error?.message).toContain('"b":true');
+      }
+    });
+
+    it('shows the received value of every empty field, not just the first', () => {
+      const result = requireFields({ a: '', b: '   ' }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+        expect(result.error.error?.message).toContain('"a":""');
+        expect(result.error.error?.message).toContain('"b":"   "');
+      }
+    });
   });
 
   describe('isValidISO8601', () => {

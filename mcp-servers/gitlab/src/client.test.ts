@@ -1498,6 +1498,33 @@ describe('GitLabClient', () => {
 
       expect(result).toHaveLength(10);
     });
+
+    it('should clamp a zero limit up to 1', async () => {
+      mockGitlabInstance.Tags.all.mockResolvedValue([]);
+
+      await client.listTags(1, { limit: 0 });
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: undefined,
+        perPage: 1,
+      });
+    });
+
+    it('should clamp an oversized limit down to the max of 100', async () => {
+      const mockTags = Array.from({ length: 150 }, (_, i) => ({
+        name: `v${i}`,
+        target: `sha${i}`,
+      }));
+      mockGitlabInstance.Tags.all.mockResolvedValue(mockTags);
+
+      const result = await client.listTags(1, { limit: 999999 });
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: undefined,
+        perPage: 100,
+      });
+      expect(result).toHaveLength(100);
+    });
   });
 
   describe('createTag', () => {

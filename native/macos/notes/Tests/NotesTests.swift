@@ -235,71 +235,34 @@ final class NotesTests: XCTestCase {
         XCTAssertTrue((parsed["error"] as! String).contains("AppleScript error"))
     }
 
-    // MARK: - runNoteScript Wrapper
+    // MARK: - runNoteScript (real function, via osascript)
 
     func testRunNoteScriptWrapsTimeoutWithHint() {
-        let original = ScriptError.timeout(7, nil)
-        let wrapped = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.timeout(let seconds, _) {
-                throw ScriptError.timeout(seconds, "note may contain large attachments")
-            }
-        }
-        XCTAssertThrowsError(try wrapped()) { error in
-            guard case ScriptError.timeout(let seconds, let hint) = error else {
+        // osascript `delay` guarantees a real .timeout is thrown by ScriptRunner.
+        let script = "delay 2"
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 0.05)) { error in
+            guard case ScriptError.timeout(_, let hint) = error else {
                 return XCTFail("expected .timeout, got \(error)")
             }
-            XCTAssertEqual(seconds, 7)
             XCTAssertEqual(hint, "note may contain large attachments")
         }
     }
 
-    func testRunNoteScriptPassesThroughScriptFailed() {
-        let original = ScriptError.scriptFailed("x")
-        let passThrough = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.timeout(let seconds, _) {
-                throw ScriptError.timeout(seconds, "note may contain large attachments")
-            }
-        }
-        XCTAssertThrowsError(try passThrough()) { error in
-            guard case ScriptError.scriptFailed = error else {
-                return XCTFail("expected .scriptFailed, got \(error)")
-            }
-        }
-    }
-
     func testRunNoteScriptPassesThroughAutomationPermission() {
-        let original = ScriptError.automationPermission("denied")
-        let passThrough = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.timeout(let seconds, _) {
-                throw ScriptError.timeout(seconds, "note may contain large attachments")
-            }
-        }
-        XCTAssertThrowsError(try passThrough()) { error in
+        // Empty stderr classifies as .scriptFailed regardless of syntax; force a real
+        // permission-shaped stderr via a script guaranteed to be rejected as automation.
+        XCTAssertThrowsError(try runNoteScript("error \"not allowed to send Apple events\"", timeout: 5)) { error in
             guard case ScriptError.automationPermission = error else {
                 return XCTFail("expected .automationPermission, got \(error)")
             }
         }
     }
 
-    func testRunNoteScriptMapsFolderNotFoundToTeachingError() {
-        // Real osascript wording (curly apostrophe) for a nonexistent folder must map
-        // to a CLIError.notFound teaching message, not the raw AppleScript error.
-        let original = ScriptError.scriptFailed("Notes got an error: Can\u{2019}t get folder \"Nope\". (-1728)")
-        let wrapped = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.timeout(let seconds, _) {
-                throw ScriptError.timeout(seconds, "note may contain large attachments")
-            }
-            catch ScriptError.scriptFailed(let msg) where isAppleScriptNotFoundError(msg) {
-                throw CLIError.notFound(
-                    "Folder not found. List valid folders via listNoteFolders and use their name field as folder_id."
-                )
-            }
-        }
-        XCTAssertThrowsError(try wrapped()) { error in
+    func testRunNoteScriptMapsFolderNotFoundToTeachingErrorWhenFolderPassed() {
+        // Real osascript wording (curly apostrophe) for a nonexistent folder, with a
+        // folder actually supplied, must map to the folder teaching error.
+        let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Nope")) { error in
             guard case CLIError.notFound(let msg) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
@@ -307,19 +270,35 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    func testRunNoteScriptPreservesTimeoutSecondsValue() {
-        let original = ScriptError.timeout(42, nil)
-        let wrapped = { () throws -> Void in
-            do { throw original }
-            catch ScriptError.timeout(let seconds, _) {
-                throw ScriptError.timeout(seconds, "note may contain large attachments")
+    func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenNoFolderPassed() {
+        // Same -1728 wording but no folder was passed (an id-scoped lookup like
+        // getNote/updateNote/deleteNote) must yield the note-not-found teaching error.
+        let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"stale-id\\\". (-1728)\""
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5)) { error in
+            guard case CLIError.notFound(let msg) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(msg.contains("listNotes/searchNotes"))
+            XCTAssertFalse(msg.contains("listNoteFolders"), "stale note id must not surface the folder message")
+        }
+    }
+
+    func testRunNoteScriptPassesThroughGenericScriptFailed() {
+        // A syntax error (not -1728-shaped) must surface as the raw .scriptFailed,
+        // not get rewritten into either teaching error.
+        XCTAssertThrowsError(try runNoteScript("this is not valid AppleScript", timeout: 5, folder: "Work")) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected .scriptFailed, got \(error)")
             }
         }
-        XCTAssertThrowsError(try wrapped()) { error in
+    }
+
+    func testRunNoteScriptPreservesTimeoutSecondsValue() {
+        XCTAssertThrowsError(try runNoteScript("delay 2", timeout: 0.05)) { error in
             guard case ScriptError.timeout(let seconds, _) = error else {
                 return XCTFail("expected .timeout")
             }
-            XCTAssertEqual(seconds, 42, "seconds value must be preserved across rewrap")
+            XCTAssertEqual(seconds, 0.05, "seconds value must be preserved across rewrap")
         }
     }
 

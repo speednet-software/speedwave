@@ -204,6 +204,47 @@ final class MailTests: XCTestCase {
         }
     }
 
+    // MARK: - Send Email Validation (empty 'to')
+
+    func testSendEmailRejectsEmptyTo() {
+        let params: [String: Any] = [
+            "to": "", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients = error else {
+                return XCTFail("expected emptyRecipients, got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsWhitespaceOnlyTo() {
+        let params: [String: Any] = [
+            "to": "   ", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients = error else {
+                return XCTFail("expected emptyRecipients, got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailEmptyRecipientsErrorMessageTeaches() {
+        let error = MailError.emptyRecipients
+        XCTAssertTrue(error.errorDescription!.contains("at least one recipient"))
+    }
+
+    func testSendEmailValidToStillReachesConfirmGate() {
+        // A valid 'to' must pass the emptiness check and fail only on the confirm gate.
+        let params: [String: Any] = [
+            "to": "alice@example.com", "subject": "Test", "body": "Hello",
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.confirmRequired = error else {
+                return XCTFail("expected confirmRequired (proves 'to' passed validation), got \(error)")
+            }
+        }
+    }
+
     // MARK: - Send Email Validation
 
     func testSendEmailRequiresConfirmation() {

@@ -1734,10 +1734,10 @@ describe('slack client', () => {
     it('passes user IDs straight through (U… and enterprise W…)', async () => {
       const open = stubOpen('D9');
 
-      const result = await openDm(mockClients, { users: ['U0123ABC', 'W0456DEF'] });
+      const result = await openDm(mockClients, { users: ['U0123ABCD456', 'W0456DEFG789'] });
 
       expect(result).toEqual({ id: 'D9' });
-      expect(open).toHaveBeenCalledWith({ users: 'U0123ABC,W0456DEF' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456,W0456DEFG789' });
     });
 
     it('resolves email entries via users.lookupByEmail', async () => {
@@ -1765,13 +1765,21 @@ describe('slack client', () => {
       expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
     });
 
-    it('accepts a lowercase user ID and normalizes it to uppercase', async () => {
+    it('routes names that merely look like Slack IDs to the findUsers teaching path', async () => {
+      await expect(openDm(mockClients, { users: ['Wanda'] })).rejects.toThrow(/findUsers first/);
+      await expect(openDm(mockClients, { users: ['workspace'] })).rejects.toThrow(
+        /findUsers first/
+      );
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
+    it('accepts a real-looking uppercase user ID', async () => {
       const open = stubOpen('D11');
 
-      const result = await openDm(mockClients, { users: ['u0123abc'] });
+      const result = await openDm(mockClients, { users: ['U0123ABCD456'] });
 
       expect(result).toEqual({ id: 'D11' });
-      expect(open).toHaveBeenCalledWith({ users: 'U0123ABC' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456' });
     });
 
     it('rejects a non-array users value before any API call', async () => {
@@ -1783,7 +1791,7 @@ describe('slack client', () => {
 
     it('rejects more than 8 participants before any API call', async () => {
       const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
-      const nine = Array.from({ length: 9 }, (_, i) => `U${i}`);
+      const nine = Array.from({ length: 9 }, (_, i) => `U${i}0123ABC`);
 
       await expect(openDm(mockClients, { users: nine })).rejects.toThrow(/at most 8 people/);
       expect(open).not.toHaveBeenCalled();
@@ -1797,7 +1805,7 @@ describe('slack client', () => {
 
     it('accepts exactly 8 participants (the boundary)', async () => {
       const open = stubOpen('G8');
-      const eight = Array.from({ length: 8 }, (_, i) => `U${i}`);
+      const eight = Array.from({ length: 8 }, (_, i) => `U${i}0123ABC`);
 
       const result = await openDm(mockClients, { users: eight });
 
@@ -1809,7 +1817,7 @@ describe('slack client', () => {
       (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true,
       });
-      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toThrow(
+      await expect(openDm(mockClients, { users: ['U0123ABCD456'] })).rejects.toThrow(
         /did not return a conversation ID/
       );
     });
@@ -1818,7 +1826,7 @@ describe('slack client', () => {
       (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockRejectedValue(
         Object.assign(new Error('missing_scope'), { data: { error: 'missing_scope' } })
       );
-      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toMatchObject({
+      await expect(openDm(mockClients, { users: ['U0123ABCD456'] })).rejects.toMatchObject({
         data: { error: 'missing_scope' },
       });
     });
