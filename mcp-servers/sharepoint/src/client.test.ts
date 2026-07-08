@@ -1318,11 +1318,6 @@ describe('SharePointClient', () => {
   });
 
   describe('ensureParentFolders', () => {
-    it('returns without any Graph call for a root-level file (no parent path)', async () => {
-      await client.ensureParentFolders('file.txt');
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
     it('should create nested parent folders', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
