@@ -245,10 +245,15 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
 
 /// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
 /// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
-/// and enabled plugin service IDs. Excludes the always-on `claude` / `mcp-hub`.
+/// and enabled plugin service IDs — filtered against `plugin_manifests` so a
+/// resource-only plugin's enable-toggle key (its slug, not a `service_id`) never
+/// surfaces as a hub service with no worker behind it. Excludes `claude` / `mcp-hub`.
 /// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
 /// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
-pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
+pub fn enabled_hub_service_ids(
+    integrations: &ResolvedIntegrationsConfig,
+    plugin_manifests: &[plugin::PluginManifest],
+) -> Vec<String> {
     let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
         .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
@@ -257,10 +262,15 @@ pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec
     if integrations.any_os_enabled() {
         ids.push("os".to_string());
     }
+    let mcp_plugin_ids: std::collections::HashSet<&str> = plugin_manifests
+        .iter()
+        .filter_map(|m| m.service_id.as_deref())
+        .collect();
     ids.extend(
         integrations
             .enabled_plugin_service_ids()
             .into_iter()
+            .filter(|id| mcp_plugin_ids.contains(*id))
             .map(String::from),
     );
     ids
@@ -279,6 +289,7 @@ pub(crate) fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
     network_name: &str,
+    plugin_manifests: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
@@ -321,7 +332,7 @@ pub(crate) fn apply_integrations_filter(
     }
 
     // Hub uses ENABLED_SERVICES for tool routing; claude entrypoint uses it to gate claude-resources.
-    let enabled_csv = enabled_hub_service_ids(integrations).join(",");
+    let enabled_csv = enabled_hub_service_ids(integrations, plugin_manifests).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
     inject_env_into(&mut doc, "mcp-hub", "ENABLED_SERVICES", &enabled_csv);
     inject_env_into(&mut doc, "claude", "ENABLED_SERVICES", &enabled_csv);
