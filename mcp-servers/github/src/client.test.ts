@@ -639,6 +639,15 @@ describe('GitHubClient', () => {
         'PR #999 not found in o/r. Check the number with listPullRequests, or the owner/repo with getRepo.'
       );
     });
+
+    it('rethrows a non-404 error unchanged and unmarked', async () => {
+      const serverError = Object.assign(new Error('Internal Server Error'), { status: 500 });
+      octokit.rest.pulls.get.mockRejectedValue(serverError);
+      await expect(client.getPullRequest('o', 'r', 7)).rejects.toThrow(serverError);
+      await client.getPullRequest('o', 'r', 7).catch((error) => {
+        expect(isExpectedError(error)).toBe(false);
+      });
+    });
   });
 
   describe('createPullRequest', () => {
@@ -1304,6 +1313,15 @@ describe('GitHubClient', () => {
       });
     });
 
+    it('rethrows a non-404 error unchanged and unmarked', async () => {
+      const serverError = Object.assign(new Error('Internal Server Error'), { status: 500 });
+      octokit.rest.repos.getContent.mockRejectedValue(serverError);
+      await expect(client.getFileContents('o', 'r', 'README.md')).rejects.toThrow(serverError);
+      await client.getFileContents('o', 'r', 'README.md').catch((error) => {
+        expect(isExpectedError(error)).toBe(false);
+      });
+    });
+
     it('returns raw base64 (not UTF-8) for binary content that does not round-trip', async () => {
       // A 1x1 PNG-like byte sequence with bytes invalid as UTF-8.
       const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8]);
@@ -1865,6 +1883,17 @@ describe('GitHubClient', () => {
       await expect(client.createLabel('o', 'r', { name: 'bug', color: 'fff' })).rejects.toThrow(
         "Could not create label 'bug' in o/r (it may already exist — check with listLabels): Validation Failed"
       );
+    });
+
+    it('rethrows a non-422 error unchanged and unmarked', async () => {
+      const serverError = Object.assign(new Error('Internal Server Error'), { status: 500 });
+      octokit.rest.issues.createLabel.mockRejectedValue(serverError);
+      await expect(client.createLabel('o', 'r', { name: 'bug', color: 'fff' })).rejects.toThrow(
+        serverError
+      );
+      await client.createLabel('o', 'r', { name: 'bug', color: 'fff' }).catch((error) => {
+        expect(isExpectedError(error)).toBe(false);
+      });
     });
   });
 

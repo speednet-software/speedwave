@@ -475,6 +475,15 @@ describe('MR Tools', () => {
 
       expect(approveTool?.tool.description).toContain('authenticated GitLab user');
     });
+
+    it('should return a teaching error and skip the client call for an invalid mr_iid', async () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const approveTool = tools.find((t) => t.tool.name === 'approveMergeRequest');
+      const result = await approveTool!.handler({ project_id: 123, mr_iid: 'abc' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.approveMergeRequest).not.toHaveBeenCalled();
+    });
   });
 
   describe('mergeMergeRequest', () => {
@@ -733,6 +742,19 @@ describe('MR Tools', () => {
       expect(mockClient.updateMergeRequest).toHaveBeenCalledWith(123, 10, {
         title: 'New Title',
       });
+    });
+
+    it('should return a teaching error and skip the client call for an invalid mr_iid', async () => {
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const updateTool = tools.find((t) => t.tool.name === 'updateMergeRequest');
+      const result = await updateTool!.handler({
+        project_id: 123,
+        mr_iid: 'abc',
+        title: 'New Title',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.updateMergeRequest).not.toHaveBeenCalled();
     });
   });
 

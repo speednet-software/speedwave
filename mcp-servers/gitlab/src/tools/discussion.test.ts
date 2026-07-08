@@ -590,6 +590,16 @@ describe('discussion-tools', () => {
         isError: true,
       });
     });
+
+    it('returns a teaching error and skips the client call for an invalid mr_iid', async () => {
+      const tools = createDiscussionTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createMrDiscussion')?.handler;
+
+      const result = await handler!({ project_id: 1, mr_iid: 'abc', body: 'Comment' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.createMrDiscussion).not.toHaveBeenCalled();
+    });
   });
 
   describe('unconfigured client', () => {

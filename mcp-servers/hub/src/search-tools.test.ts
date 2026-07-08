@@ -877,6 +877,40 @@ describe('searchTools tokenized multi-word query', () => {
     expect(result.matches).toEqual([]);
   });
 
+  it('sorts a non-boosted tool after a boosted tool regardless of comparator call order', async () => {
+    // Both tools match the content token 'zzzsharedterm' at the same tier (Description),
+    // so only selfBoost decides order; 'aaa...' sorts first alphabetically, forcing the
+    // comparator to see the non-boosted tool as `a` and the boosted tool as `b`.
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['aaaPlainTool'] = {
+      name: 'aaaPlainTool',
+      description: 'Handles zzzsharedterm but is not userScoped',
+      keywords: [],
+      inputSchema: { type: 'object', properties: {} },
+      example: '',
+      service: 'redmine',
+      deferLoading: true,
+    };
+    mutableRegistry['redmine']['getCurrentUser'] = {
+      ...mutableRegistry['redmine']['getCurrentUser'],
+      description: 'Get current user for zzzsharedterm',
+      userScoped: true,
+    };
+
+    const result = await searchTools({
+      query: 'my zzzsharedterm',
+      detailLevel: 'names_only',
+      service: 'redmine',
+    });
+
+    const names = result.matches.map((m) => m.tool);
+    expect(names.indexOf('redmine/getCurrentUser')).toBeLessThan(
+      names.indexOf('redmine/aaaPlainTool')
+    );
+
+    delete mutableRegistry['redmine']['aaaPlainTool'];
+  });
+
   it('a self-reference-only query with no service filter returns userScoped tools across all enabled services', async () => {
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
     mutableRegistry['redmine']['getCurrentUser'] = {
@@ -983,6 +1017,19 @@ describe('searchTools zero-match hint', () => {
     expect(result.hint).toContain('unknownservice');
     expect(result.hint).toContain('slack');
     expect(result.hint).toContain('redmine');
+  });
+
+  it('shows "(none enabled)" in the hint when no services are enabled', async () => {
+    delete process.env.ENABLED_SERVICES;
+    resetServiceCaches();
+
+    const result = await searchTools({
+      query: '*',
+      detailLevel: 'names_only',
+      service: 'unknownservice',
+    });
+
+    expect(result.hint).toContain('(none enabled)');
   });
 
   it('gives a service-scoped hint when the service is valid but the query matches nothing in it', async () => {

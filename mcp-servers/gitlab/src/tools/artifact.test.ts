@@ -259,6 +259,16 @@ describe('artifact-tools', () => {
       expect(mockClient.downloadArtifact).toHaveBeenCalledWith('my-project', 42);
     });
 
+    it('returns a teaching error and skips the client call for an invalid job_id', async () => {
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'downloadArtifact')?.handler;
+
+      const result = await handler!({ project_id: 'my-project', job_id: 'abc' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.downloadArtifact).not.toHaveBeenCalled();
+    });
+
     it('describes accurately that this fetches a job log, not the CI artifact bundle', () => {
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const tool = tools.find((t) => t.tool.name === 'downloadArtifact')?.tool;

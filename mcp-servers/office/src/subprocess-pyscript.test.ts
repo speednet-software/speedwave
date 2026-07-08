@@ -57,6 +57,7 @@ beforeAll(() => {
     path.join(SCRIPTS_DIR, 'ok-json-but-nonzero-exit.py'),
     'process.stdout.write(JSON.stringify({ ok: true, value: 1 })); process.exit(3);'
   );
+  fs.writeFileSync(path.join(SCRIPTS_DIR, 'sleeper.py'), 'setTimeout(() => {}, 5000);');
 });
 
 afterAll(() => {
@@ -102,6 +103,12 @@ describe('runPythonScript', () => {
     );
     await expect(runPythonScript('ok-json-but-nonzero-exit.py', [])).rejects.toThrow(
       /exited with code 3 even though stdout claimed success/
+    );
+  });
+
+  it('throws a timeout SubprocessError when the script exceeds timeoutMs', async () => {
+    await expect(runPythonScript('sleeper.py', [], { timeoutMs: 100 })).rejects.toThrow(
+      /timed out after 100ms/
     );
   });
 });

@@ -295,6 +295,15 @@ describe('createMrNotesTools', () => {
 
       expect(mockClient.listMrPipelines).toHaveBeenCalledWith(1, 1, undefined);
     });
+
+    it('should return a teaching error and skip the client call for an invalid mr_iid', async () => {
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listMrPipelines');
+      const result = await tool!.handler({ project_id: 1, mr_iid: 'abc' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.listMrPipelines).not.toHaveBeenCalled();
+    });
   });
 
   describe('listMrNotes', () => {
@@ -436,6 +445,15 @@ describe('createMrNotesTools', () => {
         content: [{ type: 'text', text: 'Error: GitLab server error. Please try again later.' }],
         isError: true,
       });
+    });
+
+    it('should return a teaching error and skip the client call for an invalid mr_iid', async () => {
+      const tools = createMrNotesTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listMrNotes');
+      const result = await tool!.handler({ project_id: 1, mr_iid: 'abc' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.listMrNotes).not.toHaveBeenCalled();
     });
   });
 
