@@ -43,37 +43,37 @@ export function requireFields(
   params: Record<string, unknown>,
   fields: string[]
 ): { valid: true } | { valid: false; error: ToolResult } {
+  const fieldsError = (
+    offending: string[],
+    code: string,
+    nextStep: string
+  ): { valid: false; error: ToolResult } => {
+    const [first, ...rest] = offending;
+    return {
+      valid: false,
+      error: teachingToolResult(
+        {
+          paramName: offending.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
+          received: offending.length > 1 ? receivedMapFor(params, offending) : params[first],
+          nextStep,
+        },
+        code
+      ),
+    };
+  };
   const missing = fields.filter(
     (f) => params[f] === undefined || params[f] === null || typeof params[f] !== 'string'
   );
   if (missing.length > 0) {
-    const [first, ...rest] = missing;
-    return {
-      valid: false,
-      error: teachingToolResult(
-        {
-          paramName: missing.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
-          received: missing.length > 1 ? receivedMapFor(params, missing) : params[first],
-          nextStep: `Provide a non-empty string for ${missing.join(', ')}.`,
-        },
-        'MISSING_FIELDS'
-      ),
-    };
+    return fieldsError(
+      missing,
+      'MISSING_FIELDS',
+      `Provide a non-empty string for ${missing.join(', ')}.`
+    );
   }
   const empty = fields.filter((f) => (params[f] as string).trim() === '');
   if (empty.length > 0) {
-    const [first, ...rest] = empty;
-    return {
-      valid: false,
-      error: teachingToolResult(
-        {
-          paramName: empty.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
-          received: empty.length > 1 ? receivedMapFor(params, empty) : params[first],
-          nextStep: `Provide a non-empty value for ${empty.join(', ')}.`,
-        },
-        'EMPTY_FIELDS'
-      ),
-    };
+    return fieldsError(empty, 'EMPTY_FIELDS', `Provide a non-empty value for ${empty.join(', ')}.`);
   }
   return { valid: true };
 }

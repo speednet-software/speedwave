@@ -16,6 +16,32 @@ import {
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
 
+/**
+ * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error
+ * result when the identifier matches no user, undefined on success/no-op.
+ * @param client - Redmine client used for user resolution.
+ * @param resolved - Params object mutated in place.
+ */
+async function resolveAssignedTo(
+  client: RedmineClient,
+  resolved: Record<string, unknown>
+): Promise<ReturnType<typeof teachingErrorResult> | undefined> {
+  if (!resolved.assigned_to || resolved.assigned_to_id) return undefined;
+  const userId = await client.resolveUser(resolved.assigned_to as string);
+  if (userId === null) {
+    return teachingErrorResult({
+      paramName: 'assigned_to',
+      received: resolved.assigned_to,
+      correctValueTool: 'resolveUser',
+      nextStep:
+        'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
+    });
+  }
+  resolved.assigned_to_id = userId;
+  delete resolved.assigned_to;
+  return undefined;
+}
+
 // Tool Definitions
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
@@ -478,20 +504,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           } else {
             resolved = resolveParams(p, client.getMappings());
           }
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId === null) {
-              return teachingErrorResult({
-                paramName: 'assigned_to',
-                received: resolved.assigned_to,
-                correctValueTool: 'resolveUser',
-                nextStep:
-                  'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
-              });
-            }
-            resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           const result = await client.listIssues(
             resolved as Parameters<typeof client.listIssues>[0]
           );
@@ -540,20 +554,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       handler: async (params) => {
         try {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId === null) {
-              return teachingErrorResult({
-                paramName: 'assigned_to',
-                received: resolved.assigned_to,
-                correctValueTool: 'resolveUser',
-                nextStep:
-                  'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
-              });
-            }
-            resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           if (resolved.parent_id !== undefined && resolved.parent_issue_id === undefined) {
             resolved.parent_issue_id = resolved.parent_id;
             delete resolved.parent_id;
@@ -573,20 +575,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
         const { issue_id } = params as { issue_id: number };
         try {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId === null) {
-              return teachingErrorResult({
-                paramName: 'assigned_to',
-                received: resolved.assigned_to,
-                correctValueTool: 'resolveUser',
-                nextStep:
-                  'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
-              });
-            }
-            resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           const updatedIssue = await client.updateIssue(
             issue_id,
             resolved as Parameters<typeof client.updateIssue>[1]
