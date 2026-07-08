@@ -1528,6 +1528,22 @@ describe('RedmineClient', () => {
       expect(result).toBe(withSetupGuidance('Authentication failed. Check your Redmine API key.'));
     });
 
+    it('formats a 422 without a lookup hint when no mappable field is named', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Subject cannot be blank'] },
+        },
+        message: 'Request failed with status code 422',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('Subject cannot be blank');
+      expect(result).not.toContain('getMappings');
+      expect(result).not.toContain('resolveUser');
+    });
+
     it('should format 403 permission error', () => {
       const error = {
         isAxiosError: true,
