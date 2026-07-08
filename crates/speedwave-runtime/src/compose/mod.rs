@@ -417,8 +417,13 @@ pub fn render_compose_in(
     // Inject per-worker Bearer auth tokens (SEC-035)
     yaml = apply_worker_auth_tokens_in(data_dir, &yaml, project_name, integrations)?;
 
-    // Filter services based on integrations config
-    yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
+    // Filter services based on integrations config; only manifests with a
+    // service_id are real hub services — resource-only plugins have no worker.
+    let plugin_manifests: Vec<crate::plugin::PluginManifest> =
+        crate::plugin::list_verified_plugins()
+            .map(|ps| ps.into_iter().map(|p| p.manifest().clone()).collect())
+            .unwrap_or_default();
+    yaml = apply_integrations_filter(&yaml, integrations, &network_name, &plugin_manifests)?;
 
     // Per-worker credentials digest: token rotation changes config-hash for idempotent recreate.
     yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
@@ -2818,7 +2823,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -2844,7 +2849,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -3477,7 +3482,7 @@ services:
             office: true,
             ..Default::default()
         };
-        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net", &[]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
         let claude_env = find_env_value(&get_service_env_seq(&doc, "claude"), "ENABLED_SERVICES=")
@@ -3499,7 +3504,7 @@ services:
             os_calendar: true,
             ..Default::default()
         };
-        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net", &[]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
         let claude_disabled = find_env_value(
@@ -7102,7 +7107,7 @@ services:
 
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let filtered =
-            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
 
         let filtered_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let filtered_services = filtered_doc.get("services").unwrap().as_mapping().unwrap();
@@ -7122,7 +7127,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -7156,7 +7161,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7172,7 +7177,7 @@ services:
 
     #[test]
     fn test_enabled_hub_service_ids() {
-        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
+        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default(), &[]);
         assert!(default_ids.is_empty());
 
         let mut cfg = ResolvedIntegrationsConfig {
@@ -7183,13 +7188,31 @@ services:
         };
         cfg.plugins.insert("example-plugin".to_string(), true);
         cfg.plugins.insert("disabled-one".to_string(), false);
-        let ids = enabled_hub_service_ids(&cfg);
+        // Resource-only plugin (skills/commands, no worker): toggled on via the
+        // same generic map, keyed by slug — must never surface as a hub service.
+        cfg.plugins.insert("stallion".to_string(), true);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp_manifest =
+            fixture_verified_plugin("example-plugin", Some("example-plugin"), tmp.path(), None)
+                .manifest()
+                .clone();
+        let resource_only_manifest = fixture_verified_plugin("stallion", None, tmp.path(), None)
+            .manifest()
+            .clone();
+        let manifests = [mcp_manifest, resource_only_manifest];
+
+        let ids = enabled_hub_service_ids(&cfg, &manifests);
         assert!(ids.contains(&"slack".to_string()));
         assert!(ids.contains(&"gitlab".to_string()));
         assert!(ids.contains(&"os".to_string()));
         assert!(ids.contains(&"example-plugin".to_string()));
         assert!(!ids.contains(&"redmine".to_string()));
         assert!(!ids.contains(&"disabled-one".to_string()));
+        assert!(
+            !ids.contains(&"stallion".to_string()),
+            "a resource-only plugin (no service_id) must never be discovered as a hub service"
+        );
         assert!(!ids.contains(&"claude".to_string()));
         assert!(!ids.contains(&"mcp-hub".to_string()));
     }
@@ -7199,7 +7222,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default();
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -7220,7 +7243,7 @@ services:
         // reminders and mail remain false (default)
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7244,7 +7267,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7263,6 +7286,7 @@ services:
             VALID_COMPOSE_ALL_WORKERS,
             &integrations,
             "speedwave_test_network",
+            &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
@@ -7300,6 +7324,7 @@ services:
             VALID_COMPOSE_ALL_WORKERS,
             &integrations,
             "speedwave_test_network",
+            &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
@@ -7415,7 +7440,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -7479,7 +7504,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
         let filtered =
-            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
@@ -7506,7 +7531,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
