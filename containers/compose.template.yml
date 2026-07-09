@@ -93,8 +93,14 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
+    # Resolved PII policy: always rendered + mounted read-only; the hub
+    # fail-closes on an invalid file.
+    volumes:
+      - ${POLICY_CONFIG_DIR}:/policy:ro
     environment:
       - PORT=${PORT_HUB}
+      - POLICY_FILE=/policy/policy.json
+      - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}

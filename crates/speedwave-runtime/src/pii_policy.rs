@@ -3,6 +3,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Builtin template id used when no template is requested.
@@ -696,6 +697,41 @@ pub fn resolve_pii_policy(
     }
 }
 
+/// `<data_dir>/policies/<project>/`. Caller validates `project` as a safe component.
+pub fn policy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("policies").join(project)
+}
+
+/// The policy.json path inside the per-project policy dir.
+pub fn policy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
+    policy_config_dir_in(data_dir, project).join("policy.json")
+}
+
+/// Writes the resolved PII policy as `policy.json`, mounted `:ro` into mcp-hub.
+/// Dir owner-only (0o700 / DACL), file 0o600 via fs_perms atomic write (mirrors
+/// `claude_managed.rs::write_managed_settings`).
+pub fn write_policy_config_in(
+    data_dir: &Path,
+    project: &str,
+    policy: &ResolvedPiiPolicy,
+) -> anyhow::Result<()> {
+    let dir = policy_config_dir_in(data_dir, project);
+    crate::fs_perms::ensure_owner_only_dir(&dir)?;
+    let content = serde_json::to_string_pretty(policy)?;
+    crate::fs_perms::write_restricted_file_atomic(
+        &policy_config_path_in(data_dir, project),
+        &content,
+    )
+}
+
+/// sha256 of the rendered `policy.json`; digest change forces mcp-hub recreate
+/// (mirrors `compose/proxy.rs::proxy_state_digest_in`).
+pub(crate) fn policy_state_digest_in(data_dir: &Path, project: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let content = std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default();
+    crate::bundle::bytes_to_hex(&Sha256::digest(content))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1232,5 +1268,103 @@ sensitiveKeys: { add: [], remove: [] }
             rust, ts,
             "Rust PiiCategory serde strings must match TS PIIType enum values"
         );
+    }
+
+    // ---- write_policy_config_in / policy_state_digest_in -------------------
+
+    #[test]
+    fn policy_dir_and_path_layout() {
+        assert_eq!(
+            policy_config_dir_in(Path::new("/data"), "proj"),
+            Path::new("/data/policies/proj")
+        );
+        assert_eq!(
+            policy_config_path_in(Path::new("/data"), "proj"),
+            Path::new("/data/policies/proj/policy.json")
+        );
+    }
+
+    /// Snapshot: written JSON matches the pinned contract shape, incl. the
+    /// literal `source.mode`/`templateId` values.
+    #[test]
+    fn write_policy_config_matches_pinned_contract_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = resolve_pii_policy(
+            Some(&PiiPolicyUserConfig {
+                template_id: Some("gdpr-art32".to_string()),
+                custom_patterns: Some(vec![CustomPiiPattern {
+                    id: "EMPLOYEE_ID".to_string(),
+                    display_name: "Employee ID".to_string(),
+                    pattern: r"\bEMP-\d{4,8}\b".to_string(),
+                    case_insensitive: false,
+                    forced: false,
+                }]),
+                sensitive_keys: Some(PiiSensitiveKeyDelta {
+                    add: vec!["salary".to_string()],
+                    remove: vec![],
+                }),
+                ..Default::default()
+            }),
+            None,
+        );
+        write_policy_config_in(tmp.path(), "proj", &policy).unwrap();
+
+        let path = policy_config_path_in(tmp.path(), "proj");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["source"]["mode"], "custom");
+        assert_eq!(v["source"]["templateId"], "gdpr-art32");
+        assert_eq!(v["categories"]["EMAIL"], true);
+        assert!(!v["categories"]["API_KEY"].as_bool().unwrap());
+        assert_eq!(v["customPatterns"][0]["id"], "EMPLOYEE_ID");
+        assert_eq!(v["customPatterns"][0]["displayName"], "Employee ID");
+        assert_eq!(v["sensitiveKeys"]["add"][0], "salary");
+        assert_eq!(v["sensitiveKeys"]["forcedAdd"], serde_json::json!([]));
+        assert_eq!(v["forcedCategories"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn write_policy_config_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        let path = policy_config_path_in(tmp.path(), "proj");
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "policy.json must be owner-only");
+            let dir_mode = std::fs::metadata(policy_config_dir_in(tmp.path(), "proj"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700, "policy dir must be owner-only");
+        }
+    }
+
+    #[test]
+    fn policy_state_digest_changes_with_content_and_is_stable_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        let d1 = policy_state_digest_in(tmp.path(), "proj");
+        assert_eq!(d1.len(), 64);
+        assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(d1, policy_state_digest_in(tmp.path(), "proj"));
+
+        let mut other = ResolvedPiiPolicy::default();
+        other.categories.set(PiiCategory::Email, false);
+        write_policy_config_in(tmp.path(), "proj", &other).unwrap();
+        let d2 = policy_state_digest_in(tmp.path(), "proj");
+        assert_ne!(d1, d2, "changed policy content must change the digest");
+    }
+
+    #[test]
+    fn policy_state_digest_handles_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = policy_state_digest_in(tmp.path(), "proj");
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, policy_state_digest_in(tmp.path(), "proj"));
     }
 }

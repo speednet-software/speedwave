@@ -336,6 +336,16 @@ pub fn render_compose_in(
         &proxy::proxy_state_digest_in(data_dir, project_name),
     );
 
+    // Resolved PII policy: always written + mounted :ro into mcp-hub — absence
+    // would silently degrade the hub to its compiled-in default policy.
+    crate::pii_policy::write_policy_config_in(data_dir, project_name, &resolved_config.pii_policy)?;
+    let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
+    yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
+    yaml = yaml.replace(
+        "${POLICY_CONFIG_DIGEST}",
+        &crate::pii_policy::policy_state_digest_in(data_dir, project_name),
+    );
+
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -1177,7 +1187,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 40;
+    const SECURITY_RULE_COUNT: usize = 41;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1815,6 +1825,19 @@ mod tests {
         )
     }
 
+    /// Adds the canonical mcp-hub policy mount + pinned POLICY_FILE env that
+    /// `check_hub_policy_mount` requires unconditionally; fixtures predate them.
+    fn with_hub_policy_mount(yaml: &str, data_dir: &Path, project: &str) -> String {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/policy:ro", to_engine_path(&dir).unwrap()),
+        );
+        inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
+        serde_yaml_ng::to_string(&doc).unwrap()
+    }
+
     const VALID_COMPOSE: &str = r#"
 version: "3"
 services:
@@ -1948,7 +1971,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let tmp = tempfile::tempdir().unwrap();
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_mount(&valid_compose_yaml(), tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -3349,15 +3372,16 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        // The mount-source checks (policy, managed-settings) compare the rendered
+        // volume against `data_dir` — must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3366,6 +3390,56 @@ services:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The rendered compose contains the mcp-hub policy mount + both envs, with
+    /// real substituted values (not raw placeholders).
+    #[test]
+    fn test_rendered_compose_contains_policy_mount_and_envs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let volumes = get_hub_volumes(&doc);
+        let expected_source = to_engine_path(&crate::pii_policy::policy_config_dir_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v == &format!("{expected_source}:/policy:ro")),
+            "hub must mount the rendered policy dir at /policy:ro, volumes: {volumes:?}"
+        );
+
+        let env = get_hub_env_seq(&doc);
+        assert!(
+            env.iter().any(|e| e == "POLICY_FILE=/policy/policy.json"),
+            "hub env must carry POLICY_FILE, env: {env:?}"
+        );
+        let digest =
+            find_env_value(&env, "POLICY_DIGEST=").expect("hub env must carry POLICY_DIGEST");
+        assert_eq!(digest.len(), 64, "digest must be a sha256 hex string");
+        assert!(
+            !digest.contains("${"),
+            "digest placeholder must be substituted"
         );
     }
 
@@ -4765,6 +4839,44 @@ services:
         assert!(
             pw_block.lines().any(|l| l.trim() == expected),
             "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
+        );
+    }
+
+    /// Cross-read: the hub (mcp-servers/hub/src/policy.ts) reads `POLICY_FILE`;
+    /// `POLICY_DIGEST` only forces recreate on change (PROXY_CONFIG_DIGEST pattern).
+    #[test]
+    fn spw_policy_env_names_appear_in_compose_template() {
+        for expected in [
+            "- POLICY_FILE=/policy/policy.json",
+            "- POLICY_DIGEST=${POLICY_CONFIG_DIGEST}",
+        ] {
+            assert!(
+                COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
+                "compose.template.yml must contain '{expected}' in mcp-hub's environment"
+            );
+        }
+        // Run the REAL hub env denylist against the template, not a re-typed copy.
+        let yaml =
+            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
+        assert!(
+            violations.is_empty(),
+            "template hub env (incl. POLICY_FILE/POLICY_DIGEST) must pass \
+             check_no_tokens_in_hub, got: {:?}",
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// The mcp-hub service must declare the `/policy:ro` mount in the template
+    /// (unconditional, unlike the MDM managed-settings mount).
+    #[test]
+    fn hub_policy_volume_appears_in_compose_template() {
+        assert!(
+            COMPOSE_TEMPLATE
+                .lines()
+                .any(|l| l.trim() == "- ${POLICY_CONFIG_DIR}:/policy:ro"),
+            "compose.template.yml must mount ${{POLICY_CONFIG_DIR}} at /policy:ro on mcp-hub"
         );
     }
 
@@ -7478,10 +7590,10 @@ services:
     #[test]
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
-        let yaml = valid_compose_yaml();
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = with_hub_policy_mount(&valid_compose_yaml(), tmp.path(), "test");
         let filtered =
             apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
             "test",
@@ -9518,6 +9630,7 @@ networks:
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
+        let result = with_hub_policy_mount(&result, data_tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
@@ -10158,7 +10271,7 @@ services:
         std::fs::create_dir_all(&secrets_dir).unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_mount(&valid_compose_yaml(), data_dir, "test");
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), data_dir);
         assert!(
