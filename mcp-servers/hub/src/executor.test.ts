@@ -465,7 +465,7 @@ describe('executor', () => {
     });
   });
 
-  // sanitizeParamsForLogging tests moved to pii-tokenizer.ts
+  // Sensitive-key-detection tests live in the policy-engine package's tokenizer test suite
 
   describe('batch helper (through executeCode)', () => {
     beforeEach(() => {

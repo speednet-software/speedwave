@@ -11,7 +11,7 @@ import { PIIType } from './types.js';
 
 const policy = compilePolicy(defaultResolvedPolicy());
 
-describe('pii-tokenizer (moved regression suite — compilePolicy(defaultResolvedPolicy()))', () => {
+describe('tokenizer (moved regression suite — compilePolicy(defaultResolvedPolicy()))', () => {
   describe('createPIIContext', () => {
     it('creates context with default values', () => {
       const context = createPIIContext(policy);

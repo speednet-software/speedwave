@@ -3,8 +3,8 @@
  * reappears anywhere in mcp-servers source.
  *
  * The desktop guard (`forbidden-patterns.spec.ts`) only covers `desktop/src`;
- * a real TODO once slipped into `mcp-servers/hub/pii-tokenizer.ts` through that
- * gap. This scans every worker's `src/` tree. It matches ONLY markers inside a
+ * a real TODO once slipped into the hub's now-removed inline PII tokenizer module
+ * through that gap. This scans every worker's `src/` tree. It matches ONLY markers inside a
  * line- or block-comment — string literals such as the `query: 'TODO'` tool-arg
  * examples in the github/gitlab tool files are data, not markers, and must not
  * trip it. Test files (`*.test.ts`) are excluded: they legitimately carry the

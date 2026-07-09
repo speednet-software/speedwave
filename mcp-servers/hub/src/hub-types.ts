@@ -2,8 +2,8 @@
  * Hub-Specific Types
  * @module hub-types
  *
- * Extended types for mcp-hub (code executor, PII tokenization, skills)
- * Base MCP types are imported from \@speedwave/mcp-shared
+ * Extended types for mcp-hub (code executor, skills). PII types live in
+ * \@speedwave/policy-engine. Base MCP types are imported from \@speedwave/mcp-shared
  */
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -168,41 +168,4 @@ export interface ToolSearchResult {
   inputExamples?: ToolInputExample[];
   /** Defer loading status: true = on-demand, false = core tool */
   deferLoading?: boolean;
-}
-
-//═══════════════════════════════════════════════════════════════════════════════
-// PII Tokenization Types
-//═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * PII Token entry
- */
-export interface PIITokenEntry {
-  /** Token string (e.g., "[EMAIL:TOKEN_A1B2C3]") */
-  token: string;
-  /** Type of PII */
-  type: PIIType;
-  /** Original sensitive value */
-  value: string;
-  /** When this token was created */
-  createdAt: Date;
-  /** Number of times this token has been accessed */
-  accessCount: number;
-  /** Last time this token was accessed */
-  lastAccessed?: Date;
-}
-
-/**
- * PII Types supported for tokenization
- */
-export enum PIIType {
-  EMAIL = 'EMAIL',
-  PHONE_PL = 'PHONE_PL',
-  PESEL = 'PESEL',
-  NIP = 'NIP',
-  IBAN = 'IBAN',
-  CARD = 'CARD',
-  API_KEY = 'API_KEY',
-  /** Sensitive field detected by key name (password, token, secret, etc.) */
-  SENSITIVE_FIELD = 'SENSITIVE_FIELD',
 }

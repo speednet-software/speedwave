@@ -31,6 +31,9 @@ import { initializeRegistry } from './tool-registry.js';
 // Import auth token loader
 import { loadAuthTokens } from './auth-tokens.js';
 
+// Import PII policy loader
+import { loadPolicy } from './policy.js';
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Constants & Configuration
 //═════════════════════════════════════════════════════════════════════════════════
@@ -212,6 +215,9 @@ async function main() {
 
   // Load per-service auth tokens (e.g., for mcp-os on host)
   loadAuthTokens();
+
+  // Load the PII policy; an invalid POLICY_FILE throws here and aborts startup (fail-closed)
+  loadPolicy();
 
   // Initialize dynamic tool registry (fetches tools from workers)
   console.log(`${ts()} 🔧 Initializing dynamic tool registry...`);

@@ -1,6 +1,6 @@
 /**
- * Policy-driven PII tokenization engine: a superset of the hub's inline pii-tokenizer that
- * behaves bit-identically under the default (all-categories-on) policy.
+ * Policy-driven PII tokenization engine: a superset of the hub's former inline tokenizer
+ * module that behaves bit-identically under the default (all-categories-on) policy.
  * @module speedwave/policy-engine
  */
 

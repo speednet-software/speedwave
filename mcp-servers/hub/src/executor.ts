@@ -1,11 +1,18 @@
 /**
  * Executes model-generated JavaScript in a restricted AsyncFunction sandbox: forbidden-pattern
- * validation, prototype-chain hardening (ADR-029), timeout, PII tokenization, container isolation.
+ * validation, prototype-chain hardening (ADR-029), timeout, policy-driven PII tokenization,
+ * container isolation.
  * @module executor
  */
 
 import { IToolResult } from './hub-types.js';
-import { tokenizePII, detokenizePII, createPIIContext, PIIContext } from './pii-tokenizer.js';
+import {
+  tokenizePII,
+  detokenizePII,
+  createPIIContext,
+  type PIIContext,
+} from '@speedwave/policy-engine';
+import { getCompiledPolicy } from './policy.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { addAutoReturn } from './auto-return.js';
@@ -448,8 +455,8 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     };
   }
 
-  // Create PII context for this execution
-  const piiContext = createPIIContext();
+  // Create PII context for this execution, driven by the process-wide compiled policy
+  const piiContext = createPIIContext(getCompiledPolicy());
 
   // Create audit context for tracking tool executions
   const auditContext = createAuditContext();
