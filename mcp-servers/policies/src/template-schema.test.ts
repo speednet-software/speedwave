@@ -181,6 +181,10 @@ describe('parseTemplate', () => {
     }
   );
 
+  it('rejects an unknown top-level key', () => {
+    expect(() => parseTemplate(validTemplate({ extra: true }))).toThrow(/unknown key/);
+  });
+
   it('rejects malformed sensitiveKeys', () => {
     expect(() => parseTemplate(validTemplate({ sensitiveKeys: { add: [1], remove: [] } }))).toThrow(
       /must be an array of strings/

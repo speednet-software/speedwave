@@ -10,6 +10,15 @@ const CUSTOM_PATTERN_ID_RE = /^[A-Z][A-Z0-9_]{2,31}$/;
 
 /** Fields from a pre-v1 schema draft; recognized so callers get an actionable error. */
 const DEPRECATED_TEMPLATE_FIELDS = ['inherit', 'attachments', 'scope'];
+const KNOWN_TEMPLATE_FIELDS = new Set([
+  'version',
+  'id',
+  'name',
+  'description',
+  'categories',
+  'customPatterns',
+  'sensitiveKeys',
+]);
 
 const BUILTIN_TYPE_IDS: readonly string[] = ALL_PII_TYPES;
 
@@ -141,6 +150,11 @@ export function parseTemplate(raw: unknown): PolicyTemplate {
     if (deprecated in raw) {
       fail('template', `field "${deprecated}" is not supported in schema version 1`);
     }
+  }
+  // Reject unknown top-level keys, matching Rust's deny_unknown_fields so the YAML SSOT can't drift TS-only.
+  const unknown = Object.keys(raw).filter((k) => !KNOWN_TEMPLATE_FIELDS.has(k));
+  if (unknown.length > 0) {
+    fail('template', `unknown key(s): ${unknown.sort().join(', ')}`);
   }
   if (raw.version !== 1) {
     fail('template', `unsupported version "${String(raw.version)}", expected 1`);

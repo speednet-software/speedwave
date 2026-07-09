@@ -13,8 +13,10 @@ pub const DEFAULT_TEMPLATE_ID: &str = "strict";
 pub const PII_MAX_CUSTOM_PATTERNS: usize = 32;
 /// Maximum number of sensitive-key additions a user may store (save-time gate).
 pub const PII_MAX_SENSITIVE_KEYS: usize = 64;
-/// Maximum stored length (bytes) of a custom pattern's regex source.
-pub const PII_PATTERN_MAX_LEN: usize = 512;
+/// Minimum length (bytes) of a custom pattern's regex source, mirroring `pattern-lint.ts`'s `MIN_LENGTH`.
+pub const PII_PATTERN_MIN_LEN: usize = 3;
+/// Maximum length (bytes) of a custom pattern's regex source, mirroring `pattern-lint.ts`'s `MAX_LENGTH`.
+pub const PII_PATTERN_MAX_LEN: usize = 256;
 /// Maximum stored length (bytes) of a custom pattern's display name.
 pub const PII_PATTERN_NAME_MAX_LEN: usize = 64;
 /// Maximum stored length (bytes) of a single sensitive-key substring.
@@ -229,7 +231,11 @@ impl Default for PiiPolicyLimits {
 
 /// How a resolved policy was produced (mirrors TS `PolicySelection`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "mode", rename_all = "camelCase")]
+#[serde(
+    tag = "mode",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PiiPolicySource {
     /// Resolved purely from a named built-in template.
     Template {
@@ -340,16 +346,21 @@ pub fn derive_custom_pattern_id(display_name: &str) -> Result<String, String> {
     Ok(id)
 }
 
-/// Save-time gate: non-empty, at most [`PII_PATTERN_MAX_LEN`] bytes, compiles under `regex`, no
-/// group-applied counted quantifier over [`PII_PATTERN_MAX_QUANTIFIER`], free of `(a+)+`-nesting.
+/// Save-time gate, a superset of the TS load lint so a saved pattern never gets silently dropped
+/// at load: length in [`PII_PATTERN_MIN_LEN`]..=[`PII_PATTERN_MAX_LEN`] bytes, compiles under `regex`,
+/// does not match the empty string, no group-applied counted quantifier over
+/// [`PII_PATTERN_MAX_QUANTIFIER`], free of `(a+)+`-nesting.
 pub fn validate_value_pattern(pattern: &str) -> Result<(), String> {
-    if pattern.is_empty() {
-        return Err("pattern must not be empty".to_string());
+    if pattern.len() < PII_PATTERN_MIN_LEN || pattern.len() > PII_PATTERN_MAX_LEN {
+        return Err(format!(
+            "pattern length {} is outside the allowed {PII_PATTERN_MIN_LEN}..={PII_PATTERN_MAX_LEN} bytes",
+            pattern.len()
+        ));
     }
-    if pattern.len() > PII_PATTERN_MAX_LEN {
-        return Err(format!("pattern exceeds {PII_PATTERN_MAX_LEN} bytes"));
+    let compiled = Regex::new(pattern).map_err(|e| format!("pattern does not compile: {e}"))?;
+    if compiled.is_match("") {
+        return Err("pattern must not match the empty string".to_string());
     }
-    Regex::new(pattern).map_err(|e| format!("pattern does not compile: {e}"))?;
     scan_quantifier_bounds(pattern)?;
     scan_nested_quantifiers(pattern)
 }
@@ -1163,10 +1174,24 @@ sensitiveKeys: { add: [], remove: [] }
     }
 
     #[test]
-    fn validate_value_pattern_rejects_over_512_bytes() {
+    fn validate_value_pattern_rejects_under_min_length() {
+        assert!(validate_value_pattern("ab").is_err());
+        assert!(validate_value_pattern(&"a".repeat(PII_PATTERN_MIN_LEN - 1)).is_err());
+    }
+
+    #[test]
+    fn validate_value_pattern_rejects_over_max_length() {
         let huge = "a".repeat(PII_PATTERN_MAX_LEN + 1);
         let err = validate_value_pattern(&huge).unwrap_err();
-        assert!(err.contains("512"));
+        assert!(err.contains(&PII_PATTERN_MAX_LEN.to_string()));
+    }
+
+    #[test]
+    fn validate_value_pattern_rejects_empty_string_match() {
+        // `\d*` compiles and is bounded, but matches "" and would spin the tokenizer loop.
+        let err = validate_value_pattern(r"\d*").unwrap_err();
+        assert!(err.contains("empty string"));
+        assert!(validate_value_pattern("a*b*").is_err());
     }
 
     #[test]

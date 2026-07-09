@@ -322,7 +322,6 @@ pub enum SecurityRule {
     ))]
     HubPolicyMount,
 
-    // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
