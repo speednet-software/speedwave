@@ -190,6 +190,12 @@ A per-project dashboard on its own tab (⌘5, route `/usage`) that aggregates ev
 
 Cost is computed per provider (API key → catalog, OpenRouter → real `/generation`, local → `$0`, subscription → "—"); an unpriced request shows "—", never `$0`. A record with no usable timestamp still counts toward totals but is omitted from the day/hour charts.
 
+## Security
+
+Speedwave tokenizes PII in tool results before Claude ever sees them, driven by a per-project policy: which built-in categories (email, Polish phone, PESEL, NIP, IBAN, card, API key, and key-name-based sensitive fields) get detected, plus optional custom patterns and sensitive-key deltas. See [ADR-079](../adr/ADR-079-policy-engine-pii-tokenization.md) for the full design and the resolved-policy contract.
+
+A per-project policy is editable two ways. In Settings, a **Security** section (revealed by enabling Settings → Beta features) offers a template picker (Strict, GDPR Art. 32, EU AI Act Art. 5, or Custom) and, in Custom mode, per-category toggles, custom detection patterns, and sensitive-key names; saving confirms the write and notes that the project must restart to apply it. That restart requirement is intrinsic: the resolved policy is a mounted, read-only file the hub reads only at startup, so a change reaches a project on its next start, not while it is running. The same policy can also be set without the UI by editing the `policy` field on that project's entry in `~/.speedwave/config.json` (template id, category overrides, custom patterns, sensitive-key deltas), which is the only route when beta features are off.
+
 ## Appearance
 
 Settings → Appearance controls two independent choices:
@@ -204,3 +210,4 @@ The two axes are orthogonal: any accent works in either mode. Accent colors are 
 - [ADR-005: Two Interfaces — CLI and Desktop](../adr/ADR-005-two-interfaces-cli-and-desktop.md)
 - [ADR-006: Chat UI via claude -p --stream-json](../adr/ADR-006-chat-ui-via-stream-json.md)
 - [ADR-056: Host-Side Audio Capture and Local Meeting Transcription](../adr/ADR-056-host-side-audio-transcription.md)
+- [ADR-079: Policy Engine, PII Tokenization](../adr/ADR-079-policy-engine-pii-tokenization.md)
