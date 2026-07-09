@@ -6,7 +6,8 @@ use speedwave_runtime::config;
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{
-    check_project, LlmConfigResponse, LlmConfigUpdate, TelemetryConfigResponse,
+    check_project, LlmConfigResponse, LlmConfigUpdate, SecurityPolicyResponse,
+    SecurityPolicyTemplateInfo, SecurityPolicyUpdate, TelemetryConfigResponse,
     TelemetryConfigUpdate, TelemetryLocks,
 };
 
@@ -1179,6 +1180,128 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
     }
 }
 
+/// Builds the frontend PII policy response: resolved categories (the actual
+/// effect) plus the raw stored selection (so the form round-trips it).
+fn build_security_policy_response(
+    resolved: &speedwave_runtime::pii_policy::ResolvedPiiPolicy,
+    raw: Option<&config::PiiPolicyUserConfig>,
+) -> SecurityPolicyResponse {
+    use speedwave_runtime::pii_policy::PiiPolicySource;
+    let template = match &resolved.source {
+        PiiPolicySource::Template { template_id } => template_id.clone(),
+        PiiPolicySource::Custom { .. } => "custom".to_string(),
+    };
+    let custom_patterns = raw
+        .and_then(|r| r.custom_patterns.clone())
+        .unwrap_or_default();
+    let sensitive_keys_add = raw
+        .and_then(|r| r.sensitive_keys.as_ref())
+        .map(|d| d.add.clone())
+        .unwrap_or_default();
+    SecurityPolicyResponse {
+        template,
+        categories: resolved.categories,
+        custom_patterns,
+        sensitive_keys_add,
+    }
+}
+
+/// Returns the active project's PII policy: the resolved all-8 category view
+/// plus the raw stored selection so the Settings form round-trips exactly.
+#[tauri::command]
+pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    let policy = user_config
+        .active_project_entry()
+        .and_then(|p| p.policy.clone());
+    let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), None);
+    Ok(build_security_policy_response(&resolved, policy.as_ref()))
+}
+
+/// Lists every built-in PII policy template for the Settings picker.
+#[tauri::command]
+pub fn list_security_policy_templates() -> Result<Vec<SecurityPolicyTemplateInfo>, String> {
+    let templates =
+        speedwave_runtime::pii_policy::builtin_templates().map_err(|e| e.to_string())?;
+    Ok(templates
+        .iter()
+        .map(|t| SecurityPolicyTemplateInfo {
+            id: t.id.clone(),
+            name: t.name.clone(),
+            description: t.description.clone(),
+            categories: t.categories,
+        })
+        .collect())
+}
+
+/// Validates a `SecurityPolicyUpdate` and builds the `PiiPolicyUserConfig` to
+/// persist; all checks delegate to `pii_policy` (the WP4 SSOT).
+fn build_pii_policy_user_config(
+    update: &SecurityPolicyUpdate,
+) -> anyhow::Result<config::PiiPolicyUserConfig> {
+    use speedwave_runtime::pii_policy;
+
+    if update.template != "custom" {
+        let known = pii_policy::builtin_templates()
+            .map_err(|e| anyhow::anyhow!("PII policy templates unavailable: {e}"))?;
+        if !known.iter().any(|t| t.id == update.template) {
+            anyhow::bail!("unknown PII policy template id \"{}\"", update.template);
+        }
+        return Ok(config::PiiPolicyUserConfig {
+            template_id: Some(update.template.clone()),
+            ..Default::default()
+        });
+    }
+
+    let mut custom_patterns = Vec::with_capacity(update.custom_patterns.len());
+    for input in &update.custom_patterns {
+        let name = input.display_name.trim();
+        let id = pii_policy::derive_custom_pattern_id(name)
+            .map_err(|e| anyhow::anyhow!("custom pattern \"{name}\": {e}"))?;
+        custom_patterns.push(pii_policy::CustomPiiPattern {
+            id,
+            display_name: name.to_string(),
+            pattern: input.pattern.clone(),
+            case_insensitive: input.case_insensitive,
+            forced: false,
+        });
+    }
+
+    let cfg = config::PiiPolicyUserConfig {
+        template_id: None,
+        categories: Some(update.categories),
+        custom_patterns: Some(custom_patterns),
+        sensitive_keys: Some(pii_policy::PiiSensitiveKeyDelta {
+            add: update.sensitive_keys_add.clone(),
+            remove: Vec::new(),
+        }),
+        limits: None,
+    };
+    pii_policy::validate_user_policy_config(&cfg).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(cfg)
+}
+
+/// Persists the active project's PII policy selection; runs inside the config
+/// lock so a concurrent write cannot interleave.
+#[tauri::command]
+pub fn update_security_policy(update: SecurityPolicyUpdate) -> Result<(), String> {
+    config::with_config_lock(|| {
+        let policy = build_pii_policy_user_config(&update)?;
+        let mut user_config = config::load_user_config()?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        let project = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        project.policy = Some(policy);
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// Applies LLM config to the active project in-memory; enforces the local-
 /// provider-needs-model invariant for callers bypassing `update_llm_config`.
 fn apply_llm_config(
@@ -1676,6 +1799,7 @@ fn mirror_local_key_to_llm_namespace(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::types::SecurityPolicyCustomPatternInput;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {
@@ -3513,5 +3637,210 @@ mod tests {
             !json.contains("SUPER_SECRET"),
             "headers value must never reach the frontend"
         );
+    }
+
+    // ── security policy command helpers ─────────────────────────────────────
+
+    fn security_policy_input(
+        template: &str,
+        categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+        custom_patterns: Vec<SecurityPolicyCustomPatternInput>,
+        sensitive_keys_add: Vec<String>,
+    ) -> SecurityPolicyUpdate {
+        SecurityPolicyUpdate {
+            template: template.to_string(),
+            categories,
+            custom_patterns,
+            sensitive_keys_add,
+        }
+    }
+
+    #[test]
+    fn list_security_policy_templates_maps_every_builtin() {
+        let templates = list_security_policy_templates().unwrap();
+        let ids: Vec<&str> = templates.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"strict"));
+        assert!(ids.contains(&"gdpr-art32"));
+        assert!(ids.contains(&"eu-ai-act-art5"));
+    }
+
+    #[test]
+    fn build_response_defaults_to_all_8_on_for_unconfigured_project() {
+        let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(None, None);
+        let resp = build_security_policy_response(&resolved, None);
+        assert_eq!(resp.template, "strict");
+        assert_eq!(
+            resp.categories,
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON
+        );
+        assert!(resp.custom_patterns.is_empty());
+        assert!(resp.sensitive_keys_add.is_empty());
+    }
+
+    #[test]
+    fn build_response_round_trips_raw_custom_selection_not_resolved() {
+        use speedwave_runtime::pii_policy::{
+            CustomPiiPattern, PiiCategoryFlags, PiiSensitiveKeyDelta,
+        };
+        let mut categories = PiiCategoryFlags::ALL_ON;
+        categories.set(speedwave_runtime::pii_policy::PiiCategory::Email, false);
+        let raw = config::PiiPolicyUserConfig {
+            template_id: None,
+            categories: Some(categories),
+            custom_patterns: Some(vec![CustomPiiPattern {
+                id: "EMPLOYEE_ID".to_string(),
+                display_name: "Employee ID".to_string(),
+                pattern: r"\bEMP-\d{4,8}\b".to_string(),
+                case_insensitive: false,
+                forced: false,
+            }]),
+            sensitive_keys: Some(PiiSensitiveKeyDelta {
+                add: vec!["salary".to_string()],
+                remove: vec![],
+            }),
+            limits: None,
+        };
+        let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(Some(&raw), None);
+        let resp = build_security_policy_response(&resolved, Some(&raw));
+        assert_eq!(resp.template, "custom");
+        assert_eq!(resp.categories, categories);
+        assert_eq!(resp.custom_patterns.len(), 1);
+        assert_eq!(resp.custom_patterns[0].id, "EMPLOYEE_ID");
+        assert_eq!(resp.sensitive_keys_add, vec!["salary".to_string()]);
+    }
+
+    #[test]
+    fn build_config_template_mode_stores_only_the_template_id() {
+        let update = security_policy_input(
+            "gdpr-art32",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![SecurityPolicyCustomPatternInput {
+                display_name: "Ignored".to_string(),
+                pattern: r"\d+".to_string(),
+                case_insensitive: false,
+            }],
+            vec!["ignored-too".to_string()],
+        );
+        let cfg = build_pii_policy_user_config(&update).unwrap();
+        assert_eq!(cfg.template_id, Some("gdpr-art32".to_string()));
+        assert!(cfg.categories.is_none());
+        assert!(cfg.custom_patterns.is_none());
+        assert!(cfg.sensitive_keys.is_none());
+    }
+
+    #[test]
+    fn build_config_rejects_unknown_template_id() {
+        let update = security_policy_input(
+            "totally-bogus",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![],
+            vec![],
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
+    fn build_config_custom_mode_derives_id_and_persists_full_selection() {
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![SecurityPolicyCustomPatternInput {
+                display_name: "Employee ID".to_string(),
+                pattern: r"\bEMP-\d{4,8}\b".to_string(),
+                case_insensitive: false,
+            }],
+            vec!["salary".to_string()],
+        );
+        let cfg = build_pii_policy_user_config(&update).unwrap();
+        assert!(cfg.template_id.is_none());
+        assert_eq!(
+            cfg.categories,
+            Some(speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON)
+        );
+        let patterns = cfg.custom_patterns.unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].id, "EMPLOYEE_ID");
+        assert_eq!(patterns[0].display_name, "Employee ID");
+        assert_eq!(cfg.sensitive_keys.unwrap().add, vec!["salary".to_string()]);
+    }
+
+    #[test]
+    fn build_config_rejects_nested_quantifier_regex() {
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![SecurityPolicyCustomPatternInput {
+                display_name: "Evil".to_string(),
+                pattern: "(a+)+".to_string(),
+                case_insensitive: false,
+            }],
+            vec![],
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
+    fn build_config_rejects_over_cap_custom_patterns() {
+        let patterns: Vec<SecurityPolicyCustomPatternInput> = (0..33)
+            .map(|i| SecurityPolicyCustomPatternInput {
+                display_name: format!("Pattern {i}"),
+                pattern: r"\d{3}".to_string(),
+                case_insensitive: false,
+            })
+            .collect();
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            patterns,
+            vec![],
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
+    fn build_config_rejects_over_cap_sensitive_keys() {
+        let keys: Vec<String> = (0..65).map(|i| format!("key{i}")).collect();
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![],
+            keys,
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
+    fn build_config_rejects_uppercase_sensitive_key_even_though_ui_lowercases() {
+        // The UI lowercases keys before calling; the server must not rely on that.
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![],
+            vec!["Salary".to_string()],
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
+    fn build_config_rejects_duplicate_derived_pattern_ids() {
+        let update = security_policy_input(
+            "custom",
+            speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON,
+            vec![
+                SecurityPolicyCustomPatternInput {
+                    display_name: "Employee ID".to_string(),
+                    pattern: r"\d{3}".to_string(),
+                    case_insensitive: false,
+                },
+                SecurityPolicyCustomPatternInput {
+                    display_name: "Employee-ID".to_string(),
+                    pattern: r"\d{4}".to_string(),
+                    case_insensitive: false,
+                },
+            ],
+            vec![],
+        );
+        assert!(build_pii_policy_user_config(&update).is_err());
     }
 }

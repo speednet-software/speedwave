@@ -15,6 +15,8 @@ pub const PII_MAX_CUSTOM_PATTERNS: usize = 32;
 pub const PII_MAX_SENSITIVE_KEYS: usize = 64;
 /// Maximum stored length (bytes) of a custom pattern's regex source.
 pub const PII_PATTERN_MAX_LEN: usize = 512;
+/// Maximum stored length (bytes) of a custom pattern's display name.
+pub const PII_PATTERN_NAME_MAX_LEN: usize = 64;
 /// Maximum stored length (bytes) of a single sensitive-key substring.
 const SENSITIVE_KEY_MAX_LEN: usize = 64;
 
@@ -381,6 +383,12 @@ pub fn validate_user_policy_config(cfg: &crate::config::PiiPolicyUserConfig) -> 
             if p.display_name.trim().is_empty() {
                 return Err(format!(
                     "pattern \"{}\" display name must not be empty",
+                    p.id
+                ));
+            }
+            if p.display_name.len() > PII_PATTERN_NAME_MAX_LEN {
+                return Err(format!(
+                    "pattern \"{}\" display name exceeds {PII_PATTERN_NAME_MAX_LEN} bytes",
                     p.id
                 ));
             }
@@ -1206,6 +1214,37 @@ sensitiveKeys: { add: [], remove: [] }
             ..Default::default()
         };
         assert!(validate_user_policy_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_user_policy_config_rejects_over_length_display_name() {
+        let cfg = PiiPolicyUserConfig {
+            custom_patterns: Some(vec![CustomPiiPattern {
+                id: "EMPLOYEE_ID".to_string(),
+                display_name: "a".repeat(PII_PATTERN_NAME_MAX_LEN + 1),
+                pattern: r"\d{3}".to_string(),
+                case_insensitive: false,
+                forced: false,
+            }]),
+            ..Default::default()
+        };
+        let err = validate_user_policy_config(&cfg).unwrap_err();
+        assert!(err.contains("display name exceeds"));
+    }
+
+    #[test]
+    fn validate_user_policy_config_accepts_max_length_display_name() {
+        let cfg = PiiPolicyUserConfig {
+            custom_patterns: Some(vec![CustomPiiPattern {
+                id: "EMPLOYEE_ID".to_string(),
+                display_name: "a".repeat(PII_PATTERN_NAME_MAX_LEN),
+                pattern: r"\d{3}".to_string(),
+                case_insensitive: false,
+                forced: false,
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_user_policy_config(&cfg).is_ok());
     }
 
     #[test]

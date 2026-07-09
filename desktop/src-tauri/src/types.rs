@@ -236,6 +236,45 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
+/// A built-in PII policy template's Settings-picker metadata.
+#[derive(Serialize, Clone)]
+pub(crate) struct SecurityPolicyTemplateInfo {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+}
+
+/// Effective PII policy for the active project: `categories` is the resolved
+/// all-8 view; `custom_patterns`/`sensitive_keys_add` are the raw selection.
+#[derive(Serialize)]
+pub(crate) struct SecurityPolicyResponse {
+    /// A built-in template id, or `"custom"` when the user overrides categories.
+    pub(crate) template: String,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+    pub(crate) custom_patterns: Vec<speedwave_runtime::pii_policy::CustomPiiPattern>,
+    pub(crate) sensitive_keys_add: Vec<String>,
+}
+
+/// A custom pattern as entered in the Settings form: the UI never computes
+/// the token id — the server derives it from `display_name` on every save.
+#[derive(Deserialize, Clone)]
+pub(crate) struct SecurityPolicyCustomPatternInput {
+    pub(crate) display_name: String,
+    pub(crate) pattern: String,
+    pub(crate) case_insensitive: bool,
+}
+
+/// User-supplied PII policy update (Settings → Security save path); `template`
+/// is a built-in id or `"custom"`. The server re-validates every field.
+#[derive(Deserialize)]
+pub(crate) struct SecurityPolicyUpdate {
+    pub(crate) template: String,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+    pub(crate) custom_patterns: Vec<SecurityPolicyCustomPatternInput>,
+    pub(crate) sensitive_keys_add: Vec<String>,
+}
+
 #[derive(Serialize, Clone)]
 pub(crate) struct AuthField {
     pub(crate) key: String,
@@ -727,6 +766,36 @@ mod tests {
         assert_eq!(
             ts_val, MAX_CREDENTIAL_BYTES,
             "TS MAX_PLUGIN_CREDENTIAL_BYTES must match Rust types::MAX_CREDENTIAL_BYTES"
+        );
+    }
+
+    #[test]
+    fn pii_category_matches_models_security_policy_ts() {
+        // Cross-language SSOT guard: the Angular `PiiCategory` union must carry
+        // exactly the 8 wire strings `PiiCategory` (pii_policy.rs) serializes to.
+        let mut rust: Vec<String> = speedwave_runtime::pii_policy::PiiCategory::ALL
+            .iter()
+            .map(|c| c.wire_str().to_string())
+            .collect();
+        rust.sort();
+
+        let src = include_str!("../../src/src/app/models/security-policy.ts");
+        let marker = "export type PiiCategory =";
+        let start = src
+            .find(marker)
+            .expect("security-policy.ts must declare `export type PiiCategory`");
+        let rest = &src[start + marker.len()..];
+        let end = rest.find(';').expect("PiiCategory union must end with `;`");
+        let mut ts: Vec<String> = rest[..end]
+            .split('|')
+            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS PiiCategory union must match Rust PiiCategory serde strings"
         );
     }
 }
