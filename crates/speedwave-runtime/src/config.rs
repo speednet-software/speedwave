@@ -754,7 +754,7 @@ pub struct PiiPolicyUserConfig {
 }
 
 /// MDM-layer PII policy: today only the forced-on category union slot.
-/// The single production `resolve_pii_policy` call site passes `None` in v1 (no MDM wiring yet).
+/// Both production `resolve_pii_policy` call sites pass `None` in v1 (no MDM wiring yet).
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedPiiPolicyConfig {

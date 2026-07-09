@@ -19,6 +19,10 @@ pub const PII_PATTERN_MAX_LEN: usize = 512;
 pub const PII_PATTERN_NAME_MAX_LEN: usize = 64;
 /// Maximum stored length (bytes) of a single sensitive-key substring.
 const SENSITIVE_KEY_MAX_LEN: usize = 64;
+/// Maximum bound of a group-applied counted quantifier (the `){n}`/`){n,}`/`){n,m}`
+/// form), mirroring `pattern-lint.ts`'s `MAX_QUANTIFIER_COUNT`. Atom and char-class
+/// quantifiers are exempt (linear-time, not a ReDoS risk), as in the TS lint.
+const PII_PATTERN_MAX_QUANTIFIER: u32 = 128;
 
 const DEFAULT_MAX_TOKENS: u32 = 1000;
 const DEFAULT_TTL_MS: u64 = 30 * 60 * 1000;
@@ -336,8 +340,8 @@ pub fn derive_custom_pattern_id(display_name: &str) -> Result<String, String> {
     Ok(id)
 }
 
-/// Save-time gate: non-empty, at most [`PII_PATTERN_MAX_LEN`] bytes, compiles
-/// under `regex` (rejects backrefs/lookaround), free of `(a+)+`-class nesting.
+/// Save-time gate: non-empty, at most [`PII_PATTERN_MAX_LEN`] bytes, compiles under `regex`, no
+/// group-applied counted quantifier over [`PII_PATTERN_MAX_QUANTIFIER`], free of `(a+)+`-nesting.
 pub fn validate_value_pattern(pattern: &str) -> Result<(), String> {
     if pattern.is_empty() {
         return Err("pattern must not be empty".to_string());
@@ -346,6 +350,7 @@ pub fn validate_value_pattern(pattern: &str) -> Result<(), String> {
         return Err(format!("pattern exceeds {PII_PATTERN_MAX_LEN} bytes"));
     }
     Regex::new(pattern).map_err(|e| format!("pattern does not compile: {e}"))?;
+    scan_quantifier_bounds(pattern)?;
     scan_nested_quantifiers(pattern)
 }
 
@@ -455,6 +460,85 @@ fn mark_unbounded(stack: &mut [bool]) {
     if let Some(last) = stack.last_mut() {
         *last = true;
     }
+}
+
+/// Parses a `{...}` body (`n`, `n,`, or `n,m`) into `(lower, upper)`; `upper` is
+/// `None` for the open-ended `n,` form. `None` overall if either number doesn't parse.
+fn parse_counted_bounds(body: &str) -> Option<(u32, Option<u32>)> {
+    match body.split_once(',') {
+        None => {
+            let n = body.parse().ok()?;
+            Some((n, Some(n)))
+        }
+        Some((lower, "")) => Some((lower.parse().ok()?, None)),
+        Some((lower, upper)) => Some((lower.parse().ok()?, Some(upper.parse().ok()?))),
+    }
+}
+
+/// If a counted quantifier (`{n}`/`{n,}`/`{n,m}`) starts at `b[i]`, returns its
+/// inner body (between the braces) and the byte length it spans; `None` otherwise.
+fn counted_quantifier_at(b: &[u8], i: usize) -> Option<(&str, usize)> {
+    if b.get(i) != Some(&b'{') || !matches!(b.get(i + 1), Some(c) if c.is_ascii_digit()) {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < b.len() && b[j] != b'}' {
+        j += 1;
+    }
+    if j >= b.len() {
+        return None;
+    }
+    let body = std::str::from_utf8(&b[i + 1..j]).ok()?;
+    Some((body, j + 1 - i))
+}
+
+/// Save-time cap mirroring `pattern-lint.ts`'s `MAX_QUANTIFIER_COUNT`: a counted
+/// quantifier applied to a GROUP (the `){n}`/`){n,}`/`){n,m}` form) may not exceed
+/// [`PII_PATTERN_MAX_QUANTIFIER`]. Atom and char-class quantifiers are exempt (linear-time,
+/// not a ReDoS risk). Escape/char-class handling mirrors `scan_nested_quantifiers`.
+fn scan_quantifier_bounds(pattern: &str) -> Result<(), String> {
+    let b = pattern.as_bytes();
+    let mut i = 0usize;
+
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += if i + 1 < b.len() { 2 } else { 1 };
+            }
+            b'[' => {
+                i += 1;
+                if b.get(i) == Some(&b'^') {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b']') {
+                    i += 1;
+                }
+                while i < b.len() && b[i] != b']' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b')' => {
+                i += 1;
+                if let Some((body, qlen)) = counted_quantifier_at(b, i) {
+                    if let Some((lower, upper)) = parse_counted_bounds(body) {
+                        if lower > PII_PATTERN_MAX_QUANTIFIER
+                            || upper.is_some_and(|u| u > PII_PATTERN_MAX_QUANTIFIER)
+                        {
+                            return Err(format!(
+                                "group quantifier \"{{{body}}}\" in pattern \"{pattern}\" exceeds the maximum of {PII_PATTERN_MAX_QUANTIFIER} repetitions"
+                            ));
+                        }
+                    }
+                    i += qlen;
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Scans a compiled-valid pattern for the `(a+)+`-class: a quantified group
@@ -1116,6 +1200,45 @@ sensitiveKeys: { add: [], remove: [] }
         assert!(validate_value_pattern("(a+)").is_ok());
         assert!(validate_value_pattern("a+b+").is_ok());
         assert!(validate_value_pattern("(?:abc)+").is_ok());
+    }
+
+    #[test]
+    fn validate_value_pattern_accepts_group_quantifier_bound_at_the_cap() {
+        assert!(validate_value_pattern("(ab){1,128}").is_ok());
+        assert!(validate_value_pattern("(ab){128}").is_ok());
+    }
+
+    #[test]
+    fn validate_value_pattern_rejects_group_quantifier_bound_over_the_cap() {
+        let err = validate_value_pattern("(ab){129}").unwrap_err();
+        assert!(err.contains("128"));
+        assert!(validate_value_pattern("(?:x){200,300}").is_err());
+        assert!(validate_value_pattern("(a|b){0,129}").is_err());
+    }
+
+    #[test]
+    fn validate_value_pattern_exempts_atom_and_char_class_quantifiers_from_the_cap() {
+        // Atom/char-class counted quantifiers are linear-time; TS exempts them and so must we,
+        // or safe user patterns (and the built-in EMAIL `{1,255}`) would be wrongly rejected.
+        assert!(validate_value_pattern("a{129}").is_ok());
+        assert!(validate_value_pattern("[a-z]{1,255}").is_ok());
+        assert!(validate_value_pattern(r"\d{200}").is_ok());
+    }
+
+    #[test]
+    fn validate_value_pattern_ignores_braces_in_char_class_or_escaped() {
+        // A `{` inside `[...]` or preceded by `\` is a literal, never a quantifier.
+        assert!(validate_value_pattern(r"[a{300}]bbb").is_ok());
+        assert!(validate_value_pattern(r"a\{300,999\}bbb").is_ok());
+    }
+
+    #[test]
+    fn builtin_templates_have_no_pattern_exceeding_the_quantifier_cap() {
+        for template in builtin_templates().unwrap() {
+            for p in &template.custom_patterns {
+                assert!(validate_value_pattern(&p.pattern).is_ok());
+            }
+        }
     }
 
     // ---- validate_sensitive_key --------------------------------------------
