@@ -1378,6 +1378,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }
         }
 
@@ -1427,6 +1428,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }
         }
 
@@ -1518,6 +1520,7 @@ mod tests {
                         claude: None,
                         integrations: None,
                         plugin_settings: None,
+                        policy: None,
                     })
                     .collect(),
                 ..Default::default()
@@ -1633,6 +1636,7 @@ mod tests {
                     }),
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 }],
                 ..Default::default()
             }

@@ -631,6 +631,9 @@ pub struct ProjectUserEntry {
     /// Per-plugin settings values keyed by slug.
     #[serde(default)]
     pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
+    /// PII policy selection for this project (`None` = compiled-in default).
+    #[serde(default)]
+    pub policy: Option<PiiPolicyUserConfig>,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -732,6 +735,31 @@ pub struct ManagedTelemetryConfig {
     pub metric_export_interval_ms: Option<u64>,
     /// Force the logs export interval (ms).
     pub logs_export_interval_ms: Option<u64>,
+}
+
+/// User-layer PII policy selection: a named template plus optional custom
+/// overrides. `None` (no `policy` key) resolves to the compiled-in default.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct PiiPolicyUserConfig {
+    /// Builtin template id to base the resolved policy on (`None` = "strict").
+    pub template_id: Option<String>,
+    /// Full category-enablement override; presence switches resolution to custom mode.
+    pub categories: Option<crate::pii_policy::PiiCategoryFlags>,
+    /// Additive custom detection patterns, layered on top of the template's own.
+    pub custom_patterns: Option<Vec<crate::pii_policy::CustomPiiPattern>>,
+    /// Sensitive key-name add/remove deltas, layered on top of the template's own.
+    pub sensitive_keys: Option<crate::pii_policy::PiiSensitiveKeyDelta>,
+    /// Optional token-lifecycle overrides.
+    pub limits: Option<crate::pii_policy::PiiPolicyLimits>,
+}
+
+/// MDM-layer PII policy: today only the forced-on category union slot.
+/// The single production `resolve_pii_policy` call site passes `None` in v1 (no MDM wiring yet).
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedPiiPolicyConfig {
+    /// Categories forced on regardless of the user's own selection.
+    pub forced_categories: Option<Vec<crate::pii_policy::PiiCategory>>,
 }
 
 /// Fully resolved telemetry after the per-field merge + cross-field gates.
@@ -1070,6 +1098,8 @@ pub struct ResolvedClaudeConfig {
     /// Merged telemetry the renderer reads for the managed-settings mount.
     /// An unresolvable policy degrades to `disabled()`; it is hard-stopped at boot.
     pub telemetry: ResolvedTelemetry,
+    /// Resolved PII policy the host writes to `policy.json` for the hub.
+    pub pii_policy: crate::pii_policy::ResolvedPiiPolicy,
 }
 
 /// Resolves both Claude config and integrations in a single pass,
@@ -1243,11 +1273,19 @@ pub(crate) fn resolve_project_config_in_with_managed(
     // policy is hard-stopped at boot by check_telemetry_policy_at_boot.
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
+    let pii_policy = crate::pii_policy::resolve_pii_policy(
+        user_config
+            .find_project(project_name)
+            .and_then(|p| p.policy.as_ref()),
+        None,
+    );
+
     let claude = ResolvedClaudeConfig {
         env,
         flags,
         llm,
         telemetry,
+        pii_policy,
     };
     (claude, integrations)
 }
@@ -2181,6 +2219,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2475,6 +2514,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2523,6 +2563,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2558,6 +2599,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2589,6 +2631,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2625,6 +2668,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2688,6 +2732,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3101,6 +3146,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             ..Default::default()
         };
@@ -3238,6 +3284,7 @@ mod tests {
             claude: None,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -3361,6 +3408,7 @@ mod tests {
             }),
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -3652,6 +3700,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3760,6 +3809,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -3785,6 +3835,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -3830,6 +3881,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -3890,6 +3942,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -3921,6 +3974,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -3937,6 +3991,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -3980,6 +4035,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4025,6 +4081,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4249,6 +4306,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4322,6 +4380,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4360,6 +4419,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4494,6 +4554,74 @@ mod tests {
         );
         assert!(integrations.slack);
         assert!(!integrations.gitlab);
+    }
+
+    // ---- PII policy wiring (WP4) --------------------------------------------
+
+    #[test]
+    fn project_user_entry_without_policy_field_loads_as_none() {
+        let json = r#"{"name":"p","dir":"/tmp/p"}"#;
+        let entry: ProjectUserEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.policy.is_none());
+    }
+
+    #[test]
+    fn user_policy_selection_reaches_resolved_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    template_id: Some("gdpr-art32".to_string()),
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (claude, _) =
+            resolve_project_config_in_with_managed(tmp.path(), tmp.path(), &user_config, "p", None);
+        assert!(!claude.pii_policy.categories.api_key);
+        assert_eq!(
+            claude.pii_policy.source,
+            crate::pii_policy::PiiPolicySource::Template {
+                template_id: "gdpr-art32".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn repo_speedwave_json_cannot_set_pii_policy() {
+        // A repo `.speedwave.json` is a restricted subset (ProjectRepoConfig) that
+        // never gains a `policy` field; an extra "policy" key must be a no-op.
+        let with_policy_key = tempfile::tempdir().unwrap();
+        std::fs::write(
+            with_policy_key.path().join(".speedwave.json"),
+            r#"{"policy": {"templateId": "gdpr-art32", "categories": {"EMAIL": false}}}"#,
+        )
+        .unwrap();
+        let without_policy_key = tempfile::tempdir().unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let (claude_with, _) = resolve_project_config(with_policy_key.path(), &user_config, "p");
+        let (claude_without, _) =
+            resolve_project_config(without_policy_key.path(), &user_config, "p");
+
+        assert_eq!(
+            serde_json::to_string(&claude_with.pii_policy).unwrap(),
+            serde_json::to_string(&claude_without.pii_policy).unwrap(),
+            "repo .speedwave.json must never influence the resolved PII policy"
+        );
+        assert_eq!(
+            claude_with.pii_policy.categories,
+            crate::pii_policy::PiiCategoryFlags::ALL_ON
+        );
     }
 
     #[test]
@@ -4656,6 +4784,7 @@ mod tests {
                     )])),
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4683,6 +4812,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -4690,6 +4820,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: None,
@@ -4758,6 +4889,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -4765,6 +4897,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -4792,6 +4925,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -5085,6 +5219,7 @@ mod plugin_order_tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,

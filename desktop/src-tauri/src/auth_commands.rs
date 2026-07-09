@@ -415,6 +415,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -447,6 +448,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -470,6 +472,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -500,6 +503,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -536,6 +540,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -568,6 +573,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             });
 
         let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");

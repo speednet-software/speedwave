@@ -1247,6 +1247,7 @@ mod tests {
             flags: default_flags(),
             llm,
             telemetry,
+            ..Default::default()
         }
     }
 

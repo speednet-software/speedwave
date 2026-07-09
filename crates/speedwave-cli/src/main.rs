@@ -1751,6 +1751,7 @@ mod tests {
             claude,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         });
         user_config
     }
@@ -2046,6 +2047,7 @@ mod tests {
             claude: None,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         }
     }
 
@@ -2093,6 +2095,7 @@ mod tests {
             claude: None,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
         assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");

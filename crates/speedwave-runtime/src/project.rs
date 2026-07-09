@@ -196,6 +196,7 @@ fn add_project_with_validated_dir(
         claude: None,
         integrations: None,
         plugin_settings: None,
+        policy: None,
     };
 
     user_config.projects.push(entry);
@@ -504,6 +505,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -583,6 +585,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -648,6 +651,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
