@@ -97,7 +97,7 @@ Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-$services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
+$services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
 
 foreach ($svc in $services) {
     $svcDest = "$dest\build-context\mcp-servers\$svc"
@@ -112,6 +112,10 @@ foreach ($svc in $services) {
     }
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
+    }
+    # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
+    if (Test-Path "mcp-servers\$svc\templates") {
+        Copy-Item -Recurse "mcp-servers\$svc\templates" "$svcDest\templates"
     }
     # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
     # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.

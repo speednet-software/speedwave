@@ -71,8 +71,10 @@ jobs:
         working-directory: mcp-servers
         run: |
           (cd shared && npx tsc)
+          # hub resolves @speedwave/policy-engine types from policies/dist, so build (not noEmit).
+          (cd policies && npx tsc)
           # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
+          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done

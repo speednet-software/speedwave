@@ -23,7 +23,18 @@ COPY shared/tsconfig.json ./shared/
 RUN cd shared && npm run build
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: Build hub (imports from ../shared/dist)
+# Stage 2: Build policies (imports from ../shared/dist; hub imports from ../policies/dist)
+# ─────────────────────────────────────────────────────────────────────────────
+COPY policies/package*.json ./policies/
+RUN --mount=type=cache,target=/root/.npm cd policies && npm install
+
+COPY policies/src ./policies/src
+COPY policies/tsconfig.json ./policies/
+COPY policies/templates ./policies/templates
+RUN cd policies && npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Build hub (imports from ../shared/dist and ../policies/dist)
 # ─────────────────────────────────────────────────────────────────────────────
 COPY hub/package*.json ./hub/
 RUN --mount=type=cache,target=/root/.npm cd hub && npm install
@@ -48,13 +59,19 @@ COPY --from=builder /build/shared/dist ../shared/dist
 COPY --from=builder /build/shared/package.json ../shared/
 COPY --from=builder /build/shared/node_modules ../shared/node_modules
 
+# Copy built policies library (required at runtime for relative imports + template loading)
+COPY --from=builder /build/policies/dist ../policies/dist
+COPY --from=builder /build/policies/templates ../policies/templates
+COPY --from=builder /build/policies/package.json ../policies/
+COPY --from=builder /build/policies/node_modules ../policies/node_modules
+
 # Copy built hub application
 COPY --from=builder /build/hub/package*.json ./
 COPY --from=builder /build/hub/dist ./dist
 COPY --from=builder /build/hub/node_modules ./node_modules
 
 # Create directories
-RUN mkdir -p /context && chown -R node:node /context /app /app/../shared
+RUN mkdir -p /context && chown -R node:node /context /app /app/../shared /app/../policies
 
 # Security: non-root user
 USER node

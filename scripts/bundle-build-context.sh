@@ -72,7 +72,7 @@ cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab github atlassian office playwright context7"
+MCP_SERVICES="shared policies hub slack sharepoint redmine gitlab github atlassian office playwright context7"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"
@@ -83,6 +83,8 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
+  # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
+  [ -d "$svc_src/templates" ] && cp -r "$svc_src/templates" "$svc_dest/"
   # office: exclude test_*.py — not in runtime image; must match bundle-build-context.ps1.
   if [ -d "$svc_src/scripts" ]; then
     mkdir -p "$svc_dest/scripts"

@@ -75,11 +75,18 @@ teardown() {
 @test "bundle script creates all MCP service directories" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    for svc in shared hub slack sharepoint redmine gitlab; do
+    for svc in shared policies hub slack sharepoint redmine gitlab; do
         [ -d "$DEST/build-context/mcp-servers/$svc" ]
         [ -f "$DEST/build-context/mcp-servers/$svc/package.json" ]
         [ -d "$DEST/build-context/mcp-servers/$svc/src" ]
     done
+}
+
+@test "bundle script copies policies templates" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/mcp-servers/policies/templates" ]
+    [ -f "$DEST/build-context/mcp-servers/policies/templates/strict.yaml" ]
 }
 
 @test "bundle script does not include os service in build-context" {

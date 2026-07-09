@@ -83,6 +83,7 @@ pub const IMAGES: &[ImageDef] = &[
         hash_inputs: &[
             "mcp-servers/hub",
             "mcp-servers/shared",
+            "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
         ],
     },
