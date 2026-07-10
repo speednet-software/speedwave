@@ -2610,7 +2610,7 @@ mod tests {
         .0;
         assert!(
             !resolved.telemetry.enabled
-                && resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_none(),
+                && !resolved.env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"),
             "telemetry must fail closed (disabled, no OTEL env) when the MDM policy cannot be read"
         );
     }
