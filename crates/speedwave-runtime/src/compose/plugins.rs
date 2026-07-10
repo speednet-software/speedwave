@@ -119,8 +119,11 @@ pub(crate) fn apply_plugins_from_verified(
                 if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
                 {
                     let compose_name = plugin::derive_compose_name(sid);
+                    // Under WSL2 mirrored networking the container reaches the bridge
+                    // through the guest relay port, not the loopback bind port (ADR-079).
+                    let container_port = super::container_facing_port(registration.port);
                     let bridge_url =
-                        format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, registration.port);
+                        format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, container_port);
                     add_service_env_var(
                         &mut doc,
                         &compose_name,

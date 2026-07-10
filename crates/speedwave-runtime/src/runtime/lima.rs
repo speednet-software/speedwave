@@ -91,6 +91,16 @@ impl LimaRuntime {
     fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
         super::parse_version(version_output)
     }
+
+    /// Flushes the stale CNI iptables chains / bridges named in `err` in the Lima VM
+    /// via `sudo`. Best-effort; see [`super::cni_cleanup_command`].
+    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
+        let vm = consts::lima_vm_name();
+        let cmd = super::cni_cleanup_command(err);
+        self.runner
+            .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
+            .map(|_| ())
+    }
 }
 
 /// Recursively copies `src` into `dst`, creating directories as needed.
@@ -273,25 +283,31 @@ impl ContainerRuntime for LimaRuntime {
         );
 
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                vm,
-                "--",
-                "sudo",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--remove-orphans",
-            ],
-        )?;
-        Ok(())
+        let up = || {
+            self.runner
+                .run(
+                    "limactl",
+                    &[
+                        "shell",
+                        vm,
+                        "--",
+                        "sudo",
+                        "nerdctl",
+                        "compose",
+                        "-f",
+                        &compose_file,
+                        "-p",
+                        project,
+                        "up",
+                        "-d",
+                        "--remove-orphans",
+                    ],
+                )
+                .map(|_| ())
+        };
+        // Self-heal a stale CNI iptables/bridge collision from a prior dirty
+        // shutdown (`iptables: Chain already exists`): flush + retry once.
+        super::with_cni_heal(up, |e| self.cleanup_stale_cni(e))
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -1495,6 +1511,60 @@ mod tests {
             "second command should be nerdctl compose up, got: {}",
             commands[1]
         );
+    }
+
+    #[test]
+    fn compose_up_self_heals_stale_cni_and_retries_to_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct HealRunner {
+            up_calls: Arc<AtomicUsize>,
+            cleanup_calls: Arc<AtomicUsize>,
+        }
+        impl CommandRunner for HealRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                // is_available() / require_running() probes.
+                if cmd == "limactl" && args.first() == Some(&"--version") {
+                    return Ok("limactl version 1.0.0".to_string());
+                }
+                if cmd == "limactl" && args.first() == Some(&"list") {
+                    return Ok("Running".to_string());
+                }
+                let joined = args.join(" ");
+                if joined.contains("nerdctl")
+                    && joined.contains("compose")
+                    && joined.contains(" up ")
+                {
+                    if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        anyhow::bail!(
+                            "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
+                        );
+                    }
+                    return Ok(String::new());
+                }
+                if joined.contains("base64 -d | sh") {
+                    self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(String::new())
+            }
+        }
+
+        let up_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let rt = LimaRuntime::with_runner(Box::new(HealRunner {
+            up_calls: Arc::clone(&up_calls),
+            cleanup_calls: Arc::clone(&cleanup_calls),
+        }));
+        assert!(
+            rt.compose_up("acme").is_ok(),
+            "stale-CNI up must self-heal and retry to success"
+        );
+        assert_eq!(
+            up_calls.load(Ordering::SeqCst),
+            2,
+            "up runs twice (fail + retry)"
+        );
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "cleanup runs once");
     }
 
     #[test]

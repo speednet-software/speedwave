@@ -108,6 +108,15 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
+    /// Flushes the stale CNI iptables chains / bridges named in `err`, as root in the
+    /// distro. Best-effort; see [`super::cni_cleanup_command`].
+    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
+        // run_in_distro already wraps in `sh -c` and the payload crosses the WSL
+        // default-shell reparse; base64 keeps the script quote-free through both.
+        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(err)], true)
+            .map(|_| ())
+    }
+
     /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the
     /// container uid around every `up` — nerdctl root-creates missing
     /// bind-mount sources (ADR-052). Fail-open.
@@ -416,28 +425,32 @@ fn wsl_compose_file_path(project: &str) -> anyhow::Result<String> {
 #[cfg(any(target_os = "windows", test))]
 impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        let _ = distro;
         // BEFORE up: the uid-1000 entrypoint races a post-up chown (ADR-052).
         self.ensure_claude_home_writable(project);
-        let up = self.run_in_distro(
-            &[
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--remove-orphans",
-            ],
-            false,
-        );
+        let up = || {
+            self.run_in_distro(
+                &[
+                    "nerdctl",
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "-p",
+                    project,
+                    "up",
+                    "-d",
+                    "--remove-orphans",
+                ],
+                false,
+            )
+            .map(|_| ())
+        };
+        // Self-heal a stale CNI iptables/bridge collision from a prior dirty
+        // shutdown (`iptables: Chain already exists`): flush + retry once.
+        let result = super::with_cni_heal(up, |e| self.cleanup_stale_cni(e));
         // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
-        up.map(|_| ())
+        result
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -2800,6 +2813,40 @@ mod tests {
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(rt.compose_up("acme").is_err());
             assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
+        }
+
+        #[test]
+        fn compose_up_self_heals_stale_cni_and_retries_to_success() {
+            // Pre-up chown (fast pass) → up FAILS with a stale-CNI collision →
+            // cleanup runs → up retries and succeeds → post-up chown (fast pass).
+            let mut responses = owned_pass();
+            responses.push(Err(anyhow::anyhow!(
+                "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
+            )));
+            responses.push(Ok("".into())); // cleanup
+            responses.push(Ok("".into())); // up retry succeeds
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(
+                rt.compose_up("acme").is_ok(),
+                "stale-CNI up must self-heal and retry to success"
+            );
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                7,
+                "2 pre + up(fail) + cleanup + up(retry) + 2 post"
+            );
+            assert!(calls[2].1.last().unwrap().contains(" up "), "first up");
+            assert!(
+                calls[3].1.last().unwrap().contains("base64 -d | sh"),
+                "cleanup must run between the failed up and the retry: {:?}",
+                calls[3].1
+            );
+            assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
         }
     }
 

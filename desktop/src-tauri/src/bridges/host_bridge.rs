@@ -120,6 +120,11 @@ pub struct HostBridgeConfig {
     pub lock_body: LockBodyBuilder,
     pub watchdog_interval: Duration,
     pub stale_probe_timeout: Duration,
+    /// Name the lock file with the container-facing (relay) port instead of the raw bind
+    /// port. Set only for the IDE bridge, whose lock is READ BY THE CONTAINER (Claude Code
+    /// dials the filename port); under WSL2 mirrored mode that must be the relay port. No-op
+    /// under NAT. Host-facing bridge locks (figma, etc.) keep the raw port — ADR-079.
+    pub container_facing_lock: bool,
 }
 
 impl HostBridgeConfig {
@@ -134,6 +139,7 @@ impl HostBridgeConfig {
             lock_body: None,
             watchdog_interval: Duration::from_secs(5),
             stale_probe_timeout: Duration::from_millis(200),
+            container_facing_lock: false,
         }
     }
 }
@@ -148,6 +154,7 @@ pub struct HostBridgeConfigBuilder {
     lock_body: Option<LockBodyBuilder>,
     watchdog_interval: Duration,
     stale_probe_timeout: Duration,
+    container_facing_lock: bool,
 }
 
 impl HostBridgeConfigBuilder {
@@ -175,6 +182,12 @@ impl HostBridgeConfigBuilder {
 
     pub fn max_frame_bytes(mut self, n: Option<usize>) -> Self {
         self.max_frame_bytes = n;
+        self
+    }
+
+    /// See [`HostBridgeConfig::container_facing_lock`]. Set only for the IDE bridge.
+    pub fn container_facing_lock(mut self, v: bool) -> Self {
+        self.container_facing_lock = v;
         self
     }
 
@@ -250,6 +263,7 @@ impl HostBridgeConfigBuilder {
             lock_body,
             watchdog_interval: self.watchdog_interval,
             stale_probe_timeout: self.stale_probe_timeout,
+            container_facing_lock: self.container_facing_lock,
         })
     }
 }
@@ -417,11 +431,22 @@ impl HostBridge {
     ) -> anyhow::Result<Self> {
         let listener = bind_with_retry(&config.name, opts.preferred_port)?;
         let port = listener.local_addr()?.port();
+        // Reach this loopback listener from containers under WSL2 mirrored mode via a
+        // guest-side relay (ADR-079). No-op off Windows/mirrored.
+        crate::mirror_relay::ensure_relay_for_port(port);
         let token = load_or_create_persistent_token(opts.persistent_token_path.as_deref())?;
 
         let data_dir = consts::data_dir();
         let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
-        let lock_file_path = lock_dir.join(format!("{port}.lock"));
+        // The lock filename carries the port the reader dials. The IDE bridge's lock is read
+        // by the CONTAINER (Claude Code uses the filename port), so under mirrored mode it
+        // must be the relay port; host-facing locks keep the raw port. No-op under NAT.
+        let lock_port = if config.container_facing_lock {
+            speedwave_runtime::compose::container_facing_port(port)
+        } else {
+            port
+        };
+        let lock_file_path = lock_dir.join(format!("{lock_port}.lock"));
 
         Ok(Self {
             auth_state: Arc::new(Mutex::new(AuthState::new(token))),
@@ -569,6 +594,15 @@ impl HostBridge {
                     }
                 };
                 rt.block_on(async move {
+                    // The mirror relay lives in the WSL distro; a distro restart wipes it
+                    // while this bridge process survives, so re-ensure it periodically
+                    // (idempotent, no-op off Windows/mirrored) — ADR-079.
+                    const RELAY_REENSURE_INTERVAL: Duration = Duration::from_secs(30);
+                    let mut last_relay_ensure = std::time::Instant::now();
+                    // In-flight guard: never stack blocking `ensure` tasks if a wsl.exe call
+                    // wedges (it's bounded, but the guard caps concurrency at one).
+                    let relay_inflight =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     loop {
                         tokio::select! {
                             _ = watchdog_shutdown.recv() => break,
@@ -584,6 +618,27 @@ impl HostBridge {
                                             "watchdog: failed to re-create lock file: {e}"
                                         );
                                     }
+                                }
+                                if last_relay_ensure.elapsed() >= RELAY_REENSURE_INTERVAL
+                                    && relay_inflight
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        )
+                                        .is_ok()
+                                {
+                                    last_relay_ensure = std::time::Instant::now();
+                                    // Off the select path (spawn_blocking) so the blocking
+                                    // wsl.exe call never delays watchdog shutdown; the guard
+                                    // above prevents stacking tasks if it wedges.
+                                    let port = watchdog_port;
+                                    let inflight = std::sync::Arc::clone(&relay_inflight);
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::mirror_relay::ensure_relay_for_port(port);
+                                        inflight.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    });
                                 }
                             }
                         }
@@ -607,6 +662,8 @@ impl HostBridge {
         if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
+        // Symmetric with the relay ensured at bind (ADR-079); no-op off Windows/mirrored.
+        crate::mirror_relay::remove_relay_for_port(self.tcp_port);
         match std::fs::remove_file(&self.lock_file_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -712,6 +769,7 @@ impl HostBridgeConfig {
             lock_body: self.lock_body.clone(),
             watchdog_interval: self.watchdog_interval,
             stale_probe_timeout: self.stale_probe_timeout,
+            container_facing_lock: self.container_facing_lock,
         }
     }
 }
@@ -3022,6 +3080,52 @@ mod tests {
         assert!(
             timed_out,
             "expected PendingSlotTimeout(worker), got {evts:?}"
+        );
+    }
+
+    /// Wiring guard: the watchdog must re-ensure the mirror relay so a WSL distro
+    /// restart (which this bridge process outlives) self-heals it (ADR-079).
+    #[test]
+    fn watchdog_reensures_mirror_relay() {
+        let source = include_str!("host_bridge.rs");
+        let wd = source
+            .find("\"host_bridge::{}::watchdog\"")
+            .expect("watchdog thread name must exist");
+        let end = source[wd..]
+            .find("self.shutdown_tx = Some(shutdown_tx);")
+            .map(|o| wd + o)
+            .expect("watchdog block terminator must exist");
+        assert!(
+            source[wd..end].contains("ensure_relay_for_port"),
+            "watchdog loop must call ensure_relay_for_port to revive the relay after a distro restart"
+        );
+    }
+
+    #[test]
+    fn container_facing_lock_flag_defaults_off_and_plumbs_through() {
+        // Default: host-facing bridges keep the raw bind port in the lock filename.
+        let default = HostBridgeConfig::builder("figma-x")
+            .endpoint(AuthScheme::Header("x-test"))
+            .origin_policy(OriginPolicy::RejectIfPresent)
+            .lock_body(|_| serde_json::json!({}))
+            .build()
+            .unwrap();
+        assert!(
+            !default.container_facing_lock,
+            "default must be host-facing (raw port)"
+        );
+
+        // Opt-in (IDE bridge): lock filename uses the container-facing (relay) port.
+        let ide = HostBridgeConfig::builder("ide")
+            .endpoint(AuthScheme::Header("x-test"))
+            .origin_policy(OriginPolicy::RejectIfPresent)
+            .lock_body(|_| serde_json::json!({}))
+            .container_facing_lock(true)
+            .build()
+            .unwrap();
+        assert!(
+            ide.container_facing_lock,
+            "opt-in flag must reach the config"
         );
     }
 

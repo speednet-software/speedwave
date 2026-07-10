@@ -32,12 +32,12 @@ pub use proxy::{
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{
-    host_addressing, host_bind_address, host_gateway_ip, invalidate_host_addressing_cache,
-    HostAddressing, HostAddressingComputer,
+    container_facing_port, host_addressing, host_bind_address, host_gateway_ip,
+    invalidate_host_addressing_cache, mirror_relay_port, HostAddressing, HostAddressingComputer,
 };
 #[cfg(test)]
 pub use addressing::{
-    reset_host_addressing_computer_for_test, set_host_addressing_computer_for_test,
+    reset_host_addressing_computer_for_test, set_host_addressing_computer_for_test, FixedComputer,
 };
 
 // Final YAML env-scalar quoting pass — `harden_env_scalar_quoting` is called by
@@ -5535,8 +5535,10 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_os_config_injects_when_token_exists() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let _guard = pin_nat_addressing();
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
         let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
@@ -5609,19 +5611,41 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_os_gateway_url_uses_gateway_not_bind_addr() {
         let port: u16 = 12345;
+        // NAT (non-mirrored): the port passes through unchanged.
+        super::set_host_addressing_computer_for_test(std::sync::Arc::new(super::FixedComputer(
+            super::HostAddressing {
+                gateway_ip: "192.168.5.2".to_string(),
+                bind_address: "127.0.0.1".to_string(),
+            },
+        )));
         let url = mcp_os_gateway_url(port);
         assert_eq!(
             url,
             format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS),
-            "containers reach mcp-os via the canonical host gateway alias"
+            "NAT: containers reach mcp-os via the canonical alias, port unchanged"
         );
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
         assert!(
             !url.contains("0.0.0.0"),
             "mcp_os_gateway_url must not use 0.0.0.0 — containers can't route to it"
         );
+
+        // Mirrored: the URL must carry the relay port, not the bind port (ADR-079).
+        super::set_host_addressing_computer_for_test(std::sync::Arc::new(super::FixedComputer(
+            super::HostAddressing {
+                gateway_ip: crate::consts::MIRROR_RELAY_GATEWAY_IP.to_string(),
+                bind_address: "127.0.0.1".to_string(),
+            },
+        )));
+        assert_eq!(
+            mcp_os_gateway_url(port),
+            format!("http://{}:{}", consts::HOST_GATEWAY_ALIAS, port ^ 0x4000),
+            "mirrored: URL uses the relay port, not the bind port"
+        );
+        super::reset_host_addressing_computer_for_test();
     }
 
     #[test]
@@ -5826,7 +5850,9 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
+        let _guard = pin_nat_addressing();
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         write_live_oauth_lock(&lock_path, 49301);
@@ -6086,8 +6112,10 @@ services:
 
     /// Negative-injection test: `apply_oauth_config` must NOT touch services other than SharePoint.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_oauth_config_injects_url_and_bearer_into_slack_consumer() {
         // ADR-071: slack consumes the host oauth worker exactly like sharepoint.
+        let _guard = pin_nat_addressing();
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         write_live_oauth_lock(&lock_path, 49302);
@@ -11417,8 +11445,33 @@ services:
         assert!(!yaml.contains("EXAMPLE_PLUGIN_BRIDGE_TOKEN"));
     }
 
+    /// Pins host addressing to a fixed gateway (bind stays loopback) so `mirror_relay_port`
+    /// is deterministic across dev machines. Reuses the shared `FixedComputer` (ADR-079).
+    fn fixed_gateway(gateway_ip: &str) -> std::sync::Arc<super::FixedComputer> {
+        std::sync::Arc::new(super::FixedComputer(super::HostAddressing {
+            gateway_ip: gateway_ip.to_string(),
+            bind_address: "127.0.0.1".to_string(),
+        }))
+    }
+
+    /// RAII: pin a non-mirrored (NAT) gateway so worker/bridge URLs keep the raw bind
+    /// port (no `mirror_relay_port` translation), then restore the default on drop —
+    /// panic-safe, unlike a trailing `reset` call. Pair with `#[serial(host_addressing)]`.
+    struct NatAddressingGuard;
+    impl Drop for NatAddressingGuard {
+        fn drop(&mut self) {
+            super::reset_host_addressing_computer_for_test();
+        }
+    }
+    fn pin_nat_addressing() -> NatAddressingGuard {
+        super::set_host_addressing_computer_for_test(fixed_gateway("192.168.5.2"));
+        NatAddressingGuard
+    }
+
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
+        super::set_host_addressing_computer_for_test(fixed_gateway("192.168.5.2"));
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
                 plugin_slug: "example-plugin".to_string(),
@@ -11447,6 +11500,7 @@ services:
         );
         assert!(yaml.contains("54321"), "port must appear in URL");
         assert!(yaml.contains("test-token-abc"), "token must appear in env");
+        super::reset_host_addressing_computer_for_test();
     }
 
     // ── Local LLM: tokens_path / ensure_token_dir / read_local_llm_token /
@@ -11634,7 +11688,9 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
+        super::set_host_addressing_computer_for_test(fixed_gateway("192.168.5.2"));
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
                 plugin_slug: "example-plugin".to_string(),
@@ -11656,6 +11712,44 @@ services:
             yaml.contains("ws://host.docker.internal:54321/"),
             "URL must use host.docker.internal alias"
         );
+        super::reset_host_addressing_computer_for_test();
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_render_compose_host_bridge_url_uses_relay_port_under_mirrored() {
+        // Under mirrored mode the container dials the guest relay port, not the loopback
+        // bind port — exercises `mirror_relay_port(port).unwrap_or(port)` in the injector.
+        super::set_host_addressing_computer_for_test(fixed_gateway(
+            crate::consts::MIRROR_RELAY_GATEWAY_IP,
+        ));
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "example-plugin".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "EXAMPLE_PLUGIN_BRIDGE_URL".to_string(),
+                token_env: "EXAMPLE_PLUGIN_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        let relay = 54321u16 ^ 0x4000;
+        // No `{yaml}`: this render carries the bridge auth token (cleartext-logging).
+        assert!(
+            yaml.contains(&format!("ws://host.docker.internal:{relay}/")),
+            "container URL must use the relay port {relay}, not the bind port"
+        );
+        assert!(
+            !yaml.contains("host.docker.internal:54321"),
+            "must not use the raw bind port under mirrored mode"
+        );
+        super::reset_host_addressing_computer_for_test();
     }
 
     #[test]

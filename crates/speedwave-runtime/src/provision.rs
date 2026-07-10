@@ -487,6 +487,40 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     install_nerdctl_full()?;
 
+    // Relay/CNI packages, ungated by the nerdctl pin: install_nerdctl_full early-returns
+    // when already aligned, so a distro provisioned before socat was added would never
+    // get it. Best-effort — a missing socat only degrades the mirrored relay (logged at use).
+    if let Err(e) = ensure_relay_packages() {
+        log::warn!("ensure_relay_packages failed (mirrored-mode relay may not work): {e}");
+    }
+
+    Ok(())
+}
+
+/// Ensures `iptables` (CNI bridge dependency) and `socat` (mirrored-mode host relay,
+/// ADR-079) exist in the distro. Idempotent and ungated by the nerdctl pin. Runs as the
+/// distro's default (root) user via `bash -s` on stdin; bounded so a wedged apt can't hang.
+#[cfg(target_os = "windows")]
+fn ensure_relay_packages() -> anyhow::Result<()> {
+    let script = "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 || \
+                  { apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null; }\n";
+    let mut child = crate::binary::system_command("wsl.exe")
+        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(script.as_bytes())?;
+    }
+    let output = wait_with_output_timeout(child, std::time::Duration::from_secs(120))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "apt-get iptables/socat failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     Ok(())
 }
 
@@ -1367,11 +1401,8 @@ pkill -x buildkitd 2>/dev/null || true
 pkill -x containerd 2>/dev/null || true
 tar -C /usr/local --unlink-first --recursive-unlink -xzf "/tmp/nerdctl-install/${{TARBALL}}"
 rm -rf /tmp/nerdctl-install
-# Install iptables — required by CNI bridge plugin for container networking.
-# nerdctl-full bundles CNI plugins but iptables is a system dependency.
-if ! command -v iptables >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq iptables >/dev/null
-fi
+# iptables (CNI) + socat (relay) are installed idempotently by ensure_relay_packages,
+# ungated by the nerdctl pin (this script is skipped when nerdctl already matches).
 # install_service NAME EXEC AFTER REQUIRES CHECK_CMD [CHECK_ARGS...]
 # Installs a systemd service unit file, starts it, and waits up to 30s for readiness.
 install_service() {{

@@ -22,10 +22,10 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 
 ## Network
 
-- Never bind or dial `127.0.0.1` in production code — WSL2 mirrored networking breaks container↔host loopback on Windows. Use `compose::host_bind_address()` / `host_gateway_ip()` (drift-tested). On Windows both equal the runtime-detected WSL adapter IP; on macOS they split (bind 127.0.0.1, gateway 192.168.5.2).
+- Never bind or dial `127.0.0.1` in production code — WSL2 mirrored networking breaks container↔host loopback on Windows. Use `compose::host_bind_address()` / `host_gateway_ip()` (drift-tested). On macOS they split (bind 127.0.0.1, gateway 192.168.5.2); on Windows **NAT** both equal the WSL adapter IP, while **mirrored** mode (the VPN-compat default, ADR-067) splits them — bind `127.0.0.1`, gateway `10.200.0.1` fronted by a guest `socat` relay (`mirror_relay_port`, ADR-079).
 - Never cache the Windows bind/gateway IP in a `OnceLock`/const — the WSL adapter IP changes across `wsl --shutdown`. Re-read `host_bind_address()` and handle `EADDRNOTAVAIL` by re-detect + rebind (pattern: `bridges/host_bridge.rs::bind_with_retry`, Desktop crate).
 - Addressing is a pluggable strategy (`compose/addressing.rs`, ADR-067): the `HostAddressingComputer` trait (`LimaStatic`/`WslDetector`/`Unsupported`) behind two `RwLock`s — a value cache and a strategy slot. In tests inject a fixture via `set_host_addressing_computer_for_test` under `#[serial_test::serial(host_addressing)]`; never mutate a raw cached IP.
-- `MCP_LISTEN_HOST` is the only channel telling a Node host-worker which interface to bind: Rust sets it from `host_bind_address()` (`host_mcp_process/process.rs`), TS reads it with a `127.0.0.1` fallback (`server.ts`). A Rust↔TS mismatch silently binds loopback and breaks container→host on WSL2 mirrored mode — no cross-read test guards it.
+- `MCP_LISTEN_HOST` is the only channel telling a Node host-worker which interface to bind: Rust sets it from `host_bind_address()` (`host_mcp_process/process.rs`), TS reads it with a `127.0.0.1` fallback (`server.ts`). Under mirrored mode loopback is the *intended* bind (the ADR-079 relay bridges container→host); the hazard is **NAT** mode, where `host_bind_address()` is the WSL adapter IP and a Rust↔TS mismatch silently falls back to loopback, breaking container→host. No cross-read test guards it.
 
 ## Filesystem
 

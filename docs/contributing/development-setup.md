@@ -64,6 +64,14 @@ The `desktop/src-tauri/cli/` directory is in `.gitignore` — it is populated at
 
 `make dev` works on Windows-native through Git Bash, but the toolchain has several quirks that need addressing. Once configured, the same `make` targets work as on macOS.
 
+### Automated (recommended)
+
+From Git Bash: **`make setup-dev-windows`** (self-elevates for admin). It installs the
+toolchain via Chocolatey and writes the two per-machine config files described below
+(`.cargo/config.toml` + `~/msvc-env.sh` sourced from `~/.bashrc`). Then open a **new**
+Git Bash and run `make setup-dev` (project deps) and `make dev`. The manual steps below
+document what that target does.
+
 ### Required tools (one-time)
 
 Install via Chocolatey (run in elevated PowerShell):
@@ -73,6 +81,11 @@ choco install -y git make rustup.install nodejs-lts cmake llvm `
                   visualstudio2022buildtools visualstudio2022-workload-vctools `
                   bats-core
 ```
+
+`cmake` + `llvm` are required for the `audio-transcription` feature: `whisper-rs-sys`
+builds `whisper.cpp` with CMake and generates bindings with `libclang` (from `llvm`).
+With a full VS Build Tools install the `cmake` crate auto-detects the Visual Studio
+generator — no `CMAKE_GENERATOR` override needed.
 
 `make` from Chocolatey is GNU Make 4.4 — required because **GnuWin32 make 3.81** (sometimes pre-installed elsewhere) mishandles `$(VAR)` expansion in recipes and `\` line continuations.
 

@@ -1,7 +1,9 @@
 # ADR-067: HostAddressing SSOT — host-side bind / container-side gateway under WSL2 mirrored networking
 
-> **Status:** Accepted
+> **Status:** Accepted (mirrored-mode addressing revised by [ADR-079](ADR-079-wsl2-mirrored-container-host-relay.md))
 > **Context:** Under WSL2 mirrored networking (enabled for VPN compatibility), TCP loopback (`127.0.0.1`) from a container to a host process is broken by a kernel bug (microsoft/WSL#11312), so every host-side bridge Desktop binds becomes unreachable from containers on Windows.
+>
+> **Update (ADR-079):** the claim below that "the two halves are mandatorily equal (the WSL vEthernet adapter IP)" holds only under **NAT** networking. Under genuine **mirrored** networking the default-route gateway is the LAN router (not host-bindable) and the guest adapter IP is guest-local (not container-reachable). ADR-079 keeps the SSOT but splits the halves in mirrored mode — bind `127.0.0.1`, expose a guest-local relay address — bridged by a `socat` relay in the distro.
 
 ## Decision
 

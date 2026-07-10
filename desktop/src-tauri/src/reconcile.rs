@@ -1059,10 +1059,13 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         match mcp_os.lock() {
             Ok(mut guard) => {
                 if let Some(mut proc) = guard.take() {
+                    let port = proc.port();
                     if let Err(e) = proc.stop() {
                         log::warn!("mcp-os stop error: {e}");
                     }
                     proc.cleanup_files();
+                    // Symmetric with HostBridge::stop — drop the guest relay (ADR-079).
+                    crate::mirror_relay::remove_relay_for_port(port);
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
@@ -1070,10 +1073,13 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         match oauth.lock() {
             Ok(mut map) => {
                 for (project, mut proc) in map.drain() {
+                    let port = proc.port();
                     if let Err(e) = proc.stop() {
                         log::warn!("oauth[{project}] stop error: {e}");
                     }
                     proc.cleanup_files();
+                    // Symmetric with the relay ensured at oauth spawn (ADR-079).
+                    crate::mirror_relay::remove_relay_for_port(port);
                 }
             }
             Err(e) => log::warn!("oauth cleanup skipped: map mutex poisoned: {e}"),

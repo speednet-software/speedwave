@@ -430,8 +430,11 @@ pub(crate) fn read_lock_port(
     crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
 }
 
-/// URL where a host-side worker listens, as seen from inside a container.
+/// URL where a host-side worker listens, as seen from inside a container. Under WSL2
+/// mirrored mode the container dials the guest relay port, not the loopback bind port
+/// (ADR-079) — same translation the plugin-bridge injector uses.
 pub(crate) fn worker_gateway_url(port: u16) -> String {
+    let port = super::container_facing_port(port);
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 

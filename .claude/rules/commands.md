@@ -1,7 +1,8 @@
 # Commands — always via Makefile, never cargo/npm directly
 
 ```bash
-make setup-dev      # first-time: prerequisites + all dependencies
+make setup-dev         # first-time: check prerequisites + install all dependencies
+make setup-dev-windows # Windows only: install the toolchain via Chocolatey (needs admin; self-elevates)
 make test           # all tests (Rust + Angular + MCP + entrypoint + desktop) — optional locally; CI runs it
 make check-fmt      # fmt (root + desktop + proxy) + prettier — the pre-push hook gate, no builds/tests
 make check          # lint + clippy + type-check + format — thorough local pass; CI runs it

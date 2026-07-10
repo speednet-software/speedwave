@@ -30,6 +30,7 @@ mod ide_bridge_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
+mod mirror_relay;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -261,6 +262,33 @@ fn plugin_bridge_get_status(
 }
 
 /// mcp-os watchdog thread.
+/// Per-tick health decision for the mcp-os watchdog (pure → unit-testable): given process
+/// liveness + the consecutive-unhealthy count, returns the action and the next count.
+/// Extracted so the transitions are tested behaviorally, not just source-scanned.
+#[derive(Debug, PartialEq, Eq)]
+enum HealthOutcome {
+    Alive,
+    ShouldRespawn,
+    Cooldown,
+}
+
+fn mcp_os_health_outcome(
+    alive: bool,
+    consecutive_unhealthy: u32,
+    max_unhealthy: u32,
+) -> (HealthOutcome, u32) {
+    if alive {
+        (HealthOutcome::Alive, 0)
+    } else {
+        let n = consecutive_unhealthy + 1;
+        if n >= max_unhealthy {
+            (HealthOutcome::Cooldown, 0)
+        } else {
+            (HealthOutcome::ShouldRespawn, n)
+        }
+    }
+}
+
 fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         use std::time::Duration;
@@ -269,49 +297,79 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
         const COOLDOWN: Duration = Duration::from_secs(300);
         let mut consecutive_unhealthy: u32 = 0;
 
+        // Decide + mutate under the lock, then run the blocking relay ops (wsl.exe,
+        // hundreds of ms) and cooldown AFTER releasing it, so callers taking
+        // mcp_os.lock() don't stall behind a 30s poll.
+        enum Tick {
+            EnsureRelay(u16),
+            Respawned { old: u16, new: u16 },
+            Cooldown,
+            Nothing,
+            Stop,
+        }
         loop {
             std::thread::sleep(CHECK_INTERVAL);
             if WATCHDOG_STOP.load(Ordering::Relaxed) {
                 break;
             }
 
-            match mcp_os.lock() {
+            let action = match mcp_os.lock() {
+                Err(e) => {
+                    log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                    Tick::Stop
+                }
                 Ok(mut guard) => match *guard {
-                    None => break,
+                    None => Tick::Stop,
                     Some(ref mut proc) => {
-                        if proc.is_alive() {
-                            consecutive_unhealthy = 0;
-                            continue;
-                        }
-
-                        consecutive_unhealthy += 1;
-
-                        if consecutive_unhealthy >= MAX_UNHEALTHY {
-                            log::error!(
-                                "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
-                            );
-                            std::thread::sleep(COOLDOWN);
-                            consecutive_unhealthy = 0;
-                            continue;
-                        }
-
-                        log::warn!(
-                            "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                        let (outcome, next) = mcp_os_health_outcome(
+                            proc.is_alive(),
+                            consecutive_unhealthy,
+                            MAX_UNHEALTHY,
                         );
-                        match proc.respawn() {
-                            Ok(port) => {
-                                log::info!("mcp-os watchdog: respawned (port {port})");
-                                reconcile::reconcile_compose_port(&app_handle);
-                            }
-                            Err(e) => {
-                                log::error!("mcp-os watchdog: respawn failed: {e}");
+                        consecutive_unhealthy = next;
+                        match outcome {
+                            HealthOutcome::Alive => Tick::EnsureRelay(proc.port()),
+                            HealthOutcome::Cooldown => Tick::Cooldown,
+                            HealthOutcome::ShouldRespawn => {
+                                log::warn!(
+                                    "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                                );
+                                let old = proc.port();
+                                match proc.respawn() {
+                                    Ok(new) => Tick::Respawned { old, new },
+                                    Err(e) => {
+                                        log::error!("mcp-os watchdog: respawn failed: {e}");
+                                        Tick::Nothing
+                                    }
+                                }
                             }
                         }
                     }
                 },
-                Err(e) => {
-                    log::error!("mcp-os watchdog: mutex poisoned: {e}");
-                    break;
+            };
+
+            match action {
+                Tick::Stop => break,
+                Tick::Nothing => {}
+                Tick::EnsureRelay(port) => {
+                    // Relay lives in the WSL distro; re-ensure so a distro restart
+                    // (which this host process outlives) self-heals it (ADR-079).
+                    crate::mirror_relay::ensure_relay_for_port(port);
+                }
+                Tick::Respawned { old, new } => {
+                    log::info!("mcp-os watchdog: respawned (port {new})");
+                    if new != old {
+                        crate::mirror_relay::remove_relay_for_port(old);
+                    }
+                    crate::mirror_relay::ensure_relay_for_port(new);
+                    reconcile::reconcile_compose_port(&app_handle);
+                }
+                Tick::Cooldown => {
+                    log::error!(
+                        "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                    );
+                    std::thread::sleep(COOLDOWN);
+                    consecutive_unhealthy = 0;
                 }
             }
         }
@@ -362,6 +420,8 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
         match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
                 log::info!("ensure_mcp_os_running: started (port {})", proc.port());
+                // Reach this host worker from containers under WSL2 mirrored mode (ADR-079; no-op otherwise).
+                crate::mirror_relay::ensure_relay_for_port(proc.port());
                 *guard = Some(proc);
                 drop(guard); // release before spawning watchdog thread
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
@@ -442,8 +502,11 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
                     "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
                 );
                 if let Some(mut proc) = map.remove(project) {
+                    let port = proc.port();
                     let _ = proc.stop();
                     proc.cleanup_files();
+                    // Drop the old relay; the fresh spawn below ensures a new one (ADR-079).
+                    crate::mirror_relay::remove_relay_for_port(port);
                 }
                 if clear_bearer_map {
                     // Drop the stale bearer-map so compose stops injecting into orphaned containers.
@@ -487,7 +550,11 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         &consumer_refs,
     ) {
         Ok(proc) => {
-            log::info!("oauth[{project}]: started (port {})", proc.port());
+            let port = proc.port();
+            log::info!("oauth[{project}]: started (port {port})");
+            // Container workers dial WORKER_OAUTH_URL; under WSL2 mirrored mode that
+            // reaches the guest relay, so ensure it here too (ADR-079).
+            crate::mirror_relay::ensure_relay_for_port(port);
             map.insert(project.to_string(), proc);
             drop(map);
             OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
@@ -1595,6 +1662,44 @@ mod tests {
         assert_eq!(respawned, vec!["dead".to_string()]);
         assert_eq!(map["alive"].respawn_calls.get(), 0);
         assert_eq!(map["dead"].respawn_calls.get(), 1);
+    }
+
+    /// Wiring guard: the mcp-os watchdog must re-ensure the relay on its health check
+    /// so a WSL distro restart (which the host process outlives) self-heals (ADR-079).
+    #[test]
+    fn mcp_os_watchdog_reensures_mirror_relay() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("fn start_mcp_os_watchdog")
+            .expect("start_mcp_os_watchdog must exist");
+        // Bound to this fn (up to the next top-level `fn`) so we don't match a neighbour.
+        let region = &source[start..];
+        let end = region.find("\nfn ").unwrap_or(region.len());
+        assert!(
+            region[..end].contains("ensure_relay_for_port"),
+            "mcp-os watchdog must re-ensure the relay so a distro restart self-heals"
+        );
+    }
+
+    #[test]
+    fn mcp_os_health_outcome_transitions() {
+        use super::{mcp_os_health_outcome, HealthOutcome};
+        // Alive resets the unhealthy counter.
+        assert_eq!(mcp_os_health_outcome(true, 3, 5), (HealthOutcome::Alive, 0));
+        // Unhealthy below the cap → respawn, counter increments.
+        assert_eq!(
+            mcp_os_health_outcome(false, 0, 5),
+            (HealthOutcome::ShouldRespawn, 1)
+        );
+        assert_eq!(
+            mcp_os_health_outcome(false, 3, 5),
+            (HealthOutcome::ShouldRespawn, 4)
+        );
+        // Reaching the cap → cooldown, counter resets (no respawn-storm).
+        assert_eq!(
+            mcp_os_health_outcome(false, 4, 5),
+            (HealthOutcome::Cooldown, 0)
+        );
     }
 
     /// Structural test: all exit paths must use `join_with_exit_watchdog`
