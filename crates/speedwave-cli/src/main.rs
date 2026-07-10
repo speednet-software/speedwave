@@ -1105,6 +1105,7 @@ fn main() -> anyhow::Result<()> {
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
         let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
+        speedwave_runtime::terminal_restore::sanitize_host_terminal();
         std::process::exit(
             status
                 .code()
@@ -1118,6 +1119,9 @@ fn main() -> anyhow::Result<()> {
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;
+    // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes
+    // it enabled; the CLI is the last process on the PTY chain that can.
+    speedwave_runtime::terminal_restore::sanitize_host_terminal();
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
@@ -1180,6 +1184,34 @@ mod tests {
         assert!(
             window.contains("sync_claude_resources"),
             "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
+
+    #[test]
+    fn interactive_exec_sanitizes_host_terminal_before_exit() {
+        // An abruptly killed claude leaves emulator modes enabled (kitty CSI-u,
+        // bracketed paste); the CLI must sanitize after the PTY session ends.
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let window = &source[exec..exec + 300];
+        assert!(
+            window.contains("sanitize_host_terminal()"),
+            "interactive exec must sanitize the host terminal after status()"
+        );
+    }
+
+    #[test]
+    fn login_exec_sanitizes_host_terminal_before_exit() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let window = &source[exec..exec + 300];
+        assert!(
+            window.contains("sanitize_host_terminal()"),
+            "login exec must sanitize the host terminal after status()"
         );
     }
 
