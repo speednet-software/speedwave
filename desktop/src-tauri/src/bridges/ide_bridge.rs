@@ -586,13 +586,48 @@ async fn handle_authenticated_connection(
     emit_event(&event_cb, "disconnected", "Claude WebSocket closed");
 }
 
+/// Pump timing for the upstream proxy; tests inject short values.
+#[derive(Clone, Copy)]
+struct ProxyTiming {
+    heartbeat_interval: std::time::Duration,
+    ide_silence_timeout: std::time::Duration,
+}
+
+impl Default for ProxyTiming {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: std::time::Duration::from_secs(15),
+            ide_silence_timeout: std::time::Duration::from_secs(120),
+        }
+    }
+}
+
 /// Transparent bidirectional proxy: forwards every message between
 /// Claude and the real IDE.
 async fn proxy_to_upstream<S>(
     claude_ws: tokio_tungstenite::WebSocketStream<S>,
     up: UpstreamIde,
+    upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
+    event_cb: Option<EventCallback>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    proxy_to_upstream_with_timing(
+        claude_ws,
+        up,
+        upstream_changed_rx,
+        event_cb,
+        ProxyTiming::default(),
+    )
+    .await
+}
+
+async fn proxy_to_upstream_with_timing<S>(
+    claude_ws: tokio_tungstenite::WebSocketStream<S>,
+    up: UpstreamIde,
     mut upstream_changed_rx: tokio::sync::broadcast::Receiver<()>,
     event_cb: Option<EventCallback>,
+    timing: ProxyTiming,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -637,11 +672,17 @@ async fn proxy_to_upstream<S>(
 
     let ide_tx_claude = ide_tx.clone();
     let claude_to_ide = async {
-        while let Ok(Some(Ok(m))) =
-            tokio::time::timeout(std::time::Duration::from_secs(120), claude_read.next()).await
-        {
-            if ide_tx_claude.send(m).await.is_err() {
-                break;
+        // No idle timeout: a healthy interactive session may legitimately be
+        // silent for hours; EOF/error is the only claude-side termination.
+        loop {
+            match claude_read.next().await {
+                Some(Ok(m)) => {
+                    if ide_tx_claude.send(m).await.is_err() {
+                        break "internal writer gone";
+                    }
+                }
+                Some(Err(_)) => break "claude read error",
+                None => break "claude disconnected",
             }
         }
     };
@@ -649,13 +690,13 @@ async fn proxy_to_upstream<S>(
     let ide_tx_heartbeat = ide_tx;
     let heartbeat = async {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            tokio::time::sleep(timing.heartbeat_interval).await;
             if ide_tx_heartbeat
                 .send(Message::Ping(vec![].into()))
                 .await
                 .is_err()
             {
-                break;
+                break "internal writer gone";
             }
         }
     };
@@ -663,43 +704,54 @@ async fn proxy_to_upstream<S>(
     let ide_writer_event_cb = event_cb;
     let ide_writer_ide_name = up.ide_name;
     let ide_writer = async {
-        while let Some(msg) = ide_rx.recv().await {
-            if ide_write.send(msg).await.is_err() {
-                emit_event(
-                    &ide_writer_event_cb,
-                    "upstream_lost",
-                    &format!("{} unreachable (write failed)", ide_writer_ide_name),
-                );
-                break;
+        loop {
+            match ide_rx.recv().await {
+                Some(msg) => {
+                    if ide_write.send(msg).await.is_err() {
+                        emit_event(
+                            &ide_writer_event_cb,
+                            "upstream_lost",
+                            &format!("{} unreachable (write failed)", ide_writer_ide_name),
+                        );
+                        break "IDE write failed";
+                    }
+                }
+                None => break "internal senders gone",
             }
         }
     };
 
     let ide_to_claude = async {
+        // Heartbeat pongs arrive at least every heartbeat interval from a
+        // live IDE, so prolonged read silence means the peer is gone.
         loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(120), ide_read.next()).await {
+            match tokio::time::timeout(timing.ide_silence_timeout, ide_read.next()).await {
                 Ok(Some(Ok(Message::Close(frame)))) => {
                     let _ = claude_write.send(Message::Close(frame)).await;
-                    break;
+                    break "IDE closed connection";
                 }
                 Ok(Some(Ok(m))) => {
                     if claude_write.send(m).await.is_err() {
-                        break;
+                        break "claude write failed";
                     }
                 }
-                Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+                Ok(Some(Err(_))) => break "IDE read error",
+                Ok(None) => break "IDE disconnected",
+                Err(_) => break "IDE silent past liveness timeout",
             }
         }
     };
 
-    let upstream_changed = async {
-        let _ = upstream_changed_rx.recv().await;
-        log::info!("upstream changed, closing proxy connection");
+    // Fail-fast supervision: the first leg to finish closes the whole
+    // connection — a half-open proxy black-holes Claude's IDE RPCs.
+    let reason = tokio::select! {
+        r = claude_to_ide => r,
+        r = ide_to_claude => r,
+        r = ide_writer => r,
+        r = heartbeat => r,
+        _ = upstream_changed_rx.recv() => "upstream changed",
     };
-    tokio::select! {
-        _ = async { tokio::join!(claude_to_ide, ide_to_claude, ide_writer, heartbeat) } => {}
-        _ = upstream_changed => {}
-    }
+    log::info!(target: "ide_bridge", "proxy connection closed ({reason})");
 }
 
 /// Stub handler used when no upstream IDE is selected.
@@ -1525,6 +1577,237 @@ mod tests {
         }
 
         let _ = tx.send(());
+    }
+
+    // -----------------------------------------------------------------------
+    // Upstream-proxy integration tests — a duplex pair plays the Claude side,
+    // a real TCP WebSocket server plays the IDE. Short ProxyTiming keeps the
+    // liveness/heartbeat machinery observable within test time.
+    // -----------------------------------------------------------------------
+
+    fn short_proxy_timing() -> super::ProxyTiming {
+        super::ProxyTiming {
+            heartbeat_interval: std::time::Duration::from_millis(25),
+            ide_silence_timeout: std::time::Duration::from_millis(250),
+        }
+    }
+
+    /// WebSocket-accept a mock-IDE connection, echoing the `mcp`
+    /// subprotocol the proxy requests (as a real IDE endpoint does).
+    async fn accept_mock_ide(
+        stream: tokio::net::TcpStream,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        tokio_tungstenite::accept_hdr_async(stream, |req: &Request, mut resp: Response| {
+            if req.headers().get("sec-websocket-protocol").is_some() {
+                resp.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    http::HeaderValue::from_static("mcp"),
+                );
+            }
+            Ok(resp)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Mock IDE that echoes every Text frame back to the proxy.
+    async fn spawn_echo_ide() -> (u16, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt, StreamExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_mock_ide(stream).await;
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_text() {
+                    ws.send(msg).await.unwrap();
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    /// Mock IDE that answers the first Text frame, then holds the socket
+    /// open without ever reading again (half-open peer).
+    async fn spawn_silent_after_first_reply_ide() -> (u16, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt, StreamExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_mock_ide(stream).await;
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_text() {
+                    ws.send(msg).await.unwrap();
+                    break;
+                }
+            }
+            std::future::pending::<()>().await;
+        });
+        (port, handle)
+    }
+
+    async fn start_proxy_pair(
+        port: u16,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        tokio::sync::broadcast::Sender<()>,
+    ) {
+        let up = super::UpstreamIde {
+            ide_name: "MockIde".to_string(),
+            port,
+            auth_token: "mock-upstream-token".to_string(),
+        };
+        let (upstream_changed_tx, upstream_changed_rx) = tokio::sync::broadcast::channel::<()>(4);
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_ws, client_ws) = tokio::join!(
+            tokio_tungstenite::accept_async(server_io),
+            tokio_tungstenite::client_async("ws://localhost/", client_io),
+        );
+        tokio::spawn(super::proxy_to_upstream_with_timing(
+            server_ws.unwrap(),
+            up,
+            upstream_changed_rx,
+            None,
+            short_proxy_timing(),
+        ));
+        let (client_ws, _) = client_ws.unwrap();
+        (client_ws, upstream_changed_tx)
+    }
+
+    /// Next Text frame from the proxy, skipping forwarded Ping/Pong frames.
+    async fn next_text(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) -> Option<String> {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Text(t) = msg {
+                return Some(t.to_string());
+            }
+        }
+        None
+    }
+
+    /// Wait until the claude side observes the connection closing.
+    async fn wait_for_close(ws: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>) {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_proxy_forwards_claude_request_after_idle_gap() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (port, _ide) = spawn_echo_ide().await;
+        let (mut client, _tx) = start_proxy_pair(port).await;
+
+        client
+            .send(Message::Text(r#"{"n":1}"#.into()))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), next_text(&mut client))
+            .await
+            .unwrap();
+        assert_eq!(first.as_deref(), Some(r#"{"n":1}"#));
+
+        // Idle well past every proxy-side timeout, then talk again.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        client
+            .send(Message::Text(r#"{"n":2}"#.into()))
+            .await
+            .unwrap();
+        let second =
+            tokio::time::timeout(std::time::Duration::from_secs(2), next_text(&mut client))
+                .await
+                .expect("claude request after an idle gap must still round-trip");
+        assert_eq!(second.as_deref(), Some(r#"{"n":2}"#));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_closes_claude_socket_when_ide_goes_silent() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (port, _ide) = spawn_silent_after_first_reply_ide().await;
+        let (mut client, _tx) = start_proxy_pair(port).await;
+
+        client
+            .send(Message::Text(r#"{"n":1}"#.into()))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), next_text(&mut client))
+            .await
+            .unwrap();
+        assert_eq!(first.as_deref(), Some(r#"{"n":1}"#));
+
+        let end = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_close(&mut client),
+        )
+        .await;
+        assert!(
+            end.is_ok(),
+            "claude-side socket must close after the IDE goes silent, not stay half-open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_closes_upstream_when_claude_drops() {
+        let (port, ide) = spawn_echo_ide().await;
+        let (client, _tx) = start_proxy_pair(port).await;
+
+        drop(client);
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(2), ide).await;
+        assert!(
+            ended.is_ok(),
+            "mock IDE must observe the connection closing after claude drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_mode_disconnects_on_upstream_change() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (port, _ide) = spawn_echo_ide().await;
+        let (mut client, upstream_changed_tx) = start_proxy_pair(port).await;
+
+        client
+            .send(Message::Text(r#"{"n":1}"#.into()))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), next_text(&mut client))
+            .await
+            .unwrap();
+        assert_eq!(first.as_deref(), Some(r#"{"n":1}"#));
+
+        upstream_changed_tx.send(()).unwrap();
+
+        let end = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_close(&mut client),
+        )
+        .await;
+        assert!(
+            end.is_ok(),
+            "claude-side socket must close after the upstream selection changes"
+        );
     }
 
     #[test]

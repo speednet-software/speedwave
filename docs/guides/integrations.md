@@ -211,6 +211,7 @@ Because the worker authenticates as a real account, it can reach everything that
 
 - **Jira write payloads use ADF.** `createIssue` / `updateIssue` (description) and `addComment` / `addWorklog` (comment) accept either `bodyText` — plain text the worker converts to a minimal Atlassian Document Format document (one paragraph per line) — or `bodyAdf` / `commentAdf`, a pre-built ADF object for rich content.
 - **Confluence bodies use the storage representation.** `createPage` / `updatePage` / `addPageComment` accept either `bodyText` (wrapped in a single escaped `<p>`) or `bodyStorage` (raw storage-format XHTML you provide). `updatePage` fetches the current version and increments it automatically — you never pass a version number.
+- **Jira attachments are read from `/workspace`.** `addAttachment` takes `issueIdOrKey` and `filePath` (a path under `/workspace` the worker reads and streams directly, capped at 25 MiB), plus optional `filename` (defaults to the basename) and `contentType`. The worker mounts the project at `/workspace:ro` (parity with slack/sharepoint) and rejects any `filePath` that resolves outside `/workspace` (traversal or symlink), so it cannot read `/tokens`. Bytes never pass through the MCP hub body, so there is no base64/1 MB limit. `deleteAttachment` removes an attachment by its `attachmentId` (irreversible); when a Jira project allowlist is configured it fails closed, since a bare attachment ID cannot be verified against the allowlist.
 
 #### Scope and limitations
 
@@ -229,7 +230,7 @@ Inside a worker, Speedwave's convention is: use the service's official SDK (or a
 
 #### Tool surface
 
-33 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
+35 tools. Jira: `searchIssues`, `getIssue`, `createIssue`, `updateIssue`, `getTransitions`, `transitionIssue`, `assignIssue`, `getMyself`, `addAttachment`, `deleteAttachment`, `addComment`, `getComments`, `addWorklog`, `listProjects`, `getProject`, `listIssueTypes`, `listBoards`, `getBoard`, `getBoardConfiguration`, `listSprints`, `getSprint`, `moveIssuesToSprint`.
 Confluence: `listSpaces`, `getSpace`, `searchPages`, `getPage`, `getPageByTitle`, `createPage`, `updatePage`, `getPageChildren`, `addPageComment`, `getPageComments`, `addPageLabels`, `getPageLabels`, `listAttachments`.
 
 ### SharePoint — Files and Pages

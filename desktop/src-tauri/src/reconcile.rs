@@ -988,7 +988,14 @@ fn stop_all_containers(
 pub(crate) fn run_container_cleanup(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
+    data_dir: &std::path::Path,
 ) {
+    // A separate CLI terminal session shares the VM — never power it off
+    // out from under one (shared-lock probe, session::cli_lock).
+    if speedwave_runtime::session::any_cli_session_active(data_dir) {
+        log::info!("exit cleanup: live speedwave CLI session — leaving containers and VM running");
+        return;
+    }
     #[cfg(target_os = "windows")]
     stop_all_containers(rt, projects);
     #[cfg(target_os = "macos")]
@@ -1033,7 +1040,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 Vec::new()
             }
         };
-        run_container_cleanup(&rt, &projects);
+        run_container_cleanup(&rt, &projects, speedwave_runtime::consts::data_dir());
 
         // Host process cleanup
         match ide_bridge.lock() {
@@ -1127,6 +1134,22 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_cleanup_skips_teardown_while_cli_session_live() {
+        // A separate CLI terminal session shares the VM; exit cleanup must not
+        // power it off out from under it (shared-lock probe, session::cli_lock).
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("fn run_container_cleanup(")
+            .expect("run_container_cleanup must exist");
+        let body = &source[fn_start..fn_start + 1200];
+        let probe = body
+            .find("any_cli_session_active(")
+            .expect("cleanup must probe for live CLI sessions");
+        let stop = body.find("stop_vm()").expect("cleanup must stop the VM");
+        assert!(probe < stop, "CLI-session probe must gate the VM stop");
+    }
 
     #[test]
     fn running_projects_are_stopped_before_resources_sync() {
@@ -1436,7 +1459,8 @@ mod tests {
             // Runs on any non-macOS target.
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
-            run_container_cleanup(&rt, &projects);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &projects, tmp.path());
             assert_eq!(
                 handles.down_projects(),
                 vec!["alpha", "beta"],
@@ -1458,7 +1482,8 @@ mod tests {
             // compose_down is skipped.
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
-            run_container_cleanup(&rt, &projects);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &projects, tmp.path());
             assert!(
                 handles.down_projects().is_empty(),
                 "on macOS compose_down must NOT be called; the Lima VM poweroff reaps \
@@ -1478,7 +1503,8 @@ mod tests {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_stop_vm_error("mock stop_vm error")
                 .build();
-            run_container_cleanup(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &[], tmp.path());
             assert_eq!(
                 handles
                     .stop_vm_calls
@@ -1491,7 +1517,8 @@ mod tests {
         #[test]
         fn empty_projects_still_calls_stop_vm() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
-            run_container_cleanup(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &[], tmp.path());
             assert!(handles.down_projects().is_empty());
             assert_eq!(
                 handles
@@ -1499,6 +1526,40 @@ mod tests {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "stop_vm must run even with no projects"
+            );
+        }
+
+        #[test]
+        fn live_cli_session_skips_all_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+            run_container_cleanup(&rt, &[project("alpha")], tmp.path());
+            assert!(
+                handles.down_projects().is_empty(),
+                "no compose_down while a CLI session is live"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the shared VM must keep running under a live CLI session"
+            );
+        }
+
+        #[test]
+        fn released_cli_session_allows_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            drop(speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap());
+            run_container_cleanup(&rt, &[], tmp.path());
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "teardown must proceed once the CLI session ended"
             );
         }
     }

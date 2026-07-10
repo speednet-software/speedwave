@@ -144,6 +144,17 @@ export interface JiraIssueType {
   subtask: boolean;
 }
 
+/** Jira issue attachment metadata, normalised. */
+export interface JiraAttachment {
+  id: string;
+  filename: string;
+  size?: number;
+  mime_type?: string;
+  created?: string;
+  url?: string;
+  author?: JiraUser | null;
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Jira Agile (boards / sprints)
 //═══════════════════════════════════════════════════════════════════════════════
