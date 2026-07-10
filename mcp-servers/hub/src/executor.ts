@@ -591,7 +591,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     // Redact every absolute host path (any or no extension); keep user-code
     // positions like "<anonymous>:3:7" — they teach where the snippet broke.
     let sanitizedMessage = message
-      .replace(/(^|[\s'"`(\[])(?:\/[a-zA-Z0-9_\-.]+){2,}/g, '$1[file]')
+      .replace(/(^|[\s'"`([])(?:\/[a-zA-Z0-9_\-.]+){2,}/g, '$1[file]')
       .replace(/\[file\]:\d+:\d+/g, '[file]')
       .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);

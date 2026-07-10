@@ -211,6 +211,7 @@ return { total: results.length, failed: errors.length };
 /**
  * Main server initialization and startup
  */
+/* c8 ignore start: server bootstrap (registry/bridge init + listen); exercised by container start, not unit tests */
 async function main() {
   console.log(`${ts()} 🚀 Starting Speedwave Code Executor MCP Server...`);
   console.log(`${ts()} 📊 Token reduction: 44 tools → 2 meta-tools (97.6% reduction)`);
@@ -264,7 +265,6 @@ async function main() {
   });
 
   // Graceful shutdown handler.
-  /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
     server.close(() => {
@@ -280,8 +280,8 @@ async function main() {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  /* c8 ignore stop */
 }
+/* c8 ignore stop */
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Hub Express App Factory

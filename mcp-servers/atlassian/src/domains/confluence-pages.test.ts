@@ -122,6 +122,14 @@ describe('get', () => {
     expect(client.get).toHaveBeenCalledTimes(1);
   });
 
+  it('skips the space lookup for a page payload with no spaceId (allowlist set, scope denied)', async () => {
+    client = stubClient(['DEV']);
+    client.get.mockResolvedValueOnce(v2Page({ spaceId: undefined }));
+    const c = createConfluencePagesClient(client);
+    await expect(c.get('123')).rejects.toThrow(ScopeError);
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
   it('tolerates a 404 space lookup (space_key undefined) when an allowlist is set but the space is unassignable', async () => {
     client = stubClient(['DEV']);
     const notFound = Object.assign(new Error('not found'), { response: { status: 404 } });

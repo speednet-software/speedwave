@@ -890,6 +890,23 @@ describe('executor', () => {
       _setBridgesForTesting(null);
     });
 
+    it('marks bridges initialized after a successful init and skips re-init on the next call', async () => {
+      const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
+      const httpBridgeModule = await import('./http-bridge.js');
+
+      _setBridgesForTesting(null);
+      const spy = vi
+        .spyOn(httpBridgeModule, 'initializeAllBridges')
+        .mockResolvedValue(createMockBridges() as never);
+
+      await initializeBridges();
+      await initializeBridges();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+      _setBridgesForTesting(null);
+    });
+
     it('returns immediately when bridges are already initialized (early-return branch)', async () => {
       const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
       const httpBridgeModule = await import('./http-bridge.js');
