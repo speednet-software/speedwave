@@ -11,6 +11,8 @@ pub const DATA_DIR: &str = ".speedwave";
 /// Per-project Claude Code home (`<data_dir>/claude-home/<project>/`) — SSOT;
 /// don't hard-code the `"claude-home"` literal at call sites.
 pub const CLAUDE_HOME_SUBDIR: &str = "claude-home";
+/// Live-CLI-session shared-lock file under the data dir (`session::cli_lock`).
+pub const CLI_SESSION_LOCK_FILE: &str = "cli-session.lock";
 /// Per-project native Claude Code managed-settings dir
 /// (`<data_dir>/claude-managed/<project>/`) — SSOT; don't hard-code the literal.
 pub const CLAUDE_MANAGED_SUBDIR: &str = "claude-managed";
