@@ -1405,7 +1405,7 @@ impl ChatSession {
         // Reap a prior leaked process for this session before spawning a new one.
         self.reap_instance();
 
-        let instance_id = uuid::Uuid::new_v4().to_string();
+        let instance_id = speedwave_runtime::session::new_instance_id();
         let (args, container) = Self::prepare_args(
             &self.project_name,
             &user_config,

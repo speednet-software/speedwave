@@ -2498,6 +2498,7 @@ dependencies = [
 name = "speedwave-cli"
 version = "0.15.0"
 dependencies = [
+ "anstyle-query",
  "anyhow",
  "arboard",
  "chrono",

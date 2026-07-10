@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+mod terminal_restore;
 
 /// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
 /// Split out from [`emit`] so the redaction is unit-testable without
@@ -863,6 +864,17 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Live-session marker: Desktop's exit cleanup leaves the VM running while
+    // this shared lock is held (kernel-released on any death, incl. SIGKILL).
+    let _cli_session = match speedwave_runtime::session::CliSessionGuard::acquire(consts::data_dir())
+    {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            log::warn!("CLI session lock unavailable: {e}");
+            None
+        }
+    };
+
     // Windows engine invariants (nerdctl pin + drvfs metadata automount);
     // no-op elsewhere. Warn-only, Once-guarded inside.
     speedwave_runtime::provision::ensure_windows_invariants();
@@ -1099,12 +1111,18 @@ fn main() -> anyhow::Result<()> {
     if let CliAction::Login(_) = action {
         err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
         // Unset any non-Anthropic provider env so OAuth runs against Anthropic.
-        let cmd = build_login_exec_cmd(
-            compose::PROXY_BASE_URL,
-            compose::anthropic_login_unset_keys(),
+        let instance_id = speedwave_runtime::session::new_instance_id();
+        let cmd = stamped_exec_argv(
+            &instance_id,
+            build_login_exec_cmd(
+                compose::PROXY_BASE_URL,
+                compose::anthropic_login_unset_keys(),
+            ),
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
         let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
+        terminal_restore::sanitize_host_terminal();
+        reap_instance(&runtime, &container_name, &instance_id);
         std::process::exit(
             status
                 .code()
@@ -1113,11 +1131,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     // exec -it -> interactive Claude terminal inside container
-    let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-    exec_cmd.extend(resolved.flags.iter().map(String::as_str));
+    let instance_id = speedwave_runtime::session::new_instance_id();
+    let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
+    tail.extend(resolved.flags.iter().cloned());
+    let exec_argv = stamped_exec_argv(&instance_id, tail);
+    let exec_cmd: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;
+    // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes
+    // it enabled; the CLI is the last process on the PTY chain that can.
+    terminal_restore::sanitize_host_terminal();
+    reap_instance(&runtime, &container_name, &instance_id);
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
@@ -1126,6 +1151,34 @@ fn main() -> anyhow::Result<()> {
     // Normalize OOM-via-SIGKILL (code()==None on Linux) to 137 for macOS parity.
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
+}
+
+/// Interactive exec argv carrying the instance marker so an orphaned
+/// in-container process can be reaped after the exec transport dies.
+fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
+    let mut argv = speedwave_runtime::session::instance_env_argv(instance_id);
+    argv.extend(tail);
+    argv
+}
+
+/// Kills the in-container claude stamped with `instance_id` (host-side death
+/// does not propagate through `nerdctl exec`). Best-effort; dead VM is fine.
+fn reap_instance(
+    runtime: &speedwave_runtime::runtime::LockedRuntime,
+    container: &str,
+    instance_id: &str,
+) {
+    let argv = speedwave_runtime::session::kill_by_instance_command(instance_id);
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match runtime.container_exec_piped(container, &argv_refs) {
+        Ok(mut cmd) => {
+            // output() (not status()) so nerdctl noise never reaches the terminal.
+            if let Err(e) = cmd.output() {
+                log::debug!("session reap failed: {e}");
+            }
+        }
+        Err(e) => log::debug!("session reap unavailable: {e}"),
+    }
 }
 
 /// Picks the project an action operates on. An explicit `--project` override
@@ -1180,6 +1233,39 @@ mod tests {
         assert!(
             window.contains("sync_claude_resources"),
             "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
+
+    #[test]
+    fn interactive_exec_sanitizes_host_terminal_before_exit() {
+        // An abruptly killed claude leaves emulator modes enabled (kitty CSI-u,
+        // bracketed paste); the CLI must sanitize after the PTY session ends.
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let sanitize = source[exec..]
+            .find("sanitize_host_terminal()")
+            .expect("interactive exec must sanitize the host terminal after status()");
+        let oom = source[exec..]
+            .find("is_oom_exit(&status)")
+            .expect("OOM check must exist after the interactive exec");
+        assert!(
+            sanitize < oom,
+            "sanitize must run before the OOM message so it renders on a sane terminal"
+        );
+    }
+
+    #[test]
+    fn login_exec_sanitizes_host_terminal_before_exit() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let window = &source[exec..exec + 300];
+        assert!(
+            window.contains("sanitize_host_terminal()"),
+            "login exec must sanitize the host terminal after status()"
         );
     }
 
@@ -1649,10 +1735,18 @@ mod tests {
     }
 
     #[test]
-    fn test_exec_cmd_starts_with_claude_binary() {
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend_from_slice(&["--flag"]);
-        assert_eq!(exec_cmd[0], "/usr/local/bin/claude");
+    fn stamped_exec_argv_places_claude_after_instance_marker() {
+        let argv = stamped_exec_argv(
+            "id-1",
+            vec![consts::CLAUDE_BINARY.to_string(), "--flag".to_string()],
+        );
+        assert_eq!(argv[0], "env");
+        assert_eq!(
+            argv[1],
+            format!("{}=id-1", speedwave_runtime::session::SESSION_INSTANCE_ENV)
+        );
+        assert_eq!(argv[2], "/usr/local/bin/claude");
+        assert_eq!(argv[3], "--flag");
     }
 
     #[test]
@@ -2028,13 +2122,70 @@ mod tests {
     #[test]
     fn test_exec_cmd_includes_resolved_flags() {
         use speedwave_runtime::defaults;
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend_from_slice(defaults::DEFAULT_FLAGS);
-        assert_eq!(exec_cmd[0], consts::CLAUDE_BINARY);
-        assert!(exec_cmd.contains(&"--dangerously-skip-permissions"));
-        assert!(exec_cmd.contains(&"--mcp-config"));
-        assert!(exec_cmd.contains(&defaults::MCP_CONFIG_PATH));
-        assert!(exec_cmd.contains(&"--strict-mcp-config"));
+        let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
+        tail.extend(defaults::DEFAULT_FLAGS.iter().map(|f| f.to_string()));
+        let argv = stamped_exec_argv("id-2", tail);
+        assert!(argv.contains(&consts::CLAUDE_BINARY.to_string()));
+        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(argv.contains(&"--mcp-config".to_string()));
+        assert!(argv.contains(&defaults::MCP_CONFIG_PATH.to_string()));
+        assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn interactive_exec_is_stamped_and_reaped() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let before = &source[exec.saturating_sub(700)..exec];
+        assert!(
+            before.contains("stamped_exec_argv("),
+            "run argv must carry the instance marker"
+        );
+        let after = &source[exec..exec + 500];
+        assert!(
+            after.contains("reap_instance("),
+            "run path must reap the marked process after status()"
+        );
+    }
+
+    #[test]
+    fn login_exec_is_stamped_and_reaped() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let before = &source[exec.saturating_sub(700)..exec];
+        assert!(
+            before.contains("stamped_exec_argv("),
+            "login argv must carry the instance marker"
+        );
+        let after = &source[exec..exec + 500];
+        assert!(
+            after.contains("reap_instance("),
+            "login path must reap the marked process after status()"
+        );
+    }
+
+    #[test]
+    fn cli_session_guard_spans_compose_and_interactive_execs() {
+        // The shared lock tells Desktop's exit cleanup a live CLI session is
+        // attached to the VM (kernel-released on any death, incl. SIGKILL).
+        let source = include_str!("main.rs");
+        let ready = source
+            .find("runtime.ensure_ready()")
+            .expect("runtime recovery must exist");
+        let guard = source
+            .find("CliSessionGuard::acquire(")
+            .expect("CLI must hold the live-session lock");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
+        assert!(
+            ready < guard && guard < txn,
+            "guard must be taken once the VM is confirmed, before compose/image work"
+        );
     }
 
     /// Builds a project entry with the given name; dir is irrelevant now that
