@@ -126,6 +126,26 @@ the claude container.
 
 ---
 
+## Container start fails once with "iptables: Chain already exists", then heals
+
+**Symptom:** After a crash, reboot, or `wsl --shutdown` while containers were
+running, the next start logs a warning like `compose up hit stale CNI state
+(… iptables: Chain already exists …); flushing the named CNI state and
+retrying once` — and then succeeds.
+
+**Cause:** The previous shutdown never ran the CNI DEL phase, leaving stale
+`CNI-*` iptables chains / `br-*` bridges (or stale IPAM allocations) in the
+VM. The next `compose up` collides with them.
+
+**What Speedwave does:** `compose_up` self-heals (both platforms): it detects
+the stale-CNI error family, deletes **only** the `CNI-*` chains and `br-*`
+bridges named in the error (never a VM-wide flush — a concurrently running
+project keeps its live networking), and retries the `up` exactly once
+(`runtime/mod.rs::with_cni_heal` / `cni_cleanup_command`). The warning is
+informational; file a bug only if the retry also fails.
+
+---
+
 ## After upgrading: OS integration is disabled and a banner appears
 
 **Symptom:** After installing a new Speedwave version, the Integrations view

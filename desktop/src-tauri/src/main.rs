@@ -261,10 +261,7 @@ fn plugin_bridge_get_status(
     })
 }
 
-/// mcp-os watchdog thread.
-/// Per-tick health decision for the mcp-os watchdog (pure → unit-testable): given process
-/// liveness + the consecutive-unhealthy count, returns the action and the next count.
-/// Extracted so the transitions are tested behaviorally, not just source-scanned.
+/// Action decided by one mcp-os watchdog health tick.
 #[derive(Debug, PartialEq, Eq)]
 enum HealthOutcome {
     Alive,
@@ -272,6 +269,8 @@ enum HealthOutcome {
     Cooldown,
 }
 
+/// Pure per-tick health decision: maps process liveness + the consecutive-unhealthy
+/// count to the action and the next count.
 fn mcp_os_health_outcome(
     alive: bool,
     consecutive_unhealthy: u32,
@@ -289,6 +288,7 @@ fn mcp_os_health_outcome(
     }
 }
 
+/// mcp-os watchdog thread.
 fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         use std::time::Duration;
@@ -297,9 +297,8 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
         const COOLDOWN: Duration = Duration::from_secs(300);
         let mut consecutive_unhealthy: u32 = 0;
 
-        // Decide + mutate under the lock, then run the blocking relay ops (wsl.exe,
-        // hundreds of ms) and cooldown AFTER releasing it, so callers taking
-        // mcp_os.lock() don't stall behind a 30s poll.
+        // Decide + mutate under the lock; run relay ops and the cooldown sleep AFTER
+        // releasing it, so callers taking mcp_os.lock() don't stall behind a poll.
         enum Tick {
             EnsureRelay(u16),
             Respawned { old: u16, new: u16 },
@@ -359,17 +358,17 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                 Tick::Respawned { old, new } => {
                     log::info!("mcp-os watchdog: respawned (port {new})");
                     if new != old {
-                        crate::mirror_relay::remove_relay_for_port(old);
+                        crate::mirror_relay::remove_relay_for_port_async(old);
                     }
                     crate::mirror_relay::ensure_relay_for_port(new);
                     reconcile::reconcile_compose_port(&app_handle);
                 }
                 Tick::Cooldown => {
+                    // Counter already reset by mcp_os_health_outcome.
                     log::error!(
                         "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
                     );
                     std::thread::sleep(COOLDOWN);
-                    consecutive_unhealthy = 0;
                 }
             }
         }
@@ -496,17 +495,21 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         let mut current: Vec<String> = running.spec().consumers().to_vec();
         current.sort();
         match oauth_reconcile_action(&current, &oauth_consumers) {
-            OauthReconcile::NoChange => return false,
+            OauthReconcile::NoChange => {
+                // Re-ensure the live worker's relay: a WSL distro restart wipes it while
+                // the worker (host process) survives (ADR-079; async no-op off Windows).
+                crate::mirror_relay::ensure_relay_for_port(running.port());
+                return false;
+            }
             OauthReconcile::Respawn { clear_bearer_map } => {
                 log::info!(
                     "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
                 );
-                if let Some(mut proc) = map.remove(project) {
-                    let port = proc.port();
-                    let _ = proc.stop();
-                    proc.cleanup_files();
-                    // Drop the old relay; the fresh spawn below ensures a new one (ADR-079).
-                    crate::mirror_relay::remove_relay_for_port(port);
+                if let Some(proc) = map.remove(project) {
+                    let port = reconcile::stop_worker(&format!("oauth[{project}]"), proc);
+                    // Async: teardown can block for tens of seconds and we hold the oauth
+                    // map lock; the fresh spawn below ensures the new relay (ADR-079).
+                    crate::mirror_relay::remove_relay_for_port_async(port);
                 }
                 if clear_bearer_map {
                     // Drop the stale bearer-map so compose stops injecting into orphaned containers.
@@ -567,39 +570,59 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 }
 
-/// Decide which per-project workers in the map are unhealthy, respawn them,
-/// and return the names of those whose consumer containers must be recreated.
+/// A worker the sweep respawned; the old/new ports drive relay teardown/re-ensure.
+struct RespawnedWorker {
+    name: String,
+    old_port: u16,
+    new_port: u16,
+}
+
+/// One watchdog pass over the worker map: respawns + the surviving live ports
+/// (which need their guest relay re-ensured — ADR-079).
+struct SweepOutcome {
+    respawned: Vec<RespawnedWorker>,
+    alive_ports: Vec<u16>,
+}
+
+/// Decide which per-project workers in the map are unhealthy and respawn them;
+/// callers recreate consumer containers / fix relays from the returned outcome.
 fn sweep_per_project_workers<P>(
     workers: &mut std::collections::HashMap<String, P>,
     log_prefix: &str,
-) -> Vec<String>
+) -> SweepOutcome
 where
     P: WatchdogWorker,
 {
-    if workers.is_empty() {
-        return Vec::new();
-    }
+    let mut outcome = SweepOutcome {
+        respawned: Vec::new(),
+        alive_ports: Vec::new(),
+    };
     let names: Vec<String> = workers.keys().cloned().collect();
-    let mut respawned = Vec::new();
     for name in names {
-        let alive = workers.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-        if alive {
+        let Some(proc) = workers.get_mut(&name) else {
+            continue;
+        };
+        if proc.is_alive() {
+            outcome.alive_ports.push(proc.port());
             continue;
         }
-        if let Some(proc) = workers.get_mut(&name) {
-            log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
-            match proc.respawn() {
-                Ok(port) => {
-                    log::info!("{log_prefix}: respawned '{name}' (port {port})");
-                    respawned.push(name);
-                }
-                Err(e) => {
-                    log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
-                }
+        log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
+        let old_port = proc.port();
+        match proc.respawn() {
+            Ok(new_port) => {
+                log::info!("{log_prefix}: respawned '{name}' (port {new_port})");
+                outcome.respawned.push(RespawnedWorker {
+                    name,
+                    old_port,
+                    new_port,
+                });
+            }
+            Err(e) => {
+                log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
             }
         }
     }
-    respawned
+    outcome
 }
 
 /// Trait abstracting the watchdog's view of a managed worker. Implemented by
@@ -608,6 +631,7 @@ where
 pub(crate) trait WatchdogWorker {
     fn is_alive(&self) -> bool;
     fn respawn(&mut self) -> anyhow::Result<u16>;
+    fn port(&self) -> u16;
 }
 
 impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
@@ -616,6 +640,9 @@ impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
     }
     fn respawn(&mut self) -> anyhow::Result<u16> {
         speedwave_runtime::oauth_process::OauthProcess::respawn(self)
+    }
+    fn port(&self) -> u16 {
+        speedwave_runtime::oauth_process::OauthProcess::port(self)
     }
 }
 
@@ -637,8 +664,8 @@ fn start_per_project_watchdog<P>(
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            // Respawn under the lock; defer container recreate until after release.
-            let respawned: Vec<String> = {
+            // Respawn under the lock; defer container recreate + relay ops until after release.
+            let outcome = {
                 let mut map = match workers.lock() {
                     Ok(g) => g,
                     Err(e) => {
@@ -648,8 +675,17 @@ fn start_per_project_watchdog<P>(
                 };
                 sweep_per_project_workers(&mut map, log_prefix)
             };
+            // Live workers: re-ensure the guest relay a distro restart wiped (ADR-079).
+            for port in outcome.alive_ports {
+                crate::mirror_relay::ensure_relay_for_port(port);
+            }
             // Recreate containers (panic-isolated per project) so consumers pick up the new port.
-            for name in respawned {
+            for worker in outcome.respawned {
+                if worker.old_port != worker.new_port {
+                    crate::mirror_relay::remove_relay_for_port_async(worker.old_port);
+                }
+                crate::mirror_relay::ensure_relay_for_port(worker.new_port);
+                let name = worker.name;
                 let n = name.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     containers_cmd::recreate_project_containers_if_running(&n);
@@ -961,6 +997,9 @@ fn main() {
                         Ok(proc) => {
                             let new_port = proc.port();
                             log::info!("mcp-os process started (port {new_port})");
+                            // Containers reach this host worker via the guest relay under
+                            // WSL2 mirrored mode (ADR-079; async no-op otherwise).
+                            crate::mirror_relay::ensure_relay_for_port(new_port);
                             if let Ok(mut guard) = mcp_os.lock() {
                                 *guard = Some(proc);
                             }
@@ -1583,13 +1622,18 @@ mod tests {
 
     struct FakeWorker {
         alive: bool,
+        port: u16,
         respawn_result: Result<u16, String>,
         respawn_calls: std::cell::Cell<u32>,
     }
     impl FakeWorker {
         fn new(alive: bool, respawn_result: Result<u16, String>) -> Self {
+            Self::with_port(alive, 100, respawn_result)
+        }
+        fn with_port(alive: bool, port: u16, respawn_result: Result<u16, String>) -> Self {
             Self {
                 alive,
+                port,
                 respawn_result,
                 respawn_calls: std::cell::Cell::new(0),
             }
@@ -1605,25 +1649,40 @@ mod tests {
             match &self.respawn_result {
                 Ok(p) => {
                     self.alive = true;
+                    self.port = *p;
                     Ok(*p)
                 }
                 Err(e) => Err(anyhow::anyhow!(e.clone())),
             }
         }
+        fn port(&self) -> u16 {
+            self.port
+        }
+    }
+
+    fn respawned_names(outcome: &SweepOutcome) -> Vec<String> {
+        outcome.respawned.iter().map(|w| w.name.clone()).collect()
     }
 
     #[test]
     fn sweep_per_project_workers_empty_map_returns_empty() {
         let mut map: std::collections::HashMap<String, FakeWorker> = Default::default();
-        assert!(sweep_per_project_workers(&mut map, "test").is_empty());
+        let outcome = sweep_per_project_workers(&mut map, "test");
+        assert!(outcome.respawned.is_empty());
+        assert!(outcome.alive_ports.is_empty());
     }
 
     #[test]
-    fn sweep_per_project_workers_skips_alive_workers() {
+    fn sweep_per_project_workers_skips_alive_workers_but_reports_their_ports() {
         let mut map = std::collections::HashMap::new();
-        map.insert("p".to_string(), FakeWorker::new(true, Ok(9999)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert!(respawned.is_empty(), "alive worker must not be respawned");
+        map.insert("p".to_string(), FakeWorker::with_port(true, 4321, Ok(9999)));
+        let outcome = sweep_per_project_workers(&mut map, "test");
+        assert!(
+            outcome.respawned.is_empty(),
+            "alive worker must not be respawned"
+        );
+        // Live ports feed the relay re-ensure (a distro restart wipes relays; ADR-079).
+        assert_eq!(outcome.alive_ports, vec![4321]);
         assert_eq!(map["p"].respawn_calls.get(), 0);
     }
 
@@ -1633,9 +1692,10 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
         map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
-        let mut respawned = sweep_per_project_workers(&mut map, "test");
-        respawned.sort();
-        assert_eq!(respawned, vec!["a".to_string(), "b".to_string()]);
+        let outcome = sweep_per_project_workers(&mut map, "test");
+        let mut names = respawned_names(&outcome);
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -1647,8 +1707,8 @@ mod tests {
             FakeWorker::new(false, Err("spawn failed".into())),
         );
         map.insert("good".to_string(), FakeWorker::new(false, Ok(3333)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert_eq!(respawned, vec!["good".to_string()]);
+        let outcome = sweep_per_project_workers(&mut map, "test");
+        assert_eq!(respawned_names(&outcome), vec!["good".to_string()]);
         // The failed worker WAS attempted (so we don't silently skip retries).
         assert_eq!(map["bad"].respawn_calls.get(), 1);
     }
@@ -1656,12 +1716,39 @@ mod tests {
     #[test]
     fn sweep_per_project_workers_mixed_alive_and_dead() {
         let mut map = std::collections::HashMap::new();
-        map.insert("alive".to_string(), FakeWorker::new(true, Ok(0)));
-        map.insert("dead".to_string(), FakeWorker::new(false, Ok(4444)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert_eq!(respawned, vec!["dead".to_string()]);
+        map.insert("alive".to_string(), FakeWorker::with_port(true, 77, Ok(0)));
+        map.insert(
+            "dead".to_string(),
+            FakeWorker::with_port(false, 4000, Ok(4444)),
+        );
+        let outcome = sweep_per_project_workers(&mut map, "test");
+        assert_eq!(respawned_names(&outcome), vec!["dead".to_string()]);
+        // Old + new port travel with the respawn so the watchdog can swap relays.
+        assert_eq!(outcome.respawned[0].old_port, 4000);
+        assert_eq!(outcome.respawned[0].new_port, 4444);
+        assert_eq!(outcome.alive_ports, vec![77]);
         assert_eq!(map["alive"].respawn_calls.get(), 0);
         assert_eq!(map["dead"].respawn_calls.get(), 1);
+    }
+
+    /// Wiring guard: the per-project (oauth) watchdog must re-ensure live workers'
+    /// relays and swap relays on respawn — a WSL distro restart wipes them (ADR-079).
+    #[test]
+    fn per_project_watchdog_reensures_mirror_relay() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("fn start_per_project_watchdog")
+            .expect("start_per_project_watchdog must exist");
+        let region = &source[start..];
+        let end = region.find("\nfn ").unwrap_or(region.len());
+        assert!(
+            region[..end].contains("ensure_relay_for_port"),
+            "per-project watchdog must re-ensure relays for live + respawned workers"
+        );
+        assert!(
+            region[..end].contains("remove_relay_for_port"),
+            "per-project watchdog must drop the old relay on a port-changing respawn"
+        );
     }
 
     /// Wiring guard: the mcp-os watchdog must re-ensure the relay on its health check

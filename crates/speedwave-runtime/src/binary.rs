@@ -243,6 +243,46 @@ pub fn run_with_timeout(
     }
 }
 
+/// Waits for `child` (piped stdout/stderr) at most `timeout`, draining pipes
+/// on threads; kills the child and errors on expiry.
+pub fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = pipe {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if start.elapsed() >= timeout => {
+                if let Err(e) = child.kill() {
+                    log::warn!("wait_with_output_timeout: kill failed: {e}");
+                }
+                let _ = child.wait();
+                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 /// Returns the isolated LIMA_HOME directory `~/.speedwave/lima` (avoids
 /// collision with a user-installed Lima at `~/.lima`).
 pub fn lima_home() -> Option<PathBuf> {
@@ -748,5 +788,43 @@ pub(crate) mod tests {
             elapsed < Duration::from_secs(5),
             "should not wait for the full 60s, elapsed: {elapsed:?}"
         );
+    }
+
+    fn spawn_shell(script: &str) -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(script);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(script);
+            c
+        };
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn shell child")
+    }
+
+    #[test]
+    fn wait_with_output_timeout_captures_fast_child_output() {
+        let child = spawn_shell("echo drained");
+        let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
+            .expect("fast child");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("drained"));
+    }
+
+    #[test]
+    fn wait_with_output_timeout_kills_and_errors_on_expiry() {
+        let script = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let child = spawn_shell(script);
+        let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
+            .expect_err("must time out");
+        assert!(err.to_string().contains("timed out"));
     }
 }

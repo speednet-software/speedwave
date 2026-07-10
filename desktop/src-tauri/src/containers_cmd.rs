@@ -878,11 +878,10 @@ pub async fn factory_reset(
     // 3. Stop mcp-os (kill child, join drain threads, release log handles);
     //    explicit stop + cleanup_files keeps parity with run_exit_cleanup.
     if let Ok(mut guard) = mcp_os.lock() {
-        if let Some(mut proc) = guard.take() {
-            if let Err(e) = proc.stop() {
-                log::warn!("factory_reset: mcp-os stop: {e}");
-            }
-            proc.cleanup_files();
+        if let Some(proc) = guard.take() {
+            // No remove_relay_for_port: the wipe below deletes the VM and transient
+            // relay units die with the distro (ADR-079).
+            let _ = crate::reconcile::stop_worker("factory_reset: mcp-os", proc);
         }
     }
 

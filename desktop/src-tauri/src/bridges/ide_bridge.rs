@@ -410,7 +410,7 @@ impl IdeBridge {
 
         let inner = HostBridge::new(config)?;
         let tcp_port = inner.port();
-        let lock_file_path = inner.lock_file_path().to_path_buf();
+        let lock_file_path = inner.lock_file_path();
         // Re-wrap HostBridge's token as the legacy AuthState handle.
         let auth = Arc::new(Mutex::new(AuthState::new(inner.auth_token())));
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);

@@ -487,38 +487,56 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     install_nerdctl_full()?;
 
-    // Relay/CNI packages, ungated by the nerdctl pin: install_nerdctl_full early-returns
-    // when already aligned, so a distro provisioned before socat was added would never
-    // get it. Best-effort — a missing socat only degrades the mirrored relay (logged at use).
-    if let Err(e) = ensure_relay_packages() {
-        log::warn!("ensure_relay_packages failed (mirrored-mode relay may not work): {e}");
-    }
+    // Ungated by the nerdctl pin (install_nerdctl_full early-returns when aligned);
+    // iptables is CNI-critical — without it every compose up fails opaquely, so fatal.
+    ensure_relay_packages()?;
 
     Ok(())
 }
 
-/// Ensures `iptables` (CNI bridge dependency) and `socat` (mirrored-mode host relay,
-/// ADR-079) exist in the distro. Idempotent and ungated by the nerdctl pin. Runs as the
-/// distro's default (root) user via `bash -s` on stdin; bounded so a wedged apt can't hang.
+/// Provision script for `ensure_relay_packages`: fails (exit 1) only when `iptables` is
+/// still missing after install; a missing `socat` degrades to the `SPW_SOCAT_MISSING` marker.
+#[cfg(any(target_os = "windows", test))]
+const RELAY_PACKAGES_SCRIPT: &str = "\
+command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0\n\
+apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null\n\
+command -v iptables >/dev/null 2>&1 || { echo 'iptables missing after install' >&2; exit 1; }\n\
+command -v socat >/dev/null 2>&1 || echo SPW_SOCAT_MISSING\n";
+
+/// Ensures `iptables` (CNI-critical — error when missing) and `socat` (ADR-079 relay —
+/// warn-only) in the distro. Idempotent; runs as root via `bash -s` on stdin; bounded.
 #[cfg(target_os = "windows")]
 fn ensure_relay_packages() -> anyhow::Result<()> {
-    let script = "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 || \
-                  { apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null; }\n";
     let mut child = crate::binary::system_command("wsl.exe")
-        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
+        .args([
+            "-d",
+            consts::wsl_distro_name(),
+            "-u",
+            "root",
+            "--",
+            "bash",
+            "-s",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(script.as_bytes())?;
+        stdin.write_all(RELAY_PACKAGES_SCRIPT.as_bytes())?;
     }
-    let output = wait_with_output_timeout(child, std::time::Duration::from_secs(120))?;
+    let output =
+        crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(120))?;
     if !output.status.success() {
         anyhow::bail!(
-            "apt-get iptables/socat failed: {}",
+            "iptables provisioning failed (CNI networking cannot work without it): {}",
             String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if String::from_utf8_lossy(&output.stdout).contains("SPW_SOCAT_MISSING") {
+        log::warn!(
+            "socat unavailable in the distro — WSL2 mirrored-mode host relay (ADR-079) \
+             is disabled until it installs"
         );
     }
     Ok(())
@@ -1216,47 +1234,6 @@ fn clear_download_backoff(path: &std::path::Path) {
     }
 }
 
-/// Waits for `child` (piped stdout/stderr) at most `timeout`, draining pipes
-/// on threads; kills the child and errors on expiry.
-#[cfg(any(target_os = "windows", test))]
-fn wait_with_output_timeout(
-    mut child: std::process::Child,
-    timeout: std::time::Duration,
-) -> anyhow::Result<std::process::Output> {
-    fn drain<R: std::io::Read + Send + 'static>(
-        pipe: Option<R>,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut r) = pipe {
-                let _ = r.read_to_end(&mut buf);
-            }
-            buf
-        })
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if start.elapsed() >= timeout => {
-                if let Err(e) = child.kill() {
-                    log::warn!("wait_with_output_timeout: kill failed: {e}");
-                }
-                let _ = child.wait();
-                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(200)),
-        }
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = crate::binary::system_command("wsl.exe")
@@ -1465,7 +1442,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         // Drop stdin to close the pipe and let bash finish
     }
     // Bounded host-side wait — a stalled in-distro download must not hang startup.
-    let output = match wait_with_output_timeout(
+    let output = match crate::binary::wait_with_output_timeout(
         child,
         std::time::Duration::from_secs(consts::NERDCTL_INSTALL_TIMEOUT_SECS),
     ) {
@@ -2044,28 +2021,27 @@ mod tests {
         assert!(err.to_string().contains("boom"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn wait_with_output_timeout_returns_output_and_kills_on_expiry() {
-        let fast = std::process::Command::new("sh")
-            .args(["-c", "echo out"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let out = wait_with_output_timeout(fast, std::time::Duration::from_secs(10)).unwrap();
-        assert!(out.status.success());
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
-
-        let slow = std::process::Command::new("sh")
-            .args(["-c", "sleep 30"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let err =
-            wait_with_output_timeout(slow, std::time::Duration::from_millis(300)).unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
+    fn relay_packages_script_is_fatal_on_iptables_soft_on_socat() {
+        // Contract: a failed iptables install must FAIL provisioning (CNI-critical);
+        // a missing socat only degrades the ADR-079 relay via the marker.
+        assert!(RELAY_PACKAGES_SCRIPT.contains("apt-get install -y -qq iptables socat"));
+        assert!(
+            RELAY_PACKAGES_SCRIPT.contains("command -v iptables >/dev/null 2>&1 || { echo"),
+            "iptables absence must be checked after install"
+        );
+        assert!(
+            RELAY_PACKAGES_SCRIPT.contains("exit 1"),
+            "iptables absence must exit non-zero (fatal)"
+        );
+        assert!(
+            RELAY_PACKAGES_SCRIPT.contains("|| echo SPW_SOCAT_MISSING"),
+            "socat absence must only emit the degradation marker"
+        );
+        // Short-circuit: both present → exit 0 before touching apt.
+        assert!(RELAY_PACKAGES_SCRIPT.starts_with(
+            "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0"
+        ));
     }
 
     #[test]
@@ -2669,44 +2645,6 @@ mod tests {
                 anyhow::bail!("boom") as anyhow::Result<i32>
             });
             assert!(err.unwrap_err().to_string().contains("boom"));
-        }
-
-        fn spawn_shell(script: &str) -> std::process::Child {
-            let mut cmd = if cfg!(windows) {
-                let mut c = std::process::Command::new("cmd");
-                c.arg("/C").arg(script);
-                c
-            } else {
-                let mut c = std::process::Command::new("sh");
-                c.arg("-c").arg(script);
-                c
-            };
-            cmd.stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn shell child")
-        }
-
-        #[test]
-        fn wait_with_output_timeout_captures_fast_child_output() {
-            let child = spawn_shell("echo drained");
-            let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
-                .expect("fast child");
-            assert!(out.status.success());
-            assert!(String::from_utf8_lossy(&out.stdout).contains("drained"));
-        }
-
-        #[test]
-        fn wait_with_output_timeout_kills_and_errors_on_expiry() {
-            let script = if cfg!(windows) {
-                "ping -n 30 127.0.0.1 >NUL"
-            } else {
-                "sleep 30"
-            };
-            let child = spawn_shell(script);
-            let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
-                .expect_err("must time out");
-            assert!(err.to_string().contains("timed out"));
         }
     }
 }

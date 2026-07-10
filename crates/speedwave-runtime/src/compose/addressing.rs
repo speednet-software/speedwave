@@ -2,6 +2,16 @@
 //! cached behind a pluggable computer (Lima static on macOS, WSL-detected on
 //! Windows). See ADR-067.
 
+/// How containers reach host listeners: dialing `gateway_ip` with the raw bind port
+/// (`Direct`), or via the ADR-079 guest relay with `relay_port_for`-translated ports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressingMode {
+    /// Containers dial `gateway_ip:<bind port>` unchanged (macOS Lima, Windows NAT).
+    Direct,
+    /// WSL2 mirrored: containers dial the guest relay at `relay_port_for(bind)` (ADR-079).
+    MirroredRelay,
+}
+
 /// Container-side `gateway_ip` + host-side `bind_address`. On Windows NAT both equal the
 /// WSL adapter IP; mirrored mode splits them (bind `127.0.0.1`, gateway = relay IP) — ADR-079.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +20,29 @@ pub struct HostAddressing {
     pub gateway_ip: String,
     /// Address the host process binds listeners on.
     pub bind_address: String,
+    /// Explicit mode — never inferred from `gateway_ip` (a user-pinned WSL NAT subnet
+    /// can legitimately equal the relay IP and must not trigger port translation).
+    pub mode: AddressingMode,
+}
+
+impl HostAddressing {
+    /// Direct addressing: containers dial `gateway_ip:<bind port>` unchanged.
+    pub fn direct(gateway_ip: impl Into<String>, bind_address: impl Into<String>) -> Self {
+        Self {
+            gateway_ip: gateway_ip.into(),
+            bind_address: bind_address.into(),
+            mode: AddressingMode::Direct,
+        }
+    }
+
+    /// WSL2 mirrored-relay addressing (ADR-079): loopback bind, guest relay gateway.
+    pub fn mirrored_relay() -> Self {
+        Self {
+            gateway_ip: crate::consts::MIRROR_RELAY_GATEWAY_IP.to_string(),
+            bind_address: "127.0.0.1".to_string(),
+            mode: AddressingMode::MirroredRelay,
+        }
+    }
 }
 
 /// Test seam. Production: `LimaStatic` (macOS) / `WslDetector` (Windows).
@@ -54,34 +87,41 @@ pub fn host_bind_address() -> anyhow::Result<String> {
     Ok(host_addressing()?.bind_address)
 }
 
-/// Container-facing relay port for a bridge bound on `bind_port`, or `None` when no relay
-/// is needed. `Some(bind_port ^ 0x4000)` under WSL2 mirrored mode — except `16384` (whose
-/// XOR is the invalid port 0), remapped to a valid distinct port. See ADR-079.
+/// De-duplicates the detection-failure warning across poll loops (reset on success).
+static RELAY_DETECT_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Container-facing relay port for a host listener on `bind_port`: `Some` only under
+/// WSL2 mirrored mode (ADR-079); the mapping is the fixed bijection `relay_port_for`.
 pub fn mirror_relay_port(bind_port: u16) -> Option<u16> {
-    match host_gateway_ip() {
-        Ok(gw) if gw == crate::consts::MIRROR_RELAY_GATEWAY_IP => {
-            // 16384 ^ 0x4000 == 0 (the one invalid result); flip a different bit so the
-            // relay port stays valid and distinct from the bind port.
-            let relay = bind_port ^ 0x4000;
-            Some(if relay == 0 {
-                bind_port ^ 0x6000
-            } else {
-                relay
-            })
+    match host_addressing() {
+        Ok(addr) => {
+            RELAY_DETECT_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+            (addr.mode == AddressingMode::MirroredRelay).then(|| relay_port_for(bind_port))
         }
-        Ok(_) => None,
         Err(e) => {
-            // On a mirrored host this silently skips relay setup — warn (not debug): a
-            // transient detection failure is exactly the distro-restart case we heal.
-            log::warn!("mirror_relay_port: host addressing unavailable, relay disabled: {e}");
+            // Warn once per failure streak, not per 30 s watchdog poll; errors stay
+            // uncached upstream so the relay heals as soon as detection recovers.
+            if !RELAY_DETECT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!("mirror_relay_port: host addressing unavailable, relay disabled: {e}");
+            }
             None
         }
     }
 }
 
-/// The port a container should dial to reach a host listener bound on `bind_port`: the
-/// mirror relay port under WSL2 mirrored mode, else `bind_port` unchanged (ADR-079).
-/// The one SSOT for translating a host-worker/bridge port into its container-facing form.
+/// Fixed bijection bind → relay port over `1..=65535`: XOR `0x4000`, except the 3-cycle
+/// 16384→49152→32768→16384 routing around 16384's invalid XOR image of port 0.
+fn relay_port_for(bind_port: u16) -> u16 {
+    match bind_port {
+        0x4000 => 0xC000,
+        0x8000 => 0x4000,
+        p => p ^ 0x4000,
+    }
+}
+
+/// The port a container dials to reach a host listener bound on `bind_port`: the relay
+/// port under WSL2 mirrored mode, else unchanged. The one bind→container port SSOT.
 pub fn container_facing_port(bind_port: u16) -> u16 {
     mirror_relay_port(bind_port).unwrap_or(bind_port)
 }
@@ -101,25 +141,27 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
     }
     // Install the default computer for this platform.
     let default: std::sync::Arc<dyn HostAddressingComputer> = {
-        // Tests must never reach the real platform detector: it makes addressing
-        // host-dependent (a mirrored dev machine XOR-translates worker ports) and races
-        // the global cache. Default to deterministic NAT; mirrored-mode tests pin the seam.
-        #[cfg(test)]
+        // Deterministic under tests/test-support: the real detector makes addressing
+        // host-dependent and spawns wsl.exe from dependent crates' tests (ADR-079).
+        #[cfg(any(test, feature = "test-support"))]
         {
-            std::sync::Arc::new(FixedComputer(HostAddressing {
-                gateway_ip: "192.168.5.2".to_string(),
-                bind_address: "127.0.0.1".to_string(),
-            }))
+            std::sync::Arc::new(FixedComputer(HostAddressing::direct(
+                crate::consts::LIMA_VZ_HOST_IP,
+                "127.0.0.1",
+            )))
         }
-        #[cfg(all(target_os = "macos", not(test)))]
+        #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
         {
             std::sync::Arc::new(host_addressing_impls::LimaStatic)
         }
-        #[cfg(all(target_os = "windows", not(test)))]
+        #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
         {
             std::sync::Arc::new(host_addressing_impls::WslDetector)
         }
-        #[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
+        #[cfg(all(
+            not(any(target_os = "macos", target_os = "windows")),
+            not(any(test, feature = "test-support"))
+        ))]
         {
             std::sync::Arc::new(host_addressing_impls::Unsupported)
         }
@@ -135,42 +177,80 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
     default
 }
 
-/// Test-only: inject a fixture computer. Pair with `#[serial_test::serial]`.
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+/// Test seam: inject a fixture computer. Pair with `#[serial_test::serial(host_addressing)]`.
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
-    *COMPUTER.write().expect("COMPUTER write lock") = Some(computer);
+    if let Ok(mut slot) = COMPUTER.write() {
+        *slot = Some(computer);
+    }
     invalidate_host_addressing_cache();
 }
 
-/// Test-only: restore the platform default computer.
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+/// Test seam: restore the platform default computer.
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_host_addressing_computer_for_test() {
-    *COMPUTER.write().expect("COMPUTER write lock") = None;
+    if let Ok(mut slot) = COMPUTER.write() {
+        *slot = None;
+    }
     invalidate_host_addressing_cache();
+}
+
+/// RAII pin from `pin_direct_addressing`/`pin_mirrored_addressing`: restores the platform
+/// default on drop (panic-safe). Pair with `#[serial_test::serial(host_addressing)]`.
+#[cfg(any(test, feature = "test-support"))]
+pub struct AddressingGuard(());
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for AddressingGuard {
+    fn drop(&mut self) {
+        reset_host_addressing_computer_for_test();
+    }
+}
+
+/// Pins Direct (non-mirrored) addressing with the given gateway; bind stays loopback.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_direct_addressing(gateway_ip: &str) -> AddressingGuard {
+    set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(
+        HostAddressing::direct(gateway_ip, "127.0.0.1"),
+    )));
+    AddressingGuard(())
+}
+
+/// Pins WSL2 mirrored-relay addressing (ADR-079) — container-facing ports translate.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_mirrored_addressing() -> AddressingGuard {
+    set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(
+        HostAddressing::mirrored_relay(),
+    )));
+    AddressingGuard(())
 }
 
 mod host_addressing_impls {
+    // Gate shared by the WSL detector's helpers: compiled for the production Windows
+    // detector or for unit tests — never for the test-support fixed-computer builds.
+    #[cfg(any(
+        all(target_os = "windows", not(any(test, feature = "test-support"))),
+        test
+    ))]
     use super::HostAddressing;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
     pub(super) struct LimaStatic;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
     impl super::HostAddressingComputer for LimaStatic {
-        fn compute(&self) -> anyhow::Result<HostAddressing> {
-            Ok(HostAddressing {
-                gateway_ip: crate::consts::LIMA_VZ_HOST_IP.to_string(),
-                bind_address: "127.0.0.1".to_string(),
-            })
+        fn compute(&self) -> anyhow::Result<super::HostAddressing> {
+            Ok(super::HostAddressing::direct(
+                crate::consts::LIMA_VZ_HOST_IP,
+                "127.0.0.1",
+            ))
         }
     }
 
-    #[cfg(all(target_os = "windows", not(test)))]
+    #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     pub(super) struct WslDetector;
 
-    #[cfg(all(target_os = "windows", not(test)))]
+    #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     impl super::HostAddressingComputer for WslDetector {
         fn compute(&self) -> anyhow::Result<HostAddressing> {
             let gateway = detect_wsl_gateway_ip()?;
@@ -178,39 +258,57 @@ mod host_addressing_impls {
         }
     }
 
-    /// Splits the WSL gateway into the addressing pair: bindable → NAT host adapter (both
-    /// halves); non-bindable → mirrored mode (bind loopback, expose the relay). ADR-079.
-    #[cfg(any(target_os = "windows", test))]
+    /// Splits the WSL gateway into the addressing pair: host-bindable → NAT (Direct,
+    /// both halves = gateway); non-bindable → mirrored relay mode. ADR-079.
+    #[cfg(any(
+        all(target_os = "windows", not(any(test, feature = "test-support"))),
+        test
+    ))]
     fn addressing_from(gateway: &str, can_bind: impl Fn(&str) -> bool) -> HostAddressing {
         if can_bind(gateway) {
-            HostAddressing {
-                gateway_ip: gateway.to_string(),
-                bind_address: gateway.to_string(),
-            }
+            log::info!("WSL2 addressing: NAT — gateway {gateway} is host-bindable");
+            HostAddressing::direct(gateway, gateway)
         } else {
-            HostAddressing {
-                gateway_ip: crate::consts::MIRROR_RELAY_GATEWAY_IP.to_string(),
-                bind_address: "127.0.0.1".to_string(),
+            log::info!(
+                "WSL2 addressing: mirrored — gateway {gateway} not host-bindable; relaying via {}",
+                crate::consts::MIRROR_RELAY_GATEWAY_IP
+            );
+            HostAddressing::mirrored_relay()
+        }
+    }
+
+    /// True if the host can bind a listener on `ip` (an ephemeral port) — tells a
+    /// host-local NAT gateway apart from a non-local mirrored-mode gateway.
+    #[cfg(any(
+        all(target_os = "windows", not(any(test, feature = "test-support"))),
+        test
+    ))]
+    fn host_can_bind(ip: &str) -> bool {
+        match ip.parse::<std::net::Ipv4Addr>() {
+            Ok(addr) => std::net::TcpListener::bind((addr, 0)).is_ok(),
+            Err(e) => {
+                log::warn!(
+                    "host_can_bind: WSL gateway {ip:?} unparseable ({e}); assuming mirrored"
+                );
+                false
             }
         }
     }
 
-    /// True if the host can bind a listener on `ip` (an ephemeral port). Used to tell
-    /// a host-local NAT gateway apart from a non-local mirrored-mode gateway.
-    #[cfg(any(target_os = "windows", test))]
-    fn host_can_bind(ip: &str) -> bool {
-        ip.parse::<std::net::Ipv4Addr>()
-            .ok()
-            .is_some_and(|addr| std::net::TcpListener::bind((addr, 0)).is_ok())
-    }
-
-    #[cfg(all(target_os = "windows", not(test)))]
+    #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     fn detect_wsl_gateway_ip() -> anyhow::Result<String> {
         let distro = crate::consts::wsl_distro_name();
-        let output = crate::binary::system_command("wsl.exe")
+        let child = crate::binary::system_command("wsl.exe")
             .args(["-d", distro, "--", "sh", "-c", "ip -4 route show default"])
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
+        // Bounded: watchdog ticks (and the joins in `stop()`) reach this probe — a
+        // wedged wsl.exe must never pin them indefinitely.
+        let output =
+            crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(15))
+                .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
         if !output.status.success() {
             anyhow::bail!(
                 "wsl.exe -d {distro} ip route returned status {} (stderr: {})",
@@ -228,7 +326,10 @@ mod host_addressing_impls {
 
     /// Extracts the first IPv4 gateway from `ip -4 route show default` output.
     /// Rejects loopback / unspecified / link-local / multicast.
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(
+        all(target_os = "windows", not(any(test, feature = "test-support"))),
+        test
+    ))]
     pub(super) fn parse_default_route_gateway(output: &str) -> Option<String> {
         for line in output.lines() {
             let line = line.trim();
@@ -252,7 +353,10 @@ mod host_addressing_impls {
         None
     }
 
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(
+        all(target_os = "windows", not(any(test, feature = "test-support"))),
+        test
+    ))]
     fn is_acceptable_gateway(ip: std::net::Ipv4Addr) -> bool {
         !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() && !ip.is_multicast()
     }
@@ -316,6 +420,7 @@ mod host_addressing_impls {
             let a = super::addressing_from("172.24.48.1", |_| true);
             assert_eq!(a.gateway_ip, "172.24.48.1");
             assert_eq!(a.bind_address, "172.24.48.1");
+            assert_eq!(a.mode, super::super::AddressingMode::Direct);
         }
 
         #[test]
@@ -323,6 +428,7 @@ mod host_addressing_impls {
             let a = super::addressing_from("192.168.68.1", |_| false);
             assert_eq!(a.gateway_ip, crate::consts::MIRROR_RELAY_GATEWAY_IP);
             assert_eq!(a.bind_address, "127.0.0.1");
+            assert_eq!(a.mode, super::super::AddressingMode::MirroredRelay);
         }
 
         #[test]
@@ -336,9 +442,9 @@ mod host_addressing_impls {
 }
 
 /// Test double returning a fixed `HostAddressing`; shared by addressing + compose tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct FixedComputer(pub HostAddressing);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl HostAddressingComputer for FixedComputer {
     fn compute(&self) -> anyhow::Result<HostAddressing> {
         Ok(self.0.clone())
@@ -371,10 +477,7 @@ mod resolver_tests {
     }
 
     fn sample_addr() -> HostAddressing {
-        HostAddressing {
-            gateway_ip: "172.24.48.1".into(),
-            bind_address: "172.24.48.1".into(),
-        }
+        HostAddressing::direct("172.24.48.1", "172.24.48.1")
     }
 
     #[test]
@@ -421,45 +524,53 @@ mod resolver_tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn host_gateway_ip_and_bind_address_split_correctly() {
-        set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(HostAddressing {
-            gateway_ip: "192.168.5.2".into(),
-            bind_address: "127.0.0.1".into(),
-        })));
-        assert_eq!(host_gateway_ip().unwrap(), "192.168.5.2");
+        let _guard = pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        assert_eq!(host_gateway_ip().unwrap(), crate::consts::LIMA_VZ_HOST_IP);
         assert_eq!(host_bind_address().unwrap(), "127.0.0.1");
-
-        reset_host_addressing_computer_for_test();
     }
 
     #[test]
     #[serial_test::serial(host_addressing)]
     fn mirror_relay_port_only_under_mirrored() {
-        set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(HostAddressing {
-            gateway_ip: crate::consts::MIRROR_RELAY_GATEWAY_IP.into(),
-            bind_address: "127.0.0.1".into(),
-        })));
+        let _mirrored = pin_mirrored_addressing();
         assert_eq!(mirror_relay_port(60123), Some(60123 ^ 0x4000));
         assert_ne!(mirror_relay_port(60123), Some(60123));
 
-        // 16384 ^ 0x4000 == 0 (invalid port); must map to something valid and distinct.
-        let relay_16384 = mirror_relay_port(16384).expect("mirrored → Some");
-        assert_ne!(relay_16384, 0, "relay port must never be 0");
-        assert_ne!(
-            relay_16384, 16384,
-            "relay port must differ from the bind port"
-        );
+        // 16384's XOR image is 0 (invalid); the bijection swaps it with 32768's.
+        assert_eq!(mirror_relay_port(0x4000), Some(0xC000));
+        assert_eq!(mirror_relay_port(0x8000), Some(0x4000));
 
-        set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(HostAddressing {
-            gateway_ip: "192.168.5.2".into(),
-            bind_address: "127.0.0.1".into(),
-        })));
+        let _direct = pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         assert_eq!(mirror_relay_port(60123), None);
 
-        // Detection failure disables the relay (returns None, logged at debug).
+        // Detection failure disables the relay (None; warned once per failure streak).
         set_host_addressing_computer_for_test(std::sync::Arc::new(FailingComputer("boom".into())));
         assert_eq!(mirror_relay_port(60123), None);
+    }
 
-        reset_host_addressing_computer_for_test();
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn direct_gateway_equal_to_relay_ip_does_not_translate() {
+        // A user-pinned WSL NAT subnet can legitimately yield a bindable 10.200.0.1
+        // gateway; Direct mode must never XOR-translate ports (mode beats IP). ADR-079.
+        let _guard = pin_direct_addressing(crate::consts::MIRROR_RELAY_GATEWAY_IP);
+        assert_eq!(mirror_relay_port(60123), None);
+        assert_eq!(container_facing_port(60123), 60123);
+    }
+
+    #[test]
+    fn relay_port_mapping_is_bijective_valid_and_never_identity() {
+        let mut seen = vec![false; 65536];
+        for bind in 1..=u16::MAX {
+            let relay = relay_port_for(bind);
+            assert_ne!(relay, 0, "bind {bind} mapped to invalid port 0");
+            assert_ne!(relay, bind, "bind {bind} mapped to itself");
+            assert!(
+                !seen[relay as usize],
+                "relay {relay} claimed twice (bind {bind})"
+            );
+            seen[relay as usize] = true;
+        }
     }
 
     #[test]

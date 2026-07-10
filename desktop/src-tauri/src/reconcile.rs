@@ -1058,12 +1058,8 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         }
         match mcp_os.lock() {
             Ok(mut guard) => {
-                if let Some(mut proc) = guard.take() {
-                    let port = proc.port();
-                    if let Err(e) = proc.stop() {
-                        log::warn!("mcp-os stop error: {e}");
-                    }
-                    proc.cleanup_files();
+                if let Some(proc) = guard.take() {
+                    let port = stop_worker("mcp-os", proc);
                     // Symmetric with HostBridge::stop — drop the guest relay (ADR-079).
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
@@ -1072,12 +1068,8 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         }
         match oauth.lock() {
             Ok(mut map) => {
-                for (project, mut proc) in map.drain() {
-                    let port = proc.port();
-                    if let Err(e) = proc.stop() {
-                        log::warn!("oauth[{project}] stop error: {e}");
-                    }
-                    proc.cleanup_files();
+                for (project, proc) in map.drain() {
+                    let port = stop_worker(&format!("oauth[{project}]"), proc);
                     // Symmetric with the relay ensured at oauth spawn (ADR-079).
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
@@ -1095,6 +1087,20 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         }
     });
     Some(handle)
+}
+
+/// Stops a host worker and removes its lock/token files, returning its port so the
+/// caller can tear down the guest relay (sync on exit paths, async in watchdogs).
+pub(crate) fn stop_worker<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
+    label: &str,
+    mut proc: speedwave_runtime::host_mcp_process::HostMcpProcess<S>,
+) -> u16 {
+    let port = proc.port();
+    if let Err(e) = proc.stop() {
+        log::warn!("{label} stop error: {e}");
+    }
+    proc.cleanup_files();
+    port
 }
 
 /// Resolves the bundled resources directory from the executable's parent path

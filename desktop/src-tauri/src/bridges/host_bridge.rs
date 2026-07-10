@@ -121,9 +121,7 @@ pub struct HostBridgeConfig {
     pub watchdog_interval: Duration,
     pub stale_probe_timeout: Duration,
     /// Name the lock file with the container-facing (relay) port instead of the raw bind
-    /// port. Set only for the IDE bridge, whose lock is READ BY THE CONTAINER (Claude Code
-    /// dials the filename port); under WSL2 mirrored mode that must be the relay port. No-op
-    /// under NAT. Host-facing bridge locks (figma, etc.) keep the raw port — ADR-079.
+    /// port — only for locks READ BY THE CONTAINER (the IDE bridge). ADR-079.
     pub container_facing_lock: bool,
 }
 
@@ -401,7 +399,9 @@ pub(crate) fn extract_query_param(query: &str, name: &str) -> Option<String> {
 pub struct HostBridge {
     config: HostBridgeConfig,
     auth_state: Arc<Mutex<AuthState>>,
-    lock_file_path: PathBuf,
+    // Shared with the watchdog, which relocates a container-facing lock when the
+    // addressing mode flips mid-session (e.g. late mirrored detection) — ADR-079.
+    lock_file_path: Arc<Mutex<PathBuf>>,
     tcp_port: u16,
     tcp_listener: Option<std::net::TcpListener>,
     shutdown_tx: Option<broadcast::Sender<()>>,
@@ -438,19 +438,13 @@ impl HostBridge {
 
         let data_dir = consts::data_dir();
         let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
-        // The lock filename carries the port the reader dials. The IDE bridge's lock is read
-        // by the CONTAINER (Claude Code uses the filename port), so under mirrored mode it
-        // must be the relay port; host-facing locks keep the raw port. No-op under NAT.
-        let lock_port = if config.container_facing_lock {
-            speedwave_runtime::compose::container_facing_port(port)
-        } else {
-            port
-        };
-        let lock_file_path = lock_dir.join(format!("{lock_port}.lock"));
+        // The lock filename carries the port its READER dials: container-read locks get
+        // the container-facing (relay) port under mirrored mode; host-read keep raw. ADR-079.
+        let lock_file_path = lock_dir.join(lock_file_name(port, config.container_facing_lock));
 
         Ok(Self {
             auth_state: Arc::new(Mutex::new(AuthState::new(token))),
-            lock_file_path,
+            lock_file_path: Arc::new(Mutex::new(lock_file_path)),
             tcp_port: port,
             tcp_listener: Some(listener),
             shutdown_tx: None,
@@ -464,8 +458,11 @@ impl HostBridge {
         self.tcp_port
     }
 
-    pub fn lock_file_path(&self) -> &Path {
-        &self.lock_file_path
+    pub fn lock_file_path(&self) -> PathBuf {
+        self.lock_file_path
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default()
     }
 
     pub fn auth_token(&self) -> String {
@@ -508,12 +505,13 @@ impl HostBridge {
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let lock_dir = self
-            .lock_file_path
+        let current_lock_path = self.lock_file_path();
+        let lock_dir = current_lock_path
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("lock file path has no parent"))?;
-        ensure_lock_dir(lock_dir)?;
-        cleanup_stale_lock_files(lock_dir, self.config.stale_probe_timeout);
+            .ok_or_else(|| anyhow::anyhow!("lock file path has no parent"))?
+            .to_path_buf();
+        ensure_lock_dir(&lock_dir)?;
+        cleanup_stale_lock_files(&lock_dir, self.config.stale_probe_timeout);
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let config_arc = Arc::new(self.config.clone_without_callbacks());
@@ -568,17 +566,18 @@ impl HostBridge {
             port: self.tcp_port,
             auth_token: &token,
         });
-        if let Err(e) = write_lock_file_atomic(&self.lock_file_path, &body) {
+        if let Err(e) = write_lock_file_atomic(&current_lock_path, &body) {
             let _ = shutdown_tx.send(());
             let _ = accept_handle.join();
             return Err(e).context("write lock file failed; bridge rolled back");
         }
 
-        let watchdog_path = self.lock_file_path.clone();
+        let watchdog_path = Arc::clone(&self.lock_file_path);
         let watchdog_body_cb = self.config.lock_body.clone();
         let watchdog_token = token;
         let watchdog_port = self.tcp_port;
         let watchdog_interval = self.config.watchdog_interval;
+        let container_facing_lock = self.config.container_facing_lock;
         let mut watchdog_shutdown = shutdown_tx.subscribe();
         let watchdog_handle = std::thread::Builder::new()
             .name(format!("host_bridge::{}::watchdog", self.config.name))
@@ -594,51 +593,41 @@ impl HostBridge {
                     }
                 };
                 rt.block_on(async move {
-                    // The mirror relay lives in the WSL distro; a distro restart wipes it
-                    // while this bridge process survives, so re-ensure it periodically
-                    // (idempotent, no-op off Windows/mirrored) — ADR-079.
-                    const RELAY_REENSURE_INTERVAL: Duration = Duration::from_secs(30);
+                    // A WSL distro restart wipes the relay while this process survives —
+                    // re-ensure every ~6 ticks (async fire-and-forget, idempotent). ADR-079.
+                    let relay_reensure_every = watchdog_interval * 6;
                     let mut last_relay_ensure = std::time::Instant::now();
-                    // In-flight guard: never stack blocking `ensure` tasks if a wsl.exe call
-                    // wedges (it's bounded, but the guard caps concurrency at one).
-                    let relay_inflight =
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     loop {
                         tokio::select! {
                             _ = watchdog_shutdown.recv() => break,
                             _ = tokio::time::sleep(watchdog_interval) => {
-                                if !watchdog_path.exists() {
+                                let current = watchdog_path
+                                    .lock()
+                                    .map(|p| p.clone())
+                                    .unwrap_or_default();
+                                if !current.exists() {
                                     let body = (watchdog_body_cb)(LockBodyContext {
                                         port: watchdog_port,
                                         auth_token: &watchdog_token,
                                     });
-                                    if let Err(e) = write_lock_file_atomic(&watchdog_path, &body) {
+                                    if let Err(e) = write_lock_file_atomic(&current, &body) {
                                         log::warn!(
                                             target: "host_bridge",
                                             "watchdog: failed to re-create lock file: {e}"
                                         );
                                     }
                                 }
-                                if last_relay_ensure.elapsed() >= RELAY_REENSURE_INTERVAL
-                                    && relay_inflight
-                                        .compare_exchange(
-                                            false,
-                                            true,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        )
-                                        .is_ok()
-                                {
+                                if last_relay_ensure.elapsed() >= relay_reensure_every {
                                     last_relay_ensure = std::time::Instant::now();
-                                    // Off the select path (spawn_blocking) so the blocking
-                                    // wsl.exe call never delays watchdog shutdown; the guard
-                                    // above prevents stacking tasks if it wedges.
-                                    let port = watchdog_port;
-                                    let inflight = std::sync::Arc::clone(&relay_inflight);
-                                    tokio::task::spawn_blocking(move || {
-                                        crate::mirror_relay::ensure_relay_for_port(port);
-                                        inflight.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    });
+                                    crate::mirror_relay::ensure_relay_for_port(watchdog_port);
+                                    if container_facing_lock {
+                                        relocate_lock_on_addressing_change(
+                                            &watchdog_path,
+                                            watchdog_port,
+                                            &watchdog_body_cb,
+                                            &watchdog_token,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -662,14 +651,68 @@ impl HostBridge {
         if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
-        // Symmetric with the relay ensured at bind (ADR-079); no-op off Windows/mirrored.
+        // Symmetric with the relay ensured at bind (ADR-079); no-op off Windows.
         crate::mirror_relay::remove_relay_for_port(self.tcp_port);
-        match std::fs::remove_file(&self.lock_file_path) {
+        match std::fs::remove_file(self.lock_file_path()) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).context("removing lock file"),
         }
         Ok(())
+    }
+}
+
+/// Lock filename for a listener on `port`: container-facing locks carry the
+/// container-facing (relay) port, host-facing locks the raw bind port. ADR-079.
+fn lock_file_name(port: u16, container_facing: bool) -> String {
+    let name_port = if container_facing {
+        speedwave_runtime::compose::container_facing_port(port)
+    } else {
+        port
+    };
+    format!("{name_port}.lock")
+}
+
+/// Moves a container-facing lock when the addressing mode changed since it was written —
+/// Claude Code dials the FILENAME port; a stale name strands the IDE bridge. ADR-079.
+fn relocate_lock_on_addressing_change(
+    lock_path: &Arc<Mutex<PathBuf>>,
+    port: u16,
+    body_cb: &LockBodyBuilder,
+    token: &str,
+) {
+    // A transient detection Err must not flap a live relay-port lock back to the raw
+    // port (the WSL-restart case this relocation exists for) — skip until it resolves.
+    if speedwave_runtime::compose::host_addressing().is_err() {
+        return;
+    }
+    let current = lock_path.lock().map(|p| p.clone()).unwrap_or_default();
+    let Some(dir) = current.parent() else {
+        return;
+    };
+    let expected = dir.join(lock_file_name(port, true));
+    if expected == current {
+        return;
+    }
+    let body = (body_cb)(LockBodyContext {
+        port,
+        auth_token: token,
+    });
+    match write_lock_file_atomic(&expected, &body) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&current);
+            if let Ok(mut p) = lock_path.lock() {
+                *p = expected.clone();
+            }
+            log::info!(
+                target: "host_bridge",
+                "watchdog: lock moved {current:?} -> {expected:?} after addressing change"
+            );
+        }
+        Err(e) => log::warn!(
+            target: "host_bridge",
+            "watchdog: failed to relocate lock to {expected:?}: {e}"
+        ),
     }
 }
 
@@ -748,7 +791,7 @@ impl std::fmt::Debug for HostBridge {
         f.debug_struct("HostBridge")
             .field("name", &self.config.name)
             .field("port", &self.tcp_port)
-            .field("lock_file_path", &self.lock_file_path)
+            .field("lock_file_path", &self.lock_file_path())
             .field("auth_token", &"***REDACTED***")
             .finish()
     }
@@ -3127,6 +3170,78 @@ mod tests {
             ide.container_facing_lock,
             "opt-in flag must reach the config"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn lock_filename_translates_to_relay_port_only_for_container_facing() {
+        let _guard = speedwave_runtime::compose::pin_mirrored_addressing();
+
+        let mut cfg = endpoint_config("ide");
+        cfg.container_facing_lock = true;
+        let bridge = HostBridge::new(cfg).unwrap();
+        let relay = speedwave_runtime::compose::mirror_relay_port(bridge.port())
+            .expect("mirrored pin must yield a relay port");
+        assert_eq!(
+            bridge.lock_file_path().file_name().and_then(|n| n.to_str()),
+            Some(format!("{relay}.lock").as_str()),
+            "container-facing lock must carry the relay port Claude Code dials"
+        );
+
+        // Host-facing bridges keep the raw bind port even under mirrored mode.
+        let host_facing = HostBridge::new(endpoint_config("figma-x")).unwrap();
+        assert_eq!(
+            host_facing
+                .lock_file_path()
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some(format!("{}.lock", host_facing.port()).as_str()),
+            "host-facing lock must keep the raw bind port"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn watchdog_relocates_container_facing_lock_after_addressing_flip() {
+        // Bind while addressing resolves Direct (e.g. WSL detection failed at startup):
+        // the lock carries the raw port.
+        let _direct = speedwave_runtime::compose::pin_direct_addressing(
+            speedwave_runtime::consts::LIMA_VZ_HOST_IP,
+        );
+        let mut cfg = endpoint_config("ide");
+        cfg.container_facing_lock = true;
+        cfg.watchdog_interval = Duration::from_millis(50);
+        let mut bridge = HostBridge::new(cfg).unwrap();
+        let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
+        bridge.start_endpoint(handler).unwrap();
+        let old_path = bridge.lock_file_path();
+        assert!(old_path.exists(), "raw-port lock written at start");
+
+        // Detection later resolves mirrored: the watchdog must move the lock to the
+        // relay-port filename, or Claude Code dials a dead port all session (ADR-079).
+        let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
+        let relay = speedwave_runtime::compose::mirror_relay_port(bridge.port())
+            .expect("mirrored pin must yield a relay port");
+        let expected_name = format!("{relay}.lock");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let name = bridge.lock_file_path();
+            if name.file_name().and_then(|n| n.to_str()) == Some(expected_name.as_str()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let new_path = bridge.lock_file_path();
+        assert_eq!(
+            new_path.file_name().and_then(|n| n.to_str()),
+            Some(expected_name.as_str()),
+            "watchdog must relocate the lock to the relay-port filename"
+        );
+        assert!(new_path.exists(), "relocated lock written");
+        assert!(!old_path.exists(), "stale raw-port lock removed");
+
+        bridge.stop().unwrap();
+        assert!(!new_path.exists(), "stop removes the relocated lock");
     }
 
     /// Verifies lock-file recreation logic; the timing path is covered by the smoke test.

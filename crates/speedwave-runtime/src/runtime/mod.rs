@@ -792,23 +792,19 @@ fn scan_cni_ids(haystack: &str, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// Best-effort cleanup for a stale-CNI failure, as a self-decoding `sh -c` payload
-/// (root, in the VM). Targets ONLY the `CNI-*` chains / `br-*` bridges named in `err`
-/// plus an unused-network prune — never a VM-wide flush, so a concurrently-running
-/// project keeps its live bridge/NAT. Base64 keeps it quote-safe across shell reparse.
+/// Best-effort cleanup for a stale-CNI failure: base64 `sh -c` payload (root, in the VM)
+/// targeting ONLY the `CNI-*` chains / `br-*` bridges named in `err`. Docs: troubleshooting.
 pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
     use base64::Engine;
     let msg = err.to_string();
     let mut script = String::from(
-        "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n\
-         nerdctl network prune -f 2>/dev/null || true\n",
+        "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n",
     );
     for ch in scan_cni_ids(&msg, "CNI-") {
-        // Re-issue the jump-rule delete via `eval` so a `--comment \"…\"` with spaces
-        // survives re-parsing — a bare `iptables $r` word-splits it, the `-D` fails, and
-        // the chain then can't be `-X`'d ("Device or resource busy"), so it never clears.
+        // Guarded `eval`: only shell parsing survives the `\"` in %q comments (xargs dies
+        // on "unmatched double quote"); the case-guard rejects `$`/backtick lines first.
         script.push_str(&format!(
-            "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
+            "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
              iptables -t nat -F {ch} 2>/dev/null || true\n\
              iptables -t nat -X {ch} 2>/dev/null || true\n"
         ));
@@ -2697,13 +2693,24 @@ services:
         let script = decode(&cni_cleanup_command(&anyhow::anyhow!(
             "iptables -t nat -N CNI-68fe31e0 --wait: iptables: Chain already exists"
         )));
-        assert!(script.contains("nerdctl network prune -f"));
         assert!(script.contains("iptables -t nat -F CNI-68fe31e0"));
         assert!(script.contains("iptables -t nat -X CNI-68fe31e0"));
-        // Jump-rule delete must go through `eval` + `IFS= read` so a `--comment` with
-        // spaces survives; a bare `iptables $r` leaves the chain referenced and `-X` fails.
+        // Jump-rule delete: guarded `eval` (only shell parsing handles the `\"` inside
+        // CNI's %q comments; xargs errors "unmatched double quote" and drops `-j <ch>`).
         assert!(script.contains("eval \"iptables -t nat $r\""));
         assert!(script.contains("while IFS= read -r r"));
+        assert!(
+            script.contains("case \"$r\" in *'$'*|*'`'*) continue;; esac"),
+            "eval must be guarded against $/backtick (root command-substitution sink): {script}"
+        );
+        assert!(
+            !script.contains("xargs"),
+            "xargs cannot parse backslash-escaped quotes in %q comments: {script}"
+        );
+        assert!(
+            !script.contains("nerdctl network prune"),
+            "prune is VM-global while the compose lock is per-project: {script}"
+        );
         assert!(
             !script.contains("grep -oE"),
             "must not blanket-scan CNI chains: {script}"
@@ -2713,11 +2720,10 @@ services:
             "must not blanket-delete bridges: {script}"
         );
 
-        // No id in the error → prune only, no iptables/bridge mutation of other projects.
+        // No id in the error → no iptables/bridge/network mutation at all (retry only).
         let bare = decode(&cni_cleanup_command(&anyhow::anyhow!(
             "failed to call cni.Setup: plugin failed (add)"
         )));
-        assert!(bare.contains("nerdctl network prune -f"));
         assert!(
             !bare.contains("iptables -t nat -F"),
             "no chain named → no flush: {bare}"
@@ -2725,6 +2731,119 @@ services:
         assert!(
             !bare.contains("ip link delete"),
             "no bridge named → no delete: {bare}"
+        );
+        assert!(
+            !bare.contains("nerdctl"),
+            "no id named → nothing VM-global to run: {bare}"
+        );
+    }
+
+    /// Empirical: runs the decoded cleanup pipeline against a fake `iptables` on PATH.
+    /// macOS-gated — Linux hosts would resolve the real `/usr/sbin/iptables` first.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cni_cleanup_pipeline_parses_escaped_quotes_and_blocks_injection() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let pwned = dir.path().join("pwned");
+
+        // Fake iptables: `-S` emits one legit %q-commented jump rule (CNI-68fe31e0) and
+        // one command-substitution attempt (CNI-deadbeef); every other call logs argv.
+        let legit = r#"-A POSTROUTING -s 10.4.0.0/24 -m comment --comment "name: \"speedwave_net\" id: \"abc\"" -j CNI-68fe31e0"#;
+        let evil = format!(
+            r#"-A POSTROUTING -s 10.4.1.0/24 -m comment --comment "x $(touch {})" -j CNI-deadbeef"#,
+            pwned.display()
+        );
+        let fake = dir.path().join("iptables");
+        {
+            let mut f = std::fs::File::create(&fake).unwrap();
+            write!(
+                f,
+                "#!/bin/sh\nif [ \"$3\" = \"-S\" ]; then\nprintf '%s\\n' '{legit}'\nprintf '%s\\n' '{evil}'\nexit 0\nfi\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf 'END\\n'; }} >> '{}'\nexit 0\n",
+                log.display()
+            )
+            .unwrap();
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let cmd = cni_cleanup_command(&anyhow::anyhow!(
+            "CNI-68fe31e0 and CNI-deadbeef: iptables: Chain already exists"
+        ));
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .env("PATH", path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "cleanup pipeline must exit 0");
+
+        let calls: Vec<Vec<String>> = std::fs::read_to_string(&log)
+            .unwrap()
+            .split("END\n")
+            .filter(|b| !b.trim().is_empty())
+            .map(|b| b.lines().map(str::to_string).collect())
+            .collect();
+
+        // The %q comment must arrive UNESCAPED as one argv element, with `-j <chain>`
+        // intact — exactly what the xargs variant lost ("unmatched double quote").
+        let delete = calls
+            .iter()
+            .find(|c| c.contains(&"-D".to_string()) && c.contains(&"CNI-68fe31e0".to_string()))
+            .expect("jump-rule delete for CNI-68fe31e0 must reach iptables");
+        assert!(
+            delete.contains(&r#"name: "speedwave_net" id: "abc""#.to_string()),
+            "comment must be one unescaped argv element, got: {delete:?}"
+        );
+        assert!(delete.contains(&"-j".to_string()), "got: {delete:?}");
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains(&"-F".to_string()) && c.contains(&"CNI-68fe31e0".to_string())),
+            "chain flush must run"
+        );
+
+        // The `$(…)` rule is skipped by the guard: nothing executed, no delete issued.
+        assert!(!pwned.exists(), "command substitution must never execute");
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains(&"-D".to_string()) && c.iter().any(|a| a.contains("deadbeef"))),
+            "guarded line must be skipped, not evaluated"
+        );
+    }
+
+    #[test]
+    fn with_cni_heal_propagates_error_when_retry_also_fails() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let r = with_cni_heal(
+            || {
+                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    anyhow::bail!("iptables: Chain already exists")
+                } else {
+                    anyhow::bail!("still broken after cleanup")
+                }
+            },
+            |_e| Ok(()),
+        );
+        let err = r.expect_err("second failure must propagate");
+        assert!(
+            err.to_string().contains("still broken after cleanup"),
+            "the RETRY error propagates (not the first): {err}"
+        );
+        assert_eq!(
+            ups.load(Ordering::SeqCst),
+            2,
+            "exactly one retry, never two"
         );
     }
 
