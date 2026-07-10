@@ -864,6 +864,17 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Live-session marker: Desktop's exit cleanup leaves the VM running while
+    // this shared lock is held (kernel-released on any death, incl. SIGKILL).
+    let _cli_session = match speedwave_runtime::session::CliSessionGuard::acquire(consts::data_dir())
+    {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            log::warn!("CLI session lock unavailable: {e}");
+            None
+        }
+    };
+
     // Windows engine invariants (nerdctl pin + drvfs metadata automount);
     // no-op elsewhere. Warn-only, Once-guarded inside.
     speedwave_runtime::provision::ensure_windows_invariants();
@@ -1094,17 +1105,6 @@ fn main() -> anyhow::Result<()> {
     // Host clipboard → /workspace/.speedwave/pastes/clip.png (ADR-065). Spawned
     // before the login branch so image paste works in `login` sessions too.
     let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
-
-    // Live-session marker: Desktop's exit cleanup leaves the VM running while
-    // this shared lock is held (kernel-released on any death, incl. SIGKILL).
-    let _cli_session = match speedwave_runtime::session::CliSessionGuard::acquire(consts::data_dir())
-    {
-        Ok(guard) => Some(guard),
-        Err(e) => {
-            log::warn!("CLI session lock unavailable: {e}");
-            None
-        }
-    };
 
     // Handle `speedwave login` — runs `claude auth login` directly so the
     // Anthropic OAuth flow starts at once. Claude Code writes credentials to the mount.
@@ -2169,22 +2169,22 @@ mod tests {
     }
 
     #[test]
-    fn cli_session_guard_spans_interactive_execs() {
+    fn cli_session_guard_spans_compose_and_interactive_execs() {
         // The shared lock tells Desktop's exit cleanup a live CLI session is
         // attached to the VM (kernel-released on any death, incl. SIGKILL).
         let source = include_str!("main.rs");
-        let health = source
-            .find("ensure_exec_healthy(")
-            .expect("exec health check must exist");
+        let ready = source
+            .find("runtime.ensure_ready()")
+            .expect("runtime recovery must exist");
         let guard = source
             .find("CliSessionGuard::acquire(")
             .expect("CLI must hold the live-session lock");
-        let login = source
-            .find(".container_exec(&container_name, &cmd_ref)")
-            .expect("login exec must exist");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
         assert!(
-            health < guard && guard < login,
-            "guard must be taken after the health check and before any interactive exec"
+            ready < guard && guard < txn,
+            "guard must be taken once the VM is confirmed, before compose/image work"
         );
     }
 
