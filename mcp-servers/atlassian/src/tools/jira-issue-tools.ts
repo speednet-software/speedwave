@@ -25,8 +25,6 @@ import { withValidation } from './validation.js';
 function workspaceRoot(): string {
   return process.env.WORKSPACE_DIR || '/workspace';
 }
-/** Cap for file-path attachments (bytes read from disk, not through the hub body). */
-const MAX_FILE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 /**
  * Read a file from the read-only workspace mount, rejecting any path that escapes
@@ -48,11 +46,6 @@ async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; na
   }
   const stat = await fsp.stat(real);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
-  if (stat.size > MAX_FILE_ATTACHMENT_BYTES) {
-    throw new Error(
-      `Attachment too large: ${stat.size} B exceeds the ${MAX_FILE_ATTACHMENT_BYTES} B limit.`
-    );
-  }
   return { buffer: await fsp.readFile(real), name: path.basename(real) };
 }
 

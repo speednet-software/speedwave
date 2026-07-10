@@ -4,14 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  mkdirSync,
-  mkdtempSync,
-  promises as nodeFsPromises,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJiraIssueTools } from './jira-issue-tools.js';
@@ -361,22 +354,6 @@ describe('addAttachment handler via filePath', () => {
     });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/Not a regular file/);
-    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
-  });
-
-  it('errors when the file exceeds the size limit', async () => {
-    writeFileSync(join(ws, 'big.bin'), Buffer.from('x'));
-    const statSpy = vi.spyOn(nodeFsPromises, 'stat').mockResolvedValueOnce({
-      isFile: () => true,
-      size: 26 * 1024 * 1024,
-    } as Awaited<ReturnType<(typeof nodeFsPromises)['stat']>>);
-    const res = await handlerFor('addAttachment')({
-      issueIdOrKey: 'PROJ-1',
-      filePath: join(ws, 'big.bin'),
-    });
-    statSpy.mockRestore();
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/exceeds/);
     expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });
 });

@@ -512,6 +512,26 @@ describe('uploadAttachment', () => {
     expect(body).not.toMatch(/filename="a\r\n/);
   });
 
+  it('accepts a MIME type with parameters', async () => {
+    requestMock.mockResolvedValueOnce({ data: [{ id: '1' }] });
+    const client = new AtlassianClient(CONFIG);
+    await client.uploadAttachment('PROJ-1', 'x.txt', Buffer.from('x'), 'text/plain; charset=utf-8');
+    const body = (requestMock.mock.calls[0][0].data as Buffer).toString('utf-8');
+    expect(body).toContain('Content-Type: text/plain; charset=utf-8');
+  });
+
+  it.each([
+    ['CRLF injection', 'image/png\r\nX-Evil: 1'],
+    ['no subtype', 'image'],
+    ['empty', ''],
+  ])('rejects an invalid contentType (%s) before sending', async (_label, contentType) => {
+    const client = new AtlassianClient(CONFIG);
+    await expect(
+      client.uploadAttachment('PROJ-1', 'x', Buffer.from('x'), contentType)
+    ).rejects.toThrow(/Invalid contentType/);
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
   it('encodes the issue key in the URL', async () => {
     requestMock.mockResolvedValueOnce({ data: [] });
     const client = new AtlassianClient(CONFIG);

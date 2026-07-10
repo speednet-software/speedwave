@@ -39,6 +39,13 @@ const BASE_DELAY_MS = 1000;
 /** Cap on any single backoff wait, ms (also caps a `Retry-After` we honour). */
 const MAX_DELAY_MS = 20_000;
 
+/**
+ * A `type/subtype` MIME with optional parameters, restricted to token chars so
+ * no CR/LF/quote/backslash can break out of the multipart part header.
+ */
+const MIME_TYPE_RE =
+  /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(?:[ \t]*;[ \t]*[A-Za-z0-9!#$&^_.+-]+=(?:"[^"\r\n\\]*"|[A-Za-z0-9!#$&^_.+-]+))*$/;
+
 /** Per-request options layered on top of `AxiosRequestConfig`. */
 interface RequestOptions {
   /**
@@ -232,7 +239,8 @@ export class AtlassianClient {
    * @param issueIdOrKey - Target issue key or numeric ID.
    * @param filename - Attachment file name (CR/LF/quote/backslash are stripped).
    * @param data - Raw file bytes.
-   * @param contentType - MIME type for the file part.
+   * @param contentType - MIME type for the file part; rejected unless it is a
+   *   well-formed `type/subtype` so it cannot break out of the header line.
    * @returns The response body (array of created attachment metadata).
    */
   uploadAttachment<T>(
@@ -241,6 +249,9 @@ export class AtlassianClient {
     data: Buffer,
     contentType: string
   ): Promise<T> {
+    if (!MIME_TYPE_RE.test(contentType)) {
+      return Promise.reject(new Error(`Invalid contentType: ${JSON.stringify(contentType)}`));
+    }
     const boundary = `----speedwave${randomUUID().replace(/-/g, '')}`;
     // Strip characters that would break the Content-Disposition header line.
     const safeName = String(filename).replace(/[\r\n"\\]/g, '_');
