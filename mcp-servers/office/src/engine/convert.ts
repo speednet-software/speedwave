@@ -288,17 +288,25 @@ export const CONVERT_MATRIX: Readonly<Record<string, ReadonlySet<string>>> = {
   '.ods': new Set(['pdf', 'xlsx', 'csv']),
 };
 
-/** Matches LibreOffice stderr/stdout noise indicating password-protected or encrypted input. */
-const PASSWORD_OR_ENCRYPTED = /password|encrypt/i;
+/** Matches "password"/"encrypt(ed|ion)" as a whole word only, never a substring inside a longer token. */
+const PASSWORD_OR_ENCRYPTED = /\b(?:password|encrypt(?:ed|ion)?)\b/i;
+
+/**
+ * Strips path-like tokens (anything containing `/`) so an echoed source path can never false-trigger the signature match.
+ * @param detail - The raw failure detail text.
+ */
+function withoutPathTokens(detail: string): string {
+  return detail.replace(/\S*\/\S+/g, '');
+}
 
 /**
  * Re-throw a LibreOffice subprocess failure as a {@link ValidationError} with actionable guidance,
- * pattern-matching common stderr substrings for the password/encrypted case.
+ * anchoring the password/encrypted case to a whole-word signature outside any echoed file path.
  * @param err - The error thrown by `runOk` for the `soffice` invocation.
  */
 function translateLibreOfficeError(err: unknown): never {
   const detail = err instanceof Error ? err.message : String(err);
-  if (PASSWORD_OR_ENCRYPTED.test(detail)) {
+  if (PASSWORD_OR_ENCRYPTED.test(withoutPathTokens(detail))) {
     throw new ValidationError(
       'LibreOffice could not open the input -- it may be password-protected or encrypted; ' +
         'verify the file opens normally (without a password) before converting.'

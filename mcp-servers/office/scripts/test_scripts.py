@@ -92,7 +92,35 @@ def _make_form_pdf(path: Path, field_name: str) -> None:
             ),
         }
     )
-    field_ref = writer.add_object(field)
+    field_ref = writer._add_object(field)
+    page[NameObject("/Annots")] = ArrayObject([field_ref])
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject(
+        {
+            NameObject("/Fields"): ArrayObject([field_ref]),
+            NameObject("/NeedAppearances"): BooleanObject(True),
+        }
+    )
+    with open(path, "wb") as fh:
+        writer.write(fh)
+
+
+def _make_broken_widget_form_pdf(path: Path, field_name: str) -> None:
+    """Write a one-page PDF whose single AcroForm widget is missing `/Rect`: pypdf's
+    `update_page_form_field_values` raises `KeyError: '/Rect'` writing to it (a genuine failure,
+    not the "no fields on this page" case `_fillform`'s per-page except is meant to absorb)."""
+    from pypdf import PdfWriter
+    from pypdf.generic import ArrayObject, BooleanObject, DictionaryObject, NameObject, TextStringObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    field = DictionaryObject(
+        {
+            NameObject("/FT"): NameObject("/Tx"),
+            NameObject("/T"): TextStringObject(field_name),
+            NameObject("/Subtype"): NameObject("/Widget"),
+        }
+    )
+    field_ref = writer._add_object(field)
     page[NameObject("/Annots")] = ArrayObject([field_ref])
     writer._root_object[NameObject("/AcroForm")] = DictionaryObject(
         {
@@ -117,16 +145,19 @@ def run_script(name: str, *args: str) -> dict:
     return out
 
 
-def run_script_expect_fail(name: str, *args: str) -> None:
-    """Run `scripts/<name>`; assert it exits non-zero and reports `{ok: false}`."""
+def run_script_expect_fail(name: str, *args: str) -> dict:
+    """Run `scripts/<name>`; assert it exits non-zero and reports `{ok: false}`; return the parsed stdout dict."""
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / name), *args],
         capture_output=True,
         text=True,
     )
     assert proc.returncode != 0, f"{name} unexpectedly succeeded: {proc.stdout}"
-    if proc.stdout.strip():
-        assert json.loads(proc.stdout).get("ok") is False
+    if not proc.stdout.strip():
+        return {}
+    result = json.loads(proc.stdout)
+    assert result.get("ok") is False
+    return result
 
 
 def is_zip(path: Path) -> bool:
@@ -223,17 +254,36 @@ def test_docx_replace_text_zero_matches_is_a_reported_failure(tmp_path: Path) ->
     src = tmp_path / "src.docx"
     run_script("docx_build.py", "create", str(src), json.dumps({"elements": [{"type": "paragraph", "text": "hello world"}]}))
     out = tmp_path / "edited.docx"
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "docx_build.py"), "edit", str(src), str(out), json.dumps([{"op": "replace_text", "find": "not-present", "replace": "x"}])],
-        capture_output=True,
-        text=True,
+    result = run_script_expect_fail(
+        "docx_build.py", "edit", str(src), str(out), json.dumps([{"op": "replace_text", "find": "not-present", "replace": "x"}])
     )
-    assert proc.returncode != 0
-    result = json.loads(proc.stdout)
-    assert result["ok"] is False
     assert "not-present" in result["error"]
     assert "was not found" in result["error"]
     assert not out.exists()
+
+
+def test_docx_replace_text_zero_matches_when_present_only_in_a_table_cell_is_a_reported_failure(tmp_path: Path) -> None:
+    """`find` present only inside a table cell (not a paragraph) must still count as a match, not a false zero-match failure."""
+    src = tmp_path / "src.docx"
+    run_script(
+        "docx_build.py",
+        "create",
+        str(src),
+        json.dumps({"elements": [{"type": "table", "header": ["A"], "rows": [["only-in-cell"]]}]}),
+    )
+    out = tmp_path / "edited.docx"
+    run_script(
+        "docx_build.py",
+        "edit",
+        str(src),
+        str(out),
+        json.dumps([{"op": "replace_text", "find": "only-in-cell", "replace": "replaced"}]),
+    )
+    from docx import Document
+
+    doc = Document(str(out))
+    cell_texts = [cell.text for table in doc.tables for row in table.rows for cell in row.cells]
+    assert any("replaced" in t for t in cell_texts)
 
 
 # ── xlsx_build.py ────────────────────────────────────────────────────────────
@@ -293,14 +343,35 @@ def test_xlsx_unknown_sheet_name_is_a_teaching_error(tmp_path: Path) -> None:
     src = tmp_path / "src.xlsx"
     run_script("xlsx_build.py", "create", str(src), json.dumps({"sheets": [{"name": "Q1", "rows": [[1, 2]]}]}))
     out = tmp_path / "edited.xlsx"
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "xlsx_build.py"), "edit", str(src), str(out), json.dumps([{"op": "set_cell", "sheet": "Q1 Data", "cell": "A1", "value": 5}])],
-        capture_output=True,
-        text=True,
+    result = run_script_expect_fail(
+        "xlsx_build.py", "edit", str(src), str(out), json.dumps([{"op": "set_cell", "sheet": "Q1 Data", "cell": "A1", "value": 5}])
     )
-    assert proc.returncode != 0
-    result = json.loads(proc.stdout)
-    assert result["ok"] is False
+    assert "Q1 Data" in result["error"]
+    assert "['Q1']" in result["error"]
+
+
+def test_xlsx_unknown_sheet_name_is_a_teaching_error_via_set_formula(tmp_path: Path) -> None:
+    src = tmp_path / "src.xlsx"
+    run_script("xlsx_build.py", "create", str(src), json.dumps({"sheets": [{"name": "Q1", "rows": [[1, 2]]}]}))
+    out = tmp_path / "edited.xlsx"
+    result = run_script_expect_fail(
+        "xlsx_build.py", "edit", str(src), str(out), json.dumps([{"op": "set_formula", "sheet": "Q1 Data", "cell": "A1", "formula": "=SUM(A1:A2)"}])
+    )
+    assert "Q1 Data" in result["error"]
+    assert "['Q1']" in result["error"]
+
+
+def test_xlsx_unknown_sheet_name_is_a_teaching_error_via_add_chart(tmp_path: Path) -> None:
+    src = tmp_path / "src.xlsx"
+    run_script("xlsx_build.py", "create", str(src), json.dumps({"sheets": [{"name": "Q1", "rows": [[1, 2]]}]}))
+    out = tmp_path / "edited.xlsx"
+    result = run_script_expect_fail(
+        "xlsx_build.py",
+        "edit",
+        str(src),
+        str(out),
+        json.dumps([{"op": "add_chart", "sheet": "Q1 Data", "chart": {"type": "bar", "dataRange": "Q1!B1:B2", "anchor": "D2"}}]),
+    )
     assert "Q1 Data" in result["error"]
     assert "['Q1']" in result["error"]
 
@@ -401,6 +472,10 @@ def test_pdf_metadata_merge_split_rotate(tmp_path: Path) -> None:
     meta = run_script("pdf_ops.py", "metadata", str(a))["metadata"]
     assert meta["pages"] == 3
     assert meta["encrypted"] is False
+    # A blank PDF with no title/author/creator set reports null (not "" or a missing key);
+    # pypdf stamps its own /Producer when writing, so that field alone is non-null here.
+    for key in ("title", "author", "creator"):
+        assert meta[key] is None
 
     merged = tmp_path / "merged.pdf"
     res = run_script("pdf_ops.py", "merge", str(merged), str(a), str(b))
@@ -460,6 +535,20 @@ def test_pdf_fillform_no_warnings_when_all_fields_known(tmp_path: Path) -> None:
     assert res["fill_warnings"] is None
 
 
+def test_pdf_fillform_genuine_write_failure_on_a_matching_page_is_not_silently_absorbed(tmp_path: Path) -> None:
+    form = tmp_path / "broken-form.pdf"
+    _make_broken_widget_form_pdf(form, "applicant_name")
+    out = tmp_path / "filled.pdf"
+    result = run_script_expect_fail(
+        "pdf_ops.py", "fillform", str(form), str(out), "0", json.dumps({"applicant_name": "Ada"})
+    )
+    assert "applicant_name" in result["error"]
+    assert "KeyError" in result["error"]
+    # Must not be misreported as the unrelated "no fields on this page" case.
+    assert "no AcroForm fields found" not in result["error"]
+    assert not out.exists()
+
+
 def test_pdf_errors(tmp_path: Path) -> None:
     p = tmp_path / "p.pdf"
     _make_pdf(p, 2)
@@ -470,17 +559,20 @@ def test_pdf_errors(tmp_path: Path) -> None:
     run_script_expect_fail("pdf_ops.py", "bogus")
 
 
+def test_pdf_merge_bad_input_names_its_position_in_the_batch(tmp_path: Path) -> None:
+    good = tmp_path / "good.pdf"
+    _make_pdf(good, 1)
+    bad = tmp_path / "bad.pdf"
+    bad.write_text("not a pdf")
+    out = tmp_path / "merged.pdf"
+    result = run_script_expect_fail("pdf_ops.py", "merge", str(out), str(good), str(bad))
+    assert "item 2 of 2" in result["error"]
+
+
 def test_pdf_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
     not_a_pdf = tmp_path / "fake.pdf"
     not_a_pdf.write_text("<html><body>this is not a PDF</body></html>")
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "pdf_ops.py"), "metadata", str(not_a_pdf)],
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode != 0
-    result = json.loads(proc.stdout)
-    assert result["ok"] is False
+    result = run_script_expect_fail("pdf_ops.py", "metadata", str(not_a_pdf))
     assert "could not read" in result["error"]
     assert "valid, non-corrupted PDF" in result["error"]
 
@@ -489,22 +581,9 @@ def test_pdf_fillform_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
     not_a_pdf = tmp_path / "fake.pdf"
     not_a_pdf.write_text("<html><body>this is not a PDF</body></html>")
     out = tmp_path / "filled.pdf"
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS_DIR / "pdf_ops.py"),
-            "fillform",
-            str(not_a_pdf),
-            str(out),
-            "0",
-            json.dumps({"name": "Ada"}),
-        ],
-        capture_output=True,
-        text=True,
+    result = run_script_expect_fail(
+        "pdf_ops.py", "fillform", str(not_a_pdf), str(out), "0", json.dumps({"name": "Ada"})
     )
-    assert proc.returncode != 0
-    result = json.loads(proc.stdout)
-    assert result["ok"] is False
     assert "could not read" in result["error"]
     assert "valid, non-corrupted PDF" in result["error"]
 

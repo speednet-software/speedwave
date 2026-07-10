@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createCommitTools } from './commit-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -98,13 +99,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listBranchCommits');
       const result = await tool!.handler({ project_id: 123, branch: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle API errors', async () => {
@@ -306,13 +301,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listCommits');
       const result = await tool!.handler({ project_id: 999 });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle network errors', async () => {
@@ -511,11 +500,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'searchCommits');
       const result = await tool!.handler({ project_id: 123, query: 'test' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
-      expect((result.content[0] as { text: string }).text).toContain(
-        'required scope (api or write_repository)'
-      );
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -668,13 +653,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'getCommitDiff');
       const result = await tool!.handler({ project_id: 123, commit_sha: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle invalid SHA errors', async () => {

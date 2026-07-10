@@ -16,11 +16,8 @@ import {
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
-import { createJiraAgileClient } from '../domains/jira-agile.js';
+import { createJiraAgileClient, MOVE_ISSUES_MAX } from '../domains/jira-agile.js';
 import { withValidation } from './validation.js';
-
-/** Agile API hard cap on issues per `moveIssuesToSprint` call. */
-const MOVE_ISSUES_MAX = 50;
 
 const listBoardsTool: Tool = {
   name: 'listBoards',
@@ -165,8 +162,7 @@ const getSprintTool: Tool = {
 
 const moveIssuesToSprintTool: Tool = {
   name: 'moveIssuesToSprint',
-  description:
-    'Move issues into a sprint. Rejects with a teaching error if more than 50 issueKeysOrIds are given — the Agile API caps a single call at 50; split larger batches into multiple calls.',
+  description: `Move issues into a sprint. Rejects with a teaching error if more than ${MOVE_ISSUES_MAX} issueKeysOrIds are given: the Agile API caps a single call at ${MOVE_ISSUES_MAX}; split larger batches into multiple calls.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprint', 'move', 'issues', 'assign'],
@@ -179,7 +175,7 @@ const moveIssuesToSprintTool: Tool = {
       issueKeysOrIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Issue keys or IDs (max 50 per call — rejected if exceeded)',
+        description: `Issue keys or IDs (max ${MOVE_ISSUES_MAX} per call, rejected if exceeded)`,
       },
     },
     required: ['sprintId', 'issueKeysOrIds'],

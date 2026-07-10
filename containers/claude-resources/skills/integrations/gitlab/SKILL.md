@@ -21,10 +21,10 @@ Always run step 1-2 before guessing a tool name. The live schema is the source o
 
 - **IID vs DB ID.** Issues and MRs use per-project `issue_iid` / `mr_iid`, the numbers users see in URLs (`/-/issues/42`, `/-/merge_requests/42`). Not the internal database ID. Accepts a plain number or a string, with or without a leading `#` (e.g. `42` or `"#42"`).
 - **Project paths.** Pass `group/subgroup/project` as a plain string. The tool URL-encodes slashes for you; do not pre-encode `%2F`.
-- **Identity ("my MRs"/"my issues"/"my projects").** Use `listMrIds`/`listIssues` with `scope: "assigned_to_me"` or `"created_by_me"`, or `listProjectIds` with `owned: true`, these resolve identity server-side without needing a username. Call `getCurrentUser` first when you need the caller's own numeric ID or username directly (e.g. to compare against an `author_id` field returned by another tool).
+- **Identity ("my MRs"/"my issues"/"my projects").** `listMrIds`/`listIssues`' `scope: "assigned_to_me"`/`"created_by_me"` and `listProjectIds`'s `owned: true` resolve identity server-side without needing a username, but `scope` filters by assignee, not reviewer: "MRs I need to review" needs `reviewer_username` plus the current-user tool instead. The tool description names that current-user tool when you need the caller's own numeric ID or username directly (e.g. to compare against an `author_id` field returned by another tool).
 - **Pipeline triggers cost CI minutes.** Confirm before retrying or triggering a pipeline.
 - **Search beats tree-walking.** When looking for a symbol or file, reach for `searchCode` before listing directories blindly.
-- **Job IDs come from pipelines.** `getJobLog`, `downloadArtifact`, and `deleteArtifacts` take a `job_id`, get valid values from `getPipelineFull`'s `jobs` array, not by guessing.
+- **Job IDs come from pipelines.** `getJobLog`, `downloadArtifact`, and `deleteArtifacts` take a `job_id`, get valid values from `getPipelineFull`'s `jobs` array, not by guessing. `deleteArtifacts` is irreversible and erases the job log too, not only the artifacts: treat it with the same confirmation weight as any other destructive delete.
 - **`downloadArtifact` returns a job log, not the CI artifact zip.** This worker cannot fetch raw artifact bundle contents.
 - **Write/delete confirmation.** Per `claude-resources/CLAUDE.md`, every create/update/close/merge/delete needs explicit user approval before execution. Read operations (list/get/search/compare/diff/blame) never need confirmation.
 

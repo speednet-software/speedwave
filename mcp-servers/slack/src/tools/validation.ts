@@ -5,29 +5,15 @@
 import {
   withResultValidation,
   notConfiguredMessage,
-  teachingToolResult,
+  missingParamResult,
+  type ResultValidationOptions,
   type ToolResult,
   type ToolsCallResult,
 } from '@speedwave/mcp-shared';
 import type { SlackClients } from '../client.js';
 
 export type { ToolResult };
-
-/**
- * Build a MISSING_PARAM {@link ToolResult} naming the param, the received value,
- * and the next step — used to validate required params before calling Slack.
- * Delegates to the shared {@link teachingToolResult}.
- * @param paramName - Name of the missing/invalid parameter.
- * @param received - The value actually received.
- * @param nextStep - What the caller should do instead.
- */
-export function missingParamResult(
-  paramName: string,
-  received: unknown,
-  nextStep: string
-): ToolResult {
-  return teachingToolResult({ paramName, received, nextStep }, 'MISSING_PARAM');
-}
+export { missingParamResult };
 
 /**
  * Gate: returns NOT_CONFIGURED when clients._tokensStatus is 'missing'.
@@ -50,11 +36,14 @@ export function withClients(clients: SlackClients) {
 }
 
 /**
- * Wrap handler with parameter validation (pretty-printed JSON output).
+ * Wrap handler with parameter validation (pretty-printed JSON output) and
+ * optional required-param enforcement driven by the tool's `inputSchema.required`.
  * @param handler - Tool handler function.
+ * @param options - Optional required-param list and tool name for teaching errors.
  */
 export function withValidation<T>(
-  handler: (params: T) => ToolResult | Promise<ToolResult>
+  handler: (params: T) => ToolResult | Promise<ToolResult>,
+  options?: ResultValidationOptions
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return withResultValidation(handler);
+  return withResultValidation(handler, 2, options);
 }

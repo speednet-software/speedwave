@@ -46,16 +46,16 @@ export function requireFields(
   const fieldsError = (
     offending: string[],
     code: string,
-    nextStep: string
+    action: string
   ): { valid: false; error: ToolResult } => {
-    const [first, ...rest] = offending;
+    const names = offending.join(', ');
     return {
       valid: false,
       error: teachingToolResult(
         {
-          paramName: offending.length > 1 ? `${first} (and ${rest.join(', ')})` : first,
-          received: offending.length > 1 ? receivedMapFor(params, offending) : params[first],
-          nextStep,
+          paramName: names,
+          received: offending.length > 1 ? receivedMapFor(params, offending) : params[offending[0]],
+          nextStep: `${action} ${names}.`,
         },
         code
       ),
@@ -65,15 +65,11 @@ export function requireFields(
     (f) => params[f] === undefined || params[f] === null || typeof params[f] !== 'string'
   );
   if (missing.length > 0) {
-    return fieldsError(
-      missing,
-      'MISSING_FIELDS',
-      `Provide a non-empty string for ${missing.join(', ')}.`
-    );
+    return fieldsError(missing, 'MISSING_FIELDS', 'Provide a non-empty string for');
   }
   const empty = fields.filter((f) => (params[f] as string).trim() === '');
   if (empty.length > 0) {
-    return fieldsError(empty, 'EMPTY_FIELDS', `Provide a non-empty value for ${empty.join(', ')}.`);
+    return fieldsError(empty, 'EMPTY_FIELDS', 'Provide a non-empty value for');
   }
   return { valid: true };
 }

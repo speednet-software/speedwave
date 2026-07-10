@@ -14,6 +14,7 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listJournalsTool: Tool = {
   name: 'listJournals',
@@ -186,12 +187,10 @@ export function createJournalTools(client: RedmineClient | null): ToolDefinition
       tool: listJournalsTool,
       handler: async (params) => {
         const { issue_id } = params as { issue_id: number };
-        try {
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.listJournals(issue_id);
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
-        }
+        });
       },
     },
     {
@@ -202,24 +201,20 @@ export function createJournalTools(client: RedmineClient | null): ToolDefinition
           journal_id: number;
           notes: string;
         };
-        try {
+        return withRedmineErrors({ journal_id }, async () => {
           await client.updateJournal(issue_id, journal_id, notes);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `journal_id=${journal_id}`));
-        }
+        });
       },
     },
     {
       tool: deleteJournalTool,
       handler: async (params) => {
         const { issue_id, journal_id } = params as { issue_id: number; journal_id: number };
-        try {
+        return withRedmineErrors({ journal_id }, async () => {
           await client.deleteJournal(issue_id, journal_id);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `journal_id=${journal_id}`));
-        }
+        });
       },
     },
   ];

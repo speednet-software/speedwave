@@ -12,17 +12,19 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
+import { IDENTITY_SCOPES } from '../identity-scopes.js';
 
 const listMrIdsTool: Tool = {
   name: 'listMrIds',
   description:
-    'List merge request IIDs. Use getMrFull for details. For "my MRs"/"MRs I need to review", pass scope: "assigned_to_me" or "created_by_me" (or author_username/reviewer_username for a specific user).',
+    'List merge request IIDs. Use getMrFull for details. For "my MRs" (authored or assigned), pass scope: "assigned_to_me" or "created_by_me". For "MRs I need to review", pass reviewer_username with the username from getCurrentUser (scope filters by assignee, not reviewer).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
     [META_KEYS.SELF_PARAM]: "scope: 'assigned_to_me' | 'created_by_me'",
   },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'list', 'pull', 'ids'],
@@ -40,16 +42,17 @@ const listMrIdsTool: Tool = {
       author_username: { type: 'string', description: 'Filter by author' },
       reviewer_username: {
         type: 'string',
-        description: "Filter by reviewer's username (MRs assigned to this user for review)",
+        description:
+          "Filter by reviewer's username (MRs assigned to this user for review; use getCurrentUser for 'MRs I need to review')",
       },
       labels: { type: 'string', description: 'Filter by comma-separated labels' },
       scope: {
         type: 'string',
-        enum: ['assigned_to_me', 'created_by_me', 'all'],
+        enum: [...IDENTITY_SCOPES],
         description:
-          "Filter by identity relative to the authenticated user. Use with getCurrentUser to resolve 'me' without needing a username.",
+          "Filter by identity relative to the authenticated user: assignee (not reviewer) for 'assigned_to_me', or author for 'created_by_me'. Use with getCurrentUser to resolve 'me' without needing a username.",
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: { type: 'number', description: 'Max results (default 20, max 100)' },
     },
     required: ['project_id'],
   },
@@ -87,7 +90,7 @@ const listMrIdsTool: Tool = {
       input: { project_id: 'my-group/my-project', state: 'opened' },
     },
     {
-      description: 'Full: MRs assigned to me for review',
+      description: 'Full: MRs assigned to me (assignee, not reviewer)',
       input: {
         project_id: 'my-group/my-project',
         state: 'opened',
@@ -139,9 +142,12 @@ const getMrFullTool: Tool = {
             type: 'array',
             items: { type: 'object', properties: { username: { type: 'string' } } },
           },
+          labels: { type: 'array', items: { type: 'string' } },
           web_url: { type: 'string' },
           created_at: { type: 'string' },
           updated_at: { type: 'string' },
+          merged_at: { type: ['string', 'null'], description: 'Merge timestamp, null if unmerged' },
+          merge_commit_sha: { type: ['string', 'null'], description: 'SHA of the merge commit' },
           changes_count: { type: 'string' },
           has_conflicts: { type: 'boolean', description: 'Whether the MR has merge conflicts' },
           merge_status: {
@@ -238,7 +244,7 @@ const approveMergeRequestTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['gitlab', 'merge', 'request', 'approve', 'review', 'accept'],
   example: 'await gitlab.approveMergeRequest({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -502,10 +508,8 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
     {
       tool: getMrFullTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.showMergeRequest(project_id, iid.value);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
+        const result = await c.showMergeRequest(project_id, mr_iid);
         return jsonResult(result);
       }),
     },
@@ -528,10 +532,8 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
     {
       tool: approveMergeRequestTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        await c.approveMergeRequest(project_id, iid.value);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
+        await c.approveMergeRequest(project_id, mr_iid);
         return jsonResult({ success: true, message: 'Merge request approved' });
       }),
     },
@@ -540,15 +542,13 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...options } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           squash?: boolean;
           should_remove_source_branch?: boolean;
           auto_merge?: boolean;
           sha?: string;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.mergeMergeRequest(project_id, iid.value, options);
+        const result = await c.mergeMergeRequest(project_id, mr_iid, options);
         return jsonResult(result);
       }),
     },
@@ -557,26 +557,22 @@ export function createMrTools(client: GitLabClient | null): ToolDefinition[] {
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...options } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           title?: string;
           description?: string;
           target_branch?: string;
           state_event?: string;
           labels?: string;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.updateMergeRequest(project_id, iid.value, options);
+        const result = await c.updateMergeRequest(project_id, mr_iid, options);
         return jsonResult(result);
       }),
     },
     {
       tool: getMrChangesTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: unknown };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.getMrChanges(project_id, iid.value);
+        const { project_id, mr_iid } = params as { project_id: string | number; mr_iid: number };
+        const result = await c.getMrChanges(project_id, mr_iid);
         return jsonResult(result);
       }),
     },

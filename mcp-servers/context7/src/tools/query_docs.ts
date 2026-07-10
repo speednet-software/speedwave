@@ -97,7 +97,7 @@ export function createQueryDocsTool(client: Context7Client): ToolDefinition {
           paramName: 'libraryId',
           received: p?.libraryId,
           correctValueTool: 'resolveLibraryId',
-          nextStep: 'Call resolveLibraryId first to get a valid Context7 library ID.',
+          nextStep: 'A valid ID looks like "/owner/repo" (e.g. "/facebook/react").',
         });
       }
       if (!query) {

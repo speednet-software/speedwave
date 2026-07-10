@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createDiscussionTools } from './discussion-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -252,13 +253,7 @@ describe('discussion-tools', () => {
 
       const result = await handler!({ project_id: 1, mr_iid: 9999 });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('handles network errors', async () => {
@@ -288,8 +283,7 @@ describe('discussion-tools', () => {
 
       const result = await handler!({ project_id: 1, mr_iid: 10 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('accepts a numeric-string mr_iid', async () => {
@@ -482,13 +476,7 @@ describe('discussion-tools', () => {
         body: 'Comment',
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('handles permission errors', async () => {
@@ -503,8 +491,7 @@ describe('discussion-tools', () => {
         body: 'Comment',
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('accepts a "#"-prefixed mr_iid', async () => {

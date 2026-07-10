@@ -9,7 +9,7 @@ import {
   handleDownloadFile,
   handleUploadFile,
 } from './file-tools.js';
-import type { SharePointClient } from '../client.js';
+import { GraphApiError, type SharePointClient } from '../client.js';
 
 type MockClient = {
   listFiles: Mock;
@@ -226,19 +226,19 @@ describe('file-tools', () => {
       expect(result.data).toEqual(metadata);
     });
 
-    it('returns error when file not found, with a hint to call listFileIds', async () => {
+    it('on a 404 returns a teaching error naming listFileIds as the source of a valid id', async () => {
       const client = createMockClient();
-      client.getFileMetadata.mockRejectedValue(new Error('Resource not found in SharePoint.'));
+      client.getFileMetadata.mockRejectedValue(new GraphApiError('itemNotFound', 404));
 
       const result = await handleGetFileFull(client as unknown as SharePointClient, {
         file_id: 'nonexistent',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toEqual({
-        code: 'GET_FAILED',
-        message: 'Resource not found in SharePoint. Call listFileIds first to get a valid file_id.',
-      });
+      expect(result.error?.code).toBe('GET_FAILED');
+      expect(result.error?.message).toContain('file_id');
+      expect(result.error?.message).toContain('nonexistent');
+      expect(result.error?.message).toContain('listFileIds');
     });
 
     it('returns error when API call fails', async () => {
@@ -268,7 +268,23 @@ describe('file-tools', () => {
       expect(result.error?.code).toBe('GET_FAILED');
     });
 
-    it('does not append the listFileIds hint when the error is not "not found"', async () => {
+    // A 401/403/429 must not be misread as a wrong id and steered to listFileIds.
+    it.each([401, 403, 429] as const)(
+      'does not append the listFileIds hint on a %s error',
+      async (status) => {
+        const client = createMockClient();
+        client.getFileMetadata.mockRejectedValue(new GraphApiError('Graph failure', status));
+
+        const result = await handleGetFileFull(client as unknown as SharePointClient, {
+          file_id: '123',
+        });
+
+        expect(result.error?.code).toBe('GET_FAILED');
+        expect(result.error?.message).not.toContain('listFileIds');
+      }
+    );
+
+    it('does not append the listFileIds hint when the error is a plain Error', async () => {
       const client = createMockClient();
       client.getFileMetadata.mockRejectedValue(new Error('API error'));
 
@@ -319,6 +335,8 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
       expect(result.error?.message).toContain('sharepointPath');
+      // Shared teaching envelope: names the received value and a next step.
+      expect(result.error?.message).toContain('received:');
     });
 
     it('returns MISSING_PARAM when localPath is missing', async () => {
@@ -331,6 +349,7 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
       expect(result.error?.message).toContain('localPath');
+      expect(result.error?.message).toContain('received:');
     });
 
     it('returns error when download fails', async () => {
@@ -465,6 +484,7 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
       expect(result.error?.message).toContain('localPath');
+      expect(result.error?.message).toContain('received:');
     });
 
     it('returns MISSING_PARAM when sharepointPath is missing', async () => {
@@ -477,6 +497,7 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
       expect(result.error?.message).toContain('sharepointPath');
+      expect(result.error?.message).toContain('received:');
     });
 
     it('returns error when upload fails', async () => {

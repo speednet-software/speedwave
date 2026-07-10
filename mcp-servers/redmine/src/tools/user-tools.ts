@@ -12,6 +12,8 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
+import { successResultSchema } from './schema-helpers.js';
 
 const listUsersTool: Tool = {
   name: 'listUsers',
@@ -126,24 +128,18 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      user: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          login: { type: 'string' },
-          firstname: { type: 'string' },
-          lastname: { type: 'string' },
-          mail: { type: 'string' },
-        },
+  outputSchema: successResultSchema({
+    user: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        login: { type: 'string' },
+        firstname: { type: 'string' },
+        lastname: { type: 'string' },
+        mail: { type: 'string' },
       },
-      error: { type: 'string' },
     },
-    required: ['success'],
-  },
+  }),
 };
 
 /**
@@ -165,38 +161,28 @@ export function createUserTools(client: RedmineClient | null): ToolDefinition[] 
       tool: listUsersTool,
       handler: async (params) => {
         const { project_id } = params as { project_id?: string };
-        try {
+        return withRedmineErrors(project_id ? { project_id } : undefined, async () => {
           const result = await client.listUsers(project_id);
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(
-            RedmineClient.formatError(error, project_id ? `project_id=${project_id}` : undefined)
-          );
-        }
+        });
       },
     },
     {
       tool: resolveUserTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const { identifier } = params as { identifier: string };
           const result = await client.resolveUser(identifier);
           return jsonResult({ user_id: result });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: getCurrentUserTool,
-      handler: async () => {
-        try {
+      handler: async () =>
+        withRedmineErrors(undefined, async () => {
           const result = await client.getCurrentUser();
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
   ];
 }

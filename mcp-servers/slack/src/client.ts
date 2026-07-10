@@ -151,11 +151,7 @@ export interface SlackHistoryPage {
 }
 
 /** The signed-in user's own identity, as resolved by getCurrentUser. */
-export interface SlackCurrentUser {
-  id: string;
-  name: string;
-  real_name?: string;
-  display_name?: string;
+export interface SlackCurrentUser extends SlackUser {
   team_id?: string;
 }
 
@@ -270,9 +266,42 @@ export async function slackCall<T>(
 // Error Handling
 //═══════════════════════════════════════════════════════════════════════════════
 
+const AUTH_FAILURE_MESSAGE = withSetupGuidance(
+  'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+);
+const MISSING_SCOPE_MESSAGE = withSetupGuidance(
+  'Permission denied: the Slack sign-in lacks a newly required permission. ' +
+    'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
+);
+const MALFORMED_FIELD_MESSAGE =
+  'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';
+
+/** Slack platform error code → user-facing message, for exact-match codes. */
+const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  not_authed: AUTH_FAILURE_MESSAGE,
+  invalid_auth: AUTH_FAILURE_MESSAGE,
+  token_expired: AUTH_FAILURE_MESSAGE,
+  token_revoked: AUTH_FAILURE_MESSAGE,
+  missing_scope: MISSING_SCOPE_MESSAGE,
+  restricted_action: MISSING_SCOPE_MESSAGE,
+  channel_not_found: 'Channel not found in Slack.',
+  users_not_found: 'User not found in Slack.',
+  user_not_found: 'User not found in Slack.',
+  ratelimited: 'Rate limit exceeded. Please try again later.',
+  is_archived:
+    'This channel is archived and cannot receive new messages. Choose a different channel.',
+  msg_too_long: "Message text exceeds Slack's length limit; shorten it and retry.",
+  not_in_channel:
+    'The signed-in user is not a member of this channel; use listChannelIds to see channels you can post to.',
+  cant_dm_bot:
+    'Slack apps/bots cannot receive DMs. Use findUsers to confirm the recipient is a real person.',
+  no_text: MALFORMED_FIELD_MESSAGE,
+  invalid_arguments: MALFORMED_FIELD_MESSAGE,
+});
+
 /**
- * Format Slack error messages consistently
- * Sanitizes errors and provides user-friendly messages
+ * Format Slack error messages consistently.
+ * Sanitizes errors and provides user-friendly messages via {@link SLACK_ERROR_MESSAGES}.
  * @param {unknown} error - Error object from Slack API
  * @returns {string} Formatted, user-friendly error message
  */
@@ -291,54 +320,8 @@ export function formatSlackError(error: unknown): string {
   const e = error as { message?: string; data?: { error?: string }; error?: string };
   const slackError = e.data?.error || e.error;
 
-  if (
-    slackError === 'not_authed' ||
-    slackError === 'invalid_auth' ||
-    slackError === 'token_expired' ||
-    slackError === 'token_revoked'
-  ) {
-    return withSetupGuidance(
-      'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
-    );
-  }
-
-  if (slackError === 'missing_scope' || slackError === 'restricted_action') {
-    return withSetupGuidance(
-      'Permission denied — the Slack sign-in lacks a newly required permission. ' +
-        'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
-    );
-  }
-
-  if (slackError === 'channel_not_found') {
-    return 'Channel not found in Slack.';
-  }
-
-  if (slackError === 'users_not_found' || slackError === 'user_not_found') {
-    return 'User not found in Slack.';
-  }
-
-  if (slackError === 'ratelimited') {
-    return 'Rate limit exceeded. Please try again later.';
-  }
-
-  if (slackError === 'is_archived') {
-    return 'This channel is archived and cannot receive new messages. Choose a different channel.';
-  }
-
-  if (slackError === 'msg_too_long') {
-    return "Message text exceeds Slack's length limit; shorten it and retry.";
-  }
-
-  if (slackError === 'not_in_channel') {
-    return 'The signed-in user is not a member of this channel; use listChannelIds to see channels you can post to.';
-  }
-
-  if (slackError === 'cant_dm_bot') {
-    return 'Slack apps/bots cannot receive DMs. Use findUsers to confirm the recipient is a real person.';
-  }
-
-  if (slackError === 'no_text' || slackError === 'invalid_arguments') {
-    return 'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';
+  if (slackError && slackError in SLACK_ERROR_MESSAGES) {
+    return SLACK_ERROR_MESSAGES[slackError];
   }
 
   if (e.message?.includes('getaddrinfo') || e.message?.includes('ECONNREFUSED')) {
@@ -599,14 +582,14 @@ function toHistoryPage(
 }
 
 /** Shape of a genuine Slack message timestamp — seconds dot 6-digit microseconds. */
-export const SLACK_TS_RE = /^\d+\.\d{6}$/;
+const SLACK_TS_RE = /^\d+\.\d{6}$/;
 
 /**
  * True when `value` looks like a real Slack `ts` (e.g. "1717000000.000100").
  * Guards against a weak model reformatting/rounding a copied timestamp.
  * @param value - candidate thread_ts value
  */
-export function looksLikeSlackTs(value: string): boolean {
+function looksLikeSlackTs(value: string): boolean {
   return SLACK_TS_RE.test(value);
 }
 
@@ -955,12 +938,18 @@ export async function getUsers(
  * enriched with `users.info` for the display name when that lookup succeeds.
  * @param {SlackClients} clients - Slack client container
  * @returns {Promise<SlackCurrentUser>} The signed-in user's identity
- * @throws {Error} If auth.test fails or does not report ok
+ * @throws {Error} If the `auth.test` call fails, or Slack reports `ok: false`
+ *   (carries `.data.error` so formatSlackError classifies it like any other auth failure)
+ * @throws {Error} If `ok: true` but no `user_id` is returned (malformed response)
  */
 export async function getCurrentUser(clients: SlackClients): Promise<SlackCurrentUser> {
   const auth = (await slackCall(clients, (c) => c.auth.test())) as AuthTestResponse;
-  if (!auth.ok || !auth.user_id) {
-    throw new Error(auth.error ?? 'auth.test did not return a user_id.');
+  if (!auth.ok) {
+    const code = auth.error ?? 'unknown_error';
+    throw Object.assign(new Error(code), { data: { error: code } });
+  }
+  if (!auth.user_id) {
+    throw new Error('auth.test did not return a user_id.');
   }
 
   const base: SlackCurrentUser = {
@@ -978,8 +967,11 @@ export async function getCurrentUser(clients: SlackClients): Promise<SlackCurren
       base.display_name = info.user.profile?.display_name || undefined;
       base.name = info.user.name || base.name;
     }
-  } catch {
+  } catch (error) {
     // Best-effort enrichment — auth.test alone is enough ground truth for "me".
+    console.warn(
+      `${ts()} Slack getCurrentUser: users.info enrichment failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 
   return base;
@@ -1038,7 +1030,7 @@ export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSumm
   return { dms };
 }
 
-/** User-ID shape accepted by conversations.open (U… or enterprise W…): uppercase, Slack-length only. */
+/** User-ID shape accepted by conversations.open (U… or enterprise W…): a letter/digit run of at least 8 chars after the prefix, no upper length bound. */
 const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
 
 /** Slack caps a single conversation at 8 participants (conversations.open). */
@@ -1073,8 +1065,9 @@ export async function openDm(
   }
   const ids: string[] = [];
   for (const entry of params.users) {
-    if (USER_ID_RE.test(entry)) {
-      ids.push(entry.toUpperCase());
+    const normalized = entry.toUpperCase();
+    if (USER_ID_RE.test(normalized)) {
+      ids.push(normalized);
     } else if (entry.includes('@')) {
       const found = await getUsers(clients, { email: entry });
       if (!found.user) {

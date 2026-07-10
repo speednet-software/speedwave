@@ -43,9 +43,7 @@ Always do steps 1-2 before calling a tool for the first time in a conversation.
 
 **Free-plan workspaces.** Slack hides messages older than the plan's retention window from the API as well as the UI; an export that stops early on an old channel may have hit that wall, not a bug.
 
-**User lookup.** `findUsers` searches by name (display or real name, partial and diacritic-insensitive); `getUsers` resolves an exact e-mail. Names are not unique; when identity matters (especially before any DM send), confirm the specific person with the user. Neither tool resolves the signed-in user's OWN identity; use `getCurrentUser` for that.
-
-**Resolving "me".** Every message from `getChannelMessages`/`getThreadMessages` carries a `user` field with no built-in way to tell which one is the signed-in user. To answer any question that depends on the signed-in user's own identity ("what did I say", "who mentioned me", "did I already reply to this thread"), first call `getCurrentUser` to resolve their user ID, then match it against the `user` field in the results; never assume identity from display name alone.
+**Resolving "me" and other identities.** `findUsers` searches by name (display or real name, partial and diacritic-insensitive); `getUsers` resolves an exact e-mail. Names are not unique; when identity matters (especially before any DM send), confirm the specific person with the user. Neither tool resolves the signed-in user's OWN identity, and messages from `getChannelMessages`/`getThreadMessages` carry a `user` field with no built-in way to tell which one is you: for anything depending on your own identity ("what did I say", "who mentioned me", "did I already reply to this thread"), call `getCurrentUser` first, then match its resolved ID against the `user` field; never assume identity from display name alone.
 
 ## Direct messages
 

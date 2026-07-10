@@ -7,14 +7,15 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  textResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { GitHubPullRequest } from '../types.js';
+import { DIFF_OUTPUT_SCHEMA } from './schemas.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const PR_ITEM_PROPERTIES = {
   number: { type: 'number' },
@@ -35,9 +36,8 @@ const PR_OUTPUT_SCHEMA = {
 };
 
 const listPullRequestsTool: Tool = {
-  name: 'listPullRequests',
-  description:
-    "List pull requests in a repository with optional filters. There is no author filter — for 'my PRs' questions, resolve the login with getCurrentUser, then match it against each PR's user field yourself (this worker has no PR-search tool).",
+  name: TOOL_NAMES.LIST_PULL_REQUESTS,
+  description: `List pull requests in a repository with optional filters. There is no author filter: for 'my PRs' questions, resolve the login with ${TOOL_NAMES.GET_CURRENT_USER}, then match it against each PR's user field yourself (this worker has no PR-search tool).`,
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'pr', 'pull', 'request', 'list', 'merge'],
@@ -55,7 +55,10 @@ const listPullRequestsTool: Tool = {
       },
       head: { type: 'string', description: "Filter by head branch, format 'user:branch'" },
       base: { type: 'string', description: 'Filter by base branch' },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -263,11 +266,12 @@ const updatePullRequestTool: Tool = {
 const getPrDiffTool: Tool = {
   name: 'getPrDiff',
   description:
-    'Get the unified diff for a pull request, as a plain-text result (not JSON). Large for big PRs.',
+    'Get the unified diff for a pull request as `{ diff }` (the diff text under a `diff` field). Large for big PRs.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'diff', 'patch', 'changes'],
-  example: 'const diff = await github.getPrDiff({ owner: "octocat", repo: "hello", number: 42 })',
+  example:
+    'const { diff } = await github.getPrDiff({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -277,10 +281,7 @@ const getPrDiffTool: Tool = {
     },
     required: ['owner', 'repo', 'number'],
   },
-  outputSchema: {
-    type: 'string',
-    description: 'The unified diff as plain text (returned directly, not as a JSON object).',
-  },
+  outputSchema: DIFF_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Get the diff of a pull request',
@@ -303,7 +304,10 @@ const getPrFilesTool: Tool = {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
       number: { type: 'number', description: 'Pull request number' },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'number'],
   },
@@ -438,8 +442,8 @@ export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
       tool: getPrDiffTool,
       handler: withValidation(client, async (c, params) => {
         const { owner, repo, number } = params as { owner: string; repo: string; number: number };
-        const result = await c.getPrDiff(owner, repo, number);
-        return textResult(result);
+        const diff = await c.getPrDiff(owner, repo, number);
+        return jsonResult({ diff });
       }),
     },
     {

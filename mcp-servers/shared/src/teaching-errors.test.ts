@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { teachingErrorResult, teachingToolResult, clampPageSize } from './teaching-errors.js';
+import {
+  teachingErrorResult,
+  teachingToolResult,
+  clampPageSize,
+  missingParamResult,
+  MAX_RECEIVED_LENGTH,
+} from './teaching-errors.js';
 
 describe('teachingErrorResult', () => {
   it('composes param name, received value, and next step', () => {
@@ -74,6 +80,42 @@ describe('teachingErrorResult', () => {
 
     expect(result.content[0].text).toContain('[object Object]');
   });
+
+  it('caps an oversized received string at MAX_RECEIVED_LENGTH with a marker', () => {
+    const huge = 'a'.repeat(MAX_RECEIVED_LENGTH + 500);
+    const text = teachingErrorResult({ paramName: 'query', received: huge, nextStep: 'x' })
+      .content[0].text as string;
+
+    expect(text).toContain('...');
+    expect(text).not.toContain('a'.repeat(MAX_RECEIVED_LENGTH + 1));
+    expect(text).toContain('a'.repeat(MAX_RECEIVED_LENGTH - 1));
+  });
+
+  it('does not truncate a received value at or below the cap', () => {
+    const exact = 'b'.repeat(MAX_RECEIVED_LENGTH - 2);
+    const text = teachingErrorResult({ paramName: 'query', received: exact, nextStep: 'x' })
+      .content[0].text as string;
+
+    expect(text).toContain(`"${exact}"`);
+    expect(text).not.toContain('...');
+  });
+});
+
+describe('missingParamResult', () => {
+  it('builds a MISSING_PARAM teaching ToolResult', () => {
+    const result = missingParamResult('channel', undefined, 'Provide a channel.');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('MISSING_PARAM');
+    expect(result.error?.message).toContain('Invalid channel');
+    expect(result.error?.message).toContain('Provide a channel.');
+  });
+
+  it('echoes an empty-string received value', () => {
+    const result = missingParamResult('ts', '', 'Provide a ts.');
+
+    expect(result.error?.message).toContain('received: ""');
+  });
 });
 
 describe('teachingToolResult', () => {
@@ -141,9 +183,18 @@ describe('clampPageSize', () => {
     expect(clampPageSize(500, 10, 100)).toBe(100);
   });
 
-  it('floors at 1 when value is zero or negative', () => {
-    expect(clampPageSize(0, 10, 100)).toBe(1);
-    expect(clampPageSize(-5, 10, 100)).toBe(1);
+  it('returns default when value is zero or negative', () => {
+    expect(clampPageSize(0, 10, 100)).toBe(10);
+    expect(clampPageSize(-5, 10, 100)).toBe(10);
+  });
+
+  it('returns default for a zero or negative numeric string', () => {
+    expect(clampPageSize('0', 50, 100)).toBe(50);
+    expect(clampPageSize('-3', 50, 100)).toBe(50);
+  });
+
+  it('floors a positive fractional below 1 up to 1', () => {
+    expect(clampPageSize(0.5, 10, 100)).toBe(1);
   });
 
   it('returns default when value is undefined', () => {
@@ -169,5 +220,16 @@ describe('clampPageSize', () => {
   it('returns default for Infinity (not finite)', () => {
     expect(clampPageSize(Infinity, 10, 100)).toBe(10);
     expect(clampPageSize(-Infinity, 10, 100)).toBe(10);
+  });
+
+  it('applies no upper ceiling when max is omitted', () => {
+    expect(clampPageSize(5000, 100)).toBe(5000);
+    expect(clampPageSize('250', 100)).toBe(250);
+  });
+
+  it('still floors and defaults when max is omitted', () => {
+    expect(clampPageSize(25.9, 100)).toBe(25);
+    expect(clampPageSize(0, 100)).toBe(100);
+    expect(clampPageSize(0.5, 100)).toBe(1);
   });
 });

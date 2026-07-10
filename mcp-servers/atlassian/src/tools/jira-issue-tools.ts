@@ -19,6 +19,10 @@ import { createJiraIssuesClient } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
 
+/** Shared account-ID resolution guidance (no user-search tool exists here). */
+const ACCOUNT_ID_RESOLUTION_GUIDANCE =
+  'Resolve your own account ID via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.';
+
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
   description:
@@ -99,7 +103,11 @@ const createIssueTool: Tool = {
   description:
     'Create a Jira issue. `bodyText` (plain text) becomes the description as ADF; pass `bodyAdf` for a pre-built ADF document.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'create', 'new', 'ticket', 'open'],
   example:
     'const issue = await atlassian.createIssue({ projectKey: "PROJ", summary: "Fix login", issueType: "Bug", bodyText: "Steps to reproduce..." })',
@@ -118,8 +126,7 @@ const createIssueTool: Tool = {
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
       assigneeAccountId: {
         type: 'string',
-        description:
-          'Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5) — not a username or email. Get your own via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result. This worker has no user-search tool: if the account_id is not already visible, ask the user for it.',
+        description: `Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
       },
     },
     required: ['projectKey', 'summary', 'issueType'],
@@ -168,7 +175,11 @@ const updateIssueTool: Tool = {
   description:
     'Update fields of a Jira issue (only provided fields change). `bodyText`/`bodyAdf` set the description.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'update', 'edit', 'change', 'modify', 'ticket'],
   example:
     'await atlassian.updateIssue({ issueIdOrKey: "PROJ-123", summary: "New title", priority: "Low" })',
@@ -184,6 +195,10 @@ const updateIssueTool: Tool = {
       bodyAdf: { type: 'object', description: 'New ADF description (overrides bodyText)' },
       priority: { type: 'string', description: 'New priority name' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Replacement label set' },
+      assigneeAccountId: {
+        type: 'string',
+        description: `Cloud account ID to reassign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      },
     },
     required: ['issueIdOrKey'],
   },
@@ -210,6 +225,7 @@ const updateIssueTool: Tool = {
         bodyText: 'Y',
         priority: 'High',
         labels: ['a', 'b'],
+        assigneeAccountId: '5b10a...',
       },
     },
   ],
@@ -266,8 +282,7 @@ const transitionIssueTool: Tool = {
 
 const assignIssueTool: Tool = {
   name: 'assignIssue',
-  description:
-    'Assign an issue to an account, or unassign it (omit accountId or pass null). This worker has no user-search tool: to assign to the authenticated account itself, resolve accountId via getMyself first; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.',
+  description: `Assign an issue to an account, or unassign it (omit accountId or pass null). ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -400,6 +415,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           bodyAdf?: AdfDoc;
           priority?: string;
           labels?: string[];
+          assigneeAccountId?: string;
         };
         const body = p.bodyAdf ?? p.bodyText;
         return jsonResult({
@@ -408,6 +424,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
             body,
             priority: p.priority,
             labels: p.labels,
+            assigneeAccountId: p.assigneeAccountId,
           }),
         });
       }),

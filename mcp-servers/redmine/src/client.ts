@@ -14,6 +14,8 @@ import {
   tokensDir,
   clampPageSize,
 } from '@speedwave/mcp-shared';
+import { MAPPABLE_FIELDS } from './tools/helpers.js';
+import { TOOL_NAMES } from './tool-names.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -759,50 +761,82 @@ function sanitizeTextile(textile: string): string {
   return result;
 }
 
+/** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
+export type ErrorContext = Record<string, string | number>;
+
 /** Recovery hint per entity-type context key, appended to a 404 error message. */
 const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
-  issue_id: 'Verify the issue ID with listIssueIds or searchIssueIds.',
-  issue_to_id: 'Verify the issue ID with listIssueIds or searchIssueIds.',
-  project_id: 'Verify the project ID with listProjectIds or searchProjectIds.',
-  journal_id: 'Verify the journal ID with listJournals(issue_id).',
-  relation_id: 'Verify the relation ID with listRelations(issue_id).',
-  time_entry_id: 'Verify the time entry ID with listTimeEntries.',
-  user_id: 'Verify the user ID with listUsers or resolveUser.',
+  issue_id: `Verify the issue ID with ${TOOL_NAMES.LIST_ISSUE_IDS} or ${TOOL_NAMES.SEARCH_ISSUE_IDS}.`,
+  issue_to_id: `Verify the issue ID with ${TOOL_NAMES.LIST_ISSUE_IDS} or ${TOOL_NAMES.SEARCH_ISSUE_IDS}.`,
+  project_id: `Verify the project ID with ${TOOL_NAMES.LIST_PROJECT_IDS} or ${TOOL_NAMES.SEARCH_PROJECT_IDS}.`,
+  journal_id: `Verify the journal ID with ${TOOL_NAMES.LIST_JOURNALS}(issue_id).`,
+  relation_id: `Verify the relation ID with ${TOOL_NAMES.LIST_RELATIONS}(issue_id).`,
+  time_entry_id: `Verify the time entry ID with ${TOOL_NAMES.LIST_TIME_ENTRIES}.`,
 };
 
 /**
- * Build a 404 error message, naming the attempted resource and a recovery tool per
- * entity type named in the context (e.g. "issue_id=1, issue_to_id=2" yields one hint each).
- * @param context - Attempted resource identifier(s), comma-separated "key=value" pairs.
+ * Render a context object as "key=value" pairs, e.g. `{ issue_id: 1 }` -> `"issue_id=1"`.
+ * @param context - Attempted resource identifier(s).
  */
-function formatNotFoundError(context?: string): string {
-  if (!context) return 'Resource not found in Redmine.';
-  const keys = context.split(',').map((pair) => pair.split('=')[0].trim());
-  const hints = [...new Set(keys.map((key) => NOT_FOUND_RECOVERY_HINTS[key]).filter(Boolean))];
-  return hints.length > 0
-    ? `Resource not found in Redmine: ${context}. ${hints.join(' ')}`
-    : `Resource not found in Redmine: ${context}.`;
+function formatContextLabel(context: ErrorContext): string {
+  return Object.entries(context)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
 }
 
 /**
- * Build a 422 validation error message, appending a recovery hint when the raw
- * Redmine error text names a field with a known lookup tool.
- * @param errors - Raw Redmine validation errors (array or object).
+ * Build a 404 error message, naming the attempted resource and a recovery tool per
+ * entity type in the context (identical hints, e.g. issue_id/issue_to_id, dedupe to one line).
+ * @param context - Attempted resource identifier(s).
+ */
+function formatNotFoundError(context?: ErrorContext): string {
+  if (!context) return 'Resource not found in Redmine.';
+  const label = formatContextLabel(context);
+  const hints = [
+    ...new Set(
+      Object.keys(context)
+        .map((key) => NOT_FOUND_RECOVERY_HINTS[key])
+        .filter(Boolean)
+    ),
+  ];
+  return hints.length > 0
+    ? `Resource not found in Redmine: ${label}. ${hints.join(' ')}`
+    : `Resource not found in Redmine: ${label}.`;
+}
+
+/** Field-name prefixes (case-insensitive, matched at the start of a message) that map to a hint. */
+const ASSIGNEE_HINT_PREFIXES = ['assigned to', 'assignee'];
+
+/**
+ * Check whether a lowercased message starts with `field` as a whole word, so a custom
+ * field like "Qa status is invalid" (starts with "qa") never matches "status".
+ * @param messageLower - Lowercased error message.
+ * @param field - Lowercased field name to match.
+ */
+function startsWithFieldName(messageLower: string, field: string): boolean {
+  if (!messageLower.startsWith(field)) return false;
+  const next = messageLower.charAt(field.length);
+  return next === '' || !/[a-z0-9]/.test(next);
+}
+
+/**
+ * Build a 422 validation error message, appending a recovery hint only when an individual
+ * error string starts with a known field name (never a substring match anywhere in the blob).
+ * @param errors - Raw Redmine validation errors (array of message strings, or other shape).
  * @param context - Attempted resource identifier, included verbatim when present.
  */
-function formatValidationError(errors: unknown, context?: string): string {
+function formatValidationError(errors: unknown, context?: ErrorContext): string {
   const base = `Validation error: ${JSON.stringify(errors)}`;
-  const prefixed = context ? `${base} (${context})` : base;
-  const text = JSON.stringify(errors).toLowerCase();
-  if (text.includes('assigned_to') || text.includes('assigned to') || text.includes('assignee')) {
+  const prefixed = context ? `${base} (${formatContextLabel(context)})` : base;
+
+  const messages = Array.isArray(errors)
+    ? errors.filter((e): e is string => typeof e === 'string').map((e) => e.toLowerCase())
+    : [];
+
+  if (messages.some((m) => ASSIGNEE_HINT_PREFIXES.some((p) => startsWithFieldName(m, p)))) {
     return `${prefixed}. Call resolveUser or listUsers to find a valid assignee.`;
   }
-  if (
-    text.includes('tracker') ||
-    text.includes('status') ||
-    text.includes('priority') ||
-    text.includes('activity')
-  ) {
+  if (messages.some((m) => MAPPABLE_FIELDS.some((field) => startsWithFieldName(m, field)))) {
     return `${prefixed}. Call getMappings for valid values in this project.`;
   }
   return prefixed;
@@ -1661,10 +1695,10 @@ export class RedmineClient {
    * Format error objects into user-friendly error messages.
    * Handles Axios errors with appropriate HTTP status code messages.
    * @param error - The error object to format.
-   * @param context - Attempted resource identifier (e.g. "issue_id=12345"), included in 404/validation messages.
+   * @param context - Attempted resource identifier(s), e.g. `{ issue_id: 12345 }`, included in 404/validation messages.
    * @returns Formatted error message string.
    */
-  static formatError(error: unknown, context?: string): string {
+  static formatError(error: unknown, context?: ErrorContext): string {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
 

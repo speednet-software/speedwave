@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
 import type { GitHubClient } from '../client.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 type MockClient = {
   listIssues: Mock;
@@ -76,7 +77,7 @@ describe('issue-tools', () => {
     expect(tools.find((t) => t.tool.name === 'listIssues')!.tool._meta).toEqual({
       [META_KEYS.DEFER_LOADING]: false,
       [META_KEYS.USER_SCOPED]: true,
-      [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+      [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
     });
     expect(
       tools

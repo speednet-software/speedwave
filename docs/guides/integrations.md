@@ -132,6 +132,10 @@ The host-side `oauth` worker ([ADR-060](../adr/ADR-060-host-side-oauth-refresh-w
 
 Disconnecting (**Remove Credentials**) deletes the local tokens and state. To revoke the grant on Slack's side as well, remove the Speedwave app under your Slack profile's **Settings → Apps**.
 
+#### Tool surface
+
+`getCurrentUser`, `getUsers`, `findUsers`, `listChannelIds`, `getChannelMessages`, `getThreadMessages`, `sendChannel`, `listDirectMessages`, `openDirectMessage`, `getFileContent`, `downloadFile`.
+
 ### GitHub — Code Hosting
 
 The GitHub integration is a built-in MCP worker that talks to **GitHub.com** through the official Octokit REST client. It is the GitHub-side counterpart to the GitLab worker — repositories, pull requests, branches, commits, GitHub Actions, issues, labels, tags, and releases.
@@ -182,7 +186,7 @@ When a tool call hits a permission gap, the worker surfaces a generic "token is 
 
 #### Tool surface
 
-`listRepos`, `getRepo`, `searchCode`, `listPullRequests`, `getPullRequest`, `createPullRequest`, `mergePullRequest`, `updatePullRequest`, `getPrDiff`, `getPrFiles`, `listPrCommits`, `listPrReviews`, `createPrReview`, `listPrComments`, `createPrComment`, `createPrReviewComment`, `listBranches`, `getBranch`, `createBranch`, `deleteBranch`, `compareBranches`, `listCommits`, `listBranchCommits`, `searchCommits`, `getCommitDiff`, `getTree`, `getFileContents`, `createOrUpdateFile`, `listWorkflowRuns`, `getWorkflowRun`, `getRunLogs`, `rerunWorkflow`, `triggerWorkflow`, `listWorkflowRunArtifacts`, `downloadArtifact`, `listIssues`, `getIssue`, `createIssue`, `updateIssue`, `closeIssue`, `listLabels`, `createLabel`, `createTag`, `deleteTag`, `createRelease`.
+`getCurrentUser`, `listRepos`, `getRepo`, `searchCode`, `listPullRequests`, `getPullRequest`, `createPullRequest`, `mergePullRequest`, `updatePullRequest`, `getPrDiff`, `getPrFiles`, `listPrCommits`, `listPrReviews`, `createPrReview`, `listPrComments`, `createPrComment`, `createPrReviewComment`, `listBranches`, `getBranch`, `createBranch`, `deleteBranch`, `compareBranches`, `listCommits`, `listBranchCommits`, `searchCommits`, `getCommitDiff`, `getTree`, `getFileContents`, `createOrUpdateFile`, `listWorkflowRuns`, `getWorkflowRun`, `getRunLogs`, `rerunWorkflow`, `triggerWorkflow`, `listWorkflowRunArtifacts`, `downloadArtifact`, `listIssues`, `getIssue`, `createIssue`, `updateIssue`, `closeIssue`, `listLabels`, `createLabel`, `createTag`, `deleteTag`, `createRelease`.
 
 ### Atlassian — Jira & Confluence
 
@@ -398,12 +402,12 @@ The Hub has **zero tokens** — it acts as a router. Each worker container mount
 
 Every integration acts as one authenticated account, not a directory of every user in the org. A question shaped like "my hours", "my open issues", or "messages sent to me" needs the current user's identity resolved before any filtering or counting happens.
 
-Tools whose result depends on the caller's identity are marked `_meta: { userScoped: true }` (see [Tool Policy via `_meta`](#tool-policy-via-_meta)). The Hub surfaces this in two ways:
+Tools whose result or accepted self-referential parameters depend on the caller's identity are marked `_meta: { 'speedwave.pl/user-scoped': true }` (see [Tool Policy via `_meta`](#tool-policy-via-_meta)). The Hub surfaces this in two ways:
 
-- A user-scoped tool's `search_tools` `full_schema` description names the current-user tool to call first (e.g. `getMyself`, `getCurrentUser`, `resolveUser`) or the parameter that accepts a self-reference (e.g. passing `"me"` as an identifier).
+- A user-scoped tool's `search_tools` description, rendered at both `with_descriptions` and `full_schema` detail levels, names the current-user tool to call first (e.g. `getMyself`, `getCurrentUser`, `resolveUser`) or the parameter that accepts a self-reference (e.g. passing `"me"` as an identifier).
 - `search_tools` boosts the current-user tool to the top of results for self-reference queries like "me" or "current user".
 
-Per-service current-user tools exist under different names because the underlying APIs differ: Atlassian's `getMyself`, SharePoint's `getCurrentUser`, Redmine's `resolveUser` with `identifier: "me"`. Look the tool up per service rather than assuming a common name.
+Per-service current-user tools exist under different names because the underlying APIs differ: Atlassian's `getMyself`, SharePoint's `getCurrentUser`, Redmine's `resolveUser` with `identifier: "me"`, Slack's `getCurrentUser`, GitHub's `getCurrentUser`. Look the tool up per service rather than assuming a common name.
 
 ## Read-path guarantees
 
@@ -617,24 +621,30 @@ Example manifest fragment:
 
 ### Tool Policy via `_meta`
 
-Workers (both built-in and plugins) control how the hub presents their tools by declaring a `_meta` field on each tool definition:
+Workers (both built-in and plugins) control how the hub presents their tools by declaring a `_meta` field on each tool definition, using the MCP-spec-compliant prefixed keys from mcp-shared's `META_KEYS`:
 
 ```typescript
+import { META_KEYS } from '@speedwave/mcp-shared';
+
 const myTool: Tool = {
   name: 'myTool',
   description: '...',
   inputSchema: { type: 'object', properties: { ... } },
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
-    deferLoading: false,    // show this tool to Claude immediately (default: true)
-    timeoutMs: 60000,       // custom timeout in ms (default: global WORKER_REQUEST_MS)
-    timeoutClass: 'long',   // 'standard' or 'long' (default: 'standard')
-    osCategory: 'calendar', // OS sub-integration routing (only for mcp-os)
+    [META_KEYS.DEFER_LOADING]: false,    // show this tool to Claude immediately (default: true)
+    [META_KEYS.TIMEOUT_MS]: 60000,       // custom timeout in ms (default: global WORKER_REQUEST_MS)
+    [META_KEYS.TIMEOUT_CLASS]: 'long',   // 'standard' or 'long' (default: 'standard')
+    [META_KEYS.OS_CATEGORY]: 'calendar', // OS sub-integration routing (only for mcp-os)
   },
 };
 ```
 
-**Default behavior**: tools without `_meta` default to `deferLoading: true` — they are discoverable via `search_tools` but not shown upfront to Claude. This keeps token usage low when many tools are registered. To make a tool visible immediately, set `_meta: { deferLoading: false }`.
+**Default behavior**: tools without `_meta` default to `speedwave.pl/defer-loading: true`. They are discoverable via `search_tools` but not shown upfront to Claude. This keeps token usage low when many tools are registered. To make a tool visible immediately, set `_meta: { [META_KEYS.DEFER_LOADING]: false }`.
+
+**Legacy fallback.** The hub reads every key through `metaValue(meta, META_KEYS.X, 'legacyKey')`: the prefixed key wins when present, otherwise the hub falls back to the matching unprefixed legacy key (`deferLoading`, `timeoutMs`, `timeoutClass`, `osCategory`, `userScoped`, `currentUserTool`, `selfParam`). This keeps third-party plugin workers still emitting the old shape working, but new tool code must use the prefixed `META_KEYS` form; the legacy shape is compatibility-only.
+
+**Identity trio.** A tool whose result or accepted self-referential parameters depend on the caller's identity (a "my X" question, or a write tool with an assignee-style param) declares `_meta: { [META_KEYS.USER_SCOPED]: true }`. Any worker exposing user-scoped tools also declares, on those tools, either `[META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser'` (the sibling tool's name) or `[META_KEYS.SELF_PARAM]: "assigned_to: 'me'"` (a descriptive hint, not a bare parameter name, for how to reference yourself inline). At discovery the hub drops a `currentUserTool` pointer that names a nonexistent tool and a `selfParam` whose leading parameter name is not an input parameter of the tool (each with a warning), and warns once per tool when a user-scoped tool declares neither companion. Either way the tool description still gets the identity sentence at both `with_descriptions` and `full_schema` detail levels, with a short misconfiguration hint folded in when neither companion is configured (see [Identity-first behavior](#identity-first-behavior) and [ADR-079](../adr/ADR-079-identity-metadata-and-teaching-errors.md)).
 
 When a bundle update triggers image rebuilds, container restart operations (including plugin containers) automatically wait for builds to complete before proceeding.
 

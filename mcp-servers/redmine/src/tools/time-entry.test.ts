@@ -160,7 +160,7 @@ describe('time-entry-tools', () => {
       expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ user_id: 'me' });
     });
 
-    it('clamps limit to the maximum page size', async () => {
+    it('forwards an oversized limit unchanged (the client owns clamping, not the handler)', async () => {
       mockClient.listTimeEntries.mockResolvedValue({ time_entries: [], total_count: 0 });
 
       const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
@@ -168,10 +168,10 @@ describe('time-entry-tools', () => {
 
       await handler!({ limit: 5000 });
 
-      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 100 });
+      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 5000 });
     });
 
-    it('defaults an invalid limit instead of forwarding garbage', async () => {
+    it('forwards a non-numeric limit unchanged (the client owns clamping, not the handler)', async () => {
       mockClient.listTimeEntries.mockResolvedValue({ time_entries: [], total_count: 0 });
 
       const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
@@ -179,7 +179,7 @@ describe('time-entry-tools', () => {
 
       await handler!({ limit: 'not-a-number' });
 
-      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 25 });
+      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 'not-a-number' });
     });
 
     it('handles API errors', async () => {
@@ -496,7 +496,7 @@ describe('time-entry-tools', () => {
 
       await handler!({ time_entry_id: 9999, hours: 2.0 });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'time_entry_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { time_entry_id: 9999 });
     });
 
     it('handles permission errors', async () => {

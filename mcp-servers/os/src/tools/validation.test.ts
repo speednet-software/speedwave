@@ -181,6 +181,29 @@ describe('validation', () => {
         expect(result.error.error?.message).toContain('"b":"   "');
       }
     });
+
+    it('renders a genuinely-undefined field by omitting it from the received map', () => {
+      // b is absent (genuinely undefined); JSON.stringify drops it, but both names still
+      // appear in the next-step guidance derived from the single offending list.
+      const result = requireFields({ a: 123 }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error.error?.message).toContain('"a":123');
+        expect(result.error.error?.message).not.toContain('"b"');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
+      }
+    });
+
+    it('names every offending field consistently in paramName and next step', () => {
+      const result = requireFields({}, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        // The "Invalid ..." prefix and the next step derive from one joined list.
+        expect(result.error.error?.message).toContain('Invalid a, b');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
+      }
+    });
   });
 
   describe('isValidISO8601', () => {

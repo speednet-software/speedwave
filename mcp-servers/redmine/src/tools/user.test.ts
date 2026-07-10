@@ -179,7 +179,7 @@ describe('User Tools', () => {
 
       await listUsersTool!.handler({ project_id: 'my-project' });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'project_id=my-project');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { project_id: 'my-project' });
     });
 
     it('passes undefined context when project_id is absent', async () => {

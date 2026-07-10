@@ -13,6 +13,7 @@ import {
 import { GitHubClient } from '../client.js';
 import { GitHubIssue } from '../types.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 /**
  * Maps a normalized issue to the compact summary returned by `listIssues`
@@ -41,13 +42,13 @@ function issueSummary(i: GitHubIssue): {
 }
 
 const listIssuesTool: Tool = {
-  name: 'listIssues',
+  name: TOOL_NAMES.LIST_ISSUES,
   description: 'List issues in a repository. Pull requests are excluded.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'issues', 'list', 'bugs', 'tasks', 'tickets'],
   example:
@@ -65,15 +66,16 @@ const listIssuesTool: Tool = {
       labels: { type: 'string', description: 'Comma-separated label names' },
       assignee: {
         type: 'string',
-        description:
-          "GitHub login, or '*' for any assignee, or 'none' for unassigned. Does NOT accept 'me' — resolve the authenticated user's login via getCurrentUser first, then pass it here.",
+        description: `GitHub login, or '*' for any assignee, or 'none' for unassigned. Does NOT accept 'me'. Resolve the authenticated user's login via ${TOOL_NAMES.GET_CURRENT_USER} first, then pass it here.`,
       },
       creator: {
         type: 'string',
-        description:
-          "GitHub login. Does NOT accept 'me' — resolve the authenticated user's login via getCurrentUser first, then pass it here.",
+        description: `GitHub login. Does NOT accept 'me'. Resolve the authenticated user's login via ${TOOL_NAMES.GET_CURRENT_USER} first, then pass it here.`,
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -178,7 +180,7 @@ const createIssueTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'issue', 'create', 'new', 'bug', 'ticket'],
   example:
@@ -194,8 +196,7 @@ const createIssueTool: Tool = {
       assignees: {
         type: 'array',
         items: { type: 'string' },
-        description:
-          "Assignee logins. Does NOT accept 'me' — to assign to the authenticated user, resolve their login via getCurrentUser first.",
+        description: `Assignee logins. Does NOT accept 'me'. To assign to the authenticated user, resolve their login via ${TOOL_NAMES.GET_CURRENT_USER} first.`,
       },
     },
     required: ['owner', 'repo', 'title'],
@@ -248,7 +249,7 @@ const updateIssueTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'issue', 'update', 'edit', 'modify', 'ticket'],
   example:
@@ -266,8 +267,7 @@ const updateIssueTool: Tool = {
       assignees: {
         type: 'array',
         items: { type: 'string' },
-        description:
-          "Replacement assignee logins. Does NOT accept 'me' — to assign to the authenticated user, resolve their login via getCurrentUser first.",
+        description: `Replacement assignee logins. Does NOT accept 'me'. To assign to the authenticated user, resolve their login via ${TOOL_NAMES.GET_CURRENT_USER} first.`,
       },
     },
     required: ['owner', 'repo', 'number'],

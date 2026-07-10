@@ -12,15 +12,20 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
 
 const PIPELINE_STATUSES = [
-  'running',
+  'created',
+  'waiting_for_resource',
+  'preparing',
   'pending',
+  'running',
   'success',
   'failed',
   'canceled',
   'skipped',
+  'manual',
+  'scheduled',
 ] as const;
 
 const listPipelineIdsTool: Tool = {
@@ -41,7 +46,7 @@ const listPipelineIdsTool: Tool = {
         enum: [...PIPELINE_STATUSES],
         description: 'Pipeline status',
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: { type: 'number', description: 'Max results (default 5, max 100)' },
     },
     required: ['project_id'],
   },
@@ -356,11 +361,9 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, pipeline_id } = params as {
           project_id: string | number;
-          pipeline_id: unknown;
+          pipeline_id: number;
         };
-        const iid = normalizeIid(pipeline_id, 'pipeline_id');
-        if (!iid.ok) return iid.error;
-        const result = await c.showPipeline(project_id, iid.value);
+        const result = await c.showPipeline(project_id, pipeline_id);
         return jsonResult(result);
       }),
     },
@@ -369,13 +372,11 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, job_id, tail_lines } = params as {
           project_id: string | number;
-          job_id: unknown;
+          job_id: number;
           tail_lines?: number;
         };
-        const iid = normalizeIid(job_id, 'job_id');
-        if (!iid.ok) return iid.error;
-        const result = await c.getJobLog(project_id, iid.value, tail_lines);
-        return jsonResult({ log: result });
+        const result = await c.getJobLog(project_id, job_id, tail_lines);
+        return jsonResult({ success: true, log: result });
       }),
     },
     {
@@ -383,11 +384,9 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, pipeline_id } = params as {
           project_id: string | number;
-          pipeline_id: unknown;
+          pipeline_id: number;
         };
-        const iid = normalizeIid(pipeline_id, 'pipeline_id');
-        if (!iid.ok) return iid.error;
-        const result = await c.retryPipeline(project_id, iid.value);
+        const result = await c.retryPipeline(project_id, pipeline_id);
         return jsonResult(result);
       }),
     },

@@ -11,15 +11,16 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const getCurrentUserTool: Tool = {
-  name: 'getCurrentUser',
+  name: TOOL_NAMES.GET_CURRENT_USER,
   description:
     "Get the GitHub user authenticated by the mounted token (login, name, email). Call this first to resolve 'me'/'my' before using assignee, creator, or author filters — none of them accept the literal string 'me'.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'user', 'me', 'whoami', 'current', 'authenticated', 'identity'],
-  example: 'const me = await github.getCurrentUser()',
+  example: `const me = await github.${TOOL_NAMES.GET_CURRENT_USER}()`,
   inputSchema: {
     type: 'object',
     properties: {},

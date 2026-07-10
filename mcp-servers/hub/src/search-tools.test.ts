@@ -3,7 +3,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
 import { resetServiceCaches, TOOL_REGISTRY, _setServiceNamesForTesting } from './tool-registry.js';
-import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
+import {
+  populateRegistryWithMockTools,
+  _resetRegistryForTesting,
+  buildMockToolMetadata,
+} from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
 
 describe('searchTools', () => {
@@ -702,15 +706,10 @@ describe('searchTools tokenized multi-word query', () => {
 
   it('ranks exact-name match before description-only match', async () => {
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
-    mutableRegistry['slack']['messages'] = {
-      name: 'messages',
+    mutableRegistry['slack']['messages'] = buildMockToolMetadata('slack', 'messages', {
       description: 'Unrelated tool that happens to mention messages in passing',
-      keywords: [],
-      inputSchema: { type: 'object', properties: {} },
-      example: '',
-      service: 'slack',
       deferLoading: true,
-    };
+    });
 
     const result = await searchTools({
       query: 'messages',
@@ -730,24 +729,19 @@ describe('searchTools tokenized multi-word query', () => {
 
   it('ranks name-prefix match before keyword-only match', async () => {
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
-    mutableRegistry['slack']['issueSomething'] = {
-      name: 'issueSomething',
+    mutableRegistry['slack']['issueSomething'] = buildMockToolMetadata('slack', 'issueSomething', {
       description: 'A tool whose name starts with the query token',
-      keywords: [],
-      inputSchema: { type: 'object', properties: {} },
-      example: '',
-      service: 'slack',
       deferLoading: true,
-    };
-    mutableRegistry['slack']['keywordOnlyTool'] = {
-      name: 'keywordOnlyTool',
-      description: 'Unrelated description',
-      keywords: ['issue'],
-      inputSchema: { type: 'object', properties: {} },
-      example: '',
-      service: 'slack',
-      deferLoading: true,
-    };
+    });
+    mutableRegistry['slack']['keywordOnlyTool'] = buildMockToolMetadata(
+      'slack',
+      'keywordOnlyTool',
+      {
+        description: 'Unrelated description',
+        keywords: ['issue'],
+        deferLoading: true,
+      }
+    );
 
     const result = await searchTools({
       query: 'issue',
@@ -791,15 +785,14 @@ describe('searchTools tokenized multi-word query', () => {
       description: 'Get current Redmine user issues',
       userScoped: true,
     };
-    mutableRegistry['redmine']['issueSomething2'] = {
-      name: 'issueSomething2',
-      description: 'A tool whose name starts with issues',
-      keywords: [],
-      inputSchema: { type: 'object', properties: {} },
-      example: '',
-      service: 'redmine',
-      deferLoading: true,
-    };
+    mutableRegistry['redmine']['issueSomething2'] = buildMockToolMetadata(
+      'redmine',
+      'issueSomething2',
+      {
+        description: 'A tool whose name starts with issues',
+        deferLoading: true,
+      }
+    );
 
     const result = await searchTools({
       query: 'issue',
@@ -882,15 +875,10 @@ describe('searchTools tokenized multi-word query', () => {
     // so only selfBoost decides order; 'aaa...' sorts first alphabetically, forcing the
     // comparator to see the non-boosted tool as `a` and the boosted tool as `b`.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
-    mutableRegistry['redmine']['aaaPlainTool'] = {
-      name: 'aaaPlainTool',
+    mutableRegistry['redmine']['aaaPlainTool'] = buildMockToolMetadata('redmine', 'aaaPlainTool', {
       description: 'Handles zzzsharedterm but is not userScoped',
-      keywords: [],
-      inputSchema: { type: 'object', properties: {} },
-      example: '',
-      service: 'redmine',
       deferLoading: true,
-    };
+    });
     mutableRegistry['redmine']['getCurrentUser'] = {
       ...mutableRegistry['redmine']['getCurrentUser'],
       description: 'Get current user for zzzsharedterm',
@@ -931,9 +919,63 @@ describe('searchTools tokenized multi-word query', () => {
     expect(result.matches.some((m) => m.tool === 'sharepoint/getCurrentUser')).toBe(true);
     expect(result.matches.every((m) => m.tool.endsWith('/getCurrentUser'))).toBe(true);
   });
+
+  it('matches a token appearing mid-name even when absent from keywords and description', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['slack']['fooChannelBar'] = buildMockToolMetadata('slack', 'fooChannelBar', {
+      description: 'Wholly unrelated prose',
+      deferLoading: true,
+    });
+
+    const result = await searchTools({
+      query: 'channel',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    expect(result.matches.some((m) => m.tool === 'slack/fooChannelBar')).toBe(true);
+
+    delete mutableRegistry['slack']['fooChannelBar'];
+  });
+
+  it('ranks a name-prefix match ahead of a mid-name substring match', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['slack']['channelPrefix'] = buildMockToolMetadata('slack', 'channelPrefix', {
+      description: 'Unrelated prose',
+      deferLoading: true,
+    });
+    mutableRegistry['slack']['zzzChannelSuffix'] = buildMockToolMetadata(
+      'slack',
+      'zzzChannelSuffix',
+      { description: 'Unrelated prose', deferLoading: true }
+    );
+
+    const result = await searchTools({
+      query: 'channel',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    const names = result.matches.map((m) => m.tool);
+    expect(names.indexOf('slack/channelPrefix')).toBeLessThan(
+      names.indexOf('slack/zzzChannelSuffix')
+    );
+
+    delete mutableRegistry['slack']['channelPrefix'];
+    delete mutableRegistry['slack']['zzzChannelSuffix'];
+  });
+
+  it('caps an oversized whitespace-heavy query without stalling', async () => {
+    const query = `sendChannel ${'zz '.repeat(20000)}`;
+    const start = Date.now();
+    const result = await searchTools({ query, detailLevel: 'names_only', service: 'slack' });
+    expect(Date.now() - start).toBeLessThan(500);
+    expect(Array.isArray(result.matches)).toBe(true);
+    expect(typeof result.total).toBe('number');
+  });
 });
 
-describe('search-tools lowercase cache', () => {
+describe('search-tools repeated-search consistency', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
 
   beforeEach(() => {
@@ -1043,6 +1085,22 @@ describe('searchTools zero-match hint', () => {
     expect(result.hint).toContain('slack');
   });
 
+  it('distinguishes a valid but disabled service from a no-match query', async () => {
+    process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,os';
+    resetServiceCaches();
+
+    const result = await searchTools({
+      query: 'listMrIds',
+      detailLevel: 'names_only',
+      service: 'gitlab',
+    });
+
+    expect(result.hint).toBeDefined();
+    expect(result.hint).toContain('gitlab');
+    expect(result.hint).toContain('not enabled');
+    expect(result.hint).not.toContain('matched this query');
+  });
+
   it('omits hint when there are matches', async () => {
     const result = await searchTools({ query: '*', detailLevel: 'names_only' });
     expect(result.hint).toBeUndefined();
@@ -1146,8 +1204,7 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
     expect(desc).not.toContain('reference yourself');
   });
 
-  it('warns when a userScoped tool declares neither currentUserTool nor selfParam', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('folds a misconfiguration hint into the sentence when neither companion is set', async () => {
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
     mutableRegistry['redmine']['getConfig'] = {
       ...mutableRegistry['redmine']['getConfig'],
@@ -1156,26 +1213,25 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
       selfParam: undefined,
     };
 
-    await searchTools({
+    const result = await searchTools({
       query: 'getConfig',
       detailLevel: 'with_descriptions',
       service: 'redmine',
     });
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('getConfig'));
-    warnSpy.mockRestore();
+    const desc = result.matches[0].description ?? '';
+    expect(desc).toContain('Results depend on the authenticated user.');
+    expect(desc).toContain('No self-reference helper is configured');
   });
 
-  it('does not warn when a userScoped tool declares currentUserTool or selfParam', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    await searchTools({
+  it('renders no misconfiguration hint when a companion is declared', async () => {
+    const result = await searchTools({
       query: 'getCurrentUser',
       detailLevel: 'with_descriptions',
       service: 'redmine',
     });
 
-    expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
+    const desc = result.matches[0].description ?? '';
+    expect(desc).not.toContain('No self-reference helper is configured');
   });
 });

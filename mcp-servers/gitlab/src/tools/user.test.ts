@@ -38,7 +38,7 @@ describe('user-tools', () => {
       const result = await handler!({});
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockUser, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockUser }, null, 2) }],
       });
       expect(mockClient.getCurrentUser).toHaveBeenCalled();
     });
@@ -59,7 +59,7 @@ describe('user-tools', () => {
       const result = await handler!({});
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockUser, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockUser }, null, 2) }],
       });
     });
 

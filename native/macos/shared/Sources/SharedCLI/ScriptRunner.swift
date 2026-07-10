@@ -70,6 +70,12 @@ public func isAppleScriptNotFoundError(_ stderr: String) -> Bool {
     stderr.contains("Can\u{2019}t get") || stderr.contains("(-1728)")
 }
 
+/// True when `stderr` is a -1728 miss that names `specifier`, so a not-found rewrite
+/// fires only for the scoped folder/note, not an unrelated element in the same script.
+public func appleScriptNotFoundNames(_ stderr: String, _ specifier: String) -> Bool {
+    !specifier.isEmpty && isAppleScriptNotFoundError(stderr) && stderr.contains(specifier)
+}
+
 /// Split a comma-separated address list into trimmed, non-empty addresses.
 /// Quote-aware: commas inside a double-quoted span (e.g. a "Last, First" display name) do not split.
 /// An unbalanced quote count falls back to a naive comma split of the original input,

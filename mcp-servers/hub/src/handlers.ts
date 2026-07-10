@@ -4,8 +4,8 @@
  * @module handlers
  */
 
-import { ToolHandler, ToolsCallResult } from '@speedwave/mcp-shared';
-import { searchTools, SearchToolsParams } from './search-tools.js';
+import { ToolHandler, ToolsCallResult, teachingErrorResult } from '@speedwave/mcp-shared';
+import { searchTools, SearchToolsParams, DETAIL_LEVELS, DetailLevel } from './search-tools.js';
 import { executeCode, ExecuteCodeParams } from './executor.js';
 import { getExecutionTimeout } from './tool-registry.js';
 
@@ -107,28 +107,17 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
         };
       }
 
-      const VALID_DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
       const rawDetail = params.detail_level;
-      if (
-        rawDetail !== undefined &&
-        !VALID_DETAIL_LEVELS.includes(rawDetail as (typeof VALID_DETAIL_LEVELS)[number])
-      ) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: detail_level ${JSON.stringify(rawDetail)} is not valid. Use one of: ${VALID_DETAIL_LEVELS.join(', ')}. Omit it to default to names_only.`,
-            },
-          ],
-          isError: true,
-        };
+      if (rawDetail !== undefined && !DETAIL_LEVELS.includes(rawDetail as DetailLevel)) {
+        return teachingErrorResult({
+          paramName: 'detail_level',
+          received: rawDetail,
+          nextStep: `Use one of: ${DETAIL_LEVELS.join(', ')}. Omit it to default to names_only.`,
+        });
       }
       const searchParams: SearchToolsParams = {
         query: params.query,
-        detailLevel:
-          rawDetail === undefined
-            ? 'names_only'
-            : (rawDetail as (typeof VALID_DETAIL_LEVELS)[number]),
+        detailLevel: rawDetail === undefined ? 'names_only' : (rawDetail as DetailLevel),
         service: typeof params.service === 'string' ? params.service : undefined,
         includeDeferred:
           typeof params.include_deferred === 'boolean' ? params.include_deferred : undefined,

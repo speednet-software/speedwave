@@ -13,15 +13,15 @@ GitHub access goes through MCP Hub. You do not see `github__*` tools directly: t
 
 1. **Discover**: `search_tools({ query: "github <keywords>", detail_level: "names_only" })` to see what fits.
 2. **Inspect**: `search_tools({ query: "...", detail_level: "full_schema", service: "github" })` for the exact parameter names of the tool you need.
-3. **Execute**: `execute_code` with dot notation: `await github.getPullRequest({ owner, repo, pull_number })`.
+3. **Execute**: `execute_code` with dot notation: `await github.getPullRequest({ owner, repo, number })`.
 
 Always do steps 1-2 before calling a tool for the first time in a conversation.
 
 ## Pitfalls
 
-**Identity ("my issues/PRs/commits")**: call `getCurrentUser` first to resolve the token's authenticated login before using any identity-scoped filter: `listRepos` (no owner defaults to this account), `listIssues`' `assignee`/`creator`, `createIssue`/`updateIssue`'s `assignees`, `listCommits`' `author`, `searchCommits`' query. None of GitHub's REST filters here accept a literal `'me'`: pass the resolved login instead. `listPullRequests` has no author filter at all; resolve the login and match `pr.user` yourself. If you cannot resolve a login and the user asks about "mine", ask them rather than guessing or silently returning unscoped results.
+**Identity ("my issues/PRs/commits")**: none of GitHub's REST filters accept a literal `'me'` except `searchCommits`'s `query`, which documents `author:@me` as built-in shorthand for the authenticated user, use that directly instead of resolving a login first. Every other identity-scoped filter (`listRepos`'s default owner, `listIssues`' `assignee`/`creator`, `createIssue`/`updateIssue`'s `assignees`, `listCommits`' `author`) needs the resolved login; the tool description names the current-user tool to call first. `listPullRequests` has no author filter at all: resolve the login, then match it against `pr.user` yourself, bounding the scan (stop once you have paged through enough results) rather than walking every open PR in a large repo. If you cannot resolve a login and the user asks about "mine", ask them rather than guessing or silently returning unscoped results.
 
-**Repo identifier**: every tool takes `owner` and `repo` as two separate strings, but a combined `owner/repo` passed in `repo` (e.g. a `full_name` value from `listRepos`) is split automatically when `owner` is omitted. Decompose a URL (`https://github.com/foo/bar/pull/1` -> `owner: "foo"`, `repo: "bar"`, `pull_number: 1`). Never pass the full URL or include the `.git` suffix.
+**Repo identifier**: every tool takes `owner` and `repo` as two separate strings, but a combined `owner/repo` passed in `repo` (e.g. a `full_name` value from `listRepos`) is split automatically when `owner` is omitted. Decompose a URL (`https://github.com/foo/bar/pull/1` → `owner: "foo"`, `repo: "bar"`, `number: 1`). Never pass the full URL or include the `.git` suffix.
 
 **GitHub.com only**: GitHub Enterprise Server (self-hosted, `*.ghe.com`, custom domains) is not supported. There is no `host_url` field. If the user mentions a self-hosted instance, say so and stop.
 

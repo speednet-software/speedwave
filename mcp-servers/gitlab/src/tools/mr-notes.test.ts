@@ -3,6 +3,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createMrNotesTools } from './mr-notes-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -123,8 +124,7 @@ describe('createMrNotesTools', () => {
       const tool = tools.find((t) => t.tool.name === 'listMrCommits');
       const result = await tool!.handler({ project_id: 1, mr_iid: 1 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept a numeric-string mr_iid', async () => {
@@ -282,8 +282,7 @@ describe('createMrNotesTools', () => {
       const tool = tools.find((t) => t.tool.name === 'listMrPipelines');
       const result = await tool!.handler({ project_id: 1, mr_iid: 1 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('should accept a "#"-prefixed mr_iid', async () => {

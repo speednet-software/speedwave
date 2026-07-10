@@ -38,6 +38,10 @@ beforeAll(() => {
     'process.stdout.write(JSON.stringify({ ok: false, error: "nope" }))'
   );
   fs.writeFileSync(path.join(SCRIPTS_DIR, 'crash.py'), 'process.exit(2)');
+  fs.writeFileSync(
+    path.join(SCRIPTS_DIR, 'crash-silent-stdout-noisy-stderr.py'),
+    'process.stderr.write("libreoffice: fatal error, out of memory"); process.exit(1);'
+  );
   // Mirrors the real `script_runner.fail()` contract: JSON error on stdout, a much longer
   // traceback on stderr, AND a non-zero exit — the case `runOk`'s generic path cannot see through.
   fs.writeFileSync(
@@ -77,8 +81,18 @@ describe('runPythonScript', () => {
     await expect(runPythonScript('failed.py', [])).rejects.toThrow(/reported failure/);
   });
 
-  it('throws when the script exits non-zero', async () => {
+  it('throws when the script exits non-zero, carrying the exit code even with no output', async () => {
     await expect(runPythonScript('crash.py', [])).rejects.toBeInstanceOf(SubprocessError);
+    await expect(runPythonScript('crash.py', [])).rejects.toThrow(/exited with code 2/);
+  });
+
+  it('surfaces stderr detail (never a silently-defaulted "{}") when stdout is empty on a non-zero exit', async () => {
+    await expect(runPythonScript('crash-silent-stdout-noisy-stderr.py', [])).rejects.toThrow(
+      /exited with code 1: libreoffice: fatal error, out of memory/
+    );
+    await expect(runPythonScript('crash-silent-stdout-noisy-stderr.py', [])).rejects.not.toThrow(
+      /reported failure: \{\}/
+    );
   });
 
   it('surfaces the JSON error field verbatim even though the process exits non-zero with a long stderr traceback', async () => {

@@ -173,7 +173,7 @@ describe('journal-tools', () => {
 
       await handler!({ issue_id: 9999 });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'issue_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
     });
 
     it('handles API errors', async () => {
@@ -274,7 +274,7 @@ describe('journal-tools', () => {
 
       await handler!({ issue_id: 10, journal_id: 9999, notes: 'Updated' });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'journal_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { journal_id: 9999 });
     });
 
     it('handles permission errors', async () => {
@@ -374,7 +374,7 @@ describe('journal-tools', () => {
 
       await handler!({ issue_id: 10, journal_id: 9999 });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'journal_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { journal_id: 9999 });
     });
 
     it('handles non-existent issue', async () => {

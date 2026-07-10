@@ -3,10 +3,11 @@
  * @module mcp-atlassian/domains/confluence-pages
  */
 
-import { ts, clampPageSize } from '@speedwave/mcp-shared';
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
 import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
+import { resolveConfluenceSpaceKey } from './confluence-space-resolver.js';
 import type { ConfluencePage } from '../types.js';
 
 /** A full Confluence page — like {@link ConfluencePage} but with a known version. */
@@ -55,31 +56,16 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
   /** Resolve a space ID → space key, caching within the client instance. */
   const spaceKeyCache = new Map<string, string>();
   /**
-   * Resolve a space ID → key. A 404 means the space genuinely has no
-   * resolvable key (unassignable); any other lookup failure is rethrown so
-   * callers can distinguish "no key" from "the lookup itself failed".
+   * Resolve a space ID → key via the cache or {@link resolveConfluenceSpaceKey}.
    * @param spaceId - The Confluence space ID from a page payload.
+   * @param pageId - The page the lookup is for, included in the error context.
    */
-  const resolveSpaceKey = async (spaceId: string): Promise<string | undefined> => {
+  const resolveSpaceKey = async (spaceId: string, pageId?: string): Promise<string | undefined> => {
     if (!spaceId) return undefined;
     if (spaceKeyCache.has(spaceId)) return spaceKeyCache.get(spaceId);
-    try {
-      const sp = await client.get<{ key?: string }>(
-        `/wiki/api/v2/spaces/${encodeURIComponent(spaceId)}`
-      );
-      const key = sp.key ? String(sp.key) : undefined;
-      if (key) spaceKeyCache.set(spaceId, key);
-      return key;
-    } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 404) return undefined;
-      console.warn(
-        `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${spaceId}': ${error}`
-      );
-      throw new Error(
-        `Could not verify the Confluence space for this page (space lookup failed); retry, or confirm the space is accessible.`
-      );
-    }
+    const key = await resolveConfluenceSpaceKey(client, spaceId, pageId);
+    if (key) spaceKeyCache.set(spaceId, key);
+    return key;
   };
 
   /**
@@ -97,9 +83,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     return String(id);
   };
 
-  // Resolve the page's space key, enforce the allowlist, and return the enriched page.
+  // Resolve the page's space key and enforce the allowlist. Skips the lookup
+  // entirely when no allowlist is configured: nothing to enforce.
   const enrich = async <T extends ConfluencePage>(page: T): Promise<T> => {
-    const key = page.space_key ?? (await resolveSpaceKey(page.space_id));
+    if (client.confluenceSpaceKeys.length === 0) return page;
+    const key = page.space_key ?? (await resolveSpaceKey(page.space_id, page.id));
     const enriched = { ...page, space_key: key };
     assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
     return enriched;
@@ -158,8 +146,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       // Fetch current page (need version + status + existing title/space).
       const current = await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`);
       const page = mapV2Page(current);
-      const key = page.space_key ?? (await resolveSpaceKey(page.space_id));
-      assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
+      let key = page.space_key;
+      if (client.confluenceSpaceKeys.length > 0) {
+        key = key ?? (await resolveSpaceKey(page.space_id, pageId));
+        assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
+      }
       const data: Record<string, unknown> = {
         id: pageId,
         status: page.status || 'current',

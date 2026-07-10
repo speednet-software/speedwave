@@ -13,6 +13,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const BRANCH_ITEM_PROPERTIES = {
   name: { type: 'string' },
@@ -21,7 +22,7 @@ const BRANCH_ITEM_PROPERTIES = {
 };
 
 const listBranchesTool: Tool = {
-  name: 'listBranches',
+  name: TOOL_NAMES.LIST_BRANCHES,
   description: 'List branches in a repository.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
@@ -33,7 +34,10 @@ const listBranchesTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -57,7 +61,7 @@ const listBranchesTool: Tool = {
 };
 
 const getBranchTool: Tool = {
-  name: 'getBranch',
+  name: TOOL_NAMES.GET_BRANCH,
   description: 'Get detailed information about a specific branch.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },

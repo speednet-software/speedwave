@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createUserTools } from './user-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -53,7 +53,7 @@ describe('User Tools', () => {
       expect(tools).toHaveLength(1);
       const tool = tools[0].tool;
       expect(tool.name).toBe('getCurrentUser');
-      expect(tool._meta?.['speedwave.pl/defer-loading']).toBe(false);
+      expect(tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(false);
       expect(tool.inputSchema.required).toBeUndefined();
     });
   });

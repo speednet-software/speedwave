@@ -75,17 +75,24 @@ describe('definitions', () => {
       createJiraIssueTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
     expect(byName.searchIssues._meta).toMatchObject({ [META_KEYS.DEFER_LOADING]: false });
-    expect(byName.createIssue._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
+    expect(byName.createIssue._meta).toMatchObject({ [META_KEYS.DEFER_LOADING]: true });
     expect(byName.searchIssues.annotations).toBeDefined();
   });
 
-  it('searchIssues and assignIssue declare user-scoped identity metadata pointing at getMyself', () => {
-    const byName = Object.fromEntries(
-      createJiraIssueTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
-    );
-    for (const name of ['searchIssues', 'assignIssue']) {
-      expect(byName[name]._meta?.[META_KEYS.USER_SCOPED]).toBe(true);
-      expect(byName[name]._meta?.[META_KEYS.CURRENT_USER_TOOL]).toBe('getMyself');
+  it('every tool declares strict prefixed-key identity metadata: user-scoped tools point at getMyself, others carry neither the prefixed nor the legacy key', () => {
+    const userScopedNames = new Set(['searchIssues', 'createIssue', 'updateIssue', 'assignIssue']);
+    for (const { tool } of createJiraIssueTools(FAKE_CLIENT)) {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+      if (userScopedNames.has(tool.name)) {
+        expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} should be user-scoped`).toBe(true);
+        expect(meta?.[META_KEYS.CURRENT_USER_TOOL], `${tool.name} current-user-tool`).toBe(
+          'getMyself'
+        );
+      } else {
+        expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} unexpectedly user-scoped`).toBeFalsy();
+      }
+      expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeUndefined();
+      expect(meta?.currentUserTool, `${tool.name} uses legacy currentUserTool`).toBeUndefined();
     }
   });
 });
@@ -204,6 +211,12 @@ describe('updateIssue handler', () => {
     issuesStub.update.mockResolvedValueOnce({ key: 'PROJ-1' });
     await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', bodyText: 't' });
     expect(issuesStub.update.mock.calls[0][1].body).toBe('t');
+  });
+
+  it('forwards assigneeAccountId to reassign the issue', async () => {
+    issuesStub.update.mockResolvedValueOnce({ key: 'PROJ-1' });
+    await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', assigneeAccountId: 'u1' });
+    expect(issuesStub.update.mock.calls[0][1].assigneeAccountId).toBe('u1');
   });
 });
 

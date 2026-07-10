@@ -4071,6 +4071,108 @@ mod tests {
     }
 
     #[test]
+    fn resolve_injects_no_local_only_flags_when_local_entry_present_but_inactive() {
+        // A Local entry sitting unused in `providers` must not leak its flags
+        // onto a different active provider: the discriminator is `active`,
+        // not mere presence of a Local kind in the list.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "ollama".to_string(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "openrouter".to_string(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("qwen/qwen3-coder".to_string()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        for forbidden in [
+            "--append-system-prompt",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(
+                !flags.iter().any(|f| f == forbidden),
+                "inactive Local entry must not inject {forbidden}; flags: {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_injects_local_only_flags_when_active_local_coexists_with_other_provider() {
+        // The mirror case: Local IS active alongside a non-Local sibling
+        // entry: the flags must still land, keyed off `active`, not the
+        // list's first/only entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "openrouter".to_string(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("qwen/qwen3-coder".to_string()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "ollama".to_string(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "ollama".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            flags
+                .iter()
+                .any(|f| f == "--exclude-dynamic-system-prompt-sections"),
+            "active Local entry must get the dynamic-section exclusion even with a sibling provider; flags: {flags:?}"
+        );
+        let pos = flags
+            .iter()
+            .position(|f| f == "--append-system-prompt")
+            .unwrap_or_else(|| panic!("expected --append-system-prompt; flags: {flags:?}"));
+        assert_eq!(
+            flags.get(pos + 1).map(String::as_str),
+            Some(crate::prompts::local_llm_skills_nudge()),
+            "append flag must carry the skills nudge as its value"
+        );
+    }
+
+    #[test]
     fn resolve_does_not_inject_provider_specific_flags_for_anthropic() {
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {

@@ -12,6 +12,7 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const getMappingsTool: Tool = {
   name: 'getMappings',
@@ -48,6 +49,11 @@ const getMappingsTool: Tool = {
       activity_design: { type: 'number' },
       activity_development: { type: 'number' },
       activity_testing: { type: 'number' },
+      activity_documentation: { type: 'number' },
+      activity_support: { type: 'number' },
+      activity_management: { type: 'number' },
+      activity_devops: { type: 'number' },
+      activity_review: { type: 'number' },
     },
   },
   inputExamples: [
@@ -102,25 +108,19 @@ export function createConfigTools(client: RedmineClient | null): ToolDefinition[
   return [
     {
       tool: getMappingsTool,
-      handler: async () => {
-        try {
+      handler: async () =>
+        withRedmineErrors(undefined, async () => {
           const result = client.getMappings();
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: getConfigTool,
-      handler: async () => {
-        try {
+      handler: async () =>
+        withRedmineErrors(undefined, async () => {
           const result = await client.getConfig();
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
   ];
 }

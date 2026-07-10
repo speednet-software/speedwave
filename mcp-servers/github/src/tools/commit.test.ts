@@ -56,25 +56,14 @@ describe('commit-tools', () => {
     expect(names).toEqual(['listCommits', 'listBranchCommits', 'searchCommits', 'getCommitDiff']);
   });
 
-  it('marks listCommits as the eagerly-loaded tool and the rest as deferred', () => {
+  it('marks listCommits as the only eagerly-loaded tool (identity _meta swept centrally in metadata.test.ts)', () => {
     const tools = createCommitTools(null);
-    expect(tools.find((t) => t.tool.name === 'listCommits')!.tool._meta).toEqual({
-      [META_KEYS.DEFER_LOADING]: false,
-      [META_KEYS.USER_SCOPED]: true,
-      [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
-    });
-    expect(tools.find((t) => t.tool.name === 'getCommitDiff')!.tool._meta).toEqual({
-      [META_KEYS.DEFER_LOADING]: true,
-    });
-  });
-
-  it('marks searchCommits as user-scoped with getCurrentUser as the identity resolver', () => {
-    const tools = createCommitTools(null);
-    expect(tools.find((t) => t.tool.name === 'searchCommits')!.tool._meta).toEqual({
-      [META_KEYS.DEFER_LOADING]: true,
-      [META_KEYS.USER_SCOPED]: true,
-      [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
-    });
+    const deferOf = (name: string) =>
+      tools.find((t) => t.tool.name === name)!.tool._meta?.[META_KEYS.DEFER_LOADING];
+    expect(deferOf('listCommits')).toBe(false);
+    expect(deferOf('listBranchCommits')).toBe(true);
+    expect(deferOf('searchCommits')).toBe(true);
+    expect(deferOf('getCommitDiff')).toBe(true);
   });
 
   describe('unconfigured client', () => {
@@ -305,7 +294,7 @@ describe('commit-tools', () => {
   });
 
   describe('getCommitDiff', () => {
-    it('returns the raw diff string via textResult', async () => {
+    it('returns the diff under a `diff` field (object-typed result)', async () => {
       const client = createMockClient();
       const diff = 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n';
       client.getCommitDiff.mockResolvedValue(diff);
@@ -316,12 +305,14 @@ describe('commit-tools', () => {
 
       const result = await handler({ owner: 'octocat', repo: 'hello-world', ref: 'abc123' });
 
-      expect(result).toEqual({ content: [{ type: 'text', text: diff }] });
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ diff }, null, 2) }],
+      });
       expect(result.isError).toBeUndefined();
       expect(client.getCommitDiff).toHaveBeenCalledWith('octocat', 'hello-world', 'abc123');
     });
 
-    it('returns an empty-text result for an empty diff', async () => {
+    it('returns an empty diff under the `diff` field', async () => {
       const client = createMockClient();
       client.getCommitDiff.mockResolvedValue('');
       const handler = findHandler(
@@ -331,7 +322,9 @@ describe('commit-tools', () => {
 
       const result = await handler({ owner: 'octocat', repo: 'hello-world', ref: 'main' });
 
-      expect(result).toEqual({ content: [{ type: 'text', text: '' }] });
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ diff: '' }, null, 2) }],
+      });
     });
 
     it('returns an error result when the diff fetch fails', async () => {

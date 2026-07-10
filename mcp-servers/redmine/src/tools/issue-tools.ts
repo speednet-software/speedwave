@@ -15,6 +15,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
+import { withRedmineErrors } from './error-handling.js';
 
 /**
  * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error
@@ -140,7 +141,15 @@ const getIssueFullTool: Tool = {
         type: 'array',
         items: {
           type: 'string',
-          enum: ['journals', 'attachments', 'relations', 'children', 'watchers'],
+          enum: [
+            'journals',
+            'attachments',
+            'relations',
+            'children',
+            'watchers',
+            'changesets',
+            'allowed_statuses',
+          ],
         },
         description: 'Additional data to include',
       },
@@ -492,8 +501,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
   return [
     {
       tool: listIssueIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const p = params as Record<string, unknown>;
           const specialStatuses = ['open', 'closed', '*'];
           const statusValue = p.status as string | undefined;
@@ -513,27 +522,22 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             ids: result.issues.map((i: { id: number }) => i.id),
             total_count: result.total_count,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: getIssueFullTool,
       handler: async (params) => {
         const { issue_id, include = [] } = params as { issue_id: number; include?: string[] };
-        try {
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.showIssue(issue_id, { include });
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
-        }
+        });
       },
     },
     {
       tool: searchIssueIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const { query, project_id, limit } = params as {
             query: string;
             project_id?: string;
@@ -544,15 +548,12 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             ids: result.results.map((i: { id: number }) => i.id),
             total_count: result.total_count,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: createIssueTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
@@ -564,16 +565,13 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             resolved as Parameters<typeof client.createIssue>[0]
           );
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: updateIssueTool,
       handler: async (params) => {
         const { issue_id } = params as { issue_id: number };
-        try {
+        return withRedmineErrors({ issue_id }, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
@@ -586,21 +584,17 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             subject: updatedIssue.subject,
             status: updatedIssue.status,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
-        }
+        });
       },
     },
     {
       tool: commentIssueTool,
       handler: async (params) => {
         const { issue_id, notes } = params as { issue_id: number; notes: string };
-        try {
+        return withRedmineErrors({ issue_id }, async () => {
           await client.commentIssue(issue_id, notes);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
-        }
+        });
       },
     },
   ];

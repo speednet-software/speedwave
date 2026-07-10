@@ -7,7 +7,7 @@ import { createChannelTools } from './channel-tools.js';
 import { createDmTools } from './dm-tools.js';
 import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
-import { ToolDefinition, RefreshLock, META_KEYS, metaValue } from '@speedwave/mcp-shared';
+import { ToolDefinition, RefreshLock, META_KEYS } from '@speedwave/mcp-shared';
 import type { SlackClients } from '../client.js';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
@@ -25,6 +25,16 @@ const allTools: ToolDefinition[] = [
   ...createUserTools(stubClients),
 ];
 
+/** Every tool that MUST declare speedwave.pl/user-scoped: true. */
+const userScopedToolNames = new Set([
+  'sendChannel',
+  'getChannelMessages',
+  'getThreadMessages',
+  'listChannelIds',
+  'listDirectMessages',
+  'openDirectMessage',
+]);
+
 describe('tool metadata', () => {
   it('should have at least one tool defined', () => {
     expect(allTools.length).toBeGreaterThan(0);
@@ -32,6 +42,8 @@ describe('tool metadata', () => {
 
   for (const { tool } of allTools) {
     describe(tool.name, () => {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+
       it('should have annotations with readOnlyHint and destructiveHint', () => {
         expect(tool.annotations).toBeDefined();
         expect(typeof tool.annotations!.readOnlyHint).toBe('boolean');
@@ -51,81 +63,61 @@ describe('tool metadata', () => {
       });
 
       it('should have _meta with the prefixed defer-loading key', () => {
-        expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
-        const deferLoading = metaValue(
-          tool._meta as Record<string, unknown>,
-          META_KEYS.DEFER_LOADING,
-          'deferLoading'
-        );
-        expect(typeof deferLoading, `${tool.name} missing ${META_KEYS.DEFER_LOADING}`).toBe(
+        expect(meta, `${tool.name} missing _meta`).toBeDefined();
+        expect(typeof meta![META_KEYS.DEFER_LOADING], `${tool.name} missing prefixed key`).toBe(
           'boolean'
         );
       });
+
+      it('should not use the legacy unprefixed deferLoading key', () => {
+        expect(meta?.deferLoading, `${tool.name} still uses legacy deferLoading`).toBeUndefined();
+      });
+
+      const isUserScoped = userScopedToolNames.has(tool.name);
+
+      it(`should ${isUserScoped ? '' : 'not '}declare speedwave.pl/user-scoped`, () => {
+        if (isUserScoped) {
+          expect(meta?.[META_KEYS.USER_SCOPED]).toBe(true);
+        } else {
+          expect(
+            meta?.[META_KEYS.USER_SCOPED],
+            `${tool.name} unexpectedly user-scoped`
+          ).toBeFalsy();
+        }
+      });
+
+      it('should not use the legacy unprefixed userScoped key', () => {
+        expect(meta?.userScoped, `${tool.name} still uses legacy userScoped`).toBeUndefined();
+      });
+
+      if (isUserScoped) {
+        it('should declare a current-user tool or self-param resolving its identity', () => {
+          const currentUserTool = meta?.[META_KEYS.CURRENT_USER_TOOL];
+          const selfParam = meta?.[META_KEYS.SELF_PARAM];
+          expect(
+            currentUserTool !== undefined || selfParam !== undefined,
+            `${tool.name} is user-scoped but declares neither ${META_KEYS.CURRENT_USER_TOOL} nor ${META_KEYS.SELF_PARAM}`
+          ).toBe(true);
+        });
+
+        it('should not use the legacy currentUserTool/selfParam keys', () => {
+          expect(
+            meta?.currentUserTool,
+            `${tool.name} still uses legacy currentUserTool`
+          ).toBeUndefined();
+          expect(meta?.selfParam, `${tool.name} still uses legacy selfParam`).toBeUndefined();
+        });
+      }
     });
   }
 });
 
 describe('identity metadata', () => {
-  const userScopedToolNames = [
-    'sendChannel',
-    'getChannelMessages',
-    'getThreadMessages',
-    'listChannelIds',
-    'listDirectMessages',
-    'openDirectMessage',
-  ];
-
-  for (const name of userScopedToolNames) {
-    it(`${name} declares speedwave.pl/user-scoped`, () => {
-      const tool = allTools.find((t) => t.tool.name === name)!.tool;
-      const userScoped = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.USER_SCOPED,
-        'userScoped'
-      );
-      expect(userScoped).toBe(true);
-    });
-
-    it(`${name} declares a current-user tool or self-param resolving its identity`, () => {
-      const tool = allTools.find((t) => t.tool.name === name)!.tool;
-      const currentUserTool = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.CURRENT_USER_TOOL,
-        'currentUserTool'
-      );
-      const selfParam = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.SELF_PARAM,
-        'selfParam'
-      );
-      expect(
-        currentUserTool !== undefined || selfParam !== undefined,
-        `${name} is user-scoped but declares neither ${META_KEYS.CURRENT_USER_TOOL} nor ${META_KEYS.SELF_PARAM}`
-      ).toBe(true);
-    });
-  }
-
   for (const name of ['getChannelMessages', 'getThreadMessages']) {
     it(`${name} points at getCurrentUser via speedwave.pl/current-user-tool`, () => {
       const tool = allTools.find((t) => t.tool.name === name)!.tool;
-      const currentUserTool = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.CURRENT_USER_TOOL,
-        'currentUserTool'
-      );
-      expect(currentUserTool).toBe('getCurrentUser');
+      const meta = tool._meta as Record<string, unknown>;
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
     });
   }
-
-  it('getFileContent/downloadFile/getUsers/findUsers are not marked user-scoped', () => {
-    for (const name of ['getFileContent', 'downloadFile', 'getUsers', 'findUsers']) {
-      const tool = allTools.find((t) => t.tool.name === name)!.tool;
-      const userScoped = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.USER_SCOPED,
-        'userScoped'
-      );
-      expect(userScoped, `${name} should not be user-scoped`).toBeUndefined();
-    }
-  });
 });

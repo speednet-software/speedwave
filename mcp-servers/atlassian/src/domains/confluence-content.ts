@@ -4,10 +4,11 @@
  * @module mcp-atlassian/domains/confluence-content
  */
 
-import { ts, clampPageSize } from '@speedwave/mcp-shared';
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
 import { assertConfluenceSpaceAllowed } from '../scope.js';
+import { resolveConfluenceSpaceKey } from './confluence-space-resolver.js';
 import type { ConfluenceAttachment, ConfluenceComment, ConfluenceLabel } from '../types.js';
 
 /** Client for Confluence page-content operations. */
@@ -41,26 +42,9 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
     const page = await client.get<{ spaceId?: string }>(
       `/wiki/api/v2/pages/${encodeURIComponent(pageId)}`
     );
-    let key: string | undefined;
-    if (page.spaceId) {
-      try {
-        const sp = await client.get<{ key?: string }>(
-          `/wiki/api/v2/spaces/${encodeURIComponent(String(page.spaceId))}`
-        );
-        key = sp.key ? String(sp.key) : undefined;
-      } catch (error) {
-        const status = (error as { response?: { status?: number } })?.response?.status;
-        if (status !== 404) {
-          console.warn(
-            `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${page.spaceId}': ${error}`
-          );
-          throw new Error(
-            `Could not verify the Confluence space for this page (space lookup failed); retry, or confirm the space is accessible.`
-          );
-        }
-        key = undefined;
-      }
-    }
+    const key = page.spaceId
+      ? await resolveConfluenceSpaceKey(client, String(page.spaceId), pageId)
+      : undefined;
     assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
   };
 

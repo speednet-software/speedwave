@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createReleaseTools } from './release-tools.js';
+import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -39,7 +40,9 @@ describe('release-tools', () => {
       const result = await handler!({ project_id: 'my-project' });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify({ tags: mockTags }, null, 2) }],
+        content: [
+          { type: 'text', text: JSON.stringify({ success: true, tags: mockTags }, null, 2) },
+        ],
       });
       expect(mockClient.listTags).toHaveBeenCalledWith('my-project', {});
     });
@@ -74,8 +77,7 @@ describe('release-tools', () => {
 
       const result = await handler!({ project_id: 'missing-project' });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
   });
 
@@ -306,13 +308,7 @@ describe('release-tools', () => {
         ref: 'main',
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
   });
 
@@ -420,8 +416,7 @@ describe('release-tools', () => {
         tag_name: 'non-existent-tag',
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('handles permission errors', async () => {
@@ -476,8 +471,7 @@ describe('release-tools', () => {
         tag_name: 'v1.0.0',
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
   });
 
@@ -708,13 +702,7 @@ describe('release-tools', () => {
         name: 'Release',
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
   });
 

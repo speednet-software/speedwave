@@ -96,6 +96,15 @@ describe('addComment', () => {
     await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(/space lookup failed/i);
   });
 
+  it('includes the page and space IDs in a rethrown non-404 space lookup failure', async () => {
+    client = stubClient(['DEV']);
+    client.get
+      .mockResolvedValueOnce({ spaceId: '900' })
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const c = createConfluenceContentClient(client);
+    await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(/'900'.*'123'/s);
+  });
+
   it('rejects when the page has no spaceId and an allowlist is set', async () => {
     client = stubClient(['DEV']);
     client.get.mockResolvedValueOnce({}); // page, no spaceId

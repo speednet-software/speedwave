@@ -22,6 +22,9 @@ import {
 // Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';
 
+// Detail-level SSOT (powers the TS union, this JSON-schema enum, and the validator)
+import { DETAIL_LEVELS } from './search-tools.js';
+
 // Import bridge initialization
 import { initializeBridges } from './executor.js';
 
@@ -81,7 +84,7 @@ Examples:
         },
         detail_level: {
           type: 'string',
-          enum: ['names_only', 'with_descriptions', 'full_schema'],
+          enum: [...DETAIL_LEVELS],
           description:
             "Level of detail. Use 'names_only' first, then 'full_schema' for specific tools.",
         },

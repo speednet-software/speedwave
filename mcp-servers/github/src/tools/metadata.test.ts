@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { META_KEYS } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './index.js';
 import { Tool } from '@speedwave/mcp-shared';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const ALL_TOOLS: Tool[] = createToolDefinitions(null).map((td) => td.tool);
 
@@ -121,7 +122,7 @@ describe('GitHub tool metadata', () => {
       const meta = tool?._meta as Record<string, unknown>;
       expect(meta[META_KEYS.USER_SCOPED], `${name} missing user-scoped _meta`).toBe(true);
       expect(meta[META_KEYS.CURRENT_USER_TOOL], `${name} missing current-user-tool _meta`).toBe(
-        'getCurrentUser'
+        TOOL_NAMES.GET_CURRENT_USER
       );
     });
 

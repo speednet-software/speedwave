@@ -238,6 +238,36 @@ describe('officeToPdf', () => {
     await expect(officeToPdf('a.docx')).rejects.toThrow(/password-protected or encrypted/);
   });
 
+  it('translates an "encrypted"/"encryption" soffice failure into actionable guidance', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
+    runOk.mockRejectedValueOnce(
+      new Error('soffice exited with code 1: document uses unsupported encryption')
+    );
+    await expect(officeToPdf('a.docx')).rejects.toThrow(/password-protected or encrypted/);
+  });
+
+  it('does not mislabel a failure whose only "password"/"encrypt" occurrence is inside an echoed file path', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
+    runOk.mockRejectedValueOnce(
+      new Error(
+        'soffice exited with code 1: source file could not be loaded: /workspace/my-password-protected-backup.docx'
+      )
+    );
+    await expect(officeToPdf('a.docx')).rejects.toThrow(
+      /LibreOffice conversion failed.*feature LibreOffice cannot render/s
+    );
+  });
+
+  it('does not mislabel a failure where "encrypt" is only a substring of an unrelated word', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
+    runOk.mockRejectedValueOnce(
+      new Error('soffice exited with code 1: cannot process unencryptable stream')
+    );
+    await expect(officeToPdf('a.docx')).rejects.toThrow(
+      /LibreOffice conversion failed.*feature LibreOffice cannot render/s
+    );
+  });
+
   it('wraps any other soffice failure with generic guidance', async () => {
     resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
     runOk.mockRejectedValueOnce(new Error('soffice exited with code 1: segfault'));

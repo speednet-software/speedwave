@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -215,8 +216,7 @@ describe('issue-tools', () => {
 
       const result = await handler!({ project_id: 'nonexistent/project' });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
   });
 
@@ -294,8 +294,30 @@ describe('issue-tools', () => {
         issue_iid: 9999,
       });
 
+      expectNotFoundTeachingError(result);
+    });
+
+    it('passes the real client not-found message through to the tool result end-to-end (not the generic 404 text)', async () => {
+      // Uses the real GitLabClient (not a hand-mocked one) so getIssue's own
+      // TeachingError survives withValidation's formatError call unmangled.
+      const { GitLabClient: RealGitLabClient } = await import('../client.js');
+      const realClient = new RealGitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+      (realClient as unknown as { gitlab: { Issues: { all: Mock } } }).gitlab.Issues.all = vi
+        .fn()
+        .mockResolvedValue([]);
+
+      const tools = createIssueTools(realClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+      const result = await handler!({ project_id: 'my-group/my-project', issue_iid: 999 });
+
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expect((result.content[0] as { text: string }).text).toContain(
+        "Issue #999 not found in project 'my-group/my-project'"
+      );
+      expect((result.content[0] as { text: string }).text).not.toContain(
+        'list valid values with the corresponding list* tool first'
+      );
     });
 
     it('accepts a numeric-string issue_iid', async () => {
@@ -356,11 +378,7 @@ describe('issue-tools', () => {
         issue_iid: 1,
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
-      expect((result.content[0] as { text: string }).text).toContain(
-        'required scope (api or write_repository)'
-      );
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -542,11 +560,7 @@ describe('issue-tools', () => {
         title: 'Issue',
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
-      expect((result.content[0] as { text: string }).text).toContain(
-        'required scope (api or write_repository)'
-      );
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -716,8 +730,7 @@ describe('issue-tools', () => {
         title: 'Updated',
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('accepts a numeric-string issue_iid', async () => {
@@ -759,11 +772,7 @@ describe('issue-tools', () => {
         title: 'Updated',
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
-      expect((result.content[0] as { text: string }).text).toContain(
-        'required scope (api or write_repository)'
-      );
+      expectPermissionTeachingError(result);
     });
 
     it('handles validation errors', async () => {
@@ -856,8 +865,7 @@ describe('issue-tools', () => {
         issue_iid: 9999,
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('accepts a "#"-prefixed issue_iid', async () => {
@@ -892,11 +900,7 @@ describe('issue-tools', () => {
         issue_iid: 1,
       });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain('Permission denied');
-      expect((result.content[0] as { text: string }).text).toContain(
-        'required scope (api or write_repository)'
-      );
+      expectPermissionTeachingError(result);
     });
 
     it('handles already closed issue', async () => {

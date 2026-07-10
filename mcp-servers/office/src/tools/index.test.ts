@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { META_KEYS, metaValue } from '@speedwave/mcp-shared';
+import { MAX_PDF_PAGES } from '../config.js';
 
 /** Build a fake FileResult-shaped object for the given format. */
 function fr(format: string) {
@@ -92,7 +93,7 @@ vi.mock('../engine/pdf-ops.js', () => ({
   watermarkPdf: eng.watermarkPdf,
   fillPdfForm: eng.fillPdfForm,
 }));
-vi.mock('../config.js', () => ({ DEFAULT_MAX_CHARS: 4000 }));
+vi.mock('../config.js', () => ({ DEFAULT_MAX_CHARS: 4000, MAX_PDF_PAGES: 2000 }));
 
 import { createToolDefinitions, CONVERT_MATRIX } from './index.js';
 import type { ToolDefinition } from '@speedwave/mcp-shared';
@@ -196,25 +197,30 @@ describe('tool metadata', () => {
     expect(CONVERT_MATRIX['.docx']).toBeTruthy();
   });
 
-  it('fillPdfForm declares flattened/fieldWarnings in outputSchema', () => {
+  it('fillPdfForm declares flattened/fieldWarnings in outputSchema, composed from the shared file-result shape', () => {
     const schema = byName.get('fillPdfForm')?.tool.outputSchema as
       | { properties?: Record<string, unknown>; required?: string[] }
       | undefined;
     expect(schema?.properties).toHaveProperty('flattened');
     expect(schema?.properties).toHaveProperty('fieldWarnings');
     expect(schema?.required).toContain('flattened');
+    // Composed from the shared fileResultSchema, not hand-copied: same base keys/required.
+    for (const key of ['path', 'bytes', 'format', 'preview', 'truncated']) {
+      expect(schema?.properties).toHaveProperty(key);
+    }
+    expect(schema?.required).toEqual(expect.arrayContaining(['path', 'bytes', 'format']));
   });
 
-  it('pdfMetadata declares the actual metadata shape in outputSchema', () => {
+  it('pdfMetadata declares the actual metadata shape in outputSchema, with nullable title/author/producer/creator', () => {
     const schema = byName.get('pdfMetadata')?.tool.outputSchema as
-      | { properties?: { metadata?: { properties?: Record<string, unknown> } } }
+      | { properties?: { metadata?: { properties?: Record<string, { type?: unknown }> } } }
       | undefined;
     const metadataProps = schema?.properties?.metadata?.properties;
     expect(metadataProps).toHaveProperty('pages');
     expect(metadataProps).toHaveProperty('encrypted');
-    expect(metadataProps).toHaveProperty('title');
-    expect(metadataProps).toHaveProperty('author');
-    expect(metadataProps).toHaveProperty('producer');
+    for (const key of ['title', 'author', 'producer', 'creator']) {
+      expect(metadataProps?.[key]?.type).toEqual(['string', 'null']);
+    }
   });
 
   it('documents the renderChart width/height defaults', () => {
@@ -228,6 +234,21 @@ describe('tool metadata', () => {
   it('documents the mergePdf/splitPdf batch caps', () => {
     expect(byName.get('mergePdf')?.tool.description).toMatch(/200 input PDFs/);
     expect(byName.get('splitPdf')?.tool.description).toMatch(/200 ranges/);
+  });
+
+  it('splitPdf interpolates the real MAX_PDF_PAGES cap (never a hardcoded 2000) in description and inputSchema', () => {
+    const tool = byName.get('splitPdf')?.tool;
+    const cap = String(MAX_PDF_PAGES);
+    expect(tool?.description).toMatch(new RegExp(`≤${cap}`));
+    const rangesProp = tool?.inputSchema.properties?.ranges as { description?: string } | undefined;
+    expect(rangesProp?.description ?? '').toMatch(new RegExp(`≤${cap}`));
+  });
+
+  it('officeToPdf and convertOffice descriptions mention the password/encrypted teaching error', () => {
+    expect(byName.get('officeToPdf')?.tool.description).toMatch(/password-protected or encrypted/);
+    expect(byName.get('convertOffice')?.tool.description).toMatch(
+      /password-protected or encrypted/
+    );
   });
 
   it('documents replace_text formatting loss and zero-match behavior on editDocx', () => {

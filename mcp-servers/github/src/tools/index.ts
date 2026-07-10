@@ -1,9 +1,10 @@
 /**
- * GitHub Tools Aggregator — exports 46 tools across 11 domains via factory functions.
+ * GitHub Tools Aggregator: exports the GitHub tool definitions via factory functions.
  */
 
 import { ToolDefinition } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
+import { withNumericForgiveness } from './validation.js';
 import { createRepoTools } from './repo-tools.js';
 import { createPrTools } from './pr-tools.js';
 import { createPrReviewTools } from './pr-review-tools.js';
@@ -33,7 +34,7 @@ export function createToolDefinitions(client: GitHubClient | null): ToolDefiniti
     ...createIssueTools(client),
     ...createLabelTools(client),
     ...createReleaseTools(client),
-  ];
+  ].map(withNumericForgiveness);
 }
 
 export { createRepoTools } from './repo-tools.js';

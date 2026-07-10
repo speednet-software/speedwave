@@ -1,7 +1,6 @@
 /**
- * SSOT for `_meta` key names on MCP {@link Tool} definitions: the MCP-spec-compliant
- * prefixed keys (`speedwave.pl/…`) and the reader that falls back to legacy unprefixed
- * keys still emitted by third-party plugin workers.
+ * SSOT for `_meta` key names on MCP tools: prefixed `speedwave.pl/…` keys plus a
+ * reader that falls back to the legacy unprefixed keys.
  * @module shared/meta-keys
  */
 
@@ -35,7 +34,7 @@ export type MetaKey = (typeof META_KEYS)[keyof typeof META_KEYS];
  */
 export function metaValue(
   meta: Record<string, unknown> | undefined,
-  prefixedKey: string,
+  prefixedKey: MetaKey,
   legacyKey: string
 ): unknown {
   if (!meta) return undefined;

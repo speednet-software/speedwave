@@ -4,7 +4,6 @@
  * @module search-tools
  */
 
-import { ts } from '@speedwave/mcp-shared';
 import { ToolSearchResult, ToolMetadata } from './hub-types.js';
 import {
   getToolMetadata as getToolMetadataFromRegistry,
@@ -14,6 +13,12 @@ import {
   getDisabledOsCategories,
 } from './tool-registry.js';
 
+/** The valid detail levels for search_tools, in ascending verbosity (SSOT for schema and validation). */
+export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
+
+/** One of the {@link DETAIL_LEVELS} values. */
+export type DetailLevel = (typeof DETAIL_LEVELS)[number];
+
 /**
  * Parameters for searching available tools
  */
@@ -21,7 +26,7 @@ export interface SearchToolsParams {
   /** Search query to match against tool names, descriptions, and keywords */
   query: string;
   /** Level of detail to return: names_only, with_descriptions, or full_schema */
-  detailLevel: 'names_only' | 'with_descriptions' | 'full_schema';
+  detailLevel: DetailLevel;
   /** Optional service name to filter results (slack, sharepoint, redmine, gitlab) */
   service?: string;
   /** Include deferred tools in results (default: true). Set false to get only core tools. */
@@ -60,8 +65,9 @@ const SELF_REFERENCE_TOKENS: ReadonlySet<string> = new Set([
 const MatchTier = Object.freeze({
   ExactName: 0,
   NamePrefix: 1,
-  Keyword: 2,
-  Description: 3,
+  NameSubstring: 2,
+  Keyword: 3,
+  Description: 4,
 } as const);
 type MatchTier = (typeof MatchTier)[keyof typeof MatchTier];
 
@@ -104,65 +110,59 @@ function requiredMatchCount(tokenCount: number): number {
   return tokenCount >= 4 ? tokenCount - 1 : tokenCount;
 }
 
-/** Lowercased copies of a tool's searchable fields, cached so repeated searches don't re-lowercase static metadata. */
+/** Lowercased copies of a tool's searchable fields, computed once per tool per scoring pass. */
 interface LowercasedToolFields {
   nameLower: string;
   descriptionLower: string;
   keywordsLower: string[];
 }
 
-const lowercaseCache = new WeakMap<ToolMetadata, LowercasedToolFields>();
-
 /**
- * Get (and cache) the lowercased name/description/keywords for a tool.
+ * Lowercase the searchable name/description/keywords of a tool.
  * @param tool - Tool metadata to derive lowercased fields from.
  */
-function getLowercasedFields(tool: ToolMetadata): LowercasedToolFields {
-  const cached = lowercaseCache.get(tool);
-  if (cached) return cached;
-
-  const fields: LowercasedToolFields = {
+function lowercaseFields(tool: ToolMetadata): LowercasedToolFields {
+  return {
     nameLower: tool.name.toLowerCase(),
     descriptionLower: tool.description.toLowerCase(),
     keywordsLower: tool.keywords.map((k) => k.toLowerCase()),
   };
-  lowercaseCache.set(tool, fields);
-  return fields;
 }
 
 /**
  * Determine the best match tier for a tool against a single token, or undefined if
  * the token does not appear in name, keywords, or description.
- * @param tool - Tool metadata to test.
+ * @param fields - Lowercased searchable fields of the tool.
  * @param token - Lowercased query token.
  */
-function tokenMatchTier(tool: ToolMetadata, token: string): MatchTier | undefined {
-  const { nameLower, descriptionLower, keywordsLower } = getLowercasedFields(tool);
+function tokenMatchTier(fields: LowercasedToolFields, token: string): MatchTier | undefined {
+  const { nameLower, descriptionLower, keywordsLower } = fields;
   if (nameLower === token) return MatchTier.ExactName;
   if (nameLower.startsWith(token)) return MatchTier.NamePrefix;
+  if (nameLower.includes(token)) return MatchTier.NameSubstring;
   if (keywordsLower.some((k) => k.includes(token))) return MatchTier.Keyword;
   if (descriptionLower.includes(token)) return MatchTier.Description;
   return undefined;
 }
 
 /**
- * Score a tool against tokenized query, ignoring self-reference tokens (they drive
- * only the boost signal). Returns undefined below the required-match-count threshold.
+ * Score a tool against the content tokens of a query (self-reference tokens already
+ * filtered out). Returns undefined below the required-match-count threshold.
  * @param tool - Tool metadata to test.
- * @param tokens - Lowercased query tokens (including any self-reference tokens).
+ * @param contentTokens - Lowercased query tokens with self-reference tokens removed.
  */
-function scoreTool(tool: ToolMetadata, tokens: string[]): MatchTier | undefined {
-  const contentTokens = tokens.filter((t) => !SELF_REFERENCE_TOKENS.has(t));
+function scoreTool(tool: ToolMetadata, contentTokens: string[]): MatchTier | undefined {
   if (contentTokens.length === 0) {
     // Intended: a pure self-reference query ("me") lists userScoped tools across every enabled service, not just one.
     return tool.userScoped ? MatchTier.Description : undefined;
   }
 
+  const fields = lowercaseFields(tool);
   let matchedCount = 0;
   let bestTier: MatchTier | undefined;
 
   for (const token of contentTokens) {
-    const tier = tokenMatchTier(tool, token);
+    const tier = tokenMatchTier(fields, token);
     if (tier !== undefined) {
       matchedCount++;
       if (bestTier === undefined || tier < bestTier) bestTier = tier;
@@ -175,7 +175,7 @@ function scoreTool(tool: ToolMetadata, tokens: string[]): MatchTier | undefined 
 
 /**
  * Search tools via tokenized, ranked matching (name/keyword/description); ranks
- * exact-name first, then prefix, keyword, description; self-reference queries boost userScoped tools.
+ * exact-name, then name-prefix, mid-name substring, keyword, description; self-reference queries boost userScoped tools.
  * @param params - Search parameters including query, detailLevel, service filter, and includeDeferred flag
  */
 export async function searchTools(params: SearchToolsParams): Promise<SearchToolsResult> {
@@ -183,12 +183,15 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
   const isWildcard = query === '*' || query === '';
   const tokens = tokenize(query);
   const wantsSelfBoost = tokens.some((t) => SELF_REFERENCE_TOKENS.has(t));
+  const contentTokens = tokens.filter((t) => !SELF_REFERENCE_TOKENS.has(t));
 
   const enabled = getEnabledServices();
   const disabledOs = getDisabledOsCategories();
   const servicesToSearch = (service ? [service] : [...SERVICE_NAMES]).filter((s) => enabled.has(s));
 
   const serviceFilterInvalid = Boolean(service) && !SERVICE_NAMES.includes(service as string);
+  const serviceDisabled =
+    Boolean(service) && !serviceFilterInvalid && !enabled.has(service as string);
 
   const scored: ScoredTool[] = [];
 
@@ -205,7 +208,7 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
         continue;
       }
 
-      const tier = scoreTool(tool, tokens);
+      const tier = scoreTool(tool, contentTokens);
       if (tier === undefined) continue;
       scored.push({ service: svc, tool, tier, selfBoost: wantsSelfBoost && !!tool.userScoped });
     }
@@ -229,7 +232,7 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
   };
 
   if (results.length === 0) {
-    result.hint = buildZeroMatchHint(service, serviceFilterInvalid, enabled);
+    result.hint = buildZeroMatchHint(service, serviceFilterInvalid, serviceDisabled, enabled);
   }
 
   return result;
@@ -283,8 +286,8 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
     parts.push(`Pass "${tool.selfParam}" to reference yourself.`);
   }
   if (!tool.currentUserTool && !tool.selfParam) {
-    console.warn(
-      `${ts()} [search-tools] userScoped tool "${tool.name}" declares neither currentUserTool nor selfParam; serving a degraded identity sentence`
+    parts.push(
+      'No self-reference helper is configured for this tool; identify the target account explicitly.'
     );
   }
 
@@ -292,20 +295,26 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
 }
 
 /**
- * Build the `hint` field for a zero-match search: names the invalid service filter
- * (with valid services listed) or suggests broadening the query.
+ * Build the `hint` field for a zero-match search: names the invalid or disabled service
+ * filter (with valid services listed) or suggests broadening the query.
  * @param service - The requested service filter, if any.
  * @param serviceFilterInvalid - Whether `service` was provided but unrecognized.
+ * @param serviceDisabled - Whether `service` is known but not enabled for this project.
  * @param enabled - Set of currently enabled service names.
  */
 function buildZeroMatchHint(
   service: string | undefined,
   serviceFilterInvalid: boolean,
+  serviceDisabled: boolean,
   enabled: Set<string>
 ): string {
   if (serviceFilterInvalid) {
     const known = [...SERVICE_NAMES].filter((s) => enabled.has(s)).sort();
     return `Unknown service "${service}". Known services: ${known.join(', ') || '(none enabled)'}.`;
+  }
+  if (serviceDisabled) {
+    const known = [...SERVICE_NAMES].filter((s) => enabled.has(s)).sort();
+    return `Service "${service}" is not enabled for this project. Enabled services: ${known.join(', ') || '(none)'}. Enable it in Speedwave settings or search without the service filter.`;
   }
   if (service) {
     return `No tools in service "${service}" matched this query. Retry with a single keyword, or query:"*" with detail_level:"names_only" to list all tools in this service.`;

@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { META_KEYS, metaValue } from '@speedwave/mcp-shared';
+import { META_KEYS } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './index.js';
 
 const ALL_TOOLS = createToolDefinitions(null).map((td) => td.tool);
@@ -20,6 +20,22 @@ describe('GitLab tool metadata', () => {
     const names = ALL_TOOLS.map((t) => t.name);
     const unique = new Set(names);
     expect(unique.size).toBe(names.length);
+  });
+
+  it('listMrIds is the only eagerly-loaded tool (defer-loading false)', () => {
+    const eager = ALL_TOOLS.filter(
+      (t) => (t._meta as Record<string, unknown> | undefined)?.[META_KEYS.DEFER_LOADING] === false
+    ).map((t) => t.name);
+    expect(eager).toEqual(['listMrIds']);
+  });
+
+  it('every USER_SCOPED tool declares a currentUserTool or selfParam companion key', () => {
+    for (const tool of ALL_TOOLS) {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+      if (!meta?.[META_KEYS.USER_SCOPED]) continue;
+      const hasCompanion = Boolean(meta[META_KEYS.CURRENT_USER_TOOL] || meta[META_KEYS.SELF_PARAM]);
+      expect(hasCompanion, `${tool.name} is USER_SCOPED without a companion key`).toBe(true);
+    }
   });
 
   describe.each(ALL_TOOLS.map((t) => [t.name, t]))('%s', (_name, tool) => {
@@ -63,18 +79,19 @@ describe('GitLab tool metadata', () => {
       }
     });
 
-    it('has _meta with a prefixed defer-loading key', () => {
+    it('has _meta with the prefixed defer-loading key', () => {
       expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
-      const deferLoading = metaValue(
-        tool._meta as Record<string, unknown>,
-        META_KEYS.DEFER_LOADING,
-        'deferLoading'
-      );
-      expect(typeof deferLoading, `${tool.name} missing defer-loading`).toBe('boolean');
       expect(
-        META_KEYS.DEFER_LOADING in (tool._meta as Record<string, unknown>),
-        `${tool.name} uses legacy unprefixed deferLoading key`
-      ).toBe(true);
+        typeof (tool._meta as Record<string, unknown>)[META_KEYS.DEFER_LOADING],
+        `${tool.name} missing ${META_KEYS.DEFER_LOADING}`
+      ).toBe('boolean');
+    });
+
+    it('should not use the legacy unprefixed deferLoading key', () => {
+      expect(
+        (tool._meta as Record<string, unknown> | undefined)?.deferLoading,
+        `${tool.name} still uses legacy deferLoading`
+      ).toBeUndefined();
     });
   });
 });

@@ -25,9 +25,10 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
+  teachingToolResult,
 } from '@speedwave/mcp-shared';
 import { withValidation, validateGraphId, ToolResult } from './validation.js';
-import { SharePointClient } from '../client.js';
+import { SharePointClient, GraphApiError } from '../client.js';
 import { ListsClient } from '../graph/lists-client.js';
 import { ColumnsClient } from '../graph/columns-client.js';
 import { PagesClient } from '../graph/pages-client.js';
@@ -399,8 +400,7 @@ const deleteItemTool: Tool = {
 
 const deletePageTool: Tool = {
   name: 'deletePage',
-  description:
-    'Delete a SharePoint page. Destructive (bundled with PR5 delete ops). Get pageId from listPages.',
+  description: 'Delete a SharePoint page. Destructive. Get pageId from listPages.',
   inputSchema: {
     type: 'object',
     properties: { pageId: { type: 'string', description: 'Graph page id, from listPages.' } },
@@ -711,14 +711,22 @@ async function handleListItems(
       },
     };
   } catch (e) {
-    // A malformed $filter (e.g. double-quoted string literals) surfaces as a raw
-    // Graph 400 — steer the model to the fix instead of an opaque error dump.
-    const hint = params.filter?.includes('"')
-      ? " OData $filter requires single-quoted string literals, e.g. fields/Status eq 'Open' (not double quotes)."
-      : '';
+    // Only a genuine 400 with a double-quoted $filter is the OData literal mistake;
+    // a 401/403/429 must not be relabeled as a filter-syntax error.
+    if (e instanceof GraphApiError && e.status === 400 && params.filter?.includes('"')) {
+      return teachingToolResult(
+        {
+          paramName: 'filter',
+          received: params.filter,
+          nextStep:
+            "OData $filter requires single-quoted string literals, e.g. fields/Status eq 'Open' (not double quotes).",
+        },
+        'LIST_ITEMS_FAILED'
+      );
+    }
     return {
       success: false,
-      error: { code: 'LIST_ITEMS_FAILED', message: `${SharePointClient.formatError(e)}${hint}` },
+      error: { code: 'LIST_ITEMS_FAILED', message: SharePointClient.formatError(e) },
     };
   }
 }

@@ -329,6 +329,13 @@ describe('SharePointClient', () => {
       await expect(client.listFiles()).resolves.not.toThrow();
 
       expect(client.statusTracker.getStatus()).toBe('ok');
+      // The retried list call must target the refreshed composite siteId, not the
+      // stale path-form id embedded in the URL the caller built before the resolve.
+      const listUrl = fetchMock.mock.calls[1][0] as string;
+      expect(listUrl).toContain(
+        'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+      );
+      expect(listUrl).not.toContain(':/sites/Retry:');
       // A later call must go straight through without re-resolving.
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       await expect(client.listFiles()).resolves.not.toThrow();
@@ -343,22 +350,82 @@ describe('SharePointClient', () => {
         /SharePoint site connection is not established/
       );
       expect(client.statusTracker.getStatus()).toBe('failed');
-
-      // Next call retries again rather than staying permanently wedged.
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
-        }),
-      });
-      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
-      await expect(client.listFiles()).resolves.not.toThrow();
-      expect(client.statusTracker.getStatus()).toBe('ok');
     });
 
-    it('does not short-circuit when statusTracker is unknown (default) or ok', async () => {
+    it('skips the resolve within the cooldown window after a failed retry (fail-fast)', async () => {
+      vi.useFakeTimers();
+      try {
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Cooldown:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 429'));
+        fetchMock.mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests' });
+
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        const callsAfterFirst = fetchMock.mock.calls.length;
+
+        // A second call inside the cooldown fails fast without re-running the resolve.
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries the resolve again once the cooldown elapses', async () => {
+      vi.useFakeTimers();
+      try {
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Recover:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 429'));
+        fetchMock.mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests' });
+
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+
+        // Past the cooldown the worker attempts the resolve again rather than staying wedged.
+        await vi.advanceTimersByTimeAsync(30_000);
+        fetchMock.mockReset();
+        fetchMock
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+            }),
+          })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+        await expect(client.listFiles()).resolves.not.toThrow();
+        expect(client.statusTracker.getStatus()).toBe('ok');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rethrows OAuthScopeMismatchError from the resolve retry, not the generic config error', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Scope:';
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
+      mockAuthedRequest.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+    });
+
+    it('does not short-circuit when statusTracker is ok', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       client.statusTracker.setOk();
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    it('does not short-circuit when statusTracker is unknown (default)', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      expect(client.statusTracker.getStatus()).toBe('unknown');
 
       await expect(client.listFiles()).resolves.not.toThrow();
       expect(fetchMock).toHaveBeenCalled();
@@ -2191,6 +2258,18 @@ describe('SharePointClient', () => {
       // The non-Error value made it into the warning message verbatim.
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('non-error string failure'));
       warnSpy.mockRestore();
+    });
+
+    it('propagates OAuthScopeMismatchError instead of masking it as a network error', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      global.fetch = vi.fn() as unknown as typeof fetch;
+      mockAuthedRequest.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(
+        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', { refreshOn401: true })
+      ).rejects.toBeInstanceOf(OAuthScopeMismatchError);
     });
 
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {

@@ -31,15 +31,17 @@ describe('validateGraphId', () => {
     expect(result?.error?.message).toContain('"bad/../path"');
   });
 
-  it('without a sourceTool, explains the accepted character set', () => {
+  it('without a sourceTool, derives the char set and length bounds from the regex', () => {
     const result = validateGraphId('bad/../path', 'listId');
-    expect(result?.error?.message).toMatch(/letters, digits/);
+    // Both the min (1) and max (128) length bounds come from GRAPH_ID_RE.
+    expect(result?.error?.message).toContain('1 to 128 characters');
+    expect(result?.error?.message).toContain('[A-Za-z0-9._-]');
   });
 
   it('with a sourceTool, names it as the place to get a valid value', () => {
     const result = validateGraphId('bad/../path', 'listId', 'listLists');
     expect(result?.error?.message).toContain('listLists');
-    expect(result?.error?.message).not.toMatch(/letters, digits/);
+    expect(result?.error?.message).not.toContain('characters from the set');
   });
 
   it('rejects an empty string', () => {

@@ -381,10 +381,9 @@ describe('Project Tools', () => {
 
       await getProjectFullTool!.handler({ project_id: 'nonexistent' });
 
-      expect(RedmineClient.formatError).toHaveBeenCalledWith(
-        expect.any(Error),
-        'project_id=nonexistent'
-      );
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), {
+        project_id: 'nonexistent',
+      });
     });
   });
 

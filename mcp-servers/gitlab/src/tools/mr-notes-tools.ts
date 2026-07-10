@@ -11,7 +11,8 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listMrCommitsTool: Tool = {
   name: 'listMrCommits',
@@ -164,7 +165,7 @@ const createMrNoteTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['gitlab', 'merge', 'request', 'comment', 'note'],
   example: 'await gitlab.createMrNote({ project_id: "speedwave/core", mr_iid: 42, body: "LGTM!" })',
@@ -219,12 +220,10 @@ export function createMrNotesTools(client: GitLabClient | null): ToolDefinition[
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, limit } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           limit?: number;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.listMrCommits(project_id, iid.value, limit);
+        const result = await c.listMrCommits(project_id, mr_iid, limit);
         return jsonResult(result);
       }),
     },
@@ -233,12 +232,10 @@ export function createMrNotesTools(client: GitLabClient | null): ToolDefinition[
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, limit } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           limit?: number;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.listMrPipelines(project_id, iid.value, limit);
+        const result = await c.listMrPipelines(project_id, mr_iid, limit);
         return jsonResult(result);
       }),
     },
@@ -247,12 +244,10 @@ export function createMrNotesTools(client: GitLabClient | null): ToolDefinition[
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, limit } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           limit?: number;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.listMrNotes(project_id, iid.value, limit);
+        const result = await c.listMrNotes(project_id, mr_iid, limit);
         return jsonResult(result);
       }),
     },
@@ -261,12 +256,10 @@ export function createMrNotesTools(client: GitLabClient | null): ToolDefinition[
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, body } = params as {
           project_id: string | number;
-          mr_iid: unknown;
+          mr_iid: number;
           body: string;
         };
-        const iid = normalizeIid(mr_iid, 'mr_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.createMrNote(project_id, iid.value, body);
+        const result = await c.createMrNote(project_id, mr_iid, body);
         return jsonResult(result);
       }),
     },

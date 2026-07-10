@@ -12,11 +12,15 @@ enum AppleMailClient {
 
     /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
     static func recipientClauses(_ addresses: String, kind: String) -> String {
-        splitAddressList(addresses)
-            .map { addr in
-                "        make new \(kind) recipient at end of \(kind) recipients with properties {address:\"\(escapeAppleScript(addr))\"}"
-            }
-            .joined(separator: "\n")
+        makeRecipientClauses(addresses, kind: kind) { "address:\"\($0)\"" }
+    }
+
+    /// True only when a probe confirms the mailbox is absent; a probe error returns false
+    /// so an unrelated -1728 surfaces its real cause rather than a wrong mailbox message.
+    static func mailboxDefinitelyMissing(_ name: String) -> Bool {
+        let script = "tell application \"Mail\" to return (exists mailbox \"\(escapeAppleScript(name))\")"
+        guard let out = try? ScriptRunner.run(script, timeout: 10) else { return false }
+        return out == "false"
     }
 
     static func listMailboxes() throws -> [[String: Any]] {
@@ -66,7 +70,10 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try runMailScript(script, timeout: 30, mailbox: mailbox)
+        let output = try runMailScript(
+            script, timeout: 30, mailbox: mailbox,
+            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
+        )
         return parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"])
     }
 
@@ -96,13 +103,14 @@ enum AppleMailClient {
         return try parseEmailDetail(output, id: id)
     }
 
-    static func searchEmails(query: String, limit: Int) throws -> [[String: Any]] {
+    static func searchEmails(query: String, limit: Int, mailbox: String?) throws -> [[String: Any]] {
         let queryEsc = escapeAppleScript(query)
+        let sourceClause = mailbox.map { "mailbox \"\(escapeAppleScript($0))\"" } ?? "inbox"
         let script = """
         tell application "Mail"
             set output to ""
             set msgCount to 0
-            set msgs to (every message of inbox whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
+            set msgs to (every message of \(sourceClause) whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
             repeat with m in msgs
                 if msgCount < \(limit) then
                     set msgId to message id of m
@@ -117,7 +125,10 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runMailScript(
+            script, timeout: 30, mailbox: mailbox,
+            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
+        )
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 
@@ -167,16 +178,5 @@ enum AppleMailClient {
 
         _ = try ScriptRunner.run(script, timeout: 15)
         return ["status": "sent"]
-    }
-}
-
-/// Runs a mailbox-scoped AppleScript, mapping a "Can't get mailbox" failure to a
-/// teaching `CLIError.notFound` instead of the raw AppleScript text.
-func runMailScript(_ script: String, timeout: TimeInterval, mailbox: String?) throws -> String {
-    do { return try ScriptRunner.run(script, timeout: timeout) }
-    catch ScriptError.scriptFailed(let msg) where mailbox != nil && isAppleScriptNotFoundError(msg) {
-        throw CLIError.notFound(
-            "Mailbox '\(mailbox!)' not found. List valid mailboxes via listMailboxes and use their name field."
-        )
     }
 }

@@ -51,7 +51,10 @@ const listWorkflowRunsTool: Tool = {
         type: 'string',
         description: 'e.g. queued, in_progress, completed, success, failure',
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -322,7 +325,10 @@ const listWorkflowRunArtifactsTool: Tool = {
         type: 'number',
         description: 'Workflow run ID. Obtain from listWorkflowRuns.',
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'run_id'],
   },

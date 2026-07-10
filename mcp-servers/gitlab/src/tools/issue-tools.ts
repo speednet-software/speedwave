@@ -11,7 +11,9 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
+import { IDENTITY_SCOPES } from '../identity-scopes.js';
 
 const listIssuesTool: Tool = {
   name: 'listIssues',
@@ -21,7 +23,7 @@ const listIssuesTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
     [META_KEYS.SELF_PARAM]: "scope: 'assigned_to_me' | 'created_by_me'",
   },
   keywords: ['gitlab', 'issues', 'list', 'bugs', 'tasks'],
@@ -36,7 +38,7 @@ const listIssuesTool: Tool = {
       assignee_username: { type: 'string', description: 'Filter by assignee' },
       scope: {
         type: 'string',
-        enum: ['assigned_to_me', 'created_by_me', 'all'],
+        enum: [...IDENTITY_SCOPES],
         description:
           "Filter by identity relative to the authenticated user. Use with getCurrentUser to resolve 'me' without needing a username.",
       },
@@ -310,11 +312,9 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
       handler: withValidation(client, async (c, params) => {
         const { project_id, issue_iid } = params as {
           project_id: string | number;
-          issue_iid: unknown;
+          issue_iid: number;
         };
-        const iid = normalizeIid(issue_iid, 'issue_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.getIssue(project_id, iid.value);
+        const result = await c.getIssue(project_id, issue_iid);
         return jsonResult(result);
       }),
     },
@@ -338,15 +338,13 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
       handler: withValidation(client, async (c, params) => {
         const { project_id, issue_iid, ...options } = params as {
           project_id: string | number;
-          issue_iid: unknown;
+          issue_iid: number;
           title?: string;
           description?: string;
           labels?: string;
           state_event?: string;
         };
-        const iid = normalizeIid(issue_iid, 'issue_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.updateIssue(project_id, iid.value, options);
+        const result = await c.updateIssue(project_id, issue_iid, options);
         return jsonResult(result);
       }),
     },
@@ -355,11 +353,9 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
       handler: withValidation(client, async (c, params) => {
         const { project_id, issue_iid } = params as {
           project_id: string | number;
-          issue_iid: unknown;
+          issue_iid: number;
         };
-        const iid = normalizeIid(issue_iid, 'issue_iid');
-        if (!iid.ok) return iid.error;
-        const result = await c.closeIssue(project_id, iid.value);
+        const result = await c.closeIssue(project_id, issue_iid);
         return jsonResult(result);
       }),
     },

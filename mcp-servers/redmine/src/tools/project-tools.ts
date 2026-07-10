@@ -12,6 +12,8 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
+import { successResultSchema } from './schema-helpers.js';
 
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
@@ -33,25 +35,19 @@ const listProjectIdsTool: Tool = {
       offset: { type: 'number', description: 'Pagination offset' },
     },
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      ids: { type: 'array', items: { type: 'number' } },
-      identifiers: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: { id: { type: 'number' }, identifier: { type: 'string' } },
-        },
+  outputSchema: successResultSchema({
+    ids: { type: 'array', items: { type: 'number' } },
+    identifiers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'number' }, identifier: { type: 'string' } },
       },
-      total_count: { type: 'number' },
-      offset: { type: 'number' },
-      limit: { type: 'number' },
-      error: { type: 'string' },
     },
-    required: ['success'],
-  },
+    total_count: { type: 'number' },
+    offset: { type: 'number' },
+    limit: { type: 'number' },
+  }),
   inputExamples: [
     {
       description: 'Minimal: list all projects',
@@ -100,27 +96,21 @@ const getProjectFullTool: Tool = {
     },
     required: ['project_id'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      project: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          identifier: { type: 'string' },
-          name: { type: 'string' },
-          description: { type: 'string' },
-          status: { type: 'number' },
-          is_public: { type: 'boolean' },
-          created_on: { type: 'string' },
-          updated_on: { type: 'string' },
-        },
+  outputSchema: successResultSchema({
+    project: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        identifier: { type: 'string' },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        status: { type: 'number' },
+        is_public: { type: 'boolean' },
+        created_on: { type: 'string' },
+        updated_on: { type: 'string' },
       },
-      error: { type: 'string' },
     },
-    required: ['success'],
-  },
+  }),
   inputExamples: [
     {
       description: 'Minimal: get basic project data',
@@ -149,27 +139,21 @@ const searchProjectIdsTool: Tool = {
     },
     required: ['query'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      ids: { type: 'array', items: { type: 'number' } },
-      projects: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'number' },
-            identifier: { type: 'string' },
-            name: { type: 'string' },
-          },
+  outputSchema: successResultSchema({
+    ids: { type: 'array', items: { type: 'number' } },
+    projects: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          identifier: { type: 'string' },
+          name: { type: 'string' },
         },
       },
-      total_count: { type: 'number' },
-      error: { type: 'string' },
     },
-    required: ['success'],
-  },
+    total_count: { type: 'number' },
+  }),
   inputExamples: [
     {
       description: 'Minimal: search all projects',
@@ -199,8 +183,8 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
   return [
     {
       tool: listProjectIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const { status, limit, offset } = params as {
             status?: 'active' | 'closed' | 'archived' | 'all';
             limit?: number;
@@ -217,10 +201,7 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
             offset: offset || 0,
             limit: limit || 100,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: getProjectFullTool,
@@ -229,18 +210,16 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
           project_id: string | number;
           include?: string[];
         };
-        try {
+        return withRedmineErrors({ project_id }, async () => {
           const result = await client.showProject(project_id, { include });
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `project_id=${project_id}`));
-        }
+        });
       },
     },
     {
       tool: searchProjectIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const { query, limit } = params as { query: string; limit?: number };
           const result = await client.searchProjects(query, { limit });
           return jsonResult({
@@ -248,10 +227,7 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
             projects: result.projects,
             total_count: result.total_count,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
   ];
 }

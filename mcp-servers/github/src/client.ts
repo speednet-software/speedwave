@@ -5,7 +5,7 @@
  * Architecture:
  * - Token mounted RO from /tokens/token
  * - github.com only in v1 — no host_url file (unlike GitLab). baseUrl stays default (https://api.github.com).
- * - Exposes 46 tools via `@octokit/rest`
+ * - Exposes the GitHub tools via `@octokit/rest`
  * Security:
  * - Blast radius containment: only GitHub tokens if compromised
  * - Token never exposed in responses
@@ -45,6 +45,7 @@ import type {
   GitHubUser,
 } from './types.js';
 import type { ConnectionTestResult } from '@speedwave/mcp-shared';
+import { TOOL_NAMES } from './tool-names.js';
 
 // Re-export the key types so consumers (the tools layer) can import them from the client too.
 export type {
@@ -168,18 +169,19 @@ function classifyOctokitError(error: unknown): ErrorCategory {
   return 'unknown';
 }
 
-/** An Error already translated into a teaching message for an expected (4xx) API failure. */
-interface ExpectedError extends Error {
-  expected?: true;
-}
-
 /**
- * Marks `error` as an expected, already-translated failure so callers skip unexpected-error logging.
- * @param error - The translated error to mark.
+ * An Error already translated into a teaching message for an expected (4xx) API failure.
+ * The class identity is the unforgeable marker; the original HTTP status is retained.
  */
-function markExpected(error: Error): ExpectedError {
-  (error as ExpectedError).expected = true;
-  return error;
+class TeachingError extends Error {
+  readonly expected = true as const;
+  constructor(
+    message: string,
+    readonly status?: number
+  ) {
+    super(message);
+    this.name = 'TeachingError';
+  }
 }
 
 /**
@@ -187,7 +189,7 @@ function markExpected(error: Error): ExpectedError {
  * @param error - Candidate error to test.
  */
 export function isExpectedError(error: unknown): boolean {
-  return (error as ExpectedError | null)?.expected === true;
+  return error instanceof TeachingError;
 }
 
 /**
@@ -201,7 +203,7 @@ async function withNotFoundMessage<T>(fn: () => Promise<T>, notFoundMessage: str
     return await fn();
   } catch (error) {
     if ((error as OctokitErrorLike)?.status === 404) {
-      throw markExpected(new Error(notFoundMessage));
+      throw new TeachingError(notFoundMessage, 404);
     }
     throw error;
   }
@@ -222,7 +224,7 @@ async function withValidationMessage<T>(
   } catch (error) {
     const err = error as OctokitErrorLike;
     if (err?.status === 422) {
-      throw markExpected(new Error(`${validationMessage}: ${err.message || 'invalid request'}`));
+      throw new TeachingError(`${validationMessage}: ${err.message || 'invalid request'}`, 422);
     }
     throw error;
   }
@@ -312,22 +314,64 @@ export class GitHubClient {
   }
 
   /**
-   * Caps a requested limit to GitHub's per-page maximum (and applies a default).
+   * How many items the caller wants: a positive integer with no upper ceiling
+   * (missing/0/invalid falls back to {@link DEFAULT_LIMIT}).
    * @param limit - Caller-requested limit (optional)
-   * @returns A page size between 1 and 100
    */
-  private perPage(limit?: number): number {
-    return clampPageSize(limit, DEFAULT_LIMIT, MAX_PER_PAGE);
+  private wantedCount(limit?: number): number {
+    return clampPageSize(limit, DEFAULT_LIMIT);
   }
 
   /**
-   * Slices a result array down to the caller-requested limit (default 100).
+   * Per-page size for a request: the wanted count, capped at GitHub's per-page maximum.
+   * @param limit - Caller-requested limit (optional)
+   */
+  private perPage(limit?: number): number {
+    return Math.min(this.wantedCount(limit), MAX_PER_PAGE);
+  }
+
+  /**
+   * Slices a result array down to the caller-requested count (default 100, no upper cap).
    * @param items - Items returned by the API
    * @param limit - Caller-requested limit (optional)
    * @returns The first `limit` items
    */
   private slice<T>(items: T[], limit?: number): T[] {
-    return items.slice(0, clampPageSize(limit, DEFAULT_LIMIT, MAX_PER_PAGE));
+    return items.slice(0, this.wantedCount(limit));
+  }
+
+  /**
+   * Paginates a list endpoint, stopping the fetch once `limit` items are collected
+   * (bounds requests to `ceil(limit / per_page)` instead of walking every page).
+   * @param route - Octokit endpoint method to paginate
+   * @param params - Request parameters (excluding `per_page`)
+   * @param limit - Caller-requested limit (optional)
+   * @returns The collected items, capped at the wanted count
+   */
+  private async paginateUpTo(
+    route: unknown,
+    params: Record<string, unknown>,
+    limit?: number
+  ): Promise<Array<Record<string, unknown>>> {
+    const wanted = this.wantedCount(limit);
+    let collected = 0;
+    const mapPage = (response: { data: unknown }, done: () => void): unknown[] => {
+      const page = (response.data as unknown[] | undefined) ?? [];
+      collected += page.length;
+      if (collected >= wanted) done();
+      return page;
+    };
+    const paginate = this.octokit.paginate as unknown as (
+      r: unknown,
+      p: Record<string, unknown>,
+      m: (response: { data: unknown }, done: () => void) => unknown[]
+    ) => Promise<unknown[]>;
+    const items = (await paginate(
+      route,
+      { ...params, per_page: this.perPage(limit) },
+      mapPage
+    )) as Array<Record<string, unknown>>;
+    return items.slice(0, wanted);
   }
 
   //═════════════════════════════════════════════════════════════════════════════
@@ -613,6 +657,11 @@ export class GitHubClient {
    * ```
    */
   static formatError(error: unknown): string {
+    // An already-translated teaching error is returned verbatim: its message is the guidance,
+    // and message-sniffing on caller-influenced text (a branch name, a path) must not reclassify it.
+    if (isExpectedError(error)) {
+      return (error as Error).message;
+    }
     const err = (error || {}) as OctokitErrorLike;
     const status = typeof err.status === 'number' ? err.status : undefined;
     const message = err.message || '';
@@ -692,7 +741,7 @@ export class GitHubClient {
    * repositories when a `search` term is given.
    * @param options - Filter and pagination options
    * @param options.search - If provided, performs a repository search instead of listing the user's repos
-   * @param options.limit - Maximum number of repositories to return (default 100)
+   * @param options.limit - Maximum number of repositories to return (default 100 when omitted; any positive value honored)
    * @param options.affiliation - Comma-separated affiliations passed to GitHub (e.g. "owner,collaborator")
    * @returns Array of normalized repositories
    */
@@ -707,11 +756,12 @@ export class GitHubClient {
       const items = (res.data?.items || []) as Array<Record<string, unknown>>;
       return this.slice(items, options.limit).map((r) => this.mapRepo(r));
     }
-    const repos = (await this.octokit.paginate(this.octokit.rest.repos.listForAuthenticatedUser, {
-      per_page: this.perPage(options.limit),
-      affiliation: options.affiliation,
-    })) as Array<Record<string, unknown>>;
-    return this.slice(repos, options.limit).map((r) => this.mapRepo(r));
+    const repos = await this.paginateUpTo(
+      this.octokit.rest.repos.listForAuthenticatedUser,
+      { affiliation: options.affiliation },
+      options.limit
+    );
+    return repos.map((r) => this.mapRepo(r));
   }
 
   /**
@@ -732,7 +782,7 @@ export class GitHubClient {
    * @param options - Search scope and pagination options
    * @param options.owner - Repository owner to scope the search to (requires `repo`)
    * @param options.repo - Repository name to scope the search to (requires `owner`)
-   * @param options.limit - Maximum number of results to return (default 100)
+   * @param options.limit - Maximum number of results to return (default 100 when omitted; any positive value honored)
    * @returns Array of `{ path, repository, html_url }` matches
    */
   async searchCode(
@@ -769,7 +819,7 @@ export class GitHubClient {
    * @param options.state - Filter by state: "open", "closed", or "all" (default "open")
    * @param options.head - Filter by head ref (e.g. "user:branch" or "org:branch")
    * @param options.base - Filter by base branch name
-   * @param options.limit - Maximum number of PRs to return (default 100)
+   * @param options.limit - Maximum number of PRs to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized pull requests
    */
   async listPullRequests(
@@ -783,15 +833,12 @@ export class GitHubClient {
     } = {}
   ): Promise<GitHubPullRequest[]> {
     this.validateRequired({ owner, repo });
-    const prs = (await this.octokit.paginate(this.octokit.rest.pulls.list, {
-      owner,
-      repo,
-      state: options.state || 'open',
-      head: options.head,
-      base: options.base,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(prs, options.limit).map((pr) => this.mapPullRequest(pr));
+    const prs = await this.paginateUpTo(
+      this.octokit.rest.pulls.list,
+      { owner, repo, state: options.state || 'open', head: options.head, base: options.base },
+      options.limit
+    );
+    return prs.map((pr) => this.mapPullRequest(pr));
   }
 
   /**
@@ -805,7 +852,7 @@ export class GitHubClient {
     this.validateRequired({ owner, repo, number });
     const res = await withNotFoundMessage(
       () => this.octokit.rest.pulls.get({ owner, repo, pull_number: number }),
-      `PR #${number} not found in ${owner}/${repo}. Check the number with listPullRequests, or the owner/repo with getRepo.`
+      `PR #${number} not found in ${owner}/${repo}. Check the number with ${TOOL_NAMES.LIST_PULL_REQUESTS}, or the owner/repo with ${TOOL_NAMES.GET_REPO}, or your token may lack access.`
     );
     return this.mapPullRequest(res.data as Record<string, unknown>);
   }
@@ -933,7 +980,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param number - Pull request number
    * @param options - Pagination options
-   * @param options.limit - Maximum number of files to return (default 100)
+   * @param options.limit - Maximum number of files to return (default 100 when omitted; any positive value honored)
    * @returns Array of `{ filename, status, additions, deletions, changes, patch? }`
    */
   async getPrFiles(
@@ -952,13 +999,12 @@ export class GitHubClient {
     }>
   > {
     this.validateRequired({ owner, repo, number });
-    const files = (await this.octokit.paginate(this.octokit.rest.pulls.listFiles, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(files, options.limit).map((f) => ({
+    const files = await this.paginateUpTo(
+      this.octokit.rest.pulls.listFiles,
+      { owner, repo, pull_number: number },
+      options.limit
+    );
+    return files.map((f) => ({
       filename: String(f.filename || ''),
       status: String(f.status || ''),
       additions: Number(f.additions || 0),
@@ -978,7 +1024,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param number - Pull request number
    * @param options - Pagination options
-   * @param options.limit - Maximum number of commits to return (default 100)
+   * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized commits
    */
   async listPrCommits(
@@ -988,13 +1034,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubCommit[]> {
     this.validateRequired({ owner, repo, number });
-    const commits = (await this.octokit.paginate(this.octokit.rest.pulls.listCommits, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(commits, options.limit).map((c) => this.mapCommit(c));
+    const commits = await this.paginateUpTo(
+      this.octokit.rest.pulls.listCommits,
+      { owner, repo, pull_number: number },
+      options.limit
+    );
+    return commits.map((c) => this.mapCommit(c));
   }
 
   /**
@@ -1003,7 +1048,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param number - Pull request number
    * @param options - Pagination options
-   * @param options.limit - Maximum number of reviews to return (default 100)
+   * @param options.limit - Maximum number of reviews to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized reviews
    */
   async listPrReviews(
@@ -1013,13 +1058,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubReview[]> {
     this.validateRequired({ owner, repo, number });
-    const reviews = (await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(reviews, options.limit).map((r) => this.mapReview(r));
+    const reviews = await this.paginateUpTo(
+      this.octokit.rest.pulls.listReviews,
+      { owner, repo, pull_number: number },
+      options.limit
+    );
+    return reviews.map((r) => this.mapReview(r));
   }
 
   /**
@@ -1062,7 +1106,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param number - Pull request number
    * @param options - Pagination options
-   * @param options.limit - Maximum number of comments to return (default 100)
+   * @param options.limit - Maximum number of comments to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized comments
    */
   async listPrComments(
@@ -1072,13 +1116,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubComment[]> {
     this.validateRequired({ owner, repo, number });
-    const comments = (await this.octokit.paginate(this.octokit.rest.issues.listComments, {
-      owner,
-      repo,
-      issue_number: number,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(comments, options.limit).map((c) => this.mapComment(c));
+    const comments = await this.paginateUpTo(
+      this.octokit.rest.issues.listComments,
+      { owner, repo, issue_number: number },
+      options.limit
+    );
+    return comments.map((c) => this.mapComment(c));
   }
 
   /**
@@ -1153,7 +1196,7 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Pagination options
-   * @param options.limit - Maximum number of branches to return (default 100)
+   * @param options.limit - Maximum number of branches to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized branches
    */
   async listBranches(
@@ -1162,12 +1205,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubBranch[]> {
     this.validateRequired({ owner, repo });
-    const branches = (await this.octokit.paginate(this.octokit.rest.repos.listBranches, {
-      owner,
-      repo,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(branches, options.limit).map((b) => this.mapBranch(b));
+    const branches = await this.paginateUpTo(
+      this.octokit.rest.repos.listBranches,
+      { owner, repo },
+      options.limit
+    );
+    return branches.map((b) => this.mapBranch(b));
   }
 
   /**
@@ -1181,7 +1224,7 @@ export class GitHubClient {
     this.validateRequired({ owner, repo, branch });
     const res = await withNotFoundMessage(
       () => this.octokit.rest.repos.getBranch({ owner, repo, branch }),
-      `Branch '${branch}' not found in ${owner}/${repo}. Check the name with listBranches, or the owner/repo with getRepo.`
+      `Branch '${branch}' not found in ${owner}/${repo}. Check the name with ${TOOL_NAMES.LIST_BRANCHES}, or the owner/repo with ${TOOL_NAMES.GET_REPO}, or your token may lack access.`
     );
     return this.mapBranch(res.data as unknown as Record<string, unknown>);
   }
@@ -1218,7 +1261,7 @@ export class GitHubClient {
           ref: `refs/heads/${params.branch}`,
           sha,
         }),
-      `Could not create branch '${params.branch}' in ${owner}/${repo} (it may already exist — check with listBranches)`
+      `Could not create branch '${params.branch}' in ${owner}/${repo} (it may already exist; check with ${TOOL_NAMES.LIST_BRANCHES})`
     );
     return this.getBranch(owner, repo, params.branch);
   }
@@ -1285,7 +1328,7 @@ export class GitHubClient {
    * @param options.author - Filter by author (GitHub login or email)
    * @param options.since - ISO 8601 timestamp lower bound
    * @param options.until - ISO 8601 timestamp upper bound
-   * @param options.limit - Maximum number of commits to return (default 100)
+   * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized commits
    */
   async listCommits(
@@ -1301,17 +1344,20 @@ export class GitHubClient {
     } = {}
   ): Promise<GitHubCommit[]> {
     this.validateRequired({ owner, repo });
-    const commits = (await this.octokit.paginate(this.octokit.rest.repos.listCommits, {
-      owner,
-      repo,
-      sha: options.sha,
-      path: options.path,
-      author: options.author,
-      since: options.since,
-      until: options.until,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(commits, options.limit).map((c) => this.mapCommit(c));
+    const commits = await this.paginateUpTo(
+      this.octokit.rest.repos.listCommits,
+      {
+        owner,
+        repo,
+        sha: options.sha,
+        path: options.path,
+        author: options.author,
+        since: options.since,
+        until: options.until,
+      },
+      options.limit
+    );
+    return commits.map((c) => this.mapCommit(c));
   }
 
   /**
@@ -1320,7 +1366,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param branch - Branch name
    * @param options - Pagination options
-   * @param options.limit - Maximum number of commits to return (default 100)
+   * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized commits
    */
   async listBranchCommits(
@@ -1339,7 +1385,7 @@ export class GitHubClient {
    * @param options - Search scope and pagination options
    * @param options.owner - Repository owner to scope the search to (requires `repo`)
    * @param options.repo - Repository name to scope the search to (requires `owner`)
-   * @param options.limit - Maximum number of results to return (default 100)
+   * @param options.limit - Maximum number of results to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized commits
    */
   async searchCommits(
@@ -1435,33 +1481,25 @@ export class GitHubClient {
     options: { ref?: string } = {}
   ): Promise<GitHubFileContent> {
     this.validateRequired({ owner, repo, path });
-    let res;
-    try {
-      res = await this.octokit.rest.repos.getContent({ owner, repo, path, ref: options.ref });
-    } catch (error) {
-      if ((error as OctokitErrorLike)?.status === 404) {
-        throw markExpected(
-          new Error(
-            `File not found: '${path}' in ${owner}/${repo}${options.ref ? ` at ref '${options.ref}'` : ''}. ` +
-              `Check the path with getTree, or the ref with listBranches.`
-          )
-        );
-      }
-      throw error;
-    }
+    const res = await withNotFoundMessage(
+      () => this.octokit.rest.repos.getContent({ owner, repo, path, ref: options.ref }),
+      `File not found: '${path}' in ${owner}/${repo}${options.ref ? ` at ref '${options.ref}'` : ''}. ` +
+        `Check the path with ${TOOL_NAMES.GET_TREE}, or the ref with ${TOOL_NAMES.LIST_BRANCHES}, or your token may lack access.`
+    );
     const data = res.data as unknown;
-    if (Array.isArray(data)) {
-      throw markExpected(
-        new Error(`Path '${path}' is a directory, not a file. Use getTree to list its contents.`)
-      );
-    }
     const file = data as Record<string, unknown>;
-    if (file.type !== 'file' || typeof file.content !== 'string') {
-      throw markExpected(
-        new Error(`Path '${path}' is a directory, not a file. Use getTree to list its contents.`)
+    if (Array.isArray(data) || file.type !== 'file' || typeof file.content !== 'string') {
+      throw new TeachingError(
+        `Path '${path}' is a directory, not a file. Use ${TOOL_NAMES.GET_TREE} to list its contents.`
       );
     }
     const rawEncoding = String(file.encoding || 'base64');
+    if (rawEncoding === 'none') {
+      throw new TeachingError(
+        `File '${path}' in ${owner}/${repo} is 1-100 MB, so GitHub returns no inline content (encoding "none"). ` +
+          `Inline content is unavailable at this size; fetch the raw bytes out of band instead of reading it here.`
+      );
+    }
     const rawContent = String(file.content || '');
     let content = rawContent;
     let encoding = rawEncoding === 'base64' ? 'base64' : 'utf-8';
@@ -1504,6 +1542,7 @@ export class GitHubClient {
     this.validateRequired({ owner, repo, path: params.path, message: params.message });
     let sha = params.sha;
     if (!sha) {
+      let existingData: unknown;
       try {
         const existing = await this.octokit.rest.repos.getContent({
           owner,
@@ -1511,15 +1550,25 @@ export class GitHubClient {
           path: params.path,
           ref: params.branch,
         });
-        const file = existing.data as Record<string, unknown>;
-        sha = typeof file.sha === 'string' ? file.sha : undefined;
+        existingData = existing.data;
       } catch (error) {
         // 404 means the file does not exist yet (a normal create); anything else blocks the write.
-        if ((error as OctokitErrorLike)?.status !== 404) {
-          throw new Error(
-            `Could not check whether '${params.path}' already exists in ${owner}/${repo} before writing: ${GitHubClient.formatError(error)}`
+        const status = (error as OctokitErrorLike)?.status;
+        if (status !== 404) {
+          throw new TeachingError(
+            `Could not check whether '${params.path}' already exists in ${owner}/${repo} before writing: ${GitHubClient.formatError(error)}`,
+            status
           );
         }
+      }
+      if (Array.isArray(existingData)) {
+        throw new TeachingError(
+          `Path '${params.path}' is a directory, not a file. Use ${TOOL_NAMES.GET_TREE} to list its contents.`
+        );
+      }
+      if (existingData) {
+        const file = existingData as Record<string, unknown>;
+        sha = typeof file.sha === 'string' ? file.sha : undefined;
       }
     }
     const res = await this.octokit.rest.repos.createOrUpdateFileContents({
@@ -1552,7 +1601,7 @@ export class GitHubClient {
    * @param options - Filter and pagination options
    * @param options.branch - Filter by branch
    * @param options.status - Filter by run status (e.g. "completed", "in_progress")
-   * @param options.limit - Maximum number of runs to return (default 100)
+   * @param options.limit - Maximum number of runs to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized workflow runs
    */
   async listWorkflowRuns(
@@ -1561,29 +1610,12 @@ export class GitHubClient {
     options: { branch?: string; status?: string; limit?: number } = {}
   ): Promise<GitHubWorkflowRun[]> {
     this.validateRequired({ owner, repo });
-    const runs = (await this.octokit.paginate(this.octokit.rest.actions.listWorkflowRunsForRepo, {
-      owner,
-      repo,
-      branch: options.branch,
-      status: options.status as
-        | 'completed'
-        | 'action_required'
-        | 'cancelled'
-        | 'failure'
-        | 'neutral'
-        | 'skipped'
-        | 'stale'
-        | 'success'
-        | 'timed_out'
-        | 'in_progress'
-        | 'queued'
-        | 'requested'
-        | 'waiting'
-        | 'pending'
-        | undefined,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(runs, options.limit).map((r) => this.mapWorkflowRun(r));
+    const runs = await this.paginateUpTo(
+      this.octokit.rest.actions.listWorkflowRunsForRepo,
+      { owner, repo, branch: options.branch, status: options.status },
+      options.limit
+    );
+    return runs.map((r) => this.mapWorkflowRun(r));
   }
 
   /**
@@ -1672,7 +1704,7 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param run_id - Workflow run ID
    * @param options - Pagination options
-   * @param options.limit - Maximum number of artifacts to return (default 100)
+   * @param options.limit - Maximum number of artifacts to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized artifacts
    */
   async listWorkflowRunArtifacts(
@@ -1682,16 +1714,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubWorkflowRunArtifact[]> {
     this.validateRequired({ owner, repo, run_id });
-    const artifacts = (await this.octokit.paginate(
+    const artifacts = await this.paginateUpTo(
       this.octokit.rest.actions.listWorkflowRunArtifacts,
-      {
-        owner,
-        repo,
-        run_id,
-        per_page: this.perPage(options.limit),
-      }
-    )) as Array<Record<string, unknown>>;
-    return this.slice(artifacts, options.limit).map((a) => this.mapArtifact(a));
+      { owner, repo, run_id },
+      options.limit
+    );
+    return artifacts.map((a) => this.mapArtifact(a));
   }
 
   /**
@@ -1737,7 +1765,7 @@ export class GitHubClient {
    * @param options.labels - Comma-separated label names
    * @param options.assignee - Filter by assignee login (or "none" / "*")
    * @param options.creator - Filter by creator login
-   * @param options.limit - Maximum number of issues to return (default 100)
+   * @param options.limit - Maximum number of issues to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized issues (pull requests excluded)
    */
   async listIssues(
@@ -1776,7 +1804,7 @@ export class GitHubClient {
     this.validateRequired({ owner, repo, number });
     const res = await withNotFoundMessage(
       () => this.octokit.rest.issues.get({ owner, repo, issue_number: number }),
-      `Issue #${number} not found in ${owner}/${repo}. Check the number with listIssues, or the owner/repo with getRepo.`
+      `Issue #${number} not found in ${owner}/${repo}. Check the number with ${TOOL_NAMES.LIST_ISSUES}, or the owner/repo with ${TOOL_NAMES.GET_REPO}, or your token may lack access.`
     );
     return this.mapIssue(res.data as Record<string, unknown>);
   }
@@ -1868,7 +1896,7 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Pagination options
-   * @param options.limit - Maximum number of labels to return (default 100)
+   * @param options.limit - Maximum number of labels to return (default 100 when omitted; any positive value honored)
    * @returns Array of normalized labels
    */
   async listLabels(
@@ -1877,12 +1905,12 @@ export class GitHubClient {
     options: { limit?: number } = {}
   ): Promise<GitHubLabel[]> {
     this.validateRequired({ owner, repo });
-    const labels = (await this.octokit.paginate(this.octokit.rest.issues.listLabelsForRepo, {
-      owner,
-      repo,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    return this.slice(labels, options.limit).map((l) => this.mapLabel(l));
+    const labels = await this.paginateUpTo(
+      this.octokit.rest.issues.listLabelsForRepo,
+      { owner, repo },
+      options.limit
+    );
+    return labels.map((l) => this.mapLabel(l));
   }
 
   /**
@@ -1911,7 +1939,7 @@ export class GitHubClient {
           color: params.color.replace(/^#/, ''),
           description: params.description,
         }),
-      `Could not create label '${params.name}' in ${owner}/${repo} (it may already exist — check with listLabels)`
+      `Could not create label '${params.name}' in ${owner}/${repo} (it may already exist; check with ${TOOL_NAMES.LIST_LABELS})`
     );
     return this.mapLabel(res.data as Record<string, unknown>);
   }
@@ -1951,7 +1979,7 @@ export class GitHubClient {
             object: params.sha,
             type: 'commit',
           }),
-        `SHA '${params.sha}' not found in ${owner}/${repo}. Check it with listCommits or getBranch.`
+        `SHA '${params.sha}' not found in ${owner}/${repo}. Check it with ${TOOL_NAMES.LIST_COMMITS} or ${TOOL_NAMES.GET_BRANCH}. The owner/repo may also be wrong, or your token may lack access.`
       );
       targetSha = String((tagObj.data as Record<string, unknown>).sha || params.sha);
     }

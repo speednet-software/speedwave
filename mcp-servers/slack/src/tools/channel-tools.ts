@@ -8,8 +8,9 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
+  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, missingParamResult, ToolResult } from './validation.js';
+import { withValidation, withClients, ToolResult } from './validation.js';
 import { enrichMessagesWithAuthors } from '../user-directory.js';
 import {
   SlackClients,
@@ -346,20 +347,6 @@ export async function handleSendChannel(
   clients: SlackClients,
   params: SendChannelParams
 ): Promise<ToolResult> {
-  if (!params.channel) {
-    return missingParamResult(
-      'channel',
-      params.channel,
-      'Provide a channel name (e.g. "#general"), channel ID, or DM conversation ID.'
-    );
-  }
-  if (!params.message) {
-    return missingParamResult(
-      'message',
-      params.message,
-      'Provide the text to send — confirm the exact wording with the user before sending.'
-    );
-  }
   try {
     const result = await sendChannel(clients, params);
     return { success: true, data: result };
@@ -377,13 +364,6 @@ export async function handleGetChannelMessages(
   clients: SlackClients,
   params: GetChannelMessagesParams
 ): Promise<ToolResult> {
-  if (!params.channel) {
-    return missingParamResult(
-      'channel',
-      params.channel,
-      'Provide a channel name (e.g. "#general"), channel ID, or DM conversation ID.'
-    );
-  }
   try {
     const result = await readChannel(clients, params);
     await enrichMessagesWithAuthors(clients, result.messages);
@@ -402,20 +382,6 @@ export async function handleGetThreadMessages(
   clients: SlackClients,
   params: GetThreadMessagesParams
 ): Promise<ToolResult> {
-  if (!params.channel) {
-    return missingParamResult(
-      'channel',
-      params.channel,
-      'Provide a channel name (e.g. "#general"), channel ID, or DM conversation ID.'
-    );
-  }
-  if (!params.thread_ts) {
-    return missingParamResult(
-      'thread_ts',
-      params.thread_ts,
-      'Copy the exact `ts` of the thread parent message from a prior getChannelMessages/getThreadMessages result (e.g. "1717000000.000100").'
-    );
-  }
   try {
     const result = await readThread(clients, params);
     await enrichMessagesWithAuthors(clients, result.messages);
@@ -455,6 +421,15 @@ export async function handleListChannelIds(
 //===============================================================================
 
 /**
+ * Required-param options for {@link withValidation}, driven by the tool's own
+ * declared `inputSchema.required` so the guard can never drift from the schema.
+ * @param tool - Tool definition to read `inputSchema.required`/`name` from.
+ */
+function requiredOf(tool: Tool): ResultValidationOptions {
+  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
+}
+
+/**
  * Tool handler function.
  * @param clients - Slack client instances (non-null; null check via _tokensStatus)
  */
@@ -464,15 +439,24 @@ export function createChannelTools(clients: SlackClients): ToolDefinition[] {
   return [
     {
       tool: sendChannelTool,
-      handler: withValidation<SendChannelParams>(gate(handleSendChannel)),
+      handler: withValidation<SendChannelParams>(
+        gate(handleSendChannel),
+        requiredOf(sendChannelTool)
+      ),
     },
     {
       tool: getChannelMessagesTool,
-      handler: withValidation<GetChannelMessagesParams>(gate(handleGetChannelMessages)),
+      handler: withValidation<GetChannelMessagesParams>(
+        gate(handleGetChannelMessages),
+        requiredOf(getChannelMessagesTool)
+      ),
     },
     {
       tool: getThreadMessagesTool,
-      handler: withValidation<GetThreadMessagesParams>(gate(handleGetThreadMessages)),
+      handler: withValidation<GetThreadMessagesParams>(
+        gate(handleGetThreadMessages),
+        requiredOf(getThreadMessagesTool)
+      ),
     },
     {
       tool: listChannelIdsTool,

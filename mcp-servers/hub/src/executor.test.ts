@@ -475,6 +475,23 @@ describe('executor', () => {
       const result = closestMatches('getIssue', ['listProjects', 'unrelatedName']);
       expect(result).toEqual([]);
     });
+
+    it('suggests a distance-1 candidate for a 1-character attempted name', () => {
+      // maxDistance floors to 1 for a 1-char name, so an adjacent single char still matches.
+      expect(closestMatches('a', ['b', 'c'])).toEqual(['b', 'c']);
+    });
+
+    it('rejects a distance-2 candidate for a 1-character attempted name', () => {
+      expect(closestMatches('a', ['xy'])).toEqual([]);
+    });
+
+    it('suggests a distance-1 candidate for a 2-character attempted name', () => {
+      expect(closestMatches('ab', ['ax'])).toEqual(['ax']);
+    });
+
+    it('rejects a distance-2 candidate for a 2-character attempted name', () => {
+      expect(closestMatches('ab', ['xy'])).toEqual([]);
+    });
   });
 
   describe('formatErrorMessage', () => {
@@ -1223,13 +1240,23 @@ describe('executor', () => {
       expect(result.error?.message).not.toContain(':42:9');
     });
 
-    it('strips :line:col from an absolute path whose extension is not in the known list', async () => {
+    it('redacts an absolute path whose extension is not a code extension', async () => {
       const code = `throw new Error('boom at /repo/config/settings.yaml:7:3 in handler');`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('/repo/config/settings.yaml');
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/repo/config/settings.yaml');
       expect(result.error?.message).not.toContain(':7:3');
+    });
+
+    it('redacts an absolute path with no extension at all', async () => {
+      const code = `throw new Error('boom at /etc/secrets/token in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/etc/secrets/token');
     });
   });
 

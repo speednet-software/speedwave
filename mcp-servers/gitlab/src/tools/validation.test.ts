@@ -1,9 +1,10 @@
 /**
- * Tests for the withValidation wrapper (client null-check + error formatting).
+ * Tests for the withValidation wrapper (client null-check, numeric-id
+ * normalization, and error formatting).
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
 import { GitLabClient } from '../client.js';
 import { notConfiguredMessage, jsonResult } from '@speedwave/mcp-shared';
 
@@ -46,6 +47,16 @@ describe('withValidation', () => {
     expect(result).toEqual(jsonResult({ greeting: 'hi tanuki' }));
   });
 
+  it('passes non-object params through untouched', async () => {
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+    const wrapped = withValidation<undefined>(client, async (_c, params) => {
+      expect(params).toBeUndefined();
+      return jsonResult({ ok: true });
+    });
+
+    await wrapped(undefined);
+  });
+
   it('formats errors thrown by the handler via GitLabClient.formatError, and logs non-GitBeaker errors', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
@@ -82,32 +93,79 @@ describe('withValidation', () => {
   });
 });
 
-describe('normalizeIid', () => {
-  it('accepts a plain number', () => {
-    expect(normalizeIid(42, 'mr_iid')).toEqual({ ok: true, value: 42 });
+describe('withValidation numeric-id normalization', () => {
+  const paramNames = ['mr_iid', 'issue_iid', 'pipeline_id', 'job_id'] as const;
+
+  function echoHandler() {
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+    return withValidation<Record<string, unknown>>(client, async (_c, params) =>
+      jsonResult(params)
+    );
+  }
+
+  it.each(paramNames)('normalizes a plain number for %s', async (param) => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ [param]: 42 });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ [param]: 42 });
   });
 
-  it('accepts a numeric string', () => {
-    expect(normalizeIid('42', 'mr_iid')).toEqual({ ok: true, value: 42 });
+  it.each(paramNames)('normalizes a numeric string for %s', async (param) => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ [param]: '42' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ [param]: 42 });
   });
 
-  it('accepts a "#"-prefixed numeric string', () => {
-    expect(normalizeIid('#42', 'mr_iid')).toEqual({ ok: true, value: 42 });
+  it.each(paramNames)('strips a "#" prefix for %s', async (param) => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ [param]: '#42' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ [param]: 42 });
   });
 
-  it.each(['', '   ', '#'])('returns a teaching error for %j instead of coercing to 0', (value) => {
-    const result = normalizeIid(value, 'mr_iid');
+  it('strips a "!" prefix for mr_iid (GitLab MR reference syntax)', async () => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ mr_iid: '!42' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ mr_iid: 42 });
+  });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.isError).toBe(true);
-      expect(result.error.content[0].text).toContain('mr_iid');
+  it.each(['', '   ', '#', 'not-a-number'])(
+    'rejects %j with a teaching error naming the param, without calling the handler',
+    async (value) => {
+      const wrapped = echoHandler();
+      const result = await wrapped({ mr_iid: value });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('mr_iid');
     }
+  );
+
+  it.each(['4.5', '-3', '0x2A', '1e3'])(
+    'rejects the exotic numeric form %j instead of coercing it via Number()',
+    async (value) => {
+      const wrapped = echoHandler();
+      const result = await wrapped({ pipeline_id: value });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('pipeline_id');
+    }
+  );
+
+  it('rejects a present null value', async () => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ job_id: null });
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain('job_id');
   });
 
-  it('returns a teaching error for a non-numeric string', () => {
-    const result = normalizeIid('not-a-number', 'mr_iid');
+  it('leaves params without a numeric-id key untouched', async () => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ project_id: 'group/project', search: 'foo' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({
+      project_id: 'group/project',
+      search: 'foo',
+    });
+  });
 
-    expect(result.ok).toBe(false);
+  it('leaves a param absent (not undefined-coerced) when not passed', async () => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ project_id: 1 });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ project_id: 1 });
   });
 });

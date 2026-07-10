@@ -55,19 +55,23 @@ describe('SharePoint tool metadata', () => {
     });
   }
 
-  it('listItems declares user-scoped identity metadata pointing at getCurrentUser', () => {
+  it('listItems declares user-scoped identity metadata via the prefixed keys only', () => {
     const listItems = tools.find((t) => t.name === 'listItems')!;
     const meta = listItems._meta as Record<string, unknown>;
     expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
     expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+    // The legacy unprefixed identity keys must be absent (prefixed keys are the SSOT).
+    expect(meta.userScoped).toBeUndefined();
+    expect(meta.currentUserTool).toBeUndefined();
   });
 
-  it('no non-user-scoped tool declares USER_SCOPED metadata', () => {
+  it('no tool declares USER_SCOPED via the prefixed or the legacy key unless expected', () => {
     const userScopedNames = new Set(['listItems']);
     for (const tool of tools) {
       if (userScopedNames.has(tool.name)) continue;
       const meta = tool._meta as Record<string, unknown> | undefined;
       expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} unexpectedly user-scoped`).toBeFalsy();
+      expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeFalsy();
     }
   });
 });

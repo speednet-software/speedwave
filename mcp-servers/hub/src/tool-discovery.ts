@@ -296,6 +296,8 @@ export async function discoverAndMergeService(
   }
 
   dropDanglingCurrentUserTool(service, result);
+  dropDanglingSelfParam(service, result);
+  warnMissingIdentityCompanion(service, result);
 
   return result;
 }
@@ -314,6 +316,42 @@ function dropDanglingCurrentUserTool(service: string, tools: Record<string, Tool
         `${ts()} [tool-discovery] ${service}.${methodName}: currentUserTool '${target}' does not exist — dropping`
       );
       delete metadata.currentUserTool;
+    }
+  }
+}
+
+/**
+ * Warn and drop `selfParam` when its leading parameter name is not an input parameter
+ * of the declaring tool; never serve a self-reference hint the schema cannot honor.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service, mutated in place.
+ */
+function dropDanglingSelfParam(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (!metadata.selfParam) continue;
+    const leadingParam = metadata.selfParam.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+    const schema = metadata.inputSchema as { properties?: Record<string, unknown> };
+    if (!leadingParam || !(leadingParam in (schema.properties ?? {}))) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: selfParam '${metadata.selfParam}' is not an input parameter; dropping`
+      );
+      delete metadata.selfParam;
+    }
+  }
+}
+
+/**
+ * Warn once per tool at discovery when a userScoped tool declares neither companion;
+ * the tool is kept and search_tools serves it with a misconfiguration hint.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service (read-only here).
+ */
+function warnMissingIdentityCompanion(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (metadata.userScoped && !metadata.currentUserTool && !metadata.selfParam) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: userScoped but declares neither currentUserTool nor selfParam; search results will carry a misconfiguration hint`
+      );
     }
   }
 }

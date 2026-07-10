@@ -80,39 +80,57 @@ describe('Redmine tool metadata', () => {
         `${tool.name} missing deferLoading`
       ).toBe('boolean');
     });
+
+    it('does not use the legacy unprefixed deferLoading key', () => {
+      expect(
+        (tool._meta as Record<string, unknown> | undefined)?.deferLoading,
+        `${tool.name} still uses legacy deferLoading`
+      ).toBeUndefined();
+    });
+
+    it('does not use legacy unprefixed identity keys', () => {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+      expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeUndefined();
+      expect(meta?.currentUserTool, `${tool.name} uses legacy currentUserTool`).toBeUndefined();
+      expect(meta?.selfParam, `${tool.name} uses legacy selfParam`).toBeUndefined();
+    });
   });
 
   describe('identity metadata', () => {
     const byName = (name: string): Tool =>
       ALL_TOOLS.find((t) => t.name === name) as unknown as Tool;
 
-    const USER_SCOPED_TOOLS = [
-      'listIssueIds',
-      'createIssue',
-      'updateIssue',
-      'listTimeEntries',
-      'createTimeEntry',
-      'resolveUser',
-      'getCurrentUser',
-    ];
-
-    it.each(USER_SCOPED_TOOLS)('%s declares speedwave.pl/user-scoped: true', (name) => {
-      const meta = byName(name)._meta as Record<string, unknown>;
-      expect(metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped')).toBe(true);
-    });
-
-    it.each(USER_SCOPED_TOOLS)(
-      '%s declares a current-user-tool or a self-param companion key',
-      (name) => {
-        const meta = byName(name)._meta as Record<string, unknown>;
+    it('every tool declaring speedwave.pl/user-scoped also declares a current-user-tool or self-param', () => {
+      for (const tool of ALL_TOOLS) {
+        const meta = tool._meta as Record<string, unknown> | undefined;
+        if (metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped') !== true) continue;
         const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
         const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
         expect(
           currentUserTool !== undefined || selfParam !== undefined,
-          `${name} is user-scoped but declares neither a current-user-tool nor a self-param`
+          `${tool.name} is user-scoped but declares neither a current-user-tool nor a self-param`
         ).toBe(true);
       }
-    );
+    });
+
+    it('is user-scoped on exactly the expected tools', () => {
+      const expectedUserScoped = new Set([
+        'listIssueIds',
+        'createIssue',
+        'updateIssue',
+        'listTimeEntries',
+        'createTimeEntry',
+        'resolveUser',
+        'getCurrentUser',
+      ]);
+      for (const tool of ALL_TOOLS) {
+        const meta = tool._meta as Record<string, unknown> | undefined;
+        const isUserScoped = metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped') === true;
+        expect(isUserScoped, `${tool.name} user-scoped mismatch`).toBe(
+          expectedUserScoped.has(tool.name)
+        );
+      }
+    });
 
     it('listTimeEntries points to getCurrentUser as its current-user-tool', () => {
       const meta = byName('listTimeEntries')._meta as Record<string, unknown>;

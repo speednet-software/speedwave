@@ -10,9 +10,11 @@ import {
   WRITE_ANNOTATIONS,
   TIMEOUTS,
   META_KEYS,
+  missingParamResult,
+  teachingToolResult,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
-import { SharePointClient } from '../client.js';
+import { SharePointClient, GraphApiError } from '../client.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Parameter Normalization (accept both snake_case and camelCase)
@@ -302,13 +304,21 @@ export async function handleGetFileFull(
     const result = await client.getFileMetadata(params.file_id);
     return { success: true, data: result };
   } catch (error) {
-    const message = SharePointClient.formatError(error);
-    const hint = message.includes('not found')
-      ? ' Call listFileIds first to get a valid file_id.'
-      : '';
+    // Only a genuine 404 means the id is wrong; 401/403/429 must not teach lookup.
+    if (error instanceof GraphApiError && error.status === 404) {
+      return teachingToolResult(
+        {
+          paramName: 'file_id',
+          received: params.file_id,
+          correctValueTool: 'listFileIds',
+          nextStep: 'Retry with a file_id from that list.',
+        },
+        'GET_FAILED'
+      );
+    }
     return {
       success: false,
-      error: { code: 'GET_FAILED', message: `${message}${hint}` },
+      error: { code: 'GET_FAILED', message: SharePointClient.formatError(error) },
     };
   }
 }
@@ -326,22 +336,18 @@ export async function handleDownloadFile(
     const normalized = normalizeDownloadParams(params);
 
     if (!normalized.sharepointPath) {
-      return {
-        success: false,
-        error: {
-          code: 'MISSING_PARAM',
-          message: 'sharepointPath (or sharepoint_path) is required',
-        },
-      };
+      return missingParamResult(
+        'sharepointPath',
+        params.sharepointPath ?? params.sharepoint_path,
+        'Pass sharepointPath (or sharepoint_path), the SharePoint file path to download.'
+      );
     }
     if (!normalized.localPath) {
-      return {
-        success: false,
-        error: {
-          code: 'MISSING_PARAM',
-          message: 'localPath (or local_path) is required',
-        },
-      };
+      return missingParamResult(
+        'localPath',
+        params.localPath ?? params.local_path,
+        'Pass localPath (or local_path), a destination path under /workspace.'
+      );
     }
 
     await client.downloadFile(normalized.sharepointPath, normalized.localPath);
@@ -367,22 +373,18 @@ export async function handleUploadFile(
     const normalized = normalizeUploadParams(params);
 
     if (!normalized.localPath) {
-      return {
-        success: false,
-        error: {
-          code: 'MISSING_PARAM',
-          message: 'localPath (or local_path) is required',
-        },
-      };
+      return missingParamResult(
+        'localPath',
+        params.localPath ?? params.local_path,
+        'Pass localPath (or local_path), the /workspace file to upload.'
+      );
     }
     if (!normalized.sharepointPath) {
-      return {
-        success: false,
-        error: {
-          code: 'MISSING_PARAM',
-          message: 'sharepointPath (or sharepoint_path) is required',
-        },
-      };
+      return missingParamResult(
+        'sharepointPath',
+        params.sharepointPath ?? params.sharepoint_path,
+        'Pass sharepointPath (or sharepoint_path), the destination path in SharePoint.'
+      );
     }
 
     const result = await client.uploadFile(normalized.sharepointPath, normalized.localPath, {

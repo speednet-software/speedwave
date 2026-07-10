@@ -528,6 +528,29 @@ describe('page-tools handlers — happy paths', () => {
     expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/webParts/wp-1`);
   });
 
+  // A swapped sourceTool would point the model at the wrong follow-up tool.
+  it.each([
+    [
+      'updateWebPart',
+      { pageId: 'bad/../path', webPartId: 'wp-x', innerHtml: '<p>x</p>' },
+      'listPages',
+    ],
+    ['updateWebPart', { pageId: 'p1', webPartId: 'bad/../path', innerHtml: '<p>x</p>' }, 'getPage'],
+    ['removeWebPart', { pageId: 'bad/../path', webPartId: 'wp-1' }, 'listPages'],
+    ['removeWebPart', { pageId: 'p1', webPartId: 'bad/../path' }, 'getPage'],
+  ] as const)(
+    '%s INVALID_ID message names the sourceTool that supplies a valid id',
+    async (toolName, params, sourceTool) => {
+      const tools = createPageTools(client);
+      const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+      expect(result.isError).toBe(true);
+      const parsed = parseContent(result) as { code: string; message: string };
+      expect(parsed.code).toBe('INVALID_ID');
+      expect(parsed.message).toContain(sourceTool);
+      expect(graph).not.toHaveBeenCalled();
+    }
+  );
+
   it('publishPage POSTs to the publish endpoint', async () => {
     graph.mockResolvedValueOnce(undefined);
     const tools = createPageTools(client);

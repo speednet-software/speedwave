@@ -24,14 +24,15 @@ def _write_pdf(writer, dest: str) -> None:
     atomic_save(dest, lambda p: writer.write(p))
 
 
-def _open_reader(path: str):
+def _open_reader(path: str, position: tuple[int, int] | None = None):
     from pypdf import PdfReader
 
     try:
         return PdfReader(path)
     except Exception as exc:  # noqa: BLE001 — turn any pypdf parse failure into one actionable line
+        where = f" (item {position[0]} of {position[1]} in the input list)" if position else ""
         fail(
-            f"could not read '{path}' as a PDF ({type(exc).__name__}: {exc}) -- verify the "
+            f"could not read '{path}'{where} as a PDF ({type(exc).__name__}: {exc}) -- verify the "
             "file is a valid, non-corrupted PDF and not renamed from another format"
         )
 
@@ -57,8 +58,9 @@ def _merge(output: str, inputs: list[str]) -> None:
     if len(inputs) < 2:
         fail("merge needs at least two input PDFs")
     writer = PdfWriter()
-    for path in inputs:
-        for page in _open_reader(path).pages:
+    total = len(inputs)
+    for i, path in enumerate(inputs, start=1):
+        for page in _open_reader(path, (i, total)).pages:
             writer.add_page(page)
     _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
@@ -119,6 +121,21 @@ def _watermark(src: str, watermark: str, output: str) -> None:
     ok(path=output, pages=len(writer.pages))
 
 
+def _page_field_names(page) -> set[str]:
+    """Names of AcroForm widget annotations directly on `page` (best-effort, via `/T` or its `/Parent`)."""
+    names: set[str] = set()
+    for annot_ref in page.get("/Annots") or []:
+        annot = annot_ref.get_object()
+        name = annot.get("/T")
+        if name is None:
+            parent = annot.get("/Parent")
+            if parent is not None:
+                name = parent.get_object().get("/T")
+        if name is not None:
+            names.add(str(name))
+    return names
+
+
 def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     from pypdf import PdfWriter
 
@@ -127,25 +144,28 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
     known_fields = reader.get_fields() or {}
-    fill_warnings: list[str] = (
-        [
+    fill_warnings: list[str] = []
+    if known_fields:
+        fill_warnings = [
             f"unknown field name: {name!r} — not present in this PDF's AcroForm"
             for name in str_fields
             if name not in known_fields
         ]
-        if known_fields
-        else []
-    )
     # pypdf raises when a page has no form fields (the common case for most of a PDF's pages),
-    # so we silently skip those and only flag if NO page accepted the fields — that means the
-    # caller asked to fill a form that doesn't exist in this PDF.
+    # so we silently skip those; a page whose own annotations DO include one of the fields we're
+    # writing narrows the except to that case only, so a genuine write failure there still surfaces.
     pages_filled = 0
     for page in writer.pages:
+        page_field_names = _page_field_names(page) & set(str_fields)
         try:
             writer.update_page_form_field_values(page, str_fields, auto_regenerate=False)
             pages_filled += 1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            if page_field_names:
+                fail(
+                    f"failed to write field(s) {sorted(page_field_names)!r} on a page that has "
+                    f"them ({type(exc).__name__}: {exc})"
+                )
     if pages_filled == 0:
         fill_warnings.append("no AcroForm fields found in the input PDF — values not written")
     flattened = False

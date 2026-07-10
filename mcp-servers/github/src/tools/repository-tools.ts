@@ -12,9 +12,10 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const getTreeTool: Tool = {
-  name: 'getTree',
+  name: TOOL_NAMES.GET_TREE,
   description: 'Get a repository file tree (file/directory listing), optionally recursive.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },

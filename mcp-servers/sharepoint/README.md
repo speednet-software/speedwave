@@ -8,7 +8,8 @@ This worker provides SharePoint integration for Speedwave's MCP architecture:
 
 - **Port**: 3002 (internal Docker network)
 - **Transport**: Streamable HTTP (MCP 2025-03-26)
-- **Tools**: `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `get_current_user`
+- **File tools**: `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `getCurrentUser`
+- **List / page tools**: SharePoint lists, list items, list columns, and modern-page operations (create/update/delete). Ids for these come from their sibling list tools, never from the model.
 - **Security**: Token isolation, origin validation, rate limiting
 
 ## Architecture
@@ -64,6 +65,7 @@ List file IDs and names in a SharePoint folder.
     {
       "id": "abc123",
       "name": "requirements.md",
+      "path": "Documents/Project/requirements.md",
       "isFolder": false
     }
   ],
@@ -72,9 +74,11 @@ List file IDs and names in a SharePoint folder.
 }
 ```
 
+Each entry's `path` is the folder-relative path, reusable directly as `downloadFile`'s `sharepointPath`.
+
 ### 2. `getFileFull`
 
-Get complete file metadata by ID.
+Get complete file metadata by ID. Metadata only; use `downloadFile` to fetch file content.
 
 **Parameters**:
 
@@ -98,8 +102,10 @@ Get complete file metadata by ID.
   "id": "abc123",
   "name": "requirements.md",
   "size": 4096,
-  "content": "...",
-  "metadata": {}
+  "lastModifiedDateTime": "2025-01-01T00:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/...",
+  "eTag": "\"abc123\"",
+  "file": { "mimeType": "text/markdown" }
 }
 ```
 
@@ -159,7 +165,7 @@ Upload a local file to SharePoint with optional ETag Compare-And-Swap.
 }
 ```
 
-### 5. `get_current_user`
+### 5. `getCurrentUser`
 
 Get information about the authenticated SharePoint user.
 
@@ -169,7 +175,7 @@ Get information about the authenticated SharePoint user.
 
 ```json
 {
-  "name": "get_current_user",
+  "name": "getCurrentUser",
   "arguments": {}
 }
 ```
@@ -256,7 +262,7 @@ Expected:
   "status": "ok",
   "service": "mcp-sharepoint",
   "version": "0.1.0",
-  "tools": ["listFileIds", "getFileFull", "downloadFile", "uploadFile", "get_current_user"]
+  "tools": ["listFileIds", "getFileFull", "downloadFile", "uploadFile", "getCurrentUser"]
 }
 ```
 

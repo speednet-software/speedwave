@@ -13,7 +13,7 @@ import os
 import sys
 import traceback
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 
 def atomic_save(dest: str, write_fn: Callable[[str], None]) -> None:
@@ -42,7 +42,7 @@ def ok(**fields: Any) -> None:
     raise SystemExit(0)
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     """Print a failure JSON object to stdout, the message to stderr, and exit 1."""
     sys.stdout.write(json.dumps({"ok": False, "error": message}))
     sys.stdout.flush()

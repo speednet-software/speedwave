@@ -31,7 +31,10 @@ const listPrCommitsTool: Tool = {
     type: 'object',
     properties: {
       ...PR_NUMBER_PROPERTIES,
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'number'],
   },
@@ -80,7 +83,10 @@ const listPrReviewsTool: Tool = {
     type: 'object',
     properties: {
       ...PR_NUMBER_PROPERTIES,
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'number'],
   },
@@ -209,7 +215,10 @@ const listPrCommentsTool: Tool = {
     type: 'object',
     properties: {
       ...PR_NUMBER_PROPERTIES,
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'number'],
   },

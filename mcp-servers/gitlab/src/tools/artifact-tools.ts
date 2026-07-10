@@ -11,12 +11,12 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
-import { withValidation, normalizeIid } from './validation.js';
+import { withValidation } from './validation.js';
 
 const listArtifactsTool: Tool = {
   name: 'listArtifacts',
   description:
-    'List artifacts from a pipeline, grouped by the job that produced them. Use getPipelineFull to resolve pipeline_id from a jobs list.',
+    'List artifacts from a pipeline, grouped by the job that produced them. Get pipeline_id from listPipelineIds or listMrPipelines.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'artifacts', 'pipeline', 'ci', 'build'],
@@ -68,10 +68,10 @@ const listArtifactsTool: Tool = {
 const downloadArtifactTool: Tool = {
   name: 'downloadArtifact',
   description:
-    "Get a job log as a downloadable text file (this client cannot fetch raw CI artifact zip contents, only the job log/trace). Job IDs come from getPipelineFull's jobs array.",
+    "Get a job's log as text, capped to its last N lines like getJobLog (this client cannot fetch raw CI artifact zip contents, only the job log/trace). Job IDs come from getPipelineFull's jobs array.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['gitlab', 'artifact', 'download', 'ci', 'build'],
+  keywords: ['gitlab', 'artifact', 'download', 'ci', 'build', 'log'],
   example:
     'const artifact = await gitlab.downloadArtifact({ project_id: "speedwave/core", job_id: 54321 })',
   inputSchema: {
@@ -83,6 +83,10 @@ const downloadArtifactTool: Tool = {
         description:
           'Job ID as a number or string, e.g. 42 or "#42" (from the jobs array returned by getPipelineFull)',
       },
+      tail_lines: {
+        type: 'number',
+        description: 'Number of last lines to return (default 500, 0 = all lines)',
+      },
     },
     required: ['project_id', 'job_id'],
   },
@@ -90,8 +94,9 @@ const downloadArtifactTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
+      content: { type: 'string', description: 'Job log content (plain text, capped)' },
       filename: { type: 'string', description: 'Suggested filename for the job log' },
-      size: { type: 'number', description: 'Size of the job log in bytes' },
+      size: { type: 'number', description: 'Full, untruncated size of the job log in bytes' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -151,31 +156,29 @@ export function createArtifactTools(client: GitLabClient | null): ToolDefinition
       handler: withValidation(client, async (c, params) => {
         const { project_id, pipeline_id } = params as {
           project_id: string | number;
-          pipeline_id: unknown;
+          pipeline_id: number;
         };
-        const iid = normalizeIid(pipeline_id, 'pipeline_id');
-        if (!iid.ok) return iid.error;
-        const result = await c.listArtifacts(project_id, iid.value);
-        return jsonResult(result);
+        const result = await c.listArtifacts(project_id, pipeline_id);
+        return jsonResult({ success: true, artifacts: result });
       }),
     },
     {
       tool: downloadArtifactTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, job_id } = params as { project_id: string | number; job_id: unknown };
-        const iid = normalizeIid(job_id, 'job_id');
-        if (!iid.ok) return iid.error;
-        const result = await c.downloadArtifact(project_id, iid.value);
-        return jsonResult({ filename: result.filename, size: result.data.length });
+        const { project_id, job_id, tail_lines } = params as {
+          project_id: string | number;
+          job_id: number;
+          tail_lines?: number;
+        };
+        const result = await c.downloadArtifact(project_id, job_id, tail_lines);
+        return jsonResult({ success: true, ...result });
       }),
     },
     {
       tool: deleteArtifactsTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, job_id } = params as { project_id: string | number; job_id: unknown };
-        const iid = normalizeIid(job_id, 'job_id');
-        if (!iid.ok) return iid.error;
-        await c.deleteArtifacts(project_id, iid.value);
+        const { project_id, job_id } = params as { project_id: string | number; job_id: number };
+        await c.deleteArtifacts(project_id, job_id);
         return jsonResult({ success: true, message: 'Artifacts deleted' });
       }),
     },

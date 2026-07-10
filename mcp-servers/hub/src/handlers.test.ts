@@ -24,8 +24,11 @@ function createMockExecuteResult(data: unknown, executionMs = 100) {
   };
 }
 
-// Mock the dependencies
-vi.mock('./search-tools.js');
+// Mock the dependencies. Keep the real DETAIL_LEVELS SSOT; only stub searchTools.
+vi.mock('./search-tools.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof searchToolsModule>();
+  return { ...actual, searchTools: vi.fn() };
+});
 vi.mock('./executor.js');
 vi.mock('./tool-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof toolRegistryModule>();

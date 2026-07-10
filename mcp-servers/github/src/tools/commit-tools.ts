@@ -7,12 +7,13 @@ import {
   Tool,
   ToolDefinition,
   jsonResult,
-  textResult,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { GitHubCommit } from '../types.js';
 import { withValidation } from './validation.js';
+import { DIFF_OUTPUT_SCHEMA } from './schemas.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 /**
  * Maps a normalized commit to the compact summary shape returned by the commit-list tools.
@@ -36,14 +37,14 @@ function commitSummary(c: GitHubCommit): {
 }
 
 const listCommitsTool: Tool = {
-  name: 'listCommits',
+  name: TOOL_NAMES.LIST_COMMITS,
   description:
     'List commits in a repository with optional filters (branch/tag, path, author, date range).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'commits', 'history', 'log', 'git', 'list'],
   example:
@@ -57,12 +58,14 @@ const listCommitsTool: Tool = {
       path: { type: 'string', description: 'Only commits touching this path' },
       author: {
         type: 'string',
-        description:
-          "GitHub login or email. Does NOT accept 'me' — resolve the authenticated user's login via getCurrentUser first, then pass it here.",
+        description: `GitHub login or email. Does NOT accept 'me'. Resolve the authenticated user's login via ${TOOL_NAMES.GET_CURRENT_USER} first, then pass it here.`,
       },
       since: { type: 'string', description: 'ISO 8601 date' },
       until: { type: 'string', description: 'ISO 8601 date' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -126,7 +129,10 @@ const listBranchCommitsTool: Tool = {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
       branch: { type: 'string', description: 'Branch name' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'branch'],
   },
@@ -175,7 +181,7 @@ const searchCommitsTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'commits', 'search', 'find', 'git'],
   example:
@@ -196,7 +202,10 @@ const searchCommitsTool: Tool = {
         type: 'string',
         description: 'Repository name to scope the search to (requires owner)',
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['query'],
   },
@@ -241,12 +250,12 @@ const searchCommitsTool: Tool = {
 const getCommitDiffTool: Tool = {
   name: 'getCommitDiff',
   description:
-    'Returns the unified diff for a commit as a plain-text result (not JSON) — the raw diff text, not wrapped in an object.',
+    'Returns the unified diff for a commit as `{ diff }` (the diff text under a `diff` field).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'commit', 'diff', 'changes', 'patch', 'git'],
   example:
-    'const diff = await github.getCommitDiff({ owner: "octocat", repo: "hello", ref: "abc123" })',
+    'const { diff } = await github.getCommitDiff({ owner: "octocat", repo: "hello", ref: "abc123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -260,10 +269,7 @@ const getCommitDiffTool: Tool = {
     },
     required: ['owner', 'repo', 'ref'],
   },
-  outputSchema: {
-    type: 'string',
-    description: 'The unified diff as plain text (returned directly, not as a JSON object).',
-  },
+  outputSchema: DIFF_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: diff by short SHA',
@@ -338,7 +344,7 @@ export function createCommitTools(client: GitHubClient | null): ToolDefinition[]
       handler: withValidation(client, async (c, params) => {
         const { owner, repo, ref } = params as { owner: string; repo: string; ref: string };
         const diff = await c.getCommitDiff(owner, repo, ref);
-        return textResult(diff);
+        return jsonResult({ diff });
       }),
     },
   ];

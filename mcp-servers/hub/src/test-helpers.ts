@@ -274,7 +274,7 @@ const MOCK_SERVICE_TOOLS: Record<string, Record<string, Partial<ToolMetadata>>> 
  * @param methodName - Tool method name (e.g., 'listIssueIds')
  * @param partial - Partial tool metadata to merge with defaults
  */
-function buildMockToolMetadata(
+export function buildMockToolMetadata(
   service: string,
   methodName: string,
   partial: Partial<ToolMetadata>

@@ -452,7 +452,8 @@ describe('GitHubClient', () => {
       const repos = await client.listRepos();
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.repos.listForAuthenticatedUser,
-        expect.objectContaining({ per_page: 100 })
+        expect.objectContaining({ per_page: 100 }),
+        expect.any(Function)
       );
       expect(repos).toEqual([
         {
@@ -504,27 +505,83 @@ describe('GitHubClient', () => {
       await client.listRepos({ affiliation: 'owner' });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.repos.listForAuthenticatedUser,
-        expect.objectContaining({ affiliation: 'owner' })
+        expect.objectContaining({ affiliation: 'owner' }),
+        expect.any(Function)
       );
     });
 
-    it('clamps a negative limit up to 1 instead of passing it through raw', async () => {
+    it('treats a negative limit as the default (no cap), not a floor of 1', async () => {
       octokit.paginate.mockResolvedValue([{ id: 1 }, { id: 2 }]);
       const repos = await client.listRepos({ limit: -5 });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.repos.listForAuthenticatedUser,
-        expect.objectContaining({ per_page: 1 })
+        expect.objectContaining({ per_page: 100 }),
+        expect.any(Function)
       );
-      expect(repos).toHaveLength(1);
+      expect(repos).toHaveLength(2);
     });
 
-    it('clamps an oversized limit down to the GitHub per-page maximum of 100', async () => {
+    it('caps per_page at the GitHub maximum of 100 for an oversized limit', async () => {
       octokit.paginate.mockResolvedValue([{ id: 1 }]);
       await client.listRepos({ limit: 999999 });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.repos.listForAuthenticatedUser,
-        expect.objectContaining({ per_page: 100 })
+        expect.objectContaining({ per_page: 100 }),
+        expect.any(Function)
       );
+    });
+
+    it('honors a limit above 100 by returning that many items (per_page still capped)', async () => {
+      octokit.paginate.mockResolvedValue(Array.from({ length: 150 }, (_, i) => ({ id: i + 1 })));
+      const repos = await client.listRepos({ limit: 120 });
+      expect(octokit.paginate).toHaveBeenCalledWith(
+        octokit.rest.repos.listForAuthenticatedUser,
+        expect.objectContaining({ per_page: 100 }),
+        expect.any(Function)
+      );
+      expect(repos).toHaveLength(120);
+    });
+
+    it('falls back to the default 100 when limit is 0', async () => {
+      octokit.paginate.mockResolvedValue(Array.from({ length: 130 }, (_, i) => ({ id: i + 1 })));
+      const repos = await client.listRepos({ limit: 0 });
+      expect(octokit.paginate).toHaveBeenCalledWith(
+        octokit.rest.repos.listForAuthenticatedUser,
+        expect.objectContaining({ per_page: 100 }),
+        expect.any(Function)
+      );
+      expect(repos).toHaveLength(100);
+    });
+
+    it('stops fetching pages via done() once the limit is reached', async () => {
+      const page = (start: number) => Array.from({ length: 100 }, (_, i) => ({ id: start + i }));
+      const pages = [page(1), page(101), page(201), page(301)];
+      let pagesFetched = 0;
+      octokit.paginate.mockImplementation(
+        async (
+          _route: unknown,
+          _params: unknown,
+          mapFn: (r: { data: unknown }, done: () => void) => unknown[]
+        ) => {
+          const collected: unknown[] = [];
+          let stop = false;
+          const done = (): void => {
+            stop = true;
+          };
+          for (const p of pages) {
+            pagesFetched++;
+            collected.push(...mapFn({ data: p }, done));
+            if (stop) break;
+          }
+          return collected;
+        }
+      );
+
+      const repos = await client.listRepos({ limit: 120 });
+
+      expect(repos).toHaveLength(120);
+      // per_page is 100, so 120 items are reached after the 2nd page; the 3rd/4th are never fetched.
+      expect(pagesFetched).toBe(2);
     });
   });
 
@@ -601,7 +658,8 @@ describe('GitHubClient', () => {
       const prs = await client.listPullRequests('o', 'r');
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.pulls.list,
-        expect.objectContaining({ owner: 'o', repo: 'r', state: 'open', per_page: 100 })
+        expect.objectContaining({ owner: 'o', repo: 'r', state: 'open', per_page: 100 }),
+        expect.any(Function)
       );
       expect(prs[0]).toMatchObject({
         number: 1,
@@ -620,7 +678,8 @@ describe('GitHubClient', () => {
       });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.pulls.list,
-        expect.objectContaining({ state: 'all', head: 'me:f', base: 'main', per_page: 5 })
+        expect.objectContaining({ state: 'all', head: 'me:f', base: 'main', per_page: 5 }),
+        expect.any(Function)
       );
     });
   });
@@ -655,7 +714,7 @@ describe('GitHubClient', () => {
     it('throws a teaching 404 naming the PR number and source tools', async () => {
       octokit.rest.pulls.get.mockRejectedValue({ status: 404 });
       await expect(client.getPullRequest('o', 'r', 999)).rejects.toThrow(
-        'PR #999 not found in o/r. Check the number with listPullRequests, or the owner/repo with getRepo.'
+        'PR #999 not found in o/r. Check the number with listPullRequests, or the owner/repo with getRepo, or your token may lack access.'
       );
     });
 
@@ -828,7 +887,8 @@ describe('GitHubClient', () => {
       const files = await client.getPrFiles('o', 'r', 5, { limit: 1 });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.pulls.listFiles,
-        expect.objectContaining({ pull_number: 5, per_page: 1 })
+        expect.objectContaining({ pull_number: 5, per_page: 1 }),
+        expect.any(Function)
       );
       expect(files).toEqual([
         {
@@ -856,7 +916,8 @@ describe('GitHubClient', () => {
       const commits = await client.listPrCommits('o', 'r', 3);
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.pulls.listCommits,
-        expect.objectContaining({ pull_number: 3 })
+        expect.objectContaining({ pull_number: 3 }),
+        expect.any(Function)
       );
       expect(commits[0]).toEqual({
         sha: 's1',
@@ -925,7 +986,8 @@ describe('GitHubClient', () => {
       const comments = await client.listPrComments('o', 'r', 3);
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.issues.listComments,
-        expect.objectContaining({ issue_number: 3 })
+        expect.objectContaining({ issue_number: 3 }),
+        expect.any(Function)
       );
       expect(comments[0]).toEqual({
         id: 1,
@@ -1019,7 +1081,7 @@ describe('GitHubClient', () => {
     it('throws a teaching 404 naming the branch and source tools', async () => {
       octokit.rest.repos.getBranch.mockRejectedValue({ status: 404 });
       await expect(client.getBranch('o', 'r', 'ghost')).rejects.toThrow(
-        "Branch 'ghost' not found in o/r. Check the name with listBranches, or the owner/repo with getRepo."
+        "Branch 'ghost' not found in o/r. Check the name with listBranches, or the owner/repo with getRepo, or your token may lack access."
       );
     });
   });
@@ -1048,7 +1110,7 @@ describe('GitHubClient', () => {
       await expect(
         client.createBranch('o', 'r', { branch: 'feat', from_sha: 'abc' })
       ).rejects.toThrow(
-        "Could not create branch 'feat' in o/r (it may already exist — check with listBranches): Reference already exists"
+        "Could not create branch 'feat' in o/r (it may already exist; check with listBranches): Reference already exists"
       );
     });
 
@@ -1145,7 +1207,8 @@ describe('GitHubClient', () => {
           since: 'x',
           until: 'y',
           per_page: 10,
-        })
+        }),
+        expect.any(Function)
       );
       expect(commits).toHaveLength(1);
     });
@@ -1157,7 +1220,8 @@ describe('GitHubClient', () => {
       await client.listBranchCommits('o', 'r', 'dev', { limit: 5 });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.repos.listCommits,
-        expect.objectContaining({ sha: 'dev', per_page: 5 })
+        expect.objectContaining({ sha: 'dev', per_page: 5 }),
+        expect.any(Function)
       );
     });
   });
@@ -1307,7 +1371,7 @@ describe('GitHubClient', () => {
     it('throws a teaching 404 naming the path, owner/repo, and source tools', async () => {
       octokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
       await expect(client.getFileContents('o', 'r', 'missing.txt', { ref: 'dev' })).rejects.toThrow(
-        "File not found: 'missing.txt' in o/r at ref 'dev'. Check the path with getTree, or the ref with listBranches."
+        "File not found: 'missing.txt' in o/r at ref 'dev'. Check the path with getTree, or the ref with listBranches, or your token may lack access."
       );
     });
 
@@ -1368,6 +1432,25 @@ describe('GitHubClient', () => {
       // Round-trip: decoding the returned base64 must reproduce the original bytes exactly.
       expect(Buffer.from(file.content, 'base64').equals(binary)).toBe(true);
     });
+
+    it('teaches an expected error for encoding "none" (1-100 MB) instead of an empty string', async () => {
+      octokit.rest.repos.getContent.mockResolvedValue({
+        data: {
+          type: 'file',
+          path: 'big.bin',
+          content: '',
+          encoding: 'none',
+          sha: 's',
+          size: 5_000_000,
+        },
+      });
+      await expect(client.getFileContents('o', 'r', 'big.bin')).rejects.toThrow(
+        'is 1-100 MB, so GitHub returns no inline content (encoding "none")'
+      );
+      await client.getFileContents('o', 'r', 'big.bin').catch((error) => {
+        expect(isExpectedError(error)).toBe(true);
+      });
+    });
   });
 
   describe('createOrUpdateFile', () => {
@@ -1417,11 +1500,25 @@ describe('GitHubClient', () => {
       expect(result.commit_sha).toBe('s');
     });
 
-    it('wraps non-404 errors from the SHA lookup with write-flow context', async () => {
+    it('wraps non-404 errors from the SHA lookup as an expected teaching error', async () => {
       octokit.rest.repos.getContent.mockRejectedValue({ status: 403, message: 'forbidden' });
       await expect(
         client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
       ).rejects.toThrow("Could not check whether 'a.txt' already exists in o/r before writing");
+      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+      // The wrapped error carries the marker (and status) so withValidation never logs it as a bug.
+      await client
+        .createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
+        .catch((error) => {
+          expect(isExpectedError(error)).toBe(true);
+        });
+    });
+
+    it('teaches a directory target instead of writing over it', async () => {
+      octokit.rest.repos.getContent.mockResolvedValue({ data: [{ type: 'file', path: 'dir/a' }] });
+      await expect(
+        client.createOrUpdateFile('o', 'r', { path: 'dir', content: 'x', message: 'm' })
+      ).rejects.toThrow("Path 'dir' is a directory, not a file.");
       expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
     });
 
@@ -1466,7 +1563,8 @@ describe('GitHubClient', () => {
       });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.actions.listWorkflowRunsForRepo,
-        expect.objectContaining({ branch: 'main', status: 'completed', per_page: 5 })
+        expect.objectContaining({ branch: 'main', status: 'completed', per_page: 5 }),
+        expect.any(Function)
       );
       expect(runs[0]).toMatchObject({ id: 1, conclusion: 'success' });
     });
@@ -1588,7 +1686,8 @@ describe('GitHubClient', () => {
       const artifacts = await client.listWorkflowRunArtifacts('o', 'r', 7, { limit: 1 });
       expect(octokit.paginate).toHaveBeenCalledWith(
         octokit.rest.actions.listWorkflowRunArtifacts,
-        expect.objectContaining({ run_id: 7, per_page: 1 })
+        expect.objectContaining({ run_id: 7, per_page: 1 }),
+        expect.any(Function)
       );
       expect(artifacts).toEqual([
         {
@@ -1759,7 +1858,7 @@ describe('GitHubClient', () => {
     it('throws a teaching 404 naming the issue number and source tools', async () => {
       octokit.rest.issues.get.mockRejectedValue({ status: 404 });
       await expect(client.getIssue('o', 'r', 404)).rejects.toThrow(
-        'Issue #404 not found in o/r. Check the number with listIssues, or the owner/repo with getRepo.'
+        'Issue #404 not found in o/r. Check the number with listIssues, or the owner/repo with getRepo, or your token may lack access.'
       );
     });
   });
@@ -1900,7 +1999,7 @@ describe('GitHubClient', () => {
         message: 'Validation Failed',
       });
       await expect(client.createLabel('o', 'r', { name: 'bug', color: 'fff' })).rejects.toThrow(
-        "Could not create label 'bug' in o/r (it may already exist — check with listLabels): Validation Failed"
+        "Could not create label 'bug' in o/r (it may already exist; check with listLabels): Validation Failed"
       );
     });
 
@@ -1966,7 +2065,9 @@ describe('GitHubClient', () => {
       octokit.rest.git.createTag.mockRejectedValue({ status: 404 });
       await expect(
         client.createTag('o', 'r', { tag: 'v1.0.0', sha: 'bogus', message: 'm' })
-      ).rejects.toThrow("SHA 'bogus' not found in o/r. Check it with listCommits or getBranch.");
+      ).rejects.toThrow(
+        "SHA 'bogus' not found in o/r. Check it with listCommits or getBranch. The owner/repo may also be wrong, or your token may lack access."
+      );
     });
 
     it('throws a teaching 422 when the tag ref already exists', async () => {

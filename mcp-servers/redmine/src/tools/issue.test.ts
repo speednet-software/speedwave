@@ -377,6 +377,29 @@ describe('issue-tools', () => {
       });
     });
 
+    it("include enum covers every value Redmine's issue show endpoint documents", () => {
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const getIssueFullTool = tools.find((t) => t.tool.name === 'getIssueFull')!;
+      const includeSchema = (
+        getIssueFullTool.tool.inputSchema.properties as Record<
+          string,
+          { items?: { enum?: string[] } }
+        >
+      ).include;
+
+      expect(includeSchema.items!.enum!.sort()).toEqual(
+        [
+          'journals',
+          'attachments',
+          'relations',
+          'children',
+          'watchers',
+          'changesets',
+          'allowed_statuses',
+        ].sort()
+      );
+    });
+
     it('handles non-existent issue', async () => {
       mockClient.showIssue.mockRejectedValue(new Error('Resource not found in Redmine.'));
 
@@ -400,7 +423,7 @@ describe('issue-tools', () => {
 
       await handler!({ issue_id: 9999 });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'issue_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
     });
   });
 
@@ -766,7 +789,7 @@ describe('issue-tools', () => {
 
       await handler!({ issue_id: 9999, subject: 'Updated' });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'issue_id=9999');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
     });
   });
 
@@ -819,7 +842,7 @@ describe('issue-tools', () => {
 
       await handler!({ issue_id: 1, notes: 'Comment' });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), 'issue_id=1');
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 1 });
     });
   });
 

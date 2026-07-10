@@ -139,7 +139,10 @@ const deleteTagTool: Tool = {
       message: { type: 'string' },
       deleted_tag: {
         type: 'object',
-        description: 'Audit info captured before deletion, when readable',
+        description:
+          'Audit info read just before deletion, when readable. Check-then-act: the tag could ' +
+          'change between this read and the delete call, so this reflects the pre-delete state, ' +
+          'not necessarily the exact state at the moment of deletion.',
         properties: {
           name: { type: 'string' },
           target: { type: 'string', description: 'Commit SHA' },
@@ -238,7 +241,7 @@ export function createReleaseTools(client: GitLabClient | null): ToolDefinition[
           limit?: number;
         };
         const result = await c.listTags(project_id, options);
-        return jsonResult({ tags: result });
+        return jsonResult({ success: true, tags: result });
       }),
     },
     {

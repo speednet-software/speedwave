@@ -94,13 +94,6 @@ describe('Repo Tools', () => {
       ).toBe(true);
     });
 
-    it('listRepos declares user-scoped identity with getCurrentUser as the resolver', () => {
-      const tools = createRepoTools(mockClient as unknown as GitHubClient);
-      const meta = tools.find((t) => t.tool.name === 'listRepos')?.tool._meta;
-      expect(meta?.[META_KEYS.USER_SCOPED]).toBe(true);
-      expect(meta?.[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
-    });
-
     it('searchCode requires query, getRepo requires owner+repo, listRepos requires nothing', () => {
       const tools = createRepoTools(mockClient as unknown as GitHubClient);
       expect(tools.find((t) => t.tool.name === 'searchCode')?.tool.inputSchema.required).toEqual([

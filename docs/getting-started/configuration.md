@@ -101,8 +101,6 @@ When the active provider kind is `local`, Speedwave adds two Claude Code CLI fla
 - `--exclude-dynamic-system-prompt-sections` moves per-machine sections (cwd, env info, git status) out of the system prompt prefix, so a llama.cpp/Unsloth server can reuse its KV cache across session restarts instead of re-prefilling the whole prompt.
 - `--append-system-prompt` with a short skill-recall nudge (`speedwave_runtime::prompts::local_llm_skills_nudge`). Small open models rarely act on the available-skills list unprompted; the nudge restates that contract. Even with it, explicit invocation (`/skill-name`) remains the reliable way to trigger skills on local models.
 
-Note for Unsloth Studio users: serve the model with `--disable-tools` (tool passthrough). With Studio's own server-side tools enabled, the agent's tool calls are consumed server-side and Claude Code answers without ever editing files.
-
 ### Model discovery (local providers)
 
 When the selected provider is local (`local`, or legacy `ollama` / `lmstudio` / `llamacpp`), the Settings → LLM Provider panel probes the server for the list of available models when you click **Discover models**. Discovery is button-driven only: the panel never probes automatically, not on open, not on provider switch, and not when a `base_url` is configured. A successful probe surfaces both the model ids and per-model context windows where the server advertises them:

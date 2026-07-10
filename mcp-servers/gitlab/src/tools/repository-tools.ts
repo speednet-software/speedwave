@@ -84,17 +84,12 @@ const getFileTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      file: {
-        type: 'object',
-        properties: {
-          file_name: { type: 'string' },
-          file_path: { type: 'string' },
-          size: { type: 'number' },
-          encoding: { type: 'string' },
-          content: { type: 'string' },
-          ref: { type: 'string' },
-        },
-      },
+      file_name: { type: 'string' },
+      file_path: { type: 'string' },
+      size: { type: 'number' },
+      encoding: { type: 'string' },
+      content: { type: 'string' },
+      ref: { type: 'string' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -187,7 +182,7 @@ export function createRepositoryTools(client: GitLabClient | null): ToolDefiniti
           ref?: string;
         };
         const result = await c.getFile(project_id, file_path, ref);
-        return jsonResult(result);
+        return jsonResult({ success: true, ...result });
       }),
     },
     {

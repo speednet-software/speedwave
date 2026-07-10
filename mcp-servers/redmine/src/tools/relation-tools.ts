@@ -14,6 +14,7 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listRelationsTool: Tool = {
   name: 'listRelations',
@@ -218,12 +219,10 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
       tool: listRelationsTool,
       handler: async (params) => {
         const { issue_id } = params as { issue_id: number };
-        try {
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.listRelations(issue_id);
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `issue_id=${issue_id}`));
-        }
+        });
       },
     },
     {
@@ -235,7 +234,7 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
           relation_type?: RelationType;
           delay?: number;
         };
-        try {
+        return withRedmineErrors({ issue_id, issue_to_id }, async () => {
           const result = await client.createRelation({
             issue_id,
             issue_to_id,
@@ -243,23 +242,17 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
             delay,
           });
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(
-            RedmineClient.formatError(error, `issue_id=${issue_id}, issue_to_id=${issue_to_id}`)
-          );
-        }
+        });
       },
     },
     {
       tool: deleteRelationTool,
       handler: async (params) => {
         const { relation_id } = params as { relation_id: number };
-        try {
+        return withRedmineErrors({ relation_id }, async () => {
           await client.deleteRelation(relation_id);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `relation_id=${relation_id}`));
-        }
+        });
       },
     },
   ];

@@ -5,7 +5,7 @@
  * Architecture:
  * - Token mounted RO from /tokens/token
  * - Host URL from /tokens/host_url file or GITLAB_URL env var
- * - Exposes 48 tools via `@gitbeaker`/rest
+ * - Wraps `@gitbeaker/rest`; tool count is pinned by tools/metadata.test.ts
  * Security:
  * - Blast radius containment: only GitLab tokens if compromised
  * - Token never exposed in responses
@@ -24,6 +24,59 @@ import {
 } from '@speedwave/mcp-shared';
 import type { ConnectionTestResult, HealthStatus } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
+import { basename } from 'node:path';
+import { TOOL_NAMES } from './tool-names.js';
+import type { IdentityScope } from './identity-scopes.js';
+
+/**
+ * Reads `rec[camel] ?? rec[snake]`, the dual camelCase/gitbeaker snake_case response read.
+ * @param rec - Raw gitbeaker response object.
+ * @param camel - camelCase property name.
+ * @param snake - snake_case fallback property name.
+ */
+function pick(rec: Record<string, unknown>, camel: string, snake: string): unknown {
+  return rec[camel] ?? rec[snake];
+}
+
+/** Minimal user identity shape shared by an MR's author, assignees, and reviewers. */
+export interface GitLabUserSummary {
+  id: number;
+  name: string;
+  username: string;
+}
+
+/**
+ * Maps a raw gitbeaker user payload to the minimal {@link GitLabUserSummary} shape.
+ * @param u - Raw gitbeaker user payload.
+ */
+function mapUserSummary(u: unknown): GitLabUserSummary {
+  const rec = (u || {}) as Record<string, unknown>;
+  return {
+    id: Number(rec.id) || 0,
+    name: String(rec.name || ''),
+    username: String(rec.username || ''),
+  };
+}
+
+/**
+ * An Error already translated into a teaching message by this client (e.g. {@link GitLabClient.getIssue}).
+ * The class identity is the unforgeable marker so `formatError` returns it verbatim.
+ */
+class TeachingError extends Error {
+  readonly expected = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'TeachingError';
+  }
+}
+
+/**
+ * True when `error` was already translated into a teaching message by this client.
+ * @param error - Candidate error to test.
+ */
+export function isTeachingError(error: unknown): boolean {
+  return error instanceof TeachingError;
+}
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -54,9 +107,9 @@ export interface GitLabMergeRequest {
   state: string;
   source_branch: string;
   target_branch: string;
-  author: { id: number; name: string; username: string };
-  assignees?: unknown[];
-  reviewers?: unknown[];
+  author: GitLabUserSummary;
+  assignees?: GitLabUserSummary[];
+  reviewers?: GitLabUserSummary[];
   labels?: string[];
   web_url: string;
   created_at: string;
@@ -166,9 +219,9 @@ export class GitLabClient {
    */
   private mapMergeRequestResponse(mr: Record<string, unknown>): GitLabMergeRequest {
     // Warn if critical fields are missing (helps debug API response issues)
-    const sourceBranch = mr.sourceBranch || mr.source_branch;
-    const targetBranch = mr.targetBranch || mr.target_branch;
-    const webUrl = mr.webUrl || mr.web_url;
+    const sourceBranch = pick(mr, 'sourceBranch', 'source_branch');
+    const targetBranch = pick(mr, 'targetBranch', 'target_branch');
+    const webUrl = pick(mr, 'webUrl', 'web_url');
 
     if (!sourceBranch && mr.iid) {
       console.warn(`${ts()} MR !${mr.iid} missing source_branch property`);
@@ -188,26 +241,21 @@ export class GitLabClient {
       state: String(mr.state || ''),
       source_branch: String(sourceBranch || ''),
       target_branch: String(targetBranch || ''),
-      author: (mr.author || { id: 0, name: '', username: '' }) as {
-        id: number;
-        name: string;
-        username: string;
-      },
-      assignees: (mr.assignees as unknown[] | undefined) ?? undefined,
-      reviewers: (mr.reviewers as unknown[] | undefined) ?? undefined,
+      author: mapUserSummary(mr.author),
+      assignees: Array.isArray(mr.assignees) ? mr.assignees.map(mapUserSummary) : undefined,
+      reviewers: Array.isArray(mr.reviewers) ? mr.reviewers.map(mapUserSummary) : undefined,
       labels: (mr.labels as string[] | undefined) ?? undefined,
       web_url: String(webUrl || ''),
-      created_at: String(mr.createdAt || mr.created_at || ''),
-      updated_at: String(mr.updatedAt || mr.updated_at || ''),
-      merged_at: (mr.mergedAt as string | null | undefined) ?? (mr.merged_at as string | null),
-      merge_commit_sha:
-        (mr.mergeCommitSha as string | null | undefined) ?? (mr.merge_commit_sha as string | null),
-      changes_count:
-        (mr.changesCount as string | null | undefined) ?? (mr.changes_count as string | null),
-      has_conflicts: (mr.hasConflicts as boolean | undefined) ?? (mr.has_conflicts as boolean),
-      merge_status: (mr.mergeStatus as string | undefined) ?? (mr.merge_status as string),
-      detailed_merge_status:
-        (mr.detailedMergeStatus as string | undefined) ?? (mr.detailed_merge_status as string),
+      created_at: String(pick(mr, 'createdAt', 'created_at') || ''),
+      updated_at: String(pick(mr, 'updatedAt', 'updated_at') || ''),
+      merged_at: pick(mr, 'mergedAt', 'merged_at') as string | null | undefined,
+      merge_commit_sha: pick(mr, 'mergeCommitSha', 'merge_commit_sha') as string | null | undefined,
+      changes_count: pick(mr, 'changesCount', 'changes_count') as string | null | undefined,
+      has_conflicts: pick(mr, 'hasConflicts', 'has_conflicts') as boolean | undefined,
+      merge_status: pick(mr, 'mergeStatus', 'merge_status') as string | undefined,
+      detailed_merge_status: pick(mr, 'detailedMergeStatus', 'detailed_merge_status') as
+        | string
+        | undefined,
     };
   }
 
@@ -232,10 +280,15 @@ export class GitLabClient {
    * ```
    */
   static formatError(error: unknown): string {
+    // An already-translated teaching error is returned verbatim: its message is the guidance,
+    // and message-sniffing below (e.g. on "not found") must not reclassify it.
+    if (isTeachingError(error)) {
+      return (error as Error).message;
+    }
     // Handle ``@gitbeaker``/rest error responses
     const err = error as {
       response?: { status?: number };
-      cause?: { response?: { status?: number }; description?: string };
+      cause?: { response?: { status?: number }; description?: unknown };
       message?: string;
     };
     const status = err.response?.status || err.cause?.response?.status;
@@ -257,8 +310,8 @@ export class GitLabClient {
     if (status === 404 || message.includes('404') || message.includes('not found')) {
       return (
         'Resource not found in GitLab. Verify the project_id/path and the ID/name argument are ' +
-        'correct — list valid values with the corresponding list* tool first (listProjectIds, ' +
-        'listMrIds, listIssues, listBranches, etc.) before retrying.'
+        `correct, then list valid values with the corresponding list* tool first (${TOOL_NAMES.LIST_PROJECT_IDS}, ` +
+        `${TOOL_NAMES.LIST_MR_IDS}, ${TOOL_NAMES.LIST_ISSUES}, ${TOOL_NAMES.LIST_BRANCHES}, etc.) before retrying.`
       );
     }
 
@@ -272,7 +325,7 @@ export class GitLabClient {
     }
 
     if (status === 422) {
-      const detail = err.cause?.description || message;
+      const detail = typeof err.cause?.description === 'string' ? err.cause.description : message;
       return (
         `GitLab rejected the request (422 Unprocessable): ${detail}. Check that the ` +
         'referenced branch/tag/state value is valid and not already in a terminal or protected state.'
@@ -290,7 +343,7 @@ export class GitLabClient {
     }
 
     // Extract meaningful part from gitbeaker errors
-    if (err.cause?.description) {
+    if (typeof err.cause?.description === 'string') {
       return `GitLab API error: ${err.cause.description}`;
     }
 
@@ -340,7 +393,7 @@ export class GitLabClient {
       username: String(user.username || ''),
       name: String(user.name || ''),
       email: user.email ? String(user.email) : undefined,
-      web_url: String(user.webUrl || user.web_url || ''),
+      web_url: String(pick(user, 'webUrl', 'web_url') || ''),
     };
   }
 
@@ -354,7 +407,7 @@ export class GitLabClient {
    * of results is returned, limited by the `limit` parameter.
    * @param options - Filter and pagination options
    * @param options.search - Filter projects by name or path (case-insensitive partial match)
-   * @param options.limit - Maximum number of projects to return (default: 20, max: 20)
+   * @param options.limit - Maximum number of projects to return (default: 20, max: 100)
    * @param options.page - Page number for pagination (default: 1)
    * @param options.owned - If `true`, only return projects owned by the current user (excludes shared/member projects)
    * @param options.membership - If `true`, only return projects the authenticated user is a member of
@@ -480,10 +533,15 @@ export class GitLabClient {
     if (options.project_id) {
       const results = await this.gitlab.Search.all('blobs' as const, query, {
         projectId: options.project_id,
+        perPage: 100,
+        maxPages: 1,
       });
       return results as unknown[];
     }
-    const results = await this.gitlab.Search.all('blobs' as const, query);
+    const results = await this.gitlab.Search.all('blobs' as const, query, {
+      perPage: 100,
+      maxPages: 1,
+    });
     return results as unknown[];
   }
 
@@ -499,7 +557,7 @@ export class GitLabClient {
    * @param options.author_username - Filter by author's username
    * @param options.reviewer_username - Filter by reviewer's username
    * @param options.labels - Filter by comma-separated labels (e.g., "bug,feature")
-   * @param options.scope - Filter by identity: "assigned_to_me", "created_by_me", or "all"
+   * @param options.scope - Filter by identity: "assigned_to_me" (assignee, not reviewer), "created_by_me", or "all"
    * @param options.limit - Maximum number of results to return (default: 20)
    */
   async listMergeRequests(
@@ -509,7 +567,7 @@ export class GitLabClient {
       author_username?: string;
       reviewer_username?: string;
       labels?: string;
-      scope?: 'assigned_to_me' | 'created_by_me' | 'all';
+      scope?: IdentityScope;
       limit?: number;
     } = {}
   ): Promise<GitLabMergeRequest[]> {
@@ -519,6 +577,7 @@ export class GitLabClient {
     const queryOptions: Record<string, unknown> = {
       projectId,
       perPage: limit,
+      maxPages: 1,
     };
 
     if (options.state) {
@@ -698,10 +757,12 @@ export class GitLabClient {
     mrIid: number,
     limit: number = 20
   ): Promise<GitLabCommit[]> {
+    const clamped = clampPageSize(limit, 20, 100);
     const commits = await this.gitlab.MergeRequests.allCommits(projectId, mrIid, {
-      perPage: limit,
+      perPage: clamped,
+      maxPages: 1,
     });
-    return commits.slice(0, limit).map((c: Record<string, unknown>) => ({
+    return commits.slice(0, clamped).map((c: Record<string, unknown>) => ({
       id: String(c.id),
       short_id: String(c.shortId || c.short_id || ''),
       title: String(c.title),
@@ -723,8 +784,12 @@ export class GitLabClient {
     mrIid: number,
     limit: number = 10
   ): Promise<GitLabPipeline[]> {
-    const pipelines = await this.gitlab.MergeRequests.allPipelines(projectId, mrIid);
-    return pipelines.slice(0, limit).map((p: Record<string, unknown>) => {
+    const clamped = clampPageSize(limit, 10, 100);
+    const pipelines = await this.gitlab.MergeRequests.allPipelines(projectId, mrIid, {
+      perPage: clamped,
+      maxPages: 1,
+    });
+    return pipelines.slice(0, clamped).map((p: Record<string, unknown>) => {
       return {
         id: p.id as number,
         status: String(p.status),
@@ -748,10 +813,12 @@ export class GitLabClient {
     mrIid: number,
     limit: number = 20
   ): Promise<unknown[]> {
+    const clamped = clampPageSize(limit, 20, 100);
     const notes = await this.gitlab.MergeRequestNotes.all(projectId, mrIid, {
-      perPage: limit,
+      perPage: clamped,
+      maxPages: 1,
     });
-    return notes.slice(0, limit);
+    return notes.slice(0, clamped);
   }
 
   /**
@@ -780,10 +847,12 @@ export class GitLabClient {
     mrIid: number,
     limit: number = 20
   ): Promise<unknown[]> {
+    const clamped = clampPageSize(limit, 20, 100);
     const discussions = await this.gitlab.MergeRequestDiscussions.all(projectId, mrIid, {
-      perPage: limit,
+      perPage: clamped,
+      maxPages: 1,
     });
-    return discussions.slice(0, limit);
+    return discussions.slice(0, clamped);
   }
 
   /**
@@ -821,6 +890,7 @@ export class GitLabClient {
     const branches = await this.gitlab.Branches.all(projectId, {
       search: options.search,
       perPage: limit,
+      maxPages: 1,
     });
     return branches.slice(0, limit);
   }
@@ -889,13 +959,15 @@ export class GitLabClient {
     limit: number = 20
   ): Promise<GitLabCommit[]> {
     this.validateRequired({ project_id: projectId, branch });
+    const clamped = clampPageSize(limit, 20, 100);
     const commits = await this.gitlab.Commits.all(projectId, {
       refName: branch,
-      perPage: limit,
+      perPage: clamped,
+      maxPages: 1,
     });
 
     // Take only first page
-    const limited = commits.slice(0, limit);
+    const limited = commits.slice(0, clamped);
 
     return limited.map((c: Record<string, unknown>) => ({
       id: String(c.id),
@@ -947,6 +1019,7 @@ export class GitLabClient {
       until: options.until,
       path: options.path,
       perPage: limit,
+      maxPages: 1,
     });
     return commits.slice(0, limit).map((c: Record<string, unknown>) => ({
       id: String(c.id),
@@ -977,6 +1050,7 @@ export class GitLabClient {
     const commits = await this.gitlab.Commits.all(projectId, {
       refName: options.ref,
       perPage: 100, // Get more to filter
+      maxPages: 1,
     });
     const filtered = commits
       .filter(
@@ -1020,6 +1094,7 @@ export class GitLabClient {
       ref: options.ref,
       recursive: options.recursive,
       perPage: limit,
+      maxPages: 1,
     });
     return tree.slice(0, limit);
   }
@@ -1052,8 +1127,8 @@ export class GitLabClient {
       content: String(file.content),
       encoding: String(file.encoding),
       size: Number(file.size),
-      file_name: String(file.fileName || file.file_name || ''),
-      file_path: String(file.filePath || file.file_path || filePath),
+      file_name: String(pick(file, 'fileName', 'file_name') || basename(filePath)),
+      file_path: String(pick(file, 'filePath', 'file_path') || filePath),
       ref: String(file.ref || ref),
     };
   }
@@ -1085,7 +1160,7 @@ export class GitLabClient {
    * @returns Array of jobs with artifacts including job ID, name, and artifact details
    */
   async listArtifacts(projectId: string | number, pipelineId: number): Promise<unknown[]> {
-    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId });
+    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId, perPage: 100, maxPages: 1 });
     // Filter jobs that have artifacts
     return jobs
       .filter((j: Record<string, unknown>) => j.artifacts && (j.artifacts as unknown[]).length > 0)
@@ -1097,19 +1172,26 @@ export class GitLabClient {
   }
 
   /**
-   * Downloads job log as artifact (note: direct artifact download not fully supported)
+   * Gets a job's log as text, capped to its last N lines like {@link getJobLog}
+   * (direct CI artifact-zip download is not available through this client).
    * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param jobId - Job ID to download artifact from
-   * @returns Buffer containing job log and suggested filename
+   * @param jobId - Job ID to fetch the log from
+   * @param tailLines - Number of last lines to return (default: 500, 0 = all lines)
+   * @returns Log text (capped), the full untruncated size in bytes, and a suggested filename
    */
   async downloadArtifact(
     projectId: string | number,
-    jobId: number
-  ): Promise<{ data: Buffer; filename: string }> {
-    // Get job trace (log) as artifact download isn't directly available
+    jobId: number,
+    tailLines: number = 500
+  ): Promise<{ content: string; size: number; filename: string }> {
     const trace = await this.gitlab.Jobs.showLog(projectId, jobId);
+    const full = String(trace);
+    const lines = full.split('\n');
+    const content =
+      tailLines && lines.length > tailLines ? lines.slice(-tailLines).join('\n') : full;
     return {
-      data: Buffer.from(String(trace)),
+      content,
+      size: Buffer.byteLength(full, 'utf-8'),
       filename: `job-${jobId}-log.txt`,
     };
   }
@@ -1145,7 +1227,7 @@ export class GitLabClient {
       state?: string;
       labels?: string;
       assignee_username?: string;
-      scope?: 'assigned_to_me' | 'created_by_me' | 'all';
+      scope?: IdentityScope;
       limit?: number;
     } = {}
   ): Promise<unknown[]> {
@@ -1157,6 +1239,7 @@ export class GitLabClient {
       assigneeUsername: options.assignee_username,
       scope: options.scope,
       perPage: limit,
+      maxPages: 1,
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
     // Handle both array and paginated response
     const issues = Array.isArray(result) ? result : (result as { data: unknown[] }).data || [];
@@ -1178,8 +1261,8 @@ export class GitLabClient {
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
     const result = Array.isArray(issues) ? issues : (issues as { data: unknown[] }).data || [];
     if (!result[0]) {
-      throw new Error(
-        `Issue #${issueIid} not found in project '${projectId}'. List valid issue IIDs first via listIssues.`
+      throw new TeachingError(
+        `Issue #${issueIid} not found in project '${projectId}'. List valid issue IIDs first via ${TOOL_NAMES.LIST_ISSUES}.`
       );
     }
     return result[0];
@@ -1275,6 +1358,7 @@ export class GitLabClient {
     const labels = await this.gitlab.ProjectLabels.all(projectId, {
       search: options.search,
       perPage: limit,
+      maxPages: 1,
     });
     return labels.slice(0, limit);
   }
@@ -1309,7 +1393,8 @@ export class GitLabClient {
    * Lists CI/CD pipelines for a project with optional filtering
    * @param projectId - Project ID or path (e.g., 123 or "group/project")
    * @param options - Pipeline filtering options
-   * @param options.status - Filter by status: "running", "pending", "success", "failed", "canceled", "skipped"
+   * @param options.status - Filter by status: "created", "waiting_for_resource", "preparing", "pending",
+   * "running", "success", "failed", "canceled", "skipped", "manual", "scheduled"
    * @param options.ref - Filter by branch or tag name
    * @param options.limit - Maximum pipelines to return (default: 5)
    * @param options.page - Page number for pagination (default: 1)
@@ -1325,21 +1410,28 @@ export class GitLabClient {
     } = {}
   ): Promise<GitLabPipeline[]> {
     this.validateRequired({ project_id: projectId });
+    const limit = clampPageSize(options.limit, 5, 100);
     const pipelines = await this.gitlab.Pipelines.all(projectId, {
       status: options.status as
-        | 'running'
+        | 'created'
+        | 'waiting_for_resource'
+        | 'preparing'
         | 'pending'
+        | 'running'
         | 'success'
         | 'failed'
         | 'canceled'
         | 'skipped'
+        | 'manual'
+        | 'scheduled'
         | undefined,
       ref: options.ref,
-      perPage: clampPageSize(options.limit, 5, 100),
+      perPage: limit,
       page: options.page || 1,
+      maxPages: 1,
     });
 
-    return pipelines.map((p: Record<string, unknown>) => ({
+    return pipelines.slice(0, limit).map((p: Record<string, unknown>) => ({
       id: p.id as number,
       status: String(p.status),
       ref: String(p.ref),
@@ -1359,7 +1451,7 @@ export class GitLabClient {
   async showPipeline(projectId: string | number, pipelineId: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
     const pipeline = await this.gitlab.Pipelines.show(projectId, pipelineId);
-    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId });
+    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId, perPage: 100, maxPages: 1 });
     return { pipeline, jobs };
   }
 
@@ -1455,6 +1547,7 @@ export class GitLabClient {
     const tags = await this.gitlab.Tags.all(projectId, {
       search: options.search,
       perPage: limit,
+      maxPages: 1,
     });
     return tags.slice(0, limit);
   }

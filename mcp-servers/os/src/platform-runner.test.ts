@@ -340,6 +340,12 @@ describe('platform-runner', () => {
       );
     });
 
+    it('names the (no commands registered) fallback for an unregistered domain', async () => {
+      await expect(runCommand('bogus' as any, 'anything')).rejects.toThrow(
+        "Unknown command 'anything' for domain 'bogus'. Allowed: (no commands registered for domain)"
+      );
+    });
+
     it('rejects path traversal in command name', async () => {
       await expect(runCommand('reminders', '../../../etc/passwd')).rejects.toThrow(
         'Unknown command'

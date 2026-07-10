@@ -123,6 +123,8 @@ Charts in `.docx` are images, not native chart objects (python-docx limitation).
 
 ## Pitfalls
 
+- **`editDocx`'s `replace_text` fails on a zero match.** If `find` is not present anywhere in the document, the op errors instead of silently doing nothing; text split across formatting runs may not match a plain-text `find`, so run `readDocument` first to confirm the exact text.
+- **`editXlsx` fails on an unknown sheet name.** An op naming a `sheet` that does not exist in the workbook errors with the list of actual sheet names; run `readDocument` first if you are not sure of the sheet names.
 - **`/workspace` confinement**: inputs and outputs must be under `/workspace`. Default output dir is `/workspace/.speedwave/office/`; use `outName` to pin the filename.
 - **Overwrite gate**: existing files are not replaced by default. Pass `overwrite: true` only when the user explicitly asks to replace.
 - **Limits**: 50 MB input file cap; 2 000-page PDF cap; inline `markdown`/`html`/`spec` payloads ≤200 KB (write larger content to a `/workspace` file and pass `{ path }` instead); `mergePdf`/`splitPdf` accept at most 200 inputs/ranges per call.

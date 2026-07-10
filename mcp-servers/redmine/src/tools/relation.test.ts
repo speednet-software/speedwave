@@ -159,7 +159,7 @@ describe('Relation Tools', () => {
 
       await listRelationsTool!.handler({ issue_id: 404 });
 
-      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), 'issue_id=404');
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), { issue_id: 404 });
     });
   });
 
@@ -343,10 +343,10 @@ describe('Relation Tools', () => {
 
       await createRelationTool!.handler({ issue_id: 10, issue_to_id: 20 });
 
-      expect(RedmineClient.formatError).toHaveBeenCalledWith(
-        expect.any(Error),
-        'issue_id=10, issue_to_id=20'
-      );
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), {
+        issue_id: 10,
+        issue_to_id: 20,
+      });
     });
   });
 
@@ -415,7 +415,9 @@ describe('Relation Tools', () => {
 
       await deleteRelationTool!.handler({ relation_id: 404 });
 
-      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), 'relation_id=404');
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), {
+        relation_id: 404,
+      });
     });
   });
 

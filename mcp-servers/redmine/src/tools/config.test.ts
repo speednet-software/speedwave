@@ -401,4 +401,26 @@ describe('Config Tools', () => {
       expect(parsed.project_name).toBe('Auto-Fetched Name');
     });
   });
+
+  describe('getMappings outputSchema', () => {
+    it('declares all 8 activity_* keys RedmineMappings defines', () => {
+      const tools = createConfigTools(mockClient as unknown as RedmineClient);
+      const getMappingsTool = tools.find((t) => t.tool.name === 'getMappings')!;
+      const properties = getMappingsTool.tool.outputSchema!.properties as Record<string, unknown>;
+
+      const activityKeys = Object.keys(properties).filter((k) => k.startsWith('activity_'));
+      expect(activityKeys.sort()).toEqual(
+        [
+          'activity_design',
+          'activity_development',
+          'activity_testing',
+          'activity_documentation',
+          'activity_support',
+          'activity_management',
+          'activity_devops',
+          'activity_review',
+        ].sort()
+      );
+    });
+  });
 });

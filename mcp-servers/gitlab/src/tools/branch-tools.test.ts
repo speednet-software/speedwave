@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createBranchTools } from './branch-tools.js';
+import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 // Mock client type with all branch-related methods
@@ -235,13 +236,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', branch: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -450,13 +445,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', branch: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -602,13 +591,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', from: 'main', to: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect((result.content[0] as { text: string }).text).toContain(
-        'Resource not found in GitLab.'
-      );
-      expect((result.content[0] as { text: string }).text).toContain(
-        'list valid values with the corresponding list* tool first'
-      );
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {

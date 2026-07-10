@@ -432,6 +432,26 @@ describe('RedmineClient', () => {
         },
       });
     });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { results: [], total_count: 0 } });
+
+      await client.searchIssues('bug', { limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/search.json', {
+        params: { q: 'bug', issues: 1, limit: 100 },
+      });
+    });
+
+    it('should default the limit to 25 when 0', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { results: [], total_count: 0 } });
+
+      await client.searchIssues('bug', { limit: 0 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/search.json', {
+        params: { q: 'bug', issues: 1, limit: 25 },
+      });
+    });
   });
 
   describe('createIssue', () => {
@@ -847,6 +867,26 @@ describe('RedmineClient', () => {
 
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
         params: { limit: 25, user_id: 'me' },
+      });
+    });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 100 },
+      });
+    });
+
+    it('should default the limit to 25 when 0', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ limit: 0 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 25 },
       });
     });
   });
@@ -1579,7 +1619,7 @@ describe('RedmineClient', () => {
         message: 'Not Found',
       } as AxiosError;
 
-      const result = RedmineClient.formatError(error, 'issue_id=99999');
+      const result = RedmineClient.formatError(error, { issue_id: 99999 });
       expect(result).toContain('issue_id=99999');
       expect(result).toContain('listIssueIds');
     });
@@ -1591,10 +1631,12 @@ describe('RedmineClient', () => {
         message: 'Not Found',
       } as AxiosError;
 
-      expect(RedmineClient.formatError(error, 'journal_id=42')).toContain('listJournals');
-      expect(RedmineClient.formatError(error, 'relation_id=7')).toContain('listRelations');
-      expect(RedmineClient.formatError(error, 'time_entry_id=789')).toContain('listTimeEntries');
-      expect(RedmineClient.formatError(error, 'project_id=my-project')).toContain('listProjectIds');
+      expect(RedmineClient.formatError(error, { journal_id: 42 })).toContain('listJournals');
+      expect(RedmineClient.formatError(error, { relation_id: 7 })).toContain('listRelations');
+      expect(RedmineClient.formatError(error, { time_entry_id: 789 })).toContain('listTimeEntries');
+      expect(RedmineClient.formatError(error, { project_id: 'my-project' })).toContain(
+        'listProjectIds'
+      );
     });
 
     it('should fall back to the generic 404 message for an unknown context key', () => {
@@ -1604,7 +1646,7 @@ describe('RedmineClient', () => {
         message: 'Not Found',
       } as AxiosError;
 
-      const result = RedmineClient.formatError(error, 'weird_key=1');
+      const result = RedmineClient.formatError(error, { weird_key: 1 });
       expect(result).toContain('Resource not found in Redmine: weird_key=1.');
     });
 
@@ -1615,9 +1657,21 @@ describe('RedmineClient', () => {
         message: 'Not Found',
       } as AxiosError;
 
-      const result = RedmineClient.formatError(error, 'issue_id=5, issue_to_id=9');
+      const result = RedmineClient.formatError(error, { issue_id: 5, issue_to_id: 9 });
       expect(result).toContain('issue_id=5, issue_to_id=9');
       expect(result).toContain('listIssueIds');
+    });
+
+    it('does not append a getMappings hint for a custom field whose name merely contains "status"', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 422, data: { errors: ['Qa status is invalid'] } },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('Qa status is invalid');
+      expect(result).not.toContain('getMappings');
     });
 
     it('should format 422 validation error with details', () => {
@@ -2416,6 +2470,30 @@ describe('RedmineClient', () => {
           params: { limit: 25, offset: 50 },
         });
       });
+
+      it('should clamp an oversized limit down to 100 when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: [], total_count: 0 },
+        });
+
+        await client.listProjects({ limit: 999999 });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 100, offset: 0 },
+        });
+      });
+
+      it('should default the limit to 100 when 0 and unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: [], total_count: 0 },
+        });
+
+        await client.listProjects({ limit: 0 });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 100, offset: 0 },
+        });
+      });
     });
 
     // ─── showProject() include option ───────────────────────────────────
@@ -2548,6 +2626,39 @@ describe('RedmineClient', () => {
 
         expect(result.projects).toHaveLength(1);
         expect(result.projects[0].identifier).toBe('alpha');
+      });
+
+      it('should clamp an oversized limit down to 100 results', async () => {
+        const manyProjects = Array.from({ length: 150 }, (_, i) => ({
+          id: i,
+          identifier: `proj-${i}`,
+          name: `Proj match ${i}`,
+          description: '',
+        }));
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: manyProjects, total_count: manyProjects.length },
+        });
+
+        const result = await client.searchProjects('match', { limit: 999999 });
+
+        expect(result.projects).toHaveLength(100);
+        expect(result.total_count).toBe(150);
+      });
+
+      it('should default the limit to 25 results when 0', async () => {
+        const manyProjects = Array.from({ length: 50 }, (_, i) => ({
+          id: i,
+          identifier: `proj-${i}`,
+          name: `Proj match ${i}`,
+          description: '',
+        }));
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: manyProjects, total_count: manyProjects.length },
+        });
+
+        const result = await client.searchProjects('match', { limit: 0 });
+
+        expect(result.projects).toHaveLength(25);
       });
     });
 

@@ -10,11 +10,11 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
-  clampPageSize,
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listTimeEntriesTool: Tool = {
   name: 'listTimeEntries',
@@ -236,48 +236,37 @@ export function createTimeEntryTools(client: RedmineClient | null): ToolDefiniti
   return [
     {
       tool: listTimeEntriesTool,
-      handler: async (params) => {
-        try {
-          const p = params as Record<string, unknown>;
-          const resolved: Record<string, unknown> = { ...p };
-          if (p.limit !== undefined) resolved.limit = clampPageSize(p.limit, 25, 100);
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const result = await client.listTimeEntries(
-            resolved as Parameters<typeof client.listTimeEntries>[0]
+            params as Parameters<typeof client.listTimeEntries>[0]
           );
           return jsonResult({ time_entries: result.time_entries, total_count: result.total_count });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: createTimeEntryTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const result = await client.createTimeEntry(
             resolved as Parameters<typeof client.createTimeEntry>[0]
           );
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: updateTimeEntryTool,
       handler: async (params) => {
         const { time_entry_id } = params as { time_entry_id: number };
-        try {
+        return withRedmineErrors({ time_entry_id }, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           await client.updateTimeEntry(
             time_entry_id,
             resolved as Parameters<typeof client.updateTimeEntry>[1]
           );
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error, `time_entry_id=${time_entry_id}`));
-        }
+        });
       },
     },
   ];

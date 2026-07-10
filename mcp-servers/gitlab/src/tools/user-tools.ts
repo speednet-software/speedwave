@@ -11,16 +11,17 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const getCurrentUserTool: Tool = {
-  name: 'getCurrentUser',
+  name: TOOL_NAMES.GET_CURRENT_USER,
   description:
     "Get the currently authenticated GitLab user (the configured token owner). Resolves 'me'/'my' for other tools' identity-scoped filters.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['gitlab', 'user', 'me', 'myself', 'current', 'whoami', 'identity'],
   example: 'const me = await gitlab.getCurrentUser()',
@@ -50,7 +51,7 @@ const getCurrentUserTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Builds the GitLab user tool definitions.
  * @param client - GitLab client instance
  */
 export function createUserTools(client: GitLabClient | null): ToolDefinition[] {
@@ -59,7 +60,7 @@ export function createUserTools(client: GitLabClient | null): ToolDefinition[] {
       tool: getCurrentUserTool,
       handler: withValidation(client, async (c) => {
         const result = await c.getCurrentUser();
-        return jsonResult(result);
+        return jsonResult({ success: true, ...result });
       }),
     },
   ];

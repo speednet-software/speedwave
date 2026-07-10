@@ -12,7 +12,10 @@ const stub = {
   getSprint: vi.fn(),
   moveIssuesToSprint: vi.fn(),
 };
-vi.mock('../domains/jira-agile.js', () => ({ createJiraAgileClient: () => stub }));
+vi.mock('../domains/jira-agile.js', () => ({
+  createJiraAgileClient: () => stub,
+  MOVE_ISSUES_MAX: 50,
+}));
 
 import { META_KEYS } from '@speedwave/mcp-shared';
 import { createJiraAgileTools } from './jira-agile-tools.js';

@@ -14,6 +14,9 @@ import {
 } from '../scope.js';
 import type { JiraBoard, JiraBoardConfiguration, JiraSprint } from '../types.js';
 
+/** Agile API hard cap on issues per `moveIssuesToSprint` call (SSOT). */
+export const MOVE_ISSUES_MAX = 50;
+
 /** Client for Jira Agile operations. */
 export interface JiraAgileClient {
   /** List Agile boards (filtered by the configured project allowlist, if any). */
@@ -33,7 +36,7 @@ export interface JiraAgileClient {
   ): Promise<JiraSprint[]>;
   /** Get a single sprint by ID. */
   getSprint(sprintId: number): Promise<JiraSprint>;
-  /** Move issues into a sprint. Callers must enforce the Agile API's 50-per-call cap. */
+  /** Move issues into a sprint. Rejects a batch over {@link MOVE_ISSUES_MAX}. */
   moveIssuesToSprint(sprintId: number, issueKeysOrIds: string[]): Promise<void>;
 }
 
@@ -123,9 +126,14 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
         sprintId,
         typeof sprint.originBoardId === 'number' ? sprint.originBoardId : undefined
       );
-      // Caller (tool handler) rejects batches over 50; each issue may belong
-      // to a different project than the sprint's board, so check all of them.
+      // Each issue may belong to a different project than the sprint's board,
+      // so every issue is scope-checked before the call-size cap is applied.
       for (const ref of issueKeysOrIds) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
+      if (issueKeysOrIds.length > MOVE_ISSUES_MAX) {
+        throw new Error(
+          `Cannot move ${issueKeysOrIds.length} issues in one call; the Agile API accepts at most ${MOVE_ISSUES_MAX} per call.`
+        );
+      }
       await client.post<void>(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
         issues: issueKeysOrIds,
       });

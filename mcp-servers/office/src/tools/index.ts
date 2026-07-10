@@ -19,7 +19,7 @@ import {
   WRITE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
-import { DEFAULT_MAX_CHARS } from '../config.js';
+import { DEFAULT_MAX_CHARS, MAX_PDF_PAGES } from '../config.js';
 import { readDocumentToMarkdown, readPdfText } from '../engine/extract.js';
 import {
   markdownToPdf,
@@ -273,10 +273,10 @@ const pdfMetadataTool: Tool = {
         type: 'object',
         properties: {
           pages: { type: 'number' },
-          title: { type: 'string' },
-          author: { type: 'string' },
-          producer: { type: 'string' },
-          creator: { type: 'string' },
+          title: { type: ['string', 'null'] },
+          author: { type: ['string', 'null'] },
+          producer: { type: ['string', 'null'] },
+          creator: { type: ['string', 'null'] },
           encrypted: { type: 'boolean' },
         },
         required: ['pages', 'encrypted'],
@@ -694,6 +694,7 @@ const officeToPdfTool: Tool = {
   name: 'officeToPdf',
   description:
     'Convert an EXISTING Office/ODF file (.docx, .xlsx, .pptx, .odt, .ods, .odp, .rtf) to PDF — a true LibreOffice render. ' +
+    'Fails with a teaching error if the input is password-protected or encrypted. Verify it opens without a password first. ' +
     'For Markdown→PDF use `markdownToPdf`; for HTML→PDF use `htmlToPdf`. For other target formats use `convertOffice`.',
   annotations: WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
@@ -715,7 +716,8 @@ const convertOfficeTool: Tool = {
   description:
     'Convert an Office/ODF file to another supported format via LibreOffice. Supported pairs: ' +
     '.docx→{pdf,odt,txt,html,rtf}; .odt→{pdf,docx}; .pptx→{pdf,odp}; .odp→{pdf,pptx}; .xlsx→{pdf,ods,csv}; .ods→{pdf,xlsx,csv}. ' +
-    'Anything outside this matrix is rejected. For .docx/.xlsx/.pptx → PDF specifically, `officeToPdf` is the simpler call.',
+    'Anything outside this matrix is rejected. Fails with a teaching error if the input is password-protected or encrypted. Verify it opens without a password first. ' +
+    'For .docx/.xlsx/.pptx → PDF specifically, `officeToPdf` is the simpler call.',
   annotations: WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
   example: 'await office.convertOffice({ path: "/workspace/report.xlsx", target: "csv" })',
@@ -777,7 +779,7 @@ const splitPdfTool: Tool = {
   name: 'splitPdf',
   description:
     'Split a PDF into one output file per page range. `ranges` is a list of [start, end] (1-indexed, inclusive), e.g. [[1,3],[5,5]]. ' +
-    "Accepts at most 200 ranges per call; each range end must be ≤2000 (the worker's page-count cap). Each part is named `<base>-partN.pdf`. To merge PDFs use `mergePdf`.",
+    `Accepts at most 200 ranges per call; each range end must be ≤${MAX_PDF_PAGES} (the worker's page-count cap). Each part is named \`<base>-partN.pdf\`. To merge PDFs use \`mergePdf\`.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.splitPdf({ path: "/workspace/big.pdf", ranges: [[1,3],[4,10]] })',
@@ -788,8 +790,7 @@ const splitPdfTool: Tool = {
       path: { type: 'string', description: 'Path to the .pdf, under /workspace.' },
       ranges: {
         type: 'array',
-        description:
-          'At most 200 [start, end] 1-indexed inclusive page ranges; each end must be ≤2000.',
+        description: `At most 200 [start, end] 1-indexed inclusive page ranges; each end must be ≤${MAX_PDF_PAGES}.`,
       },
       outName: {
         type: 'string',
@@ -873,15 +874,11 @@ const fillPdfFormTool: Tool = {
   outputSchema: {
     type: 'object',
     properties: {
-      path: { type: 'string' },
-      bytes: { type: 'number' },
-      format: { type: 'string' },
-      preview: { type: 'string' },
-      truncated: { type: 'boolean' },
+      ...fileResultSchema.properties,
       flattened: { type: 'boolean' },
       fieldWarnings: { type: 'array', items: { type: 'string' } },
     },
-    required: ['path', 'bytes', 'format', 'flattened'],
+    required: [...fileResultSchema.required, 'flattened'],
   },
 };
 

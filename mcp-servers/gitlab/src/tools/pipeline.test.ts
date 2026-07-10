@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createPipelineTools } from './pipeline-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -251,8 +252,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 9999 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('handles permission errors', async () => {
@@ -263,8 +263,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 123 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('accepts a "#"-prefixed pipeline_id', async () => {
@@ -301,7 +300,7 @@ describe('pipeline-tools', () => {
       const result = await handler!({ project_id: 'test-project', job_id: 456 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify({ log: mockLog }, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, log: mockLog }, null, 2) }],
       });
       expect(mockClient.getJobLog).toHaveBeenCalledWith('test-project', 456, undefined);
     });
@@ -339,7 +338,7 @@ describe('pipeline-tools', () => {
       const result = await handler!({ project_id: 'test-project', job_id: 456 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify({ log: '' }, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, log: '' }, null, 2) }],
       });
     });
 
@@ -372,8 +371,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', job_id: 9999 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('handles log retrieval errors', async () => {
@@ -440,8 +438,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 9999 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('handles permission errors', async () => {
@@ -452,8 +449,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', pipeline_id: 123 });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('handles already running pipeline', async () => {
@@ -587,8 +583,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'nonexistent' });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
 
     it('handles permission errors', async () => {
@@ -599,8 +594,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'main' });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Permission denied');
+      expectPermissionTeachingError(result);
     });
 
     it('handles pipeline configuration errors', async () => {
@@ -611,8 +605,7 @@ describe('pipeline-tools', () => {
 
       const result = await handler!({ project_id: 'test-project', ref: 'main' });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Resource not found in GitLab.');
+      expectNotFoundTeachingError(result);
     });
   });
 

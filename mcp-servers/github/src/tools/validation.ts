@@ -4,21 +4,21 @@ import {
   withClientValidation,
   ts,
   teachingErrorResult,
+  normalizeNumericIdParams,
+  type Tool,
+  type ToolDefinition,
   type ToolsCallResult,
   type jsonResult,
   type textResult,
 } from '@speedwave/mcp-shared';
 import { GitHubClient, isExpectedError } from '../client.js';
 
-/** Param names that carry a numeric GitHub ID but should tolerate a leading '#' or a string form. */
-const NUMERIC_ID_PARAMS = ['number', 'run_id', 'artifact_id'] as const;
-
 /**
  * Splits a combined `owner/repo` string passed in `repo` when `owner` is missing,
  * so a `full_name` value round-tripped from `listRepos`/`getRepo` still resolves.
- * Teaches the caller instead of silently passing through when the split is malformed
- * (e.g. a leading/trailing slash yields an empty owner or repo segment).
- * @param params - Raw params object (mutated copy is returned; input is untouched)
+ * A value with empty segments or more than one slash (an impossible GitHub repo name)
+ * is taught, not silently forwarded.
+ * @param params - Raw params object (a copy is returned; input is untouched)
  */
 function normalizeOwnerRepo(
   params: Record<string, unknown>
@@ -26,16 +26,17 @@ function normalizeOwnerRepo(
   if (params.owner || typeof params.repo !== 'string' || !params.repo.includes('/')) {
     return { ok: true, value: params };
   }
-  const [owner, ...rest] = params.repo.split('/');
-  const repo = rest.join('/');
-  if (!owner || !repo) {
+  const slash = params.repo.indexOf('/');
+  const owner = params.repo.slice(0, slash);
+  const repo = params.repo.slice(slash + 1);
+  if (!owner || !repo || repo.includes('/')) {
     return {
       ok: false,
       error: teachingErrorResult({
         paramName: 'repo',
         received: params.repo,
         nextStep:
-          "Pass repo as either a bare repository name (with a separate 'owner' param) or a full 'owner/repo' string with non-empty segments on both sides of the slash.",
+          "Pass repo as either a bare repository name (with a separate 'owner' param) or a single 'owner/repo' string with exactly one slash and non-empty segments on both sides.",
       }),
     };
   }
@@ -43,37 +44,40 @@ function normalizeOwnerRepo(
 }
 
 /**
- * Strips a leading '#' and coerces to a number for params that identify a PR/issue/run/artifact
- * by number. Teaches the caller instead of silently passing through a non-numeric value, so a
- * malformed id fails fast with guidance rather than as an opaque error from the GitHub API.
- * @param params - Raw params object (mutated copy is returned; input is untouched)
+ * Numeric-id param names for a tool: top-level integer/number inputs, excluding the
+ * pagination `limit` (which is clamped, not rejected, when zero or out of range).
+ * @param tool - The tool whose inputSchema drives the derivation
  */
-function normalizeNumericIds(
-  params: Record<string, unknown>
-): { ok: true; value: Record<string, unknown> } | { ok: false; error: ToolsCallResult } {
-  let result = params;
-  for (const key of NUMERIC_ID_PARAMS) {
-    const value = result[key];
-    if (typeof value !== 'string') continue;
-    const stripped = value.replace(/^#/, '').trim();
-    const n = stripped === '' ? NaN : Number(stripped);
-    if (!Number.isFinite(n)) {
-      return {
-        ok: false,
-        error: teachingErrorResult({
-          paramName: key,
-          received: value,
-          nextStep: `Pass ${key} as a number or a numeric string, optionally prefixed with '#' (e.g. 42 or "#42").`,
-        }),
-      };
-    }
-    result = { ...result, [key]: n };
-  }
-  return { ok: true, value: result };
+function numericIdParamNames(tool: Tool): string[] {
+  const props = tool.inputSchema.properties as Record<string, { type?: unknown }>;
+  return Object.entries(props)
+    .filter(([name, s]) => name !== 'limit' && (s?.type === 'number' || s?.type === 'integer'))
+    .map(([name]) => name);
 }
 
 /**
- * Wrap a tool handler with client-presence, param forgiveness, and error handling.
+ * Wraps a tool definition's handler with numeric-id forgiveness derived from its own
+ * inputSchema: a `#`-prefixed or string form of each numeric-id param is coerced, and an
+ * exotic value (`"4.5"`, `"-3"`, `"0x2A"`) is taught rather than passed to the API.
+ * @param def - The tool definition to wrap
+ */
+export function withNumericForgiveness(def: ToolDefinition): ToolDefinition {
+  const names = numericIdParamNames(def.tool);
+  if (names.length === 0) return def;
+  const handler = def.handler;
+  return {
+    tool: def.tool,
+    handler: (params, context) => {
+      if (!params || typeof params !== 'object') return handler(params, context);
+      const normalized = normalizeNumericIdParams(params, names, { prefixes: ['#'] });
+      if (!normalized.ok) return Promise.resolve(teachingErrorResult(normalized.error));
+      return handler(normalized.value, context);
+    },
+  };
+}
+
+/**
+ * Wrap a tool handler with client-presence, owner/repo forgiveness, and error handling.
  * @param client - GitHub client instance (null when the service is not configured)
  * @param handler - Tool handler function
  */
@@ -93,9 +97,7 @@ export function withValidation<T>(
       }
       const ownerRepo = normalizeOwnerRepo(raw);
       if (!ownerRepo.ok) return Promise.resolve(ownerRepo.error);
-      const numericIds = normalizeNumericIds(ownerRepo.value);
-      if (!numericIds.ok) return Promise.resolve(numericIds.error);
-      return handler(c, numericIds.value as T);
+      return handler(c, ownerRepo.value as T);
     },
     {
       serviceName: 'GitHub',

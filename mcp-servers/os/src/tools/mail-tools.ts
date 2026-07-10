@@ -51,7 +51,7 @@ interface GetEmailParams {
 interface SearchEmailsParams {
   /** Search query string. */
   query: string;
-  /** Limit search to specific mailbox. */
+  /** Mailbox/folder name to search (default: Inbox). */
   mailbox?: string;
   /** Max results to return. */
   limit?: number;
@@ -296,7 +296,7 @@ const getEmailTool: Tool = {
 const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search emails by query string. Searches the Inbox only (subject and body content); the mailbox parameter is not honored. If limit is omitted, defaults to 10.',
+    'Search emails by subject or body content. Scopes to the named mailbox/folder, or the Inbox when mailbox is omitted. If limit is omitted, defaults to 10.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -308,10 +308,11 @@ const searchEmailsTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Search query (searches subject, body, sender)' },
+      query: { type: 'string', description: 'Search query (matches subject and body)' },
       mailbox: {
         type: 'string',
-        description: 'Not currently supported — searchEmails always searches the Inbox only',
+        description:
+          "Mailbox/folder name to search (default: Inbox). Use the name field from listMailboxes' output.",
       },
       limit: { type: 'number', description: 'Max results (default 10)' },
       client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
@@ -343,8 +344,8 @@ const searchEmailsTool: Tool = {
       input: { query: 'quarterly report' },
     },
     {
-      description: 'Full: search with a result limit',
-      input: { query: 'invoice', limit: 10 },
+      description: 'Full: search a named mailbox with a result limit',
+      input: { query: 'invoice', mailbox: 'Archive', limit: 10 },
     },
   ],
 };

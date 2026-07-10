@@ -266,16 +266,37 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenNoFolderPassed() {
-        // Same -1728 wording but no folder was passed (an id-scoped lookup like
-        // getNote/updateNote/deleteNote) must yield the note-not-found teaching error.
+    func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenNoteIdPassed() {
+        // An id-scoped lookup (getNote/updateNote/deleteNote) whose -1728 names the id
+        // must yield the note-not-found teaching error.
         let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"stale-id\\\". (-1728)\""
-        XCTAssertThrowsError(try runNoteScript(script, timeout: 5)) { error in
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, noteId: "stale-id")) { error in
             guard case CLIError.notFound(let msg) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
             XCTAssertTrue(msg.contains("listNotes/searchNotes"))
             XCTAssertFalse(msg.contains("listNoteFolders"), "stale note id must not surface the folder message")
+        }
+    }
+
+    func testRunNoteScriptPropagatesUnscopedNotFoundMiss() {
+        // listFolders / listNotes(nil) / searchNotes(nil) pass neither folder nor noteId;
+        // a -1728 there is NOT a stale-id lookup and must surface its real message.
+        let script = "error \"Notes got an error: Can\u{2019}t get count of notes of folder 1. (-1728)\""
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5)) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testRunNoteScriptPropagatesFolderMissWhenNameNotNamed() {
+        // A -1728 that does not name the scoped folder is an unrelated miss and propagates.
+        let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"x\\\". (-1728)\""
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Work")) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
         }
     }
 

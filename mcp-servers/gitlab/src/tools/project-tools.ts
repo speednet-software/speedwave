@@ -35,7 +35,7 @@ const listProjectIdsTool: Tool = {
         description:
           "Only projects owned by the authenticated user (answers 'my projects'). No separate identity lookup needed.",
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: { type: 'number', description: 'Max results (default 20, max 100)' },
     },
   },
   outputSchema: {

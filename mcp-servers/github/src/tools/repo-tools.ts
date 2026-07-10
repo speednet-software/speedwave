@@ -11,6 +11,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listReposTool: Tool = {
   name: 'listRepos',
@@ -20,7 +21,7 @@ const listReposTool: Tool = {
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
   },
   keywords: ['github', 'repos', 'repositories', 'list', 'search'],
   example:
@@ -33,7 +34,10 @@ const listReposTool: Tool = {
         type: 'string',
         description: 'owner | collaborator | organization_member; comma-separated',
       },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
   },
   outputSchema: {
@@ -69,7 +73,7 @@ const listReposTool: Tool = {
 };
 
 const getRepoTool: Tool = {
-  name: 'getRepo',
+  name: TOOL_NAMES.GET_REPO,
   description: 'Get detailed information about a specific repository.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
@@ -128,7 +132,10 @@ const searchCodeTool: Tool = {
         type: 'string',
         description: 'Repository name to scope the search to (requires owner)',
       },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['query'],
   },
