@@ -255,6 +255,9 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
+      # Read-only so addAttachment can stream a file from the project workspace
+      # without shuttling base64 through the hub (parity with slack/sharepoint).
+      - ${PROJECT_DIR}:/workspace:ro
     environment:
       - PORT=${PORT_WORKER}
     networks:

@@ -15,6 +15,7 @@ function stubClient(projectKeys: string[] = []) {
     post: vi.fn(),
     put: vi.fn(),
     del: vi.fn(),
+    uploadAttachment: vi.fn(),
     jiraProjectKeys: projectKeys,
     confluenceSpaceKeys: [] as string[],
   } as unknown as AtlassianClient & {
@@ -22,6 +23,7 @@ function stubClient(projectKeys: string[] = []) {
     post: ReturnType<typeof vi.fn>;
     put: ReturnType<typeof vi.fn>;
     del: ReturnType<typeof vi.fn>;
+    uploadAttachment: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -403,5 +405,104 @@ describe('normalisation edge cases', () => {
     client.post.mockResolvedValueOnce({ issues: [{ key: 'NOHYPHEN' }] });
     const c = createJiraIssuesClient(client);
     expect((await c.search({ jql: 'x' })).issues[0].project_key).toBe('NOHYPHEN');
+  });
+});
+
+describe('addAttachment', () => {
+  const rawAttachment = {
+    id: '20001',
+    filename: 'bug.png',
+    size: 1234,
+    mimeType: 'image/png',
+    created: '2026-07-02T00:00:00.000+0000',
+    content: 'https://acme.atlassian.net/secure/attachment/20001/bug.png',
+    author: { accountId: 'u1', displayName: 'Alice', active: true },
+  };
+
+  it('uploads via client.uploadAttachment and normalises the first returned attachment', async () => {
+    client.uploadAttachment.mockResolvedValueOnce([rawAttachment]);
+    const c = createJiraIssuesClient(client);
+    const data = Buffer.from('png-bytes');
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'bug.png',
+      data,
+      contentType: 'image/png',
+    });
+    expect(client.uploadAttachment).toHaveBeenCalledWith('PROJ-1', 'bug.png', data, 'image/png');
+    expect(res).toEqual({
+      id: '20001',
+      filename: 'bug.png',
+      size: 1234,
+      mime_type: 'image/png',
+      created: '2026-07-02T00:00:00.000+0000',
+      url: 'https://acme.atlassian.net/secure/attachment/20001/bug.png',
+      author: { account_id: 'u1', display_name: 'Alice', email_address: undefined, active: true },
+    });
+  });
+
+  it('accepts a non-array response (defensive) and normalises it', async () => {
+    client.uploadAttachment.mockResolvedValueOnce(rawAttachment);
+    const c = createJiraIssuesClient(client);
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'bug.png',
+      data: Buffer.from('x'),
+      contentType: 'image/png',
+    });
+    expect(res.id).toBe('20001');
+  });
+
+  it('normalises an empty attachment payload to safe defaults', async () => {
+    client.uploadAttachment.mockResolvedValueOnce([]);
+    const c = createJiraIssuesClient(client);
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'x',
+      data: Buffer.from('x'),
+      contentType: 'application/octet-stream',
+    });
+    expect(res).toEqual({
+      id: '',
+      filename: '',
+      size: undefined,
+      mime_type: undefined,
+      created: undefined,
+      url: undefined,
+      author: null,
+    });
+  });
+
+  it('enforces the project allowlist and does not upload for a disallowed issue key', async () => {
+    const restricted = stubClient(['ALLOWED']);
+    const c = createJiraIssuesClient(restricted);
+    await expect(
+      c.addAttachment('OTHER-9', {
+        filename: 'x',
+        data: Buffer.from('x'),
+        contentType: 'image/png',
+      })
+    ).rejects.toBeInstanceOf(ScopeError);
+    expect(restricted.uploadAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteAttachment', () => {
+  it('DELETEs the attachment endpoint by ID', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.deleteAttachment('10475');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/10475');
+  });
+
+  it('URL-encodes the attachment ID', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.deleteAttachment('a/b');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/a%2Fb');
+  });
+
+  it('fails closed (ScopeError) when a project allowlist is configured and does not call the API', async () => {
+    const restricted = stubClient(['ALLOWED']);
+    const c = createJiraIssuesClient(restricted);
+    await expect(c.deleteAttachment('10475')).rejects.toBeInstanceOf(ScopeError);
+    expect(restricted.del).not.toHaveBeenCalled();
   });
 });

@@ -15,6 +15,7 @@
  * @module mcp-atlassian/client
  */
 
+import { randomUUID } from 'node:crypto';
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import {
   ts,
@@ -37,6 +38,13 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 /** Cap on any single backoff wait, ms (also caps a `Retry-After` we honour). */
 const MAX_DELAY_MS = 20_000;
+
+/**
+ * A `type/subtype` MIME with optional parameters, restricted to token chars so
+ * no CR/LF/quote/backslash can break out of the multipart part header.
+ */
+const MIME_TYPE_RE =
+  /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(?:[ \t]*;[ \t]*[A-Za-z0-9!#$&^_.+-]+=(?:"[^"\r\n\\]*"|[A-Za-z0-9!#$&^_.+-]+))*$/;
 
 /** Per-request options layered on top of `AxiosRequestConfig`. */
 interface RequestOptions {
@@ -221,6 +229,52 @@ export class AtlassianClient {
    */
   del<T>(url: string, params?: Record<string, unknown>): Promise<T> {
     return this.request<T>({ method: 'DELETE', url, params });
+  }
+
+  /**
+   * Upload a file as a Jira issue attachment (`POST .../attachments`, multipart).
+   * Builds the `multipart/form-data` body by hand (no `form-data` dependency) and
+   * sends the required `X-Atlassian-Token: no-check` header. Not retried (write).
+   * @template T - Expected response body type (Jira returns an array).
+   * @param issueIdOrKey - Target issue key or numeric ID.
+   * @param filename - Attachment file name (CR/LF/quote/backslash are stripped).
+   * @param data - Raw file bytes.
+   * @param contentType - MIME type for the file part; rejected unless it is a
+   *   well-formed `type/subtype` so it cannot break out of the header line.
+   * @returns The response body (array of created attachment metadata).
+   */
+  uploadAttachment<T>(
+    issueIdOrKey: string,
+    filename: string,
+    data: Buffer,
+    contentType: string
+  ): Promise<T> {
+    if (!MIME_TYPE_RE.test(contentType)) {
+      return Promise.reject(new Error(`Invalid contentType: ${JSON.stringify(contentType)}`));
+    }
+    const boundary = `----speedwave${randomUUID().replace(/-/g, '')}`;
+    // Strip characters that would break the Content-Disposition header line.
+    const safeName = String(filename).replace(/[\r\n"\\]/g, '_');
+    const CRLF = '\r\n';
+    const preamble = Buffer.from(
+      `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="file"; filename="${safeName}"${CRLF}` +
+        `Content-Type: ${contentType}${CRLF}${CRLF}`
+    );
+    const epilogue = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
+    const body = Buffer.concat([preamble, data, epilogue]);
+    return this.request<T>(
+      {
+        method: 'POST',
+        url: `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/attachments`,
+        data: body,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'X-Atlassian-Token': 'no-check',
+        },
+      },
+      { retryable: false }
+    );
   }
 
   //═══════════════════════════════════════════════════════════════════════════

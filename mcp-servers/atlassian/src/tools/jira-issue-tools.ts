@@ -1,6 +1,6 @@
 /**
  * Jira issue tools — search (enhanced JQL), get/create/update, transitions,
- * assignment, and the current account. 8 tools.
+ * assignment, the current account, and attachment upload/delete. 10 tools.
  * @module mcp-atlassian/tools/jira-issue-tools
  */
 
@@ -12,11 +12,42 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
+
+/** Root of the read-only project mount inside the worker (overridable for tests). */
+function workspaceRoot(): string {
+  return process.env.WORKSPACE_DIR || '/workspace';
+}
+
+/**
+ * Read a file from the read-only workspace mount, rejecting any path that escapes
+ * the workspace (traversal or symlink) so a tokened worker can't read `/tokens` etc.
+ * @param filePath - Path relative to (or inside) the workspace root.
+ * @returns The file bytes and its basename.
+ */
+async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; name: string }> {
+  const root = await fsp.realpath(workspaceRoot());
+  const candidate = path.resolve(root, filePath);
+  let real: string;
+  try {
+    real = await fsp.realpath(candidate);
+  } catch {
+    throw new Error(`File not found under workspace: ${filePath}`);
+  }
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new Error('filePath must resolve to a location inside the workspace');
+  }
+  const stat = await fsp.stat(real);
+  if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
+  return { buffer: await fsp.readFile(real), name: path.basename(real) };
+}
 
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
@@ -306,10 +337,83 @@ const getMyselfTool: Tool = {
   inputExamples: [{ description: 'Who am I', input: {} }],
 };
 
+const addAttachmentTool: Tool = {
+  name: 'addAttachment',
+  description:
+    "Attach a file to a Jira issue. The worker reads `filePath` (a path under /workspace) from disk and streams it — no size limit beyond Jira's.",
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
+  keywords: ['jira', 'attachment', 'attach', 'upload', 'file', 'screenshot', 'image', 'załącznik'],
+  example:
+    'await atlassian.addAttachment({ issueIdOrKey: "PROJ-123", filePath: "/workspace/bug.png" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      issueIdOrKey: { type: 'string', description: 'Issue key (e.g. PROJ-123) or numeric ID' },
+      filePath: {
+        type: 'string',
+        description: 'Path under /workspace to read and stream (e.g. /workspace/bug.png)',
+      },
+      filename: {
+        type: 'string',
+        description: 'Attachment file name; defaults to the basename of filePath',
+      },
+      contentType: { type: 'string', description: 'MIME type (default application/octet-stream)' },
+    },
+    required: ['issueIdOrKey', 'filePath'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      attachment: { type: 'object' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'From a workspace file',
+      input: { issueIdOrKey: 'PROJ-123', filePath: '/workspace/bug.png' },
+    },
+    {
+      description: 'With an explicit filename and MIME type',
+      input: {
+        issueIdOrKey: 'PROJ-123',
+        filePath: '/workspace/.speedwave/shot.png',
+        filename: 'bug.png',
+        contentType: 'image/png',
+      },
+    },
+  ],
+};
+
+const deleteAttachmentTool: Tool = {
+  name: 'deleteAttachment',
+  description: 'Delete a Jira attachment by its attachment ID (irreversible).',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
+  keywords: ['jira', 'attachment', 'delete', 'remove', 'załącznik', 'usuń'],
+  example: 'await atlassian.deleteAttachment({ attachmentId: "10475" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      attachmentId: { type: 'string', description: 'Attachment ID (e.g. 10475)' },
+    },
+    required: ['attachmentId'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    required: ['success'],
+  },
+  inputExamples: [{ description: 'Delete an attachment', input: { attachmentId: '10475' } }],
+};
+
 /**
  * Build the Jira issue tool definitions.
  * @param client - The Atlassian client (`null` when the service is not configured).
- * @returns Tool definitions for issue search/CRUD/transitions/assignment.
+ * @returns Tool definitions for issue search/CRUD/transitions/assignment/attachments.
  */
 export function createJiraIssueTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [
@@ -321,6 +425,8 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     transitionIssueTool,
     assignIssueTool,
     getMyselfTool,
+    addAttachmentTool,
+    deleteAttachmentTool,
   ];
   if (!client) {
     const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
@@ -428,6 +534,38 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     {
       tool: getMyselfTool,
       handler: withValidation(client, async () => jsonResult({ user: await issues.getMyself() })),
+    },
+    {
+      tool: addAttachmentTool,
+      handler: withValidation(client, async (_c, params) => {
+        const { issueIdOrKey, filename, filePath, contentType } = params as {
+          issueIdOrKey: string;
+          filename?: string;
+          filePath?: string;
+          contentType?: string;
+        };
+        if (!issueIdOrKey) throw new Error('issueIdOrKey is required');
+        if (!filePath) throw new Error('filePath is required (a path under /workspace)');
+
+        // Worker reads the file directly from the read-only workspace mount and streams it.
+        const file = await readWorkspaceFile(filePath);
+        return jsonResult({
+          attachment: await issues.addAttachment(issueIdOrKey, {
+            filename: filename || file.name,
+            data: file.buffer,
+            contentType: contentType || 'application/octet-stream',
+          }),
+        });
+      }),
+    },
+    {
+      tool: deleteAttachmentTool,
+      handler: withValidation(client, async (_c, params) => {
+        const { attachmentId } = params as { attachmentId: string };
+        if (!attachmentId) throw new Error('attachmentId is required');
+        await issues.deleteAttachment(attachmentId);
+        return jsonResult({ deleted: true });
+      }),
     },
   ];
 }
