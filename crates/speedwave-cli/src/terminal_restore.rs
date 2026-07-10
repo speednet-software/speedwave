@@ -46,12 +46,9 @@ fn stdout_is_vt_terminal() -> bool {
 #[cfg(windows)]
 fn stdout_is_vt_terminal() -> bool {
     use std::io::IsTerminal;
-    // VT-interpreting hosts advertise themselves (Windows Terminal, VS Code,
-    // MSYS); legacy conhost sets none of these and would print raw escapes.
-    std::io::stdout().is_terminal()
-        && (std::env::var_os("WT_SESSION").is_some()
-            || std::env::var_os("TERM_PROGRAM").is_some()
-            || std::env::var_os("TERM").is_some())
+    // Capability probe: enables VT interpretation on the console (no-op when
+    // already on); a console that cannot (pre-1607 conhost) would print raw escapes.
+    std::io::stdout().is_terminal() && anstyle_query::windows::enable_ansi_colors().unwrap_or(false)
 }
 
 #[cfg(test)]

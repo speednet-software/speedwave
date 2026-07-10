@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+mod terminal_restore;
 
 /// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
 /// Split out from [`emit`] so the redaction is unit-testable without
@@ -1105,7 +1106,7 @@ fn main() -> anyhow::Result<()> {
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
         let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
-        speedwave_runtime::terminal_restore::sanitize_host_terminal();
+        terminal_restore::sanitize_host_terminal();
         std::process::exit(
             status
                 .code()
@@ -1121,7 +1122,7 @@ fn main() -> anyhow::Result<()> {
         .status()?;
     // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes
     // it enabled; the CLI is the last process on the PTY chain that can.
-    speedwave_runtime::terminal_restore::sanitize_host_terminal();
+    terminal_restore::sanitize_host_terminal();
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
@@ -1195,10 +1196,15 @@ mod tests {
         let exec = source
             .find(".container_exec(&container_name, &exec_cmd)")
             .expect("interactive exec must exist");
-        let window = &source[exec..exec + 300];
+        let sanitize = source[exec..]
+            .find("sanitize_host_terminal()")
+            .expect("interactive exec must sanitize the host terminal after status()");
+        let oom = source[exec..]
+            .find("is_oom_exit(&status)")
+            .expect("OOM check must exist after the interactive exec");
         assert!(
-            window.contains("sanitize_host_terminal()"),
-            "interactive exec must sanitize the host terminal after status()"
+            sanitize < oom,
+            "sanitize must run before the OOM message so it renders on a sane terminal"
         );
     }
 

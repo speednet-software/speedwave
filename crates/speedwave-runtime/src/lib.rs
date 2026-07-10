@@ -39,7 +39,6 @@ pub mod signing;
 pub mod slash;
 pub mod stream;
 pub mod telemetry_env;
-pub mod terminal_restore;
 /// Host-side meeting transcription (audio capture, Whisper, model catalogue) —
 /// gated behind the `audio-transcription` feature so the CLI (which never
 /// enables it) stays lean. See `docs/adr/ADR-056-*`.
