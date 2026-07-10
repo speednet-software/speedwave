@@ -29,13 +29,18 @@ pub fn any_cli_session_active(data_dir: &Path) -> bool {
     let Ok(file) = File::open(data_dir.join(crate::consts::CLI_SESSION_LOCK_FILE)) else {
         return false;
     };
-    match file.try_lock() {
-        // Exclusive lock acquired: no shared holders, released on close below.
+    probe_says_active(file.try_lock())
+}
+
+/// Maps the exclusive-probe outcome (`Ok` = no shared holders). Inconclusive
+/// fails toward active: a skipped VM stop is recoverable, a killed session is not.
+fn probe_says_active(probe: Result<(), std::fs::TryLockError>) -> bool {
+    match probe {
         Ok(()) => false,
         Err(std::fs::TryLockError::WouldBlock) => true,
         Err(std::fs::TryLockError::Error(e)) => {
-            log::warn!("CLI session probe failed ({e}); assuming no live session");
-            false
+            log::warn!("CLI session probe inconclusive ({e}); assuming a live session");
+            true
         }
     }
 }
@@ -86,6 +91,17 @@ mod tests {
         let nested = tmp.path().join("fresh").join("data");
         let _guard = CliSessionGuard::acquire(&nested).unwrap();
         assert!(any_cli_session_active(&nested));
+    }
+
+    #[test]
+    fn inconclusive_probe_counts_as_active() {
+        // Wrongly skipping a VM stop is recoverable; powering the VM off under
+        // a live session is not — an inconclusive probe must fail toward active.
+        assert!(!probe_says_active(Ok(())));
+        assert!(probe_says_active(Err(std::fs::TryLockError::WouldBlock)));
+        assert!(probe_says_active(Err(std::fs::TryLockError::Error(
+            std::io::Error::other("io hiccup")
+        ))));
     }
 
     #[test]
