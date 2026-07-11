@@ -280,6 +280,29 @@ impl TranscriptStore {
     where
         F: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
     {
+        self.with_session_inner(id, true, mutate)
+    }
+
+    /// Like [`Self::with_session`], but never touches disk — for `#[serde(skip)]` fields (e.g.
+    /// `live_draft`) where a save would persist nothing. Seq still bumps in-memory and broadcasts.
+    fn with_session_no_save<F>(&self, id: Uuid, mutate: F) -> Result<(), StoreError>
+    where
+        F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
+    {
+        self.with_session_inner(id, false, |s, next_seq| vec![mutate(s, next_seq)])
+            .map(|_| ())
+    }
+
+    /// Shared lock-mutate-persist-emit body; `save` toggles the disk write.
+    fn with_session_inner<F>(
+        &self,
+        id: Uuid,
+        save: bool,
+        mutate: F,
+    ) -> Result<Vec<TranscriptEvent>, StoreError>
+    where
+        F: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
+    {
         // `activate` loads from disk on a cache miss, so mutators work on sessions persisted
         // by an earlier run (a cache-only lookup would return NotFound for them).
         let h = self.activate(id)?;
@@ -290,7 +313,9 @@ impl TranscriptStore {
             let next_seq = s.last_seq + 1;
             events = mutate(&mut s, next_seq);
             s.last_seq += events.len() as u64;
-            s.save(&dir)?;
+            if save {
+                s.save(&dir)?;
+            }
         }
         for event in &events {
             let _ = h.tx.send(event.clone());
@@ -333,10 +358,11 @@ impl TranscriptStore {
         Ok(events.iter().map(TranscriptEvent::seq).collect())
     }
 
-    /// Publishes the uncommitted live-decode tail (replace-only; `""` clears it).
+    /// Publishes the uncommitted live-decode tail (replace-only; `""` clears it). Called on every
+    /// ~5s decode cycle while the draft churns, so this never hits disk — see `with_session_no_save`.
     pub fn live_draft(&self, id: Uuid, text: String) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
+        self.with_session_no_save(id, |s, seq| {
             seq_out = seq;
             s.live_draft = text.clone();
             TranscriptEvent::LiveDraft { seq, text }
@@ -928,6 +954,9 @@ mod tests {
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         let mut sub = store.subscribe(id).unwrap();
+        let json_path = store.session_dir(id).join("transcript.json");
+        let before = std::fs::read_to_string(&json_path).unwrap();
+        let mtime_before = std::fs::metadata(&json_path).unwrap().modified().unwrap();
 
         store
             .live_draft(id, "not yet committed".to_string())
@@ -940,13 +969,40 @@ mod tests {
         }
         // Snapshot carries the draft for late subscribers…
         assert_eq!(store.get(id).unwrap().live_draft, "not yet committed");
-        // …but the durable transcript.json never does (ephemeral display state).
-        let json = std::fs::read_to_string(store.session_dir(id).join("transcript.json")).unwrap();
-        assert!(!json.contains("live_draft"));
-        assert!(!json.contains("not yet committed"));
+        // …but the durable transcript.json is untouched — no rewrite, no fsync.
+        let after = std::fs::read_to_string(&json_path).unwrap();
+        let mtime_after = std::fs::metadata(&json_path).unwrap().modified().unwrap();
+        assert_eq!(after, before, "live_draft must not rewrite transcript.json");
+        assert_eq!(
+            mtime_after, mtime_before,
+            "live_draft must not touch the file's mtime"
+        );
+        assert!(!after.contains("live_draft"));
+        assert!(!after.contains("not yet committed"));
         // A fresh store (app restart) reloads without any draft.
         let store2 = TranscriptStore::with_root(dir.path());
         assert_eq!(store2.get(id).unwrap().live_draft, "");
+    }
+
+    #[test]
+    fn live_draft_still_bumps_seq_monotonically_alongside_saved_mutators() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        let seq1 = store.append_segment(id, seg(0.0, 1.0, "a")).unwrap();
+        let seq2 = store.live_draft(id, "tail".to_string()).unwrap();
+        let seq3 = store.live_draft(id, "longer tail".to_string()).unwrap();
+        let seq4 = store.append_segment(id, seg(1.0, 2.0, "b")).unwrap();
+
+        assert_eq!(
+            [seq1, seq2, seq3, seq4],
+            [1, 2, 3, 4],
+            "seq stays dense and monotonic"
+        );
+        // The saved mutator after the drafts still persists the cumulative last_seq.
+        let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert_eq!(loaded.last_seq, 4);
     }
 
     #[test]

@@ -50,6 +50,17 @@ populate_all_packages() {
     [ "$(cat "$DEST/audio-capture-cli")" = "release-universal" ]
 }
 
+@test "on an equal-mtime tie the direct swift-build output wins over the universal build" {
+    populate_all_packages
+    write_artifact "$NATIVE_ROOT/audio-capture/.build/release/audio-capture-cli" \
+        "release-direct" 202605120000
+    write_artifact "$NATIVE_ROOT/audio-capture/.build/apple/Products/Release/audio-capture-cli" \
+        "release-universal" 202605120000
+    run env SPEEDWAVE_NATIVE_MACOS_DIR="$NATIVE_ROOT" bash "$SCRIPT" "$DEST"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DEST/audio-capture-cli")" = "release-direct" ]
+}
+
 @test "missing built artifact fails and names the binary" {
     populate_all_packages
     rm -r "$NATIVE_ROOT/notes"

@@ -161,6 +161,8 @@ impl TranscriptDriver {
                 Ok(())
             }
             Err(e) => {
+                // Retract a stale draft before flipping to Failed — nothing will flush it now.
+                let _ = self.store.live_draft(self.id, String::new());
                 let _ = self.store.set_status(
                     self.id,
                     TranscriptStatus::Failed {
@@ -273,6 +275,9 @@ impl TranscriptDriver {
                 self.last_committed_text = seg.text.clone();
                 batch.push(seg);
             } else {
+                let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
+                    continue;
+                };
                 if !draft.is_empty() {
                     draft.push(' ');
                 }
@@ -985,6 +990,85 @@ mod tests {
     }
 
     #[test]
+    fn draft_trims_the_committed_prefix_of_a_jittered_re_decode() {
+        // Decode 1 commits "ala ma" (published_until -> 4.0 s). Decode 2's still-unripe tail
+        // re-decodes "ma" (jittered, with word timestamps) — the draft must drop it, not repeat it.
+        use crate::transcription::transcriber::Word;
+        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let jittered_tail = Segment {
+            start: Duration::from_secs_f32(3.5),
+            end: Duration::from_secs_f32(6.0),
+            text: "ma kota i psa".to_string(),
+            words: vec![
+                Word {
+                    text: "ma".to_string(),
+                    start: Duration::from_secs_f32(3.5),
+                    end: Duration::from_secs_f32(3.8),
+                },
+                Word {
+                    text: "kota".to_string(),
+                    start: Duration::from_secs_f32(3.8),
+                    end: Duration::from_secs_f32(4.2),
+                },
+                Word {
+                    text: "i".to_string(),
+                    start: Duration::from_secs_f32(4.2),
+                    end: Duration::from_secs_f32(4.4),
+                },
+                Word {
+                    text: "psa".to_string(),
+                    start: Duration::from_secs_f32(4.4),
+                    end: Duration::from_secs_f32(6.0),
+                },
+            ],
+        };
+        let script = vec![
+            vec![seg_at(0.0, 4.0, "ala ma")],
+            vec![seg_at(0.0, 4.0, "ala ma"), jittered_tail],
+            // Decode 3 + flush run at a shifted window (window_start slides forward); an
+            // empty result keeps this test isolated to the decode-1/decode-2 interaction.
+            vec![],
+        ];
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let mut drafts = Vec::new();
+        let mut rx = sub.events;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::LiveDraft {
+                text, ..
+            } = ev
+            {
+                drafts.push(text);
+            }
+        }
+        // Decode 1's pre-commit draft may show "ala ma" (nothing committed yet);
+        // once decode 2 commits it, the jittered tail's "ma" is trimmed away.
+        assert_eq!(
+            drafts,
+            vec![
+                "ala ma".to_string(),
+                "kota i psa".to_string(),
+                String::new()
+            ],
+            "draft sequence mismatch"
+        );
+    }
+
+    #[test]
     fn stop_signal_winds_down_at_the_next_chunk_boundary() {
         let (_fixture_guard, fixture) = make_fixture_wav(30.0); // long fixture
         let store_dir = tempfile::tempdir().unwrap();
@@ -1027,6 +1111,10 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        // Seed a stale draft, as a real decode would leave one mid-recording.
+        store
+            .live_draft(id, "not yet committed".to_string())
+            .unwrap();
 
         let driver = TranscriptDriver::new(DriverConfig {
             id,
@@ -1045,6 +1133,11 @@ mod tests {
             matches!(snap.status, TranscriptStatus::Failed { .. }),
             "got {:?}",
             snap.status
+        );
+        // The stale draft was retracted — nothing left to display for a failed session.
+        assert_eq!(
+            snap.live_draft, "",
+            "stale draft must be cleared on failure"
         );
     }
 

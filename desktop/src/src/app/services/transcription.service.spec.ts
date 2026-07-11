@@ -203,6 +203,29 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.last_seq).toBe(3);
     });
 
+    it('resubscribing to the same in-progress recording preserves the live draft', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'live_draft',
+        seq: 1,
+        text: 'not yet committed',
+      });
+      expect(svc.liveDraft()).toBe('not yet committed');
+
+      // Simulate the record tab being remounted: re-subscribe to the *same* session.
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: 'transcript_event::sess-1',
+            snapshot: snapshot({ id: 'sess-1', last_seq: 1 }),
+          };
+        }
+        return undefined;
+      };
+      await svc.subscribeToTranscript('sess-1');
+      expect(svc.liveDraft()).toBe('not yet committed');
+    });
+
     it('subscribeToTranscript switches sessions freely once nothing is recording', async () => {
       await startWith('sess-1');
       await svc.stopRecording('sess-1');

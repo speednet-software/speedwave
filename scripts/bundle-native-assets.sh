@@ -12,14 +12,17 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 0
 fi
 
-# Both `swift build -c release` (.build/release) and the universal release
-# build (.build/apple/Products/Release) are legitimate producers — newest wins.
+# Both `.build/release` (swift build) and `.build/apple/Products/Release` (universal build)
+# are legitimate producers — newest wins; an equal-mtime tie deterministically prefers `release`.
 resolve_binary_path() {
   local pkg_dir="$1"
   local binary_name="$2"
+  local direct="$pkg_dir/.build/release/$binary_name"
   local newest="" candidate
   while IFS= read -r -d '' candidate; do
     if [[ -z "$newest" || "$candidate" -nt "$newest" ]]; then
+      newest="$candidate"
+    elif [[ "$candidate" == "$direct" && ! "$newest" -nt "$candidate" ]]; then
       newest="$candidate"
     fi
   done < <(find "$pkg_dir/.build" -type f \( -path "*/release/$binary_name" -o -path "*/Release/$binary_name" \) -print0 2>/dev/null)

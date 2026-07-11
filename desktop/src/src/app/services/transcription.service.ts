@@ -340,13 +340,16 @@ export class TranscriptionService {
   }
 
   /**
-   * Applies a freshly-received snapshot (resets lastSeq).
+   * Applies a freshly-received snapshot (resets lastSeq). Keeps the live draft when
+   * re-subscribing to the same in-progress recording — the snapshot never carries one.
    * @param snapshot - server-supplied current state.
    */
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
     this.captureWarningSignal.set(null); // warnings are per-session
-    this.liveDraftSignal.set(''); // drafts are per-session too
+    if (snapshot.id !== this.recordingSessionIdSignal()) {
+      this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
+    }
     this.activeSignal.set(snapshot);
   }
 
