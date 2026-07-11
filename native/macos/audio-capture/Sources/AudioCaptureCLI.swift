@@ -63,6 +63,14 @@ final class WriterQueue {
     ) {
         queue.async { [self] in
             let idx = Int(streamIndex)
+            // Rebuild on a format change — a stale converter mis-resamples when
+            // a device/rate switch happens mid-session (e.g. joining a call).
+            if let cached = converters[idx], cached.inputFormat != format {
+                logErr(
+                    "stream \(idx) input format changed (\(cached.inputFormat.sampleRate) Hz → \(format.sampleRate) Hz); rebuilding converter"
+                )
+                converters[idx] = nil
+            }
             guard let converter = converters[idx]
                 ?? AVAudioConverter(from: format, to: outFormat)
             else { return }
@@ -397,8 +405,18 @@ final class RecordSession {
     var ioProcId: AudioDeviceIOProcID?
     /// Optional mic engine; nil when --mic none.
     var micEngine: AVAudioEngine?
+    /// Debounce for mic restarts — config changes arrive in bursts.
+    var micRestartWork: DispatchWorkItem?
     /// Monotonic nanoseconds reference for `offset_ns`.
     let startMachAbs: UInt64 = mach_absolute_time()
+
+    /// Coalesces burst config-change notifications into one restart.
+    func scheduleMicRestart(_ body: @escaping () -> Void) {
+        micRestartWork?.cancel()
+        let work = DispatchWorkItem(block: body)
+        micRestartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
 
     /// Converts a mach absolute time delta to nanoseconds. Cached timebase.
     func offsetNs() -> UInt64 {
@@ -424,6 +442,8 @@ final class RecordSession {
             AudioHardwareDestroyProcessTap(tapId)
             tapId = 0
         }
+        // No observer/GCD cleanup: teardown can run from a signal handler
+        // (not async-signal-safe) and every call site exits right after.
         micEngine?.stop()
         micEngine = nil
     }
@@ -472,6 +492,7 @@ func runRecord(_ opts: RecordOptions) {
             session.teardown()
             exit(1)
         }
+        installMicConfigChangeObserver(session: session, selector: selector, streamIndex: 0)
         RunLoop.main.run()
         return
     }
@@ -502,6 +523,7 @@ func runRecord(_ opts: RecordOptions) {
         try startSystemTap(session: session, source: opts.source)
         if micGranted {
             try startMicEngine(session: session, selector: opts.mic, streamIndex: 1)
+            installMicConfigChangeObserver(session: session, selector: opts.mic, streamIndex: 1)
         }
     } catch {
         logErr("record start failed: \(error.localizedDescription)")
@@ -753,6 +775,40 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
     engine.prepare()
     try engine.start()
     session.micEngine = engine
+}
+
+/// Restarts the mic engine after the audio configuration changed (AVAudioEngine
+/// invalidates its graph when the default input device switches mid-session).
+@available(macOS 14.4, *)
+func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) {
+    guard activeSession === session else { return }
+    logErr("audio configuration changed — restarting the microphone capture")
+    if let engine = session.micEngine {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        session.micEngine = nil
+    }
+    do {
+        try startMicEngine(session: session, selector: selector, streamIndex: streamIndex)
+    } catch {
+        // The Rust side degrades a dead mic side gracefully and warns the user.
+        logErr("mic restart failed: \(error.localizedDescription) — continuing without the microphone")
+    }
+}
+
+/// Debounced mic restart on engine-configuration changes (device switch).
+/// Process-lifetime observer — the CLI records one session and exits.
+@available(macOS 14.4, *)
+func installMicConfigChangeObserver(
+    session: RecordSession, selector: MicSelector, streamIndex: UInt32
+) {
+    _ = NotificationCenter.default.addObserver(
+        forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
+    ) { _ in
+        session.scheduleMicRestart {
+            restartMicEngine(session: session, selector: selector, streamIndex: streamIndex)
+        }
+    }
 }
 
 /// Resolves a device UID string to its `AudioDeviceID`, or `nil` if no input

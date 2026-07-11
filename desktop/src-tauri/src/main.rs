@@ -39,6 +39,7 @@ mod paste_cmd;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
 // `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.
+mod mic_permission_cmd;
 #[cfg(target_os = "windows")]
 mod path_util;
 mod plugin_cmd;
@@ -707,6 +708,8 @@ fn main() {
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let transcript_forwarders: transcription_cmd::ForwardersHandle =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let transcript_downloads: transcription_cmd::DownloadsHandle =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project oauth
     // workers, auto-check handle.
@@ -824,6 +827,7 @@ fn main() {
         .manage(model_store.clone())
         .manage(transcript_drivers.clone())
         .manage(transcript_forwarders.clone())
+        .manage(transcript_downloads.clone())
         .manage(tray_state)
         .setup(move |app| {
             // Fixed at Trace — no user-facing toggle.
@@ -1279,7 +1283,10 @@ fn main() {
             // CloudStorage TCC
             system_settings_cmd::open_files_folders_pane,
             cloudstorage_cmd::detect_cloudstorage_path,
-            // Meeting-transcription TCC (ADR-056) — deep-links to the macOS Microphone / Audio panes.
+            // Meeting-transcription TCC (ADR-056) — in-process mic consent plus
+            // deep-links to the macOS Microphone / Audio panes.
+            mic_permission_cmd::request_microphone_permission,
+            mic_permission_cmd::microphone_permission_status,
             system_settings_cmd::open_microphone_pane,
             system_settings_cmd::open_audio_capture_pane,
         ])

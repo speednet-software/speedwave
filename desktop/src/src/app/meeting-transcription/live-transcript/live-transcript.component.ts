@@ -8,6 +8,7 @@ import {
   output,
   signal,
 } from '@angular/core';
+import { Router } from '@angular/router';
 
 import { TranscriptionService } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
@@ -30,7 +31,7 @@ interface TranscriptLine {
 /**
  * The live transcript view (right pane): renders the active session's segments
  * (the offline `final_segments` if the pass ran, else `live_segments`) as plain
- * timestamped lines, shows the finalize progress bar, and has a "Send to Claude"
+ * timestamped lines, shows the finalize progress bar, and has a "Send to chat"
  * button behind a confirm dialog (the markdown leaves the machine).
  */
 @Component({
@@ -72,14 +73,14 @@ interface TranscriptLine {
           <button
             type="button"
             class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
-            data-testid="send-to-claude-btn"
+            data-testid="send-to-chat-btn"
             [disabled]="sending()"
-            (click)="sendToClaude()"
+            (click)="sendToChat()"
           >
-            {{ sending() ? 'sending…' : 'Send to Claude' }}
+            {{ sending() ? 'sending…' : 'Send to chat' }}
           </button>
           <span class="mono ml-2 text-[10px] text-[var(--ink-mute)]">
-            sends the transcript text to your configured LLM provider
+            drops the transcript into the chat and opens it
           </span>
         </div>
       }
@@ -92,7 +93,7 @@ export class LiveTranscriptComponent {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
-  /** `true` while a "Send to Claude" call is in flight. */
+  /** `true` while a "Send to chat" call is in flight. */
   readonly sending = signal(false);
   /** Local error string. */
   readonly error = signal('');
@@ -122,19 +123,22 @@ export class LiveTranscriptComponent {
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
+  private readonly router = inject(Router);
 
-  /** Confirms, then sends the transcript markdown to the active chat. */
-  async sendToClaude(): Promise<void> {
+  /** Confirms, drops the transcript into the chat, then opens the chat tab. */
+  async sendToChat(): Promise<void> {
     const s = this.session();
     if (!s) return;
     const ok = window.confirm(
-      'This sends the transcript text to your configured LLM provider. Continue?'
+      'This drops the transcript text into the chat (sent to your configured LLM provider). Continue?'
     );
     if (!ok) return;
     this.sending.set(true);
     this.error.set('');
     try {
       await this.transcription.sendToChat(s.id);
+      // Open the chat so the user sees the message they just sent.
+      await this.router.navigate(['/chat']);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);

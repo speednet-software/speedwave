@@ -95,6 +95,66 @@ describe('TranscriptionService', () => {
           language: 'pl',
         },
       });
+      // The recording id is tracked at service level so it survives a remount.
+      expect(svc.recordingSessionId()).toBe('sess-1');
+    });
+  });
+
+  describe('recording state survives a tab switch', () => {
+    async function startWith(id: string): Promise<void> {
+      const ack = {
+        session_id: id,
+        event_name: `transcript_event::${id}`,
+        snapshot: snapshot({ id }),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      await svc.startRecording({ kind: 'system_wide' }, 'pl');
+    }
+
+    it('stopRecording clears the tracked id', async () => {
+      await startWith('sess-1');
+      expect(svc.recordingSessionId()).toBe('sess-1');
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('stopRecording clears the id even if the backend call rejects', async () => {
+      await startWith('sess-1');
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'stop_transcription') throw new Error('already stopping');
+        return undefined;
+      };
+      await expect(svc.stopRecording('sess-1')).rejects.toThrow('already stopping');
+      expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('resumeActiveRecording re-subscribes to a still-running recording', async () => {
+      await startWith('sess-1');
+      await svc.detach(); // simulate the record tab being destroyed
+      const seen: string[] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        seen.push(cmd);
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: `transcript_event::${(args as { sessionId: string }).sessionId}`,
+            snapshot: snapshot({ id: 'sess-1' }),
+          };
+        }
+        return undefined;
+      };
+      await svc.resumeActiveRecording();
+      expect(seen).toContain('subscribe_transcript');
+    });
+
+    it('resumeActiveRecording is a no-op when nothing is recording', async () => {
+      const seen: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        seen.push(cmd);
+        return undefined;
+      };
+      await svc.resumeActiveRecording();
+      expect(seen).toEqual([]);
     });
   });
 
@@ -159,21 +219,6 @@ describe('TranscriptionService', () => {
       expect(svc.active()?.live_segments[0].text).toBe('a');
     });
 
-    it('replaces the tail on segments_replaced', () => {
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'segment_appended',
-        seq: 1,
-        segment: seg(0, 2, 'keep'),
-      });
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'segments_replaced',
-        seq: 2,
-        from_index: 1,
-        segments: [seg(2, 4, 'new1'), seg(4, 6, 'new2')],
-      });
-      expect(svc.active()?.live_segments.map((s) => s.text)).toEqual(['keep', 'new1', 'new2']);
-    });
-
     it('updates status on status_changed and finalize_progress', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'finalize_progress',
@@ -207,14 +252,52 @@ describe('TranscriptionService', () => {
   });
 
   describe('sendToChat', () => {
-    it('renders markdown and forwards it to ChatStateService.sendMessage', async () => {
-      mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'get_transcript_markdown' ? '# Meeting transcript' : undefined;
+    it('sends the transcript with a Polish summarization instruction on top', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'pl' });
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return undefined;
+      };
       await svc.sendToChat('sess-1');
-      expect(mockChat.sendMessage).toHaveBeenCalledWith(
-        '# Meeting transcript',
-        'Meeting transcript'
-      );
+      const [text, label] = mockChat.sendMessage.mock.calls[0];
+      expect(label).toBe('Meeting transcript');
+      expect(text).toContain('podsumowanie');
+      expect(text.endsWith('# Meeting transcript')).toBe(true);
+    });
+
+    it('uses the English instruction for an English session', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return undefined;
+      };
+      await svc.sendToChat('sess-1');
+      const [text] = mockChat.sendMessage.mock.calls[0];
+      expect(text).toContain('summary');
+      expect(text).toContain('action item');
+      expect(text.endsWith('# Meeting transcript')).toBe(true);
+    });
+  });
+
+  describe('requestMicrophonePermission', () => {
+    it('passes the backend verdict through', async () => {
+      let invoked = '';
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked = cmd;
+        return 'previously_denied';
+      };
+      expect(await svc.requestMicrophonePermission()).toBe('previously_denied');
+      expect(invoked).toBe('request_microphone_permission');
+    });
+
+    it('microphonePermissionStatus queries without prompting', async () => {
+      let invoked = '';
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked = cmd;
+        return 'undetermined';
+      };
+      expect(await svc.microphonePermissionStatus()).toBe('undetermined');
+      expect(invoked).toBe('microphone_permission_status');
     });
   });
 
@@ -228,6 +311,169 @@ describe('TranscriptionService', () => {
         segment: seg(0, 1, 'after-detach'),
       });
       expect(svc.active()?.live_segments.length).toBe(0);
+    });
+  });
+
+  describe('capture warnings', () => {
+    it('capture_warning events set the service signal', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      expect(svc.captureWarning()).toBeNull();
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('system_audio_silent');
+    });
+
+    it('capture_warning_cleared removes the matching banner', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('system_audio_silent');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning_cleared',
+        seq: 2,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBeNull();
+    });
+
+    it('capture_warning_cleared leaves a different active banner alone', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'microphone_stalled',
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning_cleared',
+        seq: 2,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBe('microphone_stalled');
+    });
+
+    it('a new session snapshot clears the previous warning', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 1,
+        warning: 'microphone_stalled',
+      });
+      expect(svc.captureWarning()).toBe('microphone_stalled');
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      expect(svc.captureWarning()).toBeNull();
+    });
+
+    it('ignores a stale capture_warning (seq below the snapshot)', async () => {
+      await subscribeWith(snapshot({ last_seq: 5 }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 3,
+        warning: 'system_audio_silent',
+      });
+      expect(svc.captureWarning()).toBeNull();
+    });
+  });
+
+  describe('model download tracking', () => {
+    it('downloadModel tracks the key + progress, then clears on completion', async () => {
+      let finish!: () => void;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') {
+          return new Promise<void>((resolve) => (finish = resolve));
+        }
+        return undefined;
+      };
+      const done = svc.downloadModel('large-v3');
+      // A macrotask lets the listener attach AND the invoke start.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(svc.downloadingModelKey()).toBe('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 42,
+        total_bytes: 100,
+      });
+      expect(svc.downloadProgress()?.downloaded_bytes).toBe(42);
+      finish();
+      await done;
+      expect(svc.downloadingModelKey()).toBeNull();
+      expect(svc.downloadProgress()).toBeNull();
+    });
+
+    it('clears tracking when the progress listener fails to attach', async () => {
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('ipc down');
+      expect(svc.downloadingModelKey()).toBeNull();
+    });
+
+    it('clears tracking and rethrows when the backend download fails', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') throw new Error('integrity check failed');
+        return undefined;
+      };
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('integrity check');
+      expect(svc.downloadingModelKey()).toBeNull();
+    });
+
+    it('rejects a second downloadModel while one is in flight', async () => {
+      let finish!: () => void;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') {
+          return new Promise<void>((resolve) => (finish = resolve));
+        }
+        return undefined;
+      };
+      const first = svc.downloadModel('large-v3');
+      await new Promise((r) => setTimeout(r, 0));
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('already in progress');
+      finish();
+      await first;
+    });
+
+    it('ignores progress events for other model keys', async () => {
+      await svc.resumeDownloadTracking('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3-turbo',
+        downloaded_bytes: 7,
+        total_bytes: 10,
+      });
+      expect(svc.downloadProgress()).toBeNull();
+    });
+
+    it('resumeDownloadTracking attaches without invoking the download command', async () => {
+      const invoked: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked.push(cmd);
+        return undefined;
+      };
+      await svc.resumeDownloadTracking('large-v3');
+      expect(invoked).toEqual([]);
+      expect(svc.downloadingModelKey()).toBe('large-v3');
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 99,
+        total_bytes: 100,
+      });
+      expect(svc.downloadProgress()?.downloaded_bytes).toBe(99);
+    });
+
+    it('clearDownloadTracking detaches the progress listener', async () => {
+      await svc.resumeDownloadTracking('large-v3');
+      svc.clearDownloadTracking();
+      expect(svc.downloadingModelKey()).toBeNull();
+      mockTauri.dispatchEvent('transcription_model_status', {
+        model_key: 'large-v3',
+        downloaded_bytes: 5,
+        total_bytes: 10,
+      });
+      expect(svc.downloadProgress()).toBeNull();
     });
   });
 });

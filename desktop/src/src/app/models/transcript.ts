@@ -70,12 +70,22 @@ export interface TranscriptSession {
   last_seq: number;
 }
 
+/** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
+export type CaptureWarning = 'system_audio_silent' | 'microphone_stalled' | 'system_audio_stalled';
+
+/** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
+export type MicPermission = 'granted' | 'denied' | 'previously_denied';
+
+/** `microphone_permission_status` state — mirrors Rust `MicPermissionStatus`. */
+export type MicPermissionStatus = 'granted' | 'denied' | 'undetermined';
+
 /** Live event on a `transcript_event::<id>` channel. `seq` is monotonic per session. */
 export type TranscriptEvent =
   | { kind: 'segment_appended'; seq: number; segment: Segment }
-  | { kind: 'segments_replaced'; seq: number; from_index: number; segments: Segment[] }
   | { kind: 'status_changed'; seq: number; status: TranscriptStatus }
   | { kind: 'finalize_progress'; seq: number; progress: number }
+  | { kind: 'capture_warning'; seq: number; warning: CaptureWarning }
+  | { kind: 'capture_warning_cleared'; seq: number; warning: CaptureWarning }
   | {
       kind: 'final_segments_ready';
       seq: number;
@@ -122,6 +132,7 @@ export interface RecommendedModelAck {
   display_name: string;
   size_bytes: number;
   downloaded: boolean;
+  downloading: boolean;
   accel_label: string;
 }
 

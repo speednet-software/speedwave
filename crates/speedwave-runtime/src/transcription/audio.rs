@@ -114,6 +114,28 @@ pub enum CaptureError {
     Io(#[from] std::io::Error),
 }
 
+/// Non-fatal capture-health warnings a backend surfaces to the UI (ADR-056:
+/// a consent-broken tap delivers silence, not an error — detect and say so).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWarning {
+    /// The system-audio side has produced only digital silence since start.
+    SystemAudioSilent,
+    /// The mic stopped delivering; recording continues with system audio only.
+    MicrophoneStalled,
+    /// System audio stopped delivering; recording continues with the mic only.
+    SystemAudioStalled,
+}
+
+/// A capture-health transition: a warning raised, or a prior one recovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHealth {
+    /// The degradation began.
+    Raised(CaptureWarning),
+    /// The degraded side recovered.
+    Cleared(CaptureWarning),
+}
+
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
 /// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
 /// for a live backend it doesn't normally end until `stop()` — represented by
@@ -123,6 +145,57 @@ pub trait AudioStream: Send {
     /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
     /// capture broke (the driver flips the session to `Failed`).
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError>;
+
+    /// Drains capture-health transitions since the last call (default: none).
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
+        Vec::new()
+    }
+}
+
+/// Flags a system-audio stream that has been pure digital silence since start
+/// (the signature of a consent-broken CoreAudio tap or a wrong loopback device).
+#[derive(Debug, Default)]
+pub struct ZeroStreakDetector {
+    samples_seen: u64,
+    nonzero_seen: bool,
+    reported: bool,
+}
+
+/// Silence-warning threshold: this much all-zero audio from the start.
+pub(crate) const SILENT_AFTER_SAMPLES: u64 = SAMPLE_RATE_HZ as u64 * 15;
+
+impl ZeroStreakDetector {
+    /// Feeds samples; one-shot `Raised` after [`SILENT_AFTER_SAMPLES`] of pure
+    /// zeros, one-shot `Cleared` if signal arrives after the warning fired.
+    pub fn feed(&mut self, samples: &[f32]) -> Option<CaptureHealth> {
+        if self.nonzero_seen {
+            return None;
+        }
+        if samples.iter().any(|&s| s != 0.0) {
+            self.nonzero_seen = true;
+            if self.reported {
+                log::info!(
+                    target: "transcription::capture",
+                    "system audio started delivering signal after the silent-start warning"
+                );
+                return Some(CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent));
+            }
+            return None;
+        }
+        if self.reported {
+            return None;
+        }
+        self.samples_seen += samples.len() as u64;
+        if self.samples_seen >= SILENT_AFTER_SAMPLES {
+            self.reported = true;
+            log::warn!(
+                target: "transcription::capture",
+                "system audio has been pure silence since capture start — likely a missing/broken System Audio Recording permission"
+            );
+            return Some(CaptureHealth::Raised(CaptureWarning::SystemAudioSilent));
+        }
+        None
+    }
 }
 
 /// A host audio-capture backend. Resolved per-OS at runtime (the same pattern
@@ -301,15 +374,57 @@ pub fn bytes_to_f32_samples(raw: &[u8]) -> Vec<f32> {
 /// Spawns a background thread draining a child's stderr into the log so the
 /// child can't deadlock on a full pipe. `target` distinguishes log lines per
 /// capture backend.
-pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) {
+pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) -> ChildStderr {
     use std::io::BufRead;
+    let collected = ChildStderr::default();
     if let Some(stderr) = child.stderr.take() {
+        let sink = collected.clone();
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                log::debug!(target: "transcription::capture", "{target}: {line}");
+                // Denials must be visible in logs, not buried at debug.
+                if line.to_ascii_lowercase().contains("denied") {
+                    log::warn!(target: "transcription::capture", "{target}: {line}");
+                } else {
+                    log::debug!(target: "transcription::capture", "{target}: {line}");
+                }
+                if let Ok(mut lines) = sink.lines.lock() {
+                    if lines.len() < MAX_STDERR_LINES {
+                        lines.push(line);
+                    }
+                }
             }
+            sink.done.store(true, std::sync::atomic::Ordering::SeqCst);
         });
+    } else {
+        collected
+            .done
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    collected
+}
+
+/// Cap on buffered child-stderr lines (diagnostics only).
+const MAX_STDERR_LINES: usize = 50;
+
+/// Handle to a capture child's collected stderr (see [`drain_child_stderr`]).
+#[derive(Clone, Debug, Default)]
+pub struct ChildStderr {
+    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ChildStderr {
+    /// Joined stderr lines; waits up to `timeout` for the drain to finish
+    /// (the child must already have exited, else this just times out).
+    pub fn wait_snapshot(&self, timeout: Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        while !self.done.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.lines.lock().map(|l| l.join("; ")).unwrap_or_default()
     }
 }
 
@@ -347,6 +462,70 @@ fn resample_linear(src: &[f32], from: u32, to: u32) -> Vec<f32> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_warning_variants_match_ts_union() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        for (variant, json) in [
+            (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
+            (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
+            (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&variant).unwrap(),
+                format!("\"{json}\"")
+            );
+            assert!(
+                src.contains(json),
+                "models/transcript.ts must carry '{json}'"
+            );
+        }
+        assert!(
+            src.contains("kind: 'capture_warning'"),
+            "TS TranscriptEvent union must carry the capture_warning kind"
+        );
+        assert!(
+            src.contains("kind: 'capture_warning_cleared'"),
+            "TS TranscriptEvent union must carry the capture_warning_cleared kind"
+        );
+    }
+
+    #[test]
+    fn zero_streak_detector_fires_once_only_for_pure_silence() {
+        let mut z = ZeroStreakDetector::default();
+        let five_secs = vec![0.0f32; SAMPLE_RATE_HZ as usize * 5];
+        assert_eq!(z.feed(&five_secs), None);
+        assert_eq!(z.feed(&five_secs), None);
+        assert_eq!(
+            z.feed(&five_secs),
+            Some(CaptureHealth::Raised(CaptureWarning::SystemAudioSilent))
+        );
+        assert_eq!(z.feed(&five_secs), None); // one-shot
+                                              // Any non-zero sample disarms it for good.
+        let mut z2 = ZeroStreakDetector::default();
+        assert_eq!(z2.feed(&[0.0, 0.001]), None);
+        assert_eq!(
+            z2.feed(&vec![0.0f32; SAMPLE_RATE_HZ as usize * 20]),
+            None,
+            "signal was seen — never warn"
+        );
+    }
+
+    #[test]
+    fn zero_streak_detector_clears_once_when_signal_finally_arrives() {
+        let mut z = ZeroStreakDetector::default();
+        let five_secs = vec![0.0f32; SAMPLE_RATE_HZ as usize * 5];
+        for _ in 0..3 {
+            let _ = z.feed(&five_secs);
+        }
+        // Warned already; the first real sample recovers the banner exactly once.
+        assert_eq!(
+            z.feed(&[0.0, 0.2]),
+            Some(CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent))
+        );
+        assert_eq!(z.feed(&[0.3]), None);
+        assert_eq!(z.feed(&five_secs), None, "disarmed for good after signal");
+    }
 
     /// Writes a 16-bit-int WAV to a temp dir from mono samples at `rate`, with
     /// `channels` (the mono sample is duplicated across channels). Returns the

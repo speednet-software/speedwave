@@ -4,7 +4,7 @@ import { provideRouter } from '@angular/router';
 import { signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
-import type { TranscriptSession } from '../models/transcript';
+import type { CaptureWarning, TranscriptSession } from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
   let component: MeetingTranscriptionComponent;
@@ -13,6 +13,7 @@ describe('MeetingTranscriptionComponent', () => {
     active: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
     subscribeToTranscript: ReturnType<typeof vi.fn>;
+    resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
     // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
@@ -21,8 +22,12 @@ describe('MeetingTranscriptionComponent', () => {
     list: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
+    captureWarning: typeof captureWarningSig;
+    recordingSessionId: typeof recordingSessionIdSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
+  const captureWarningSig = signal<CaptureWarning | null>(null);
+  const recordingSessionIdSig = signal<string | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -39,10 +44,13 @@ describe('MeetingTranscriptionComponent', () => {
 
   beforeEach(async () => {
     activeSig.set(null);
+    captureWarningSig.set(null);
+    recordingSessionIdSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
       subscribeToTranscript: vi.fn(async () => ({ event_name: 'e', snapshot: {} as never })),
+      resumeActiveRecording: vi.fn(async () => undefined),
       recommendedModel: vi.fn(async () => recommended(true)),
       getCapabilities: vi.fn(async () => ({
         capabilities: {
@@ -58,6 +66,8 @@ describe('MeetingTranscriptionComponent', () => {
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
+      captureWarning: captureWarningSig,
+      recordingSessionId: recordingSessionIdSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -158,5 +168,27 @@ describe('MeetingTranscriptionComponent', () => {
   it('detaches the live stream on destroy', async () => {
     await component.ngOnDestroy();
     expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('renders no capture-warning banner without a warning', () => {
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="capture-warning"]')).toBeNull();
+  });
+
+  it('renders the silent-system-audio warning with a settings link', () => {
+    captureWarningSig.set('system_audio_silent');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner).not.toBeNull();
+    expect(banner.textContent).toContain('No system audio captured');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).not.toBeNull();
+  });
+
+  it('renders the stalled-microphone warning without a settings link', () => {
+    captureWarningSig.set('microphone_stalled');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('microphone stopped');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
   });
 });

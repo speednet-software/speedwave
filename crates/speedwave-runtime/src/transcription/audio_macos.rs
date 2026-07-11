@@ -133,7 +133,7 @@ impl AudioCapture for MacOsAudioCapture {
             .stdout
             .take()
             .ok_or_else(|| CaptureError::Failed("capture CLI stdout not piped".to_string()))?;
-        super::audio::drain_child_stderr(&mut child, CLI_NAME);
+        let stderr = super::audio::drain_child_stderr(&mut child, CLI_NAME);
 
         let mut reader = BufReader::new(stdout);
         // First: the JSON header line.
@@ -144,10 +144,9 @@ impl AudioCapture for MacOsAudioCapture {
         if n == 0 {
             // CLI exited before emitting anything — usually permission denial
             // or old OS. Reap it to read the exit code, then classify.
-            let _ = child.wait();
-            return Err(CaptureError::PermissionDenied(
-                "capture CLI produced no output (check Privacy & Security → Microphone / Audio Recording)".to_string(),
-            ));
+            let code = child.wait().ok().and_then(|s| s.code());
+            let detail = stderr.wait_snapshot(Duration::from_millis(300));
+            return Err(classify_early_exit(code, &detail));
         }
         let header: StreamHeader = serde_json::from_str(header_line.trim()).map_err(|e| {
             CaptureError::Failed(format!("parse capture header {header_line:?}: {e}"))
@@ -175,7 +174,13 @@ impl AudioCapture for MacOsAudioCapture {
                 mix: MixBuffer::new(),
             }))
         } else {
-            Ok(Box::new(PassthroughCliStream { raw }))
+            // Zero-detect only when the single stream is system audio ("app").
+            let is_system = header.streams.first().is_some_and(|s| s == "app");
+            Ok(Box::new(PassthroughCliStream {
+                raw,
+                zero: is_system.then(super::audio::ZeroStreakDetector::default),
+                health: Vec::new(),
+            }))
         }
     }
 }
@@ -272,6 +277,9 @@ impl Drop for CliRawReader {
 /// other stream index (defensive — a single-stream run only ever emits 0).
 struct PassthroughCliStream {
     raw: CliRawReader,
+    /// Silence detector — present only when stream 0 is system audio.
+    zero: Option<super::audio::ZeroStreakDetector>,
+    health: Vec<super::audio::CaptureHealth>,
 }
 
 impl AudioStream for PassthroughCliStream {
@@ -287,6 +295,9 @@ impl AudioStream for PassthroughCliStream {
                     return Ok(None);
                 }
                 Some((0, offset_ns, samples)) => {
+                    if let Some(t) = self.zero.as_mut().and_then(|z| z.feed(&samples)) {
+                        self.health.push(t);
+                    }
                     return Ok(Some(AudioChunk {
                         samples,
                         offset: Duration::from_nanos(offset_ns),
@@ -295,6 +306,10 @@ impl AudioStream for PassthroughCliStream {
                 Some(_) => continue,
             }
         }
+    }
+
+    fn take_health(&mut self) -> Vec<super::audio::CaptureHealth> {
+        std::mem::take(&mut self.health)
     }
 }
 
@@ -306,6 +321,10 @@ struct MixedCliStream {
 }
 
 impl AudioStream for MixedCliStream {
+    fn take_health(&mut self) -> Vec<super::audio::CaptureHealth> {
+        self.mix.take_health()
+    }
+
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         if self.raw.done {
             return Ok(None);
@@ -346,6 +365,23 @@ impl AudioStream for MixedCliStream {
     }
 }
 
+/// Maps an early CLI exit to a precise error (exit 2 = a permission denial;
+/// the CLI's stderr says which permission and how to grant it).
+fn classify_early_exit(code: Option<i32>, detail: &str) -> CaptureError {
+    let detail = if detail.is_empty() {
+        "capture CLI produced no output (check Privacy & Security → Microphone / System Audio Recording)"
+    } else {
+        detail
+    };
+    match code {
+        Some(2) => CaptureError::PermissionDenied(detail.to_string()),
+        _ => CaptureError::Failed(format!(
+            "capture CLI exited early (code {}): {detail}",
+            code.map_or("killed".to_string(), |c| c.to_string())
+        )),
+    }
+}
+
 /// The fallback picker entry when device enumeration yields nothing/errors.
 fn generic_default_mic() -> AudioSourceInfo {
     AudioSourceInfo {
@@ -363,9 +399,11 @@ fn list_microphones() -> Result<Vec<MicListEntry>, CaptureError> {
         .output()
         .map_err(|e| CaptureError::Failed(format!("spawn {CLI_NAME} --list-mics: {e}")))?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CaptureError::Failed(format!(
-            "{CLI_NAME} --list-mics exited {:?}",
-            output.status.code()
+            "{CLI_NAME} --list-mics exited {:?}: {}",
+            output.status.code(),
+            stderr.trim()
         )));
     }
     serde_json::from_slice(&output.stdout)
@@ -588,6 +626,8 @@ mod tests {
         bytes.extend_from_slice(&frame(0, 300, &[3.0]));
         let mut stream = PassthroughCliStream {
             raw: raw_reader_over(&bytes),
+            zero: None,
+            health: Vec::new(),
         };
         let c1 = stream.next_chunk().unwrap().unwrap();
         assert_eq!(c1.samples, vec![1.0, 2.0]);
@@ -597,6 +637,71 @@ mod tests {
         assert!(stream.next_chunk().unwrap().is_none());
         // Subsequent calls keep returning None.
         assert!(stream.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn classify_early_exit_maps_exit_2_to_permission_denied_with_the_cli_reason() {
+        let e = classify_early_exit(
+            Some(2),
+            "system audio recording permission denied — grant it in System Settings",
+        );
+        assert!(matches!(e, CaptureError::PermissionDenied(_)));
+        assert!(e.to_string().contains("System Settings"), "got: {e}");
+    }
+
+    #[test]
+    fn classify_early_exit_falls_back_to_a_generic_hint_without_stderr() {
+        let e = classify_early_exit(Some(2), "");
+        assert!(matches!(e, CaptureError::PermissionDenied(_)));
+        assert!(e.to_string().contains("Privacy & Security"), "got: {e}");
+    }
+
+    #[test]
+    fn classify_early_exit_treats_other_codes_as_failures_with_detail() {
+        let e = classify_early_exit(Some(1), "record start failed: boom");
+        assert!(matches!(e, CaptureError::Failed(_)));
+        assert!(e.to_string().contains("code 1") && e.to_string().contains("boom"));
+        let killed = classify_early_exit(None, "");
+        assert!(killed.to_string().contains("killed"), "got: {killed}");
+    }
+
+    #[test]
+    fn drain_child_stderr_collects_lines_for_error_details() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo 'permission denied — grant it' >&2; exit 2")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = super::super::audio::drain_child_stderr(&mut child, "test-cli");
+        let _ = child.wait();
+        let detail = stderr.wait_snapshot(Duration::from_secs(2));
+        assert!(detail.contains("permission denied"), "got: {detail:?}");
+    }
+
+    #[test]
+    fn passthrough_system_stream_warns_after_sustained_silence() {
+        // > 15 s of all-zero system audio in one frame batch (5 s frames × 4).
+        let zeros = vec![0.0f32; super::super::audio::SAMPLE_RATE_HZ as usize * 5];
+        let mut bytes = Vec::new();
+        for i in 0..4u64 {
+            bytes.extend_from_slice(&frame(0, i * 5_000_000_000, &zeros));
+        }
+        let mut stream = PassthroughCliStream {
+            raw: raw_reader_over(&bytes),
+            zero: Some(super::super::audio::ZeroStreakDetector::default()),
+            health: Vec::new(),
+        };
+        for _ in 0..4 {
+            let _ = stream.next_chunk().unwrap().unwrap();
+        }
+        assert_eq!(
+            stream.take_health(),
+            vec![super::super::audio::CaptureHealth::Raised(
+                super::super::audio::CaptureWarning::SystemAudioSilent
+            )]
+        );
+        assert_eq!(stream.take_health(), vec![]);
     }
 
     #[test]

@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -31,15 +30,6 @@ pub enum TranscriptEvent {
         seq: u64,
         /// The segment.
         segment: Segment,
-    },
-    /// The sliding window re-decoded its tail; replace the trailing range.
-    SegmentsReplaced {
-        /// Monotonic seq.
-        seq: u64,
-        /// Index in `live_segments` at which to splice in `segments`.
-        from_index: usize,
-        /// The replacement segments.
-        segments: Vec<Segment>,
     },
     /// The lifecycle status changed.
     StatusChanged {
@@ -68,6 +58,20 @@ pub enum TranscriptEvent {
         /// Monotonic seq.
         seq: u64,
     },
+    /// A non-fatal capture-health warning (silent tap, one side stalled).
+    CaptureWarning {
+        /// Monotonic seq.
+        seq: u64,
+        /// What degraded.
+        warning: crate::transcription::CaptureWarning,
+    },
+    /// A previously-raised capture-health warning recovered.
+    CaptureWarningCleared {
+        /// Monotonic seq.
+        seq: u64,
+        /// What recovered.
+        warning: crate::transcription::CaptureWarning,
+    },
 }
 
 impl TranscriptEvent {
@@ -75,11 +79,12 @@ impl TranscriptEvent {
     pub fn seq(&self) -> u64 {
         match self {
             TranscriptEvent::SegmentAppended { seq, .. }
-            | TranscriptEvent::SegmentsReplaced { seq, .. }
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
-            | TranscriptEvent::Finished { seq, .. } => *seq,
+            | TranscriptEvent::Finished { seq, .. }
+            | TranscriptEvent::CaptureWarning { seq, .. }
+            | TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
         }
     }
 }
@@ -295,40 +300,6 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Splice point for a window re-decode: first segment overlapping the
-    /// window (`end > threshold`). Keying on `end` (not `start`) drops segments
-    /// whose text runs into the window, which would otherwise duplicate.
-    pub fn live_splice_at(&self, id: Uuid, threshold: Duration) -> Result<usize, StoreError> {
-        let entry = self.sessions.get(&id).ok_or(StoreError::NotFound(id))?;
-        let session = entry.session.read();
-        Ok(session
-            .live_segments
-            .iter()
-            .position(|s| s.end > threshold)
-            .unwrap_or(session.live_segments.len()))
-    }
-
-    /// Replaces the tail of `live_segments` starting at `from_index`.
-    pub fn replace_segments(
-        &self,
-        id: Uuid,
-        from_index: usize,
-        segments: Vec<Segment>,
-    ) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
-            s.live_segments.truncate(from_index);
-            s.live_segments.extend(segments.iter().cloned());
-            TranscriptEvent::SegmentsReplaced {
-                seq,
-                from_index,
-                segments,
-            }
-        })?;
-        Ok(seq_out)
-    }
-
     /// Sets the status.
     pub fn set_status(&self, id: Uuid, status: TranscriptStatus) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -336,6 +307,34 @@ impl TranscriptStore {
             seq_out = seq;
             s.status = status.clone();
             TranscriptEvent::StatusChanged { seq, status }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Emits a capture-health warning event (session state is unchanged).
+    pub fn capture_warning(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarning { seq, warning }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Emits a capture-health recovery event (session state is unchanged).
+    pub fn capture_warning_cleared(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarningCleared { seq, warning }
         })?;
         Ok(seq_out)
     }
@@ -430,6 +429,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_warning_bumps_seq_broadcasts_and_persists_last_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let seq = store
+            .capture_warning(id, crate::transcription::CaptureWarning::MicrophoneStalled)
+            .unwrap();
+        assert_eq!(seq, 1);
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::CaptureWarning { seq: s, warning } => {
+                assert_eq!(s, seq);
+                assert_eq!(
+                    warning,
+                    crate::transcription::CaptureWarning::MicrophoneStalled
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // Session state is untouched apart from the persisted seq.
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.last_seq, seq);
+        assert!(snap.live_segments.is_empty());
+    }
+
+    #[tokio::test]
     async fn create_get_list_delete_round_trip_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
@@ -495,7 +520,7 @@ mod tests {
         let mut rx = store.subscribe(id).unwrap().events;
         let s1 = store.append_segment(id, seg(0.0, 1.0, "a")).unwrap();
         let s2 = store
-            .replace_segments(id, 0, vec![seg(0.0, 1.0, "A")])
+            .capture_warning(id, crate::transcription::CaptureWarning::SystemAudioSilent)
             .unwrap();
         let s3 = store
             .set_status(id, TranscriptStatus::Finalizing { progress: 0.5 })
@@ -520,7 +545,7 @@ mod tests {
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, s5);
         assert!(matches!(snap.status, TranscriptStatus::Done));
-        assert_eq!(snap.live_segments[0].text, "A");
+        assert_eq!(snap.live_segments[0].text, "a");
         // Persisted on disk (cache-independent).
         let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
         assert_eq!(loaded.last_seq, s5);
@@ -658,11 +683,6 @@ mod tests {
                 seq: 1,
                 segment: seg(0.0, 1.0, "x"),
             },
-            TranscriptEvent::SegmentsReplaced {
-                seq: 2,
-                from_index: 0,
-                segments: vec![],
-            },
             TranscriptEvent::StatusChanged {
                 seq: 4,
                 status: TranscriptStatus::Done,
@@ -676,14 +696,23 @@ mod tests {
                 segments: vec![seg(0.0, 1.0, "f")],
             },
             TranscriptEvent::Finished { seq: 9 },
+            TranscriptEvent::CaptureWarning {
+                seq: 11,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
+            TranscriptEvent::CaptureWarningCleared {
+                seq: 12,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
-                TranscriptEvent::SegmentsReplaced { seq, .. } => *seq,
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
+                TranscriptEvent::CaptureWarning { seq, .. } => *seq,
+                TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }
@@ -765,26 +794,5 @@ mod tests {
             serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),
             ev
         );
-    }
-
-    /// Regression: a kept segment whose text spans into the re-decode window
-    /// (start before threshold, end after) must be spliced out so the fresh
-    /// decode doesn't duplicate it. Splicing on `start` wrongly kept it.
-    #[tokio::test]
-    async fn live_splice_drops_segment_overlapping_the_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path());
-        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        store
-            .append_segment(id, seg(0.0, 10.0, "long packed"))
-            .unwrap();
-        store.append_segment(id, seg(10.0, 12.0, "after")).unwrap();
-        let at = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at, 0, "segment overlapping the window must be spliced out");
-        store
-            .replace_segments(id, 0, vec![seg(0.0, 8.0, "kept")])
-            .unwrap();
-        let at2 = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at2, 1, "a segment ending exactly at the threshold is kept");
     }
 }

@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { AudioSourceInfo, CapabilitiesAck, StartAck } from '../../models/transcript';
+import type {
+  AudioSourceInfo,
+  CapabilitiesAck,
+  MicPermission,
+  StartAck,
+} from '../../models/transcript';
 
 const SOURCES: AudioSourceInfo[] = [
   { source: { kind: 'system_wide' }, label: 'System (everything)' },
@@ -44,12 +50,16 @@ const SOURCES_WITH_MICS: AudioSourceInfo[] = [
 describe('RecordingControlsComponent', () => {
   let component: RecordingControlsComponent;
   let fixture: ComponentFixture<RecordingControlsComponent>;
+  let recordingSessionId: ReturnType<typeof signal<string | null>>;
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
+    requestMicrophonePermission: ReturnType<typeof vi.fn>;
+    openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
+    recordingSessionId: typeof recordingSessionId;
   };
 
   const caps: CapabilitiesAck = {
@@ -72,18 +82,26 @@ describe('RecordingControlsComponent', () => {
   };
 
   beforeEach(async () => {
+    recordingSessionId = signal<string | null>(null);
     svc = {
       getCapabilities: vi.fn(async () => caps),
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
-      startRecording: vi.fn(
-        async (): Promise<StartAck> => ({
+      // Mirror the real service: start/stop drive the shared recording signal.
+      startRecording: vi.fn(async (): Promise<StartAck> => {
+        recordingSessionId.set('sess-1');
+        return {
           session_id: 'sess-1',
           event_name: 'transcript_event::sess-1',
           snapshot: {} as never,
-        })
-      ),
-      stopRecording: vi.fn(async () => undefined),
+        };
+      }),
+      stopRecording: vi.fn(async (id: string) => {
+        if (recordingSessionId() === id) recordingSessionId.set(null);
+      }),
+      requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
+      openMicrophonePrivacyPane: vi.fn(async () => undefined),
+      recordingSessionId,
     };
     await TestBed.configureTestingModule({
       imports: [RecordingControlsComponent],
@@ -235,6 +253,21 @@ describe('RecordingControlsComponent', () => {
     expect(spy).toHaveBeenCalledWith('sess-1');
   });
 
+  it('a freshly-mounted control reflects a recording already in progress', async () => {
+    // Regression: navigating away and back destroys this component; the backend
+    // driver keeps recording, so a new instance must still show Stop, not Start.
+    recordingSessionId.set('sess-live');
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.recording()).toBe(true);
+    const stopBtn = fixture.nativeElement.querySelector('[data-testid="stop-btn"]');
+    expect(stopBtn).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]')).toBeNull();
+    // And Stop targets the session the service is tracking, not a lost local id.
+    await component.stop();
+    expect(svc.stopRecording).toHaveBeenCalledWith('sess-live');
+  });
+
   it('surfaces a start error instead of swallowing it', async () => {
     await component.ngOnInit();
     svc.startRecording.mockRejectedValueOnce(new Error('model not downloaded'));
@@ -244,6 +277,58 @@ describe('RecordingControlsComponent', () => {
     expect(component.error()).toBe('model not downloaded');
     expect(errSpy).toHaveBeenCalledWith('model not downloaded');
     expect(component.recording()).toBe(false);
+  });
+
+  describe('mic consent gate', () => {
+    it('resolves mic consent before starting a mic-including source', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.requestMicrophonePermission).toHaveBeenCalledTimes(1);
+      expect(svc.startRecording).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the consent check for a system-only source', async () => {
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.requestMicrophonePermission).not.toHaveBeenCalled();
+      expect(svc.startRecording).toHaveBeenCalledTimes(1);
+    });
+
+    it('blocks the start and surfaces the error when consent is denied', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockResolvedValueOnce('denied');
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(component.error()).toContain('microphone permission');
+      expect(errSpy).toHaveBeenCalled();
+      // A refusal on the prompt just shown must not throw System Settings at the user.
+      expect(svc.openMicrophonePrivacyPane).not.toHaveBeenCalled();
+      expect(component.busy()).toBe(false);
+    });
+
+    it('deep-links to System Settings when consent was refused earlier', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockResolvedValueOnce('previously_denied');
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(svc.openMicrophonePrivacyPane).toHaveBeenCalledTimes(1);
+      expect(component.error()).toContain('microphone permission');
+    });
+
+    it('surfaces a consent-check failure as a start error', async () => {
+      svc.listAudioSources.mockResolvedValue(SOURCES_WITH_MIXED);
+      svc.requestMicrophonePermission.mockRejectedValueOnce(new Error('ipc down'));
+      await component.ngOnInit();
+      await component.start();
+      expect(svc.startRecording).not.toHaveBeenCalled();
+      expect(component.error()).toBe('ipc down');
+      expect(component.busy()).toBe(false);
+    });
   });
 
   it('onLanguage ignores invalid values', async () => {

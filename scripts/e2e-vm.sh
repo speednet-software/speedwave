@@ -633,7 +633,14 @@ $dst = "C:\spw-audio-e2e"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst
 New-Item -ItemType Directory -Path $dst -Force | Out-Null
 Write-Host "── Copying repo WSL2 → $dst ..."
-wsl.exe -d $WINDOWS_WSL_DISTRO -- tar -C /home/windows/speedwave-e2e -cf - . 2>$null | tar -C $dst -xf -
+# Via a tar file, never a pipe — PowerShell 5.1 pipelines re-encode binary data.
+$tarPath = "C:\spw-audio-e2e.tar"
+Remove-Item -Force -ErrorAction SilentlyContinue $tarPath
+wsl.exe -d $WINDOWS_WSL_DISTRO -- tar -C /home/windows/speedwave-e2e -cf /mnt/c/spw-audio-e2e.tar .
+Assert-ExitCode
+tar -C $dst -xf $tarPath
+Assert-ExitCode
+Remove-Item -Force -ErrorAction SilentlyContinue $tarPath
 Set-Location $dst
 
 Write-Host "── wasapi/audio_windows unit tests + audio-transcription clippy ..."

@@ -1235,19 +1235,18 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         ])
         .output()?;
     let backoff_path = consts::data_dir().join(consts::NERDCTL_DOWNLOAD_BACKOFF_FILE);
-    let drift;
-    if nerdctl_check.status.success() {
+    let drift = if nerdctl_check.status.success() {
         let version_line = String::from_utf8_lossy(&nerdctl_check.stdout);
         if nerdctl_version_matches_pin(&version_line) {
             // Already aligned (possibly by the other lock holder) — drop any stale backoff.
             clear_download_backoff(&backoff_path);
             return Ok(());
         }
-        drift = format!(
+        format!(
             "in-distro nerdctl is not the pinned {} (got: {})",
             consts::NERDCTL_FULL_VERSION,
             version_line.trim()
-        );
+        )
     } else {
         // Probe failed: distinguish genuinely-absent from a transient transport error.
         let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
@@ -1259,11 +1258,11 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
                 stderr.trim()
             );
         }
-        drift = format!(
+        format!(
             "in-distro nerdctl absent; need {}",
             consts::NERDCTL_FULL_VERSION
-        );
-    }
+        )
+    };
 
     // Try bundled nerdctl-full tarball first (offline install from the bundle).
     let expected_sha256 = nerdctl_sha256_for_arch()?;

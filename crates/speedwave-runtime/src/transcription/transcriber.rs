@@ -4,6 +4,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::audio::SAMPLE_RATE_HZ;
+
 /// Languages this feature transcribes (forced into Whisper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,7 +171,9 @@ impl WhisperCppTranscriber {
         pcm: &[f32],
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError> {
-        if pcm.is_empty() {
+        // Near-silent input makes Whisper emit trained-in filler ("Dziękuję" /
+        // "Thank you") — skip it instead of transcribing hallucinations.
+        if pcm.is_empty() || is_silent(pcm) {
             return Ok(Vec::new());
         }
         let mut state = self
@@ -184,6 +188,16 @@ impl WhisperCppTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        // Anti-hallucination: no cross-window context (a hallucinated segment
+        // would otherwise seed the next window), deterministic decoding, and
+        // whisper.cpp's blank/non-speech-token suppression. (`no_speech_thold`
+        // is a no-op in whisper.cpp; we gate on per-segment prob below instead.)
+        params.set_no_context(true);
+        params.set_temperature(0.0);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
         if opts.word_timestamps {
             params.set_token_timestamps(true);
             params.set_max_len(1); // one token per segment → segment ts == word ts
@@ -198,10 +212,25 @@ impl WhisperCppTranscriber {
             let Some(seg) = state.get_segment(i) else {
                 continue;
             };
+            let no_speech = seg.no_speech_probability();
+            let seg_rms = rms(segment_pcm(pcm, seg.start_timestamp(), seg.end_timestamp()));
+            // Metrics only — segment text must stay out of the logs.
+            log::debug!(
+                target: "transcription::transcriber",
+                "segment {}..{}cs rms={seg_rms:.5} no_speech={no_speech:.2}",
+                seg.start_timestamp(),
+                seg.end_timestamp()
+            );
+            if is_hallucinated(no_speech, seg_rms) {
+                continue;
+            }
             // whisper_rs timestamps are centiseconds.
             let start = cs_to_duration(seg.start_timestamp());
             let end = cs_to_duration(seg.end_timestamp());
             let text = format!("{seg}").trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
             out.push(Segment {
                 start,
                 end,
@@ -242,6 +271,48 @@ impl Transcriber for WhisperCppTranscriber {
 
 fn cs_to_duration(centiseconds: i64) -> Duration {
     Duration::from_millis(centiseconds.max(0) as u64 * 10)
+}
+
+/// RMS below this (−60 dBFS) is treated as silence and skips the decode. Only a
+/// true noise floor gates; quiet speech goes to Whisper's no-speech filter.
+const SILENCE_RMS: f32 = 0.001;
+
+/// Drop a segment whose no-speech probability exceeds this — whisper.cpp's own
+/// estimate that the span is not speech (the filler-on-silence signature).
+const NO_SPEECH_MAX: f32 = 0.6;
+
+/// A merely-elevated no-speech probability drops the segment only when the
+/// audio under it also sits below [`SPEECH_RMS_FLOOR`] (two signals agree).
+const NO_SPEECH_SUSPECT: f32 = 0.3;
+
+/// RMS below this (−45 dBFS) cannot be intelligible speech.
+const SPEECH_RMS_FLOOR: f32 = 0.0055;
+
+/// RMS of a PCM span (0.0 for an empty span).
+fn rms(pcm: &[f32]) -> f32 {
+    if pcm.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum_sq / pcm.len() as f64).sqrt() as f32
+}
+
+/// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
+fn is_silent(pcm: &[f32]) -> bool {
+    rms(pcm) < SILENCE_RMS
+}
+
+/// The window samples under a whisper segment (centisecond timestamps, 16 kHz).
+fn segment_pcm(pcm: &[f32], start_cs: i64, end_cs: i64) -> &[f32] {
+    const SAMPLES_PER_CS: i64 = SAMPLE_RATE_HZ as i64 / 100;
+    let a = (start_cs.max(0).saturating_mul(SAMPLES_PER_CS)).min(pcm.len() as i64) as usize;
+    let b = (end_cs.max(0).saturating_mul(SAMPLES_PER_CS)).min(pcm.len() as i64) as usize;
+    &pcm[a..b.max(a)]
+}
+
+/// Signal-driven hallucination verdict for one decoded segment.
+fn is_hallucinated(no_speech: f32, seg_rms: f32) -> bool {
+    no_speech > NO_SPEECH_MAX || (no_speech > NO_SPEECH_SUSPECT && seg_rms < SPEECH_RMS_FLOOR)
 }
 
 /// Deterministic fake transcriber for orchestration tests — one segment per
@@ -326,6 +397,58 @@ mod tests {
         assert_eq!(cs_to_duration(0), Duration::ZERO);
         assert_eq!(cs_to_duration(150), Duration::from_millis(1500));
         assert_eq!(cs_to_duration(-5), Duration::ZERO);
+    }
+
+    #[test]
+    fn hallucination_guard_needs_both_signals_to_agree() {
+        // Model certain the span is not speech — dropped regardless of energy.
+        assert!(is_hallucinated(0.7, 0.5));
+        // Model unsure AND audio below the speech floor — dropped.
+        assert!(is_hallucinated(0.4, 0.001));
+        // Model unsure but the audio is loud — kept (real sound, model's call).
+        assert!(!is_hallucinated(0.4, 0.05));
+        // Model confident it is speech — kept even when quiet.
+        assert!(!is_hallucinated(0.1, 0.001));
+        // Thresholds are strict: exactly-at values are kept.
+        assert!(!is_hallucinated(0.3, 0.001));
+        assert!(!is_hallucinated(0.6, 0.0055));
+    }
+
+    #[test]
+    fn segment_pcm_maps_centiseconds_and_clamps() {
+        let pcm: Vec<f32> = (0..16_000).map(|i| i as f32).collect(); // 1 s at 16 kHz
+        assert_eq!(segment_pcm(&pcm, 10, 20), &pcm[1_600..3_200]);
+        // An end past the window clamps to the window.
+        assert_eq!(segment_pcm(&pcm, 90, 500), &pcm[14_400..]);
+        // Degenerate, reversed, and out-of-window spans yield an empty slice.
+        assert!(segment_pcm(&pcm, 50, 50).is_empty());
+        assert!(segment_pcm(&pcm, 60, 40).is_empty());
+        assert!(segment_pcm(&pcm, 200, 300).is_empty());
+        // Negative timestamps clamp to the start.
+        assert_eq!(segment_pcm(&pcm, -5, 10), &pcm[0..1_600]);
+    }
+
+    #[test]
+    fn rms_of_known_signals() {
+        assert_eq!(rms(&[]), 0.0);
+        assert!((rms(&vec![0.5f32; 100]) - 0.5).abs() < 1e-6);
+        assert!((rms(&vec![-0.5f32; 100]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn is_silent_flags_quiet_and_empty_but_not_speech() {
+        assert!(is_silent(&[]));
+        assert!(is_silent(&vec![0.0f32; 16_000]));
+        // A near-noise-floor level (−66 dBFS) is still silence.
+        assert!(is_silent(&vec![0.0005f32; 16_000]));
+        // Quiet real speech (−54 dBFS: low OS input volume + 0.5 mix gain) must
+        // reach the decoder — Whisper's no-speech filter owns that judgement.
+        assert!(!is_silent(&vec![0.002f32; 16_000]));
+        // A half-scale tone is clearly not silence.
+        let tone: Vec<f32> = (0..16_000)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        assert!(!is_silent(&tone));
     }
 
     #[test]
