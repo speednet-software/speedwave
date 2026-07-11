@@ -51,6 +51,8 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - Installer dest ↔ `consts::cli_install_path_for` (**Unix only**) — `link_cli_from_copies_binary_and_sets_permissions` (setup_wizard.rs, `#[cfg(unix)]`) asserts the installed binary path equals the SSOT. The Windows installer producer stays manually synced with the SSOT (the test is Unix-gated because it exercises Unix chmod); do not claim both-platform coverage.
 - Bundled skills (`containers/claude-resources/skills/` — the single source; no repo-level dev copy) — `tests/bundled_skills_guards.rs`: no `model:` in any SKILL.md frontmatter (skills inherit the session model), `.claude/skills`/`.claude/scripts` must not exist, orchestrator `## Worker Skills` list ↔ `code-review-*` directories, shared Review Scope/Project Conventions/Output Contract blocks byte-identical across workers.
 - CLI filename leaf ↔ bundle manifest + Tauri config — `windows_bundle_cli_asset_matches_filename_ssot` and `macos_bundle_cli_asset_matches_filename_ssot` (bundle.rs) assert `{WINDOWS,MACOS}_BUNDLED_ASSETS` and `tauri.{windows,macos}.conf.json` carry `cli/<cli_binary_filename(is_windows)>`. The filename SSOT is `consts::cli_binary_filename`, single-sourced from `CLI_BINARY`; `cli_install_path_for` and the `installer_hooks.rs` sweep guard both derive from it.
+- Root `[workspace.lints]` table ↔ `desktop/src-tauri/Cargo.toml` `[lints]` table ↔ `containers/proxy/Cargo.toml` `[lints]` table (each a standalone workspace, cannot inherit) — `lint_tables_are_aligned` cross-read test.
+- No raw `Command::new` outside `binary.rs` — drift detector `tests/no_raw_command_spawn.rs` (escape hatch: `// SSOT-allow: <reason>`).
 
 ## Manual alignments — NO automated guard; update together in the same commit
 

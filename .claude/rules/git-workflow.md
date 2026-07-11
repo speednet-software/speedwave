@@ -11,8 +11,8 @@
 
 - **PRs always target `dev`** — never open a PR directly to `main`.
 - **PR titles `dev → main`: ONLY `feat` or `fix`** (conventional commit form). Everything else — `chore`, `perf`, `refactor`, `docs`, `ci`, `test`, `build`, `style`, `revert` — is rejected by `scripts/validate-pr-title-main.sh` (via `merge-strategy-check.yml`), because only `feat`/`fix` guarantee a release-please version bump; a non-release type strands merged code outside the updater path. All types remain valid for PRs to `dev`. Release-please and backmerge PRs are exempt.
-- **Backmerge is automated:** on release publish, `backmerge.yml` resets dev to main (force-push); if dev has new commits it falls back to a merge PR. Its version-file lists are derived from `release-please-config.json` `extra-files` — never hand-sync them; a new versioned artifact (e.g. a new worker's `package.json`) only needs adding to `extra-files`.
-- Branch names: no `+` characters (rejected by the review action) — use `fix/foo`, `feature/foo`.
+- **Backmerge is automated:** on release publish, `backmerge.yml` resets dev to main (force-push); if dev has new commits it falls back to a merge PR. Its version-file lists are derived from `release-please-config.json` `extra-files` plus a small `STATIC_VERSION_FILES` set hardcoded in the workflow (lockfiles/manifests); a new versioned artifact (e.g. a new worker's `package.json`) only needs adding to `extra-files`, but a new static version-adjacent file needs a workflow edit.
+- Branch names: no `+` characters — use `fix/foo`, `feature/foo`.
 - **GitHub is public and English-only:** PR/issue/commit text always in English; never include internal issue-tracker keys or links (e.g. Jira) in PRs, commits, or code.
 - No "Generated with Claude Code" / "Co-Authored-By: Claude" footers unless explicitly requested.
 - Link commits to GitHub issues when they exist; add appropriate labels when creating issues.

@@ -14,7 +14,7 @@ paths:
 - **Catalog SSOT:** `build.rs::IMAGES` — one `ImageDef` per image. Compose references images via `${IMAGE_*}` placeholders (alignment test-guarded), bundle scripts carry the matching service list (test-guarded).
 - **Rebuilds are content-addressed:** tags are `name:<16-hex>` over the image's declared `ImageDef.hash_inputs`. Rules:
   - Every file a Containerfile `COPY`s must be listed in that image's `hash_inputs` (test-guarded by `hash_inputs_cover_copy_sources`) — otherwise it ships stale after edits.
-  - Do NOT over-declare inputs (e.g. `claude-resources/`, `compose.template.yml` for the claude image) — over-declaration is NOT test-caught and forces a rebuild on every unrelated edit.
+  - Do NOT over-declare inputs (e.g. `claude-resources/`, `compose.template.yml` for the claude image) — the claude-image exclusions are test-guarded (`claude_hash_inputs_exclude_resources_and_template`); for other images over-declaration is NOT test-caught and forces a rebuild on every unrelated edit.
   - Never rebuild under an unchanged tag: `nerdctl compose up` will not recreate the container. A content change must produce a new tag.
   - Builds and tag-prunes serialize via `build::with_build_lock`; never run builds inside a compose transaction lock.
   - `bundle_id` gates bundle reconcile only — it does not trigger image rebuilds. It deliberately includes `app_version` (all render logic is compiled-in code, so only app_version honestly covers "the rendered compose may have changed"); a release must re-render compose and recreate containers — never remove `app_version` from `bundle_id` to skip release-time reconciles.

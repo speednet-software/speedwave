@@ -3,6 +3,9 @@ paths:
   - 'native/**'
   - 'crates/speedwave-runtime/src/mcp_os_process.rs'
   - 'crates/speedwave-runtime/src/transcription/**'
+  - 'desktop/src-tauri/entitlements/**'
+  - 'desktop/src-tauri/src/mic_permission_cmd.rs'
+  - 'desktop/src-tauri/Info.plist'
 ---
 
 # Native macOS Rules (Swift OS integrations, TCC, transcription)

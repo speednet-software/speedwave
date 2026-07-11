@@ -27,7 +27,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 ## Rules for writing log statements
 
 - **Level selection:** `error!` for failures preventing operation, `warn!` for degraded/fallback conditions, `info!` for significant lifecycle events, `debug!` for diagnostic details, `trace!` for verbose internals.
-- **No prefixes in log messages** — the log format `[{level}][{target}]` already provides context. Do not add `"[tauri] update:"` or `"IDE Bridge:"` prefixes. Exception: when logging from a module that handles multiple subsystems (e.g., `main.rs` tray handlers), a short prefix like `"tray:"` is acceptable for disambiguation.
+- **No `identifier:` prefixes in log messages** — the format `[{level}][{target}]` carries the module, and the `log` crate's own convention keeps context in `target` or structured data, never in message prefixes. The message is a self-contained sentence: write `warn!("failed to bind relay socket on {addr}")`, not `warn!("bind_with_retry: bind failed")`. No exceptions — a module hosting multiple subsystems disambiguates by wording the message, not by prefixing it.
 - **Never log secrets.** Do not log tokens, passwords, API keys, HTTP Authorization headers, request/response bodies, or PEM keys. The `log_sanitizer` is a safety net, not a license to log secrets. When logging errors that might contain credentials, redact explicitly.
 - **Structs containing secrets must not derive `Debug`** — implement a manual `Debug` that redacts sensitive fields, or wrap secret fields in a newtype with a redacting `Debug` impl.
 - **Container/external logs** returned to the frontend (e.g., `get_all_logs`) must pass through `sanitize()` before being sent to the webview.
