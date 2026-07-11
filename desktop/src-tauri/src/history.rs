@@ -387,9 +387,15 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
 
     let model = message["model"].as_str().map(String::from);
     // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
-    let usage = message
-        .get("usage")
-        .and_then(crate::chat::turn_usage_from_jsonl);
+    // Sidechain (subagent) calls have their own context — never attach their
+    // usage, or the frontend resume seed would read a foreign context size.
+    let usage = if parsed["isSidechain"].as_bool() == Some(true) {
+        None
+    } else {
+        message
+            .get("usage")
+            .and_then(crate::chat::turn_usage_from_jsonl)
+    };
 
     Some(ConversationMessage {
         role: "assistant".to_string(),
@@ -1170,6 +1176,17 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 56);
         // cache_creation_input_tokens → cache_write_tokens
         assert_eq!(usage.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn parse_assistant_message_sidechain_line_drops_usage() {
+        // Subagent lines must not carry usage — the frontend resume seed
+        // reads the last usage-bearing message as the context occupancy.
+        let line = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
+        // Non-usage metadata is unaffected.
+        assert_eq!(msg.model.as_deref(), Some("claude-haiku-4-5-20251001"));
     }
 
     #[test]

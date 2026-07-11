@@ -3231,6 +3231,9 @@ describe('ChatStateService', () => {
                   cache_write_tokens: 4920,
                 },
               },
+              // Trailing sidechain (subagent) line: history.rs strips its
+              // usage, so the seed must fall back to the previous message.
+              { role: 'assistant', content: 'subagent output' },
             ],
           };
         }
@@ -3239,7 +3242,7 @@ describe('ChatStateService', () => {
 
       await fireRestart(projectState);
 
-      // Last assistant call wins — the meter is truthful before any live Result.
+      // Last usage-bearing main-chain call wins — truthful before any live Result.
       expect(service.sessionStats?.context_usage?.cache_read_tokens).toBe(66_844);
       expect(service.lastContextTokens).toBe(71_766);
     });
