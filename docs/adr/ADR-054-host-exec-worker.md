@@ -33,12 +33,12 @@ This is a deliberate, scoped weakening of Speedwave's container-isolation model:
 
 - **One global worker with bearer-token→project routing.** More complex (the worker would have to be project-aware) and weaker isolation; per-process-per-project is cleaner and matches how Speedwave already runs per-project stacks. Kept as the documented fallback only if per-project memory cost ever bites.
 - **Extending `mcp-os` instead of a new worker.** Mixes concerns and would let a build script inherit `mcp-os`'s Calendar/Mail TCC consent — rejected on blast-radius and SRP grounds.
-- **Per-call human-in-the-loop confirmation.** Claude Code runs `--dangerously-skip-permissions` inside the container, so a per-call prompt could only be a parallel side channel — Desktop-only, no CLI coverage, and architecturally awkward (the original fd-3 design). The enable-time consent + whitelist + per-recipe regex params + audit log replaces it.
+- **Per-call human-in-the-loop confirmation.** Claude Code runs `--dangerously-skip-permissions` inside the container[^1], so a per-call prompt could only be a parallel side channel — Desktop-only, no CLI coverage, and architecturally awkward (the original fd-3 design). The enable-time consent + whitelist + per-recipe regex params + audit log replaces it.
 - **A configurable shell.** No `shell:true`, no `exec:"bash"`. The shell/eval-launcher ban (`HOST_EXEC_SHELL_LAUNCHERS`) is defense in depth only — it cannot stop a build tool from running repo code, and is matched by basename so a renamed/path-qualified interpreter can bypass it; this is a documented residual, not a guarantee.
 
 ## PATH
 
-A GUI-launched Desktop process on macOS inherits only a stunted `PATH` (no login-shell rc files run), so the worker would fail to find a user's real toolchain (`/opt/homebrew/bin`, language version managers, etc.). The Desktop recovers the login-shell `PATH` once at startup via `$SHELL -ilc 'printf %s "$PATH"'` on a background thread (bounded by a short timeout, falling back to the inherited `PATH` plus the Homebrew bin dirs on any failure), caches it, and injects it into every spawned `host_exec` worker. On Windows the process `PATH` is authoritative — there is no login-shell probe. See `desktop/src-tauri/src/host_path.rs`.
+A GUI-launched Desktop process on macOS inherits only a stunted `PATH` (no login-shell rc files run)[^2], so the worker would fail to find a user's real toolchain (`/opt/homebrew/bin`, language version managers, etc.). The Desktop recovers the login-shell `PATH` once at startup via `$SHELL -ilc 'printf %s "$PATH"'` on a background thread (bounded by a short timeout, falling back to the inherited `PATH` plus the Homebrew bin dirs on any failure), caches it, and injects it into every spawned `host_exec` worker. On Windows the process `PATH` is authoritative — there is no login-shell probe (unverified). See `desktop/src-tauri/src/host_path.rs`.
 
 ## Negative
 
@@ -57,3 +57,7 @@ A GUI-launched Desktop process on macOS inherits only a stunted `PATH` (no login
 - ADR-049 — why `mcp-os` carries PIM entitlements and why `host_exec` must not.
 - ADR-007 — the IDE Bridge is a host-side proxy that never grants Claude host filesystem or code-execution access; `host_exec` is the first such channel, and it is opt-in and whitelisted.
 - ADR-001 — Speedwave does not use Docker Desktop; "the host's Docker" is a separate user install a `docker` recipe targets.
+
+[^1]: The `--dangerously-skip-permissions` flag is equivalent to `--permission-mode bypassPermissions`, which "disables permission prompts and safety checks so tool calls execute immediately": https://code.claude.com/docs/en/permission-modes
+
+[^2]: A GUI application launched by clicking its icon or via Spotlight on macOS gets its `PATH` from `launchd`, not from login-shell rc files (`.zshenv`, `.bash_profile`, etc.), so shell-configured `PATH` entries are invisible to it: https://www.bounga.org/tips/2020/04/07/instructs-mac-os-gui-apps-about-path-environment-variable/

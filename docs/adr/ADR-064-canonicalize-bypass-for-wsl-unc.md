@@ -10,7 +10,7 @@ Project registration in [`crates/speedwave-runtime/src/project.rs::add_project_w
 
 On Windows, `canonicalize` resolves UNC paths through the system's `GetFinalPathNameByHandle` family of APIs, which return an extended-length-prefixed form (`\\?\UNC\<server>\<share>\...`) for any network path.[^2] For `\\wsl.localhost\...` paths specifically, behaviour is **not stably documented across Windows releases**:[^3]
 
-- The 9P redirector backing `\\wsl.localhost\` is implemented by `wslservice.exe` (a Windows service introduced in WSL 0.50.2) and exposed via the SMB redirector — it is not part of the Win32 path API contract.[^4]
+- The 9P redirector backing `\\wsl.localhost\` is implemented by `wslservice.exe` (a Windows service installed with WSL) and exposed via the `p9rdr.sys` Plan 9 redirector driver — it is not part of the Win32 path API contract.[^4]
 - `canonicalize` may succeed and prepend `\\?\UNC\`, may fail outright on a non-running distro, or may return platform-dependent error codes depending on the user's WSL build and distro state.[^5]
 - The user-visible error for a `canonicalize` failure is the underlying OS error string (e.g. "The system cannot find the path specified" — `ERROR_PATH_NOT_FOUND`, code 3), not the carefully crafted helpful message we want users to see when they pick a project from another WSL distro.[^6]
 
@@ -62,16 +62,16 @@ Drive-letter and Unix paths are unchanged — they continue to flow through `can
 
 [^1]: Rust standard library, [`std::fs::canonicalize`](https://doc.rust-lang.org/std/fs/fn.canonicalize.html). Returns the canonical, absolute form of a path with all intermediate components normalized and symbolic links resolved.
 
-[^2]: Microsoft Win32 API, [`GetFinalPathNameByHandleW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew) and the `VOLUME_NAME_DOS` flag — produces the `\\?\` (Win32 namespace) or `\\?\UNC\` (UNC namespace) extended-length form for network paths. Rust's `std::fs::canonicalize` is built on top of this API on Windows.
+[^2]: Microsoft Win32 API, [`GetFinalPathNameByHandleW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew) and the `VOLUME_NAME_DOS` flag - produces the `\\?\` (Win32 namespace) or `\\?\UNC\` (UNC namespace) extended-length form for network paths. Rust's `std::fs::canonicalize` is built on top of this API on Windows.
 
 [^3]: Microsoft has an [open documentation request from 2022](https://github.com/MicrosoftDocs/WSL/issues/1671) for `\\wsl.localhost\` API behaviour. No primary source documents `canonicalize` behaviour on WSL UNC paths; community reports show variation across builds.
 
-[^4]: WSL [release notes for 0.50.2](https://github.com/microsoft/WSL/releases/tag/0.50.2.0) document the introduction of `\\wsl.localhost\` as the SMB-redirector-served replacement for the legacy `\\wsl$\` path. The implementation lives in `wslservice.exe`, a Windows service installed with WSL.
+[^4]: WSL technical documentation, [Plan 9 redirector](https://github.com/microsoft/WSL/blob/master/doc/docs/technical-documentation/plan9.md) - the `p9rdr.sys` redirector driver registers both `\\wsl$\` and `\\wsl.localhost\`; accessing either invokes `wslservice.exe`, a Windows service installed with WSL, to resolve the distribution and establish the Plan 9 connection.
 
 [^5]: Documented user-reported variations in [microsoft/WSL#9789](https://github.com/microsoft/WSL/issues/9789) ("wsl ubuntu path lost all mounts") and [microsoft/WSL#8301](https://github.com/microsoft/WSL/issues/8301) ("Mounted Disk disappears on restart") show that `\\wsl.localhost\` and `\\wsl$\` accessibility is not stable across WSL distro lifecycle events; mount enumeration, error codes, and `canonicalize` results vary.
 
-[^6]: Microsoft [`System Error Codes (0-499)`](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-) lists `ERROR_PATH_NOT_FOUND` (3) — "The system cannot find the path specified" — which is the bare OS string Rust surfaces as the `io::Error` source when `canonicalize` fails on a missing UNC path.
+[^6]: Microsoft [`System Error Codes (0-499)`](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-) lists `ERROR_PATH_NOT_FOUND` (3) - "The system cannot find the path specified" - which is the bare OS string Rust surfaces as the `io::Error` source when `canonicalize` fails on a missing UNC path.
 
-[^7]: Rust standard library, [`std::path::Components`](https://doc.rust-lang.org/std/path/struct.Components.html) and [`Component`](https://doc.rust-lang.org/std/path/enum.Component.html) — iterator producing `RootDir`, `CurDir`, `ParentDir`, `Normal`, and `Prefix` variants. `is_root_path` walks these to collapse `.` (no-op), `..` (pop), and `Normal` (push), returning `true` when the resulting depth is zero.
+[^7]: Rust standard library, [`std::path::Components`](https://doc.rust-lang.org/std/path/struct.Components.html) and [`Component`](https://doc.rust-lang.org/std/path/enum.Component.html) - iterator producing `RootDir`, `CurDir`, `ParentDir`, `Normal`, and `Prefix` variants. `is_root_path` walks these to collapse `.` (no-op), `..` (pop), and `Normal` (push), returning `true` when the resulting depth is zero.
 
-[^8]: Rust standard library, [`std::fs::metadata`](https://doc.rust-lang.org/std/fs/fn.metadata.html) — on Windows calls [`GetFileAttributesExW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesexw) which accepts UNC paths directly without invoking the path canonicalization pipeline that `canonicalize` uses internally.
+[^8]: Rust standard library, [`std::fs::metadata`](https://doc.rust-lang.org/std/fs/fn.metadata.html) - on Windows calls [`GetFileAttributesExW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesexw) which accepts UNC paths directly without invoking the path canonicalization pipeline that `canonicalize` uses internally.

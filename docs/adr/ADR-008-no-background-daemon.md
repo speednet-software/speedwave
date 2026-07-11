@@ -10,7 +10,7 @@ Speedwave installs no system service. The IDE Bridge (and the other host-side se
 ## Why
 
 - **KISS** — a system service adds platform-specific registration, uninstall cleanup, and privilege escalation with marginal benefit. Most users open the Desktop app before a coding session anyway.
-- **macOS TCC permissions** — a bundled `.app` inherits the Reminders / Calendar / Mail permissions declared in its `Info.plist`. A standalone daemon would need separate TCC entitlements and a more complex consent flow.
+- **macOS TCC permissions** — a bundled `.app` inherits the Reminders / Calendar / Mail permissions declared in its `Info.plist`.[^1] A standalone daemon would need separate TCC entitlements and a more complex consent flow.
 - **No orphan processes** — tying host services to the Desktop app guarantees clean shutdown. A daemon risks being orphaned after a failed update or uninstall.
 - **CLI does not benefit** — IDE integration is Desktop-only, so a daemon offers nothing to terminal users.
 
@@ -24,8 +24,8 @@ Speedwave installs no system service. The IDE Bridge (and the other host-side se
 
 The choice of whether to run per-project `compose_down` at exit follows who owns container lifetime:
 
-- **macOS (Lima):** `LimaRuntime::stop_vm` issues `limactl stop --force`, hard-powering the Apple Virtualization Framework VM off and reaping every container at once. Running `compose_down` first would be redundant and slow (nerdctl's graceful-stop timeout). Stopping the VM also frees the RAM the hypervisor reserves; the next launch pays a cold-boot cost, which `ensure_ready()` handles automatically.
-- **Windows (WSL2):** `stop_vm()` is a no-op for `WslRuntime` (it does not override the default; only `LimaRuntime` does), because the WSL2 distro is managed by the Windows host, not by Speedwave — terminating it would hit unrelated workloads. Per-project `compose_down` is therefore the only mechanism that stops Speedwave's containers at exit.
+- **macOS (Lima):** `LimaRuntime::stop_vm` issues `limactl stop --force`,[^3] hard-powering the Apple Virtualization Framework[^2] VM off and reaping every container at once. Running `compose_down` first would be redundant and slow (nerdctl's graceful-stop timeout).[^4] Stopping the VM also frees the RAM the hypervisor reserves; the next launch pays a cold-boot cost, which `ensure_ready()` handles automatically.
+- **Windows (WSL2):** `stop_vm()` is a no-op for `WslRuntime` (it does not override the default; only `LimaRuntime` does), because the WSL2 distro is managed by the Windows host, not by Speedwave[^5] — terminating it would hit unrelated workloads. Per-project `compose_down` is therefore the only mechanism that stops Speedwave's containers at exit.
 
 ## Rejected alternative
 
@@ -40,4 +40,12 @@ The choice of whether to run per-project `compose_down` at exit follows who owns
 
 ## References
 
-- [macOS TCC — Transparency, Consent, and Control](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)
+[^1]: [NSCalendarsUsageDescription - Apple Developer Documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)
+
+[^2]: [Virtualization - Apple Developer Documentation](https://developer.apple.com/documentation/virtualization)
+
+[^3]: [limactl stop - Lima docs](https://lima-vm.io/docs/reference/limactl_stop/)
+
+[^4]: [nerdctl command reference - stop timeout ("Seconds to wait for stop before killing it", default 10)](https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md)
+
+[^5]: [What is the Windows Subsystem for Linux - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/about)

@@ -9,7 +9,7 @@ Speedwave ties the installed desktop bundle to the local runtime via two files: 
 
 ## Why
 
-- A mutable `:latest` tag never proves the local images match the installed app bundle — `bundle_id` is a concrete compatibility contract derived from `app_version`, `build_context_hash`, and `claude_resources_hash` (plus the pinned Claude Code version mixed in).
+- A mutable `:latest` tag never proves the local images match the installed app bundle[^1] — `bundle_id` is a concrete compatibility contract derived from `app_version`, `build_context_hash`, and `claude_resources_hash` (plus the pinned Claude Code version mixed in).
 - Reconcile phases (`Pending` → `ResourcesSynced` → `ImagesBuilt` → `ProjectsRestored` → `Done`) are persisted, so an interrupted update resumes from where it stopped on the next launch instead of redoing finished work.
 - The previous bundle's images are pruned only after every phase succeeds, so a failure mid-reconcile leaves the last-known-good image set on disk to fall back to.
 - Manual upgrades and UI-triggered upgrades funnel through the same backend reconcile, so behaviour does not diverge between the two.
@@ -34,3 +34,8 @@ Speedwave ties the installed desktop bundle to the local runtime via two files: 
 - Keep `speedwave-*:latest` and rebuild opportunistically — a shared mutable tag cannot prove compatibility with the installed bundle, especially after a partial or interrupted update.
 - Sync `claude-resources` from the app bundle on every container start — compose mounts a stable host path; the update boundary belongs at reconcile time, not on each individual container start.
 - Keep a two-step frontend flow (`install_update` then `restart_app`) — the backend must own the whole sequence (record running projects, stop containers, install, restart) so an interruption leaves recoverable state instead of an orphaned half-update.
+
+[^1]:
+    Docker Hub docs, "Immutable tags" — by default, tags are mutable: an
+    image publisher can retarget a tag to reference a different image at any
+    time: <https://docs.docker.com/docker-hub/repos/manage/hub-images/immutable-tags/>

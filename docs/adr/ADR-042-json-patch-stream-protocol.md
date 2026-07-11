@@ -5,7 +5,7 @@
 
 ## Decision
 
-Every update the Rust runtime sends to the Angular frontend is an RFC 6902 JSON Patch applied to a single per-session conversation state-tree. There are no per-feature event types on the wire — a new UI render is a new path in the tree, not a new event. Streaming a token, for example, is a `replace` at `/entries/<i>/blocks/<j>/content` with the full accumulated string (RFC 6902 has no append op, so the caller passes the whole text).
+Every update the Rust runtime sends to the Angular frontend is an RFC 6902 JSON Patch applied to a single per-session conversation state-tree. There are no per-feature event types on the wire — a new UI render is a new path in the tree, not a new event. Streaming a token, for example, is a `replace` at `/entries/<i>/blocks/<j>/content` with the full accumulated string (RFC 6902 defines only `add`/`remove`/`replace`/`move`/`copy`/`test`, no append op, so the caller passes the whole text).[^1]
 
 ## Why
 
@@ -21,12 +21,12 @@ Every update the Rust runtime sends to the Angular frontend is an RFC 6902 JSON 
 - Typed patch builders — `crates/speedwave-runtime/src/stream/patch.rs`. Every mutation goes through a `ConversationPatch::*` helper (e.g. `add_entry`, `replace_entry`, `remove_entry`, `add_block`, `replace_text`, `replace_tool_input`, `replace_tool_result`, `replace_entry_uuid`, `replace_meta`, `set_streaming`, `set_pending_queue`, `replace_session_totals`, `set_session_id`) so a call site cannot hand-craft an invalid JSON Pointer. The same module's `apply()` is the pure Rust reducer used by the store and tests.
 - Transport enum — `crates/speedwave-runtime/src/stream/msg_store.rs`, `LogMsg`. Four adjacently-tagged variants: `JsonPatch(Patch)` (the hot path), `Resync(Box<ConversationState>)` (a full-state snapshot for lagged subscribers and reconnect), `SessionStarted { session_id }`, and `SessionEnded`. The two lifecycle markers are genuinely out-of-band (not state mutations), so collapsing them into patches would only complicate the reducer.
 - Frontend reducer (hand-written ~100-line RFC 6902 subset) — `desktop/src/src/app/services/json-patch.ts`, `applyPatch<T>(state, patch): T`. It deep-clones with `structuredClone` and returns the new value, supporting only the `add`/`remove`/`replace` ops the backend emits and rejecting the rest. The chat state service (`desktop/src/src/app/services/chat-state.service.ts`) assigns the result straight back to its signal.
-- Stream source — the Rust parser consumes `claude -p --output-format=stream-json --include-partial-messages` and translates those events into patches in one place; the rest of the system never sees stream-json types. See the Claude Code CLI reference: https://code.claude.com/docs/en/cli-reference
+- Stream source — the Rust parser consumes `claude -p --output-format=stream-json --include-partial-messages` and translates those events into patches in one place; the rest of the system never sees stream-json types.[^2]
 
 ## Rejected alternatives
 
 - A separate Tauri event type per render feature (the pre-ADR design). Every new render required a new Rust struct, event name, TypeScript type, Angular reducer branch, and test matrix — the code grew linearly with feature count and every addition was a cross-cutting change.
-- Pulling in a third-party JS JSON-Patch library (e.g. `fast-json-patch`). The state-tree surface is small and the reducer is auditable in ~100 lines; the in-house reducer avoids an extra dependency and its prototype-pollution surface. The Rust side does use the mature `json-patch` crate (https://docs.rs/json-patch/latest/json_patch/), which provides atomic apply with rollback.
+- Pulling in a third-party JS JSON-Patch library (e.g. `fast-json-patch`[^3]). The state-tree surface is small and the reducer is auditable in ~100 lines; the in-house reducer avoids an extra dependency and its prototype-pollution surface. The Rust side does use the mature `json-patch` crate, which provides atomic apply with rollback.[^4]
 - A custom "append" op for token streaming. Staying within RFC 6902 (full-string `replace`) keeps the wire format standard; the cost of re-sending accumulated text is negligible for Speedwave's short per-message block arrays.
 
 ## Known limitations
@@ -40,3 +40,11 @@ Every update the Rust runtime sends to the Angular frontend is an RFC 6902 JSON 
 - RFC 6901 — JSON Pointer: https://datatracker.ietf.org/doc/html/rfc6901
 - Design proposal — `design-proposals/06-terminal-minimal.html`
 - Related ADRs — ADR-043 (MsgStore), ADR-044 (entry index), ADR-045 (queued message), ADR-046 (resume identity), ADR-065 (image attachment lifecycle).
+
+[^1]: RFC 6902, JavaScript Object Notation (JSON) Patch, section 4 defines only `add`, `remove`, `replace`, `move`, `copy`, and `test` operations: https://datatracker.ietf.org/doc/html/rfc6902#section-4
+
+[^2]: Claude Code headless mode docs, "Stream responses" - `--output-format stream-json` with `--include-partial-messages` streams newline-delimited JSON events: https://code.claude.com/docs/en/headless
+
+[^3]: fast-json-patch, an RFC 6902 implementation for JavaScript: https://github.com/Starcounter-Jack/JSON-Patch
+
+[^4]: json-patch crate docs - the `patch` function reverts all previously-applied operations if any operation in the sequence fails: https://docs.rs/json-patch/latest/json_patch/

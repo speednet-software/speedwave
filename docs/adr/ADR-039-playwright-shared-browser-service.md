@@ -5,15 +5,15 @@
 
 ## Decision
 
-Ship Microsoft's `@playwright/mcp` as a built-in shared worker (`mcp-playwright`), not a plugin. It accesses only public URLs, carries no credentials, runs under the standard hardened compose profile with two Chromium-specific tweaks (larger `/dev/shm`, larger `/tmp`), and is always treated as configured (no setup wizard, no Desktop credentials form).
+Ship Microsoft's `@playwright/mcp` [^1] as a built-in shared worker (`mcp-playwright`), not a plugin. It accesses only public URLs, carries no credentials, runs under the standard hardened compose profile with two Chromium-specific tweaks (larger `/dev/shm`, larger `/tmp`), and is always treated as configured (no setup wizard, no Desktop credentials form).
 
 ## Why
 
 - **Shared infrastructure, not a domain integration.** Browser automation is general-purpose: multiple plugins and Claude directly benefit from one shared Chromium instance. A built-in worker keeps the multi-MB image out of every plugin ZIP and shares the compose network.
 - **Credential-less contract.** Playwright contacts only URLs supplied at call time, so it must never receive a `/tokens` mount, must always report as configured, and must show no Desktop config form. The integration status check short-circuits to `true` when a service's `auth_fields` list is empty.
-- **VM isolation replaces Chromium's in-process sandbox.** `--no-sandbox` is required because the container drops all capabilities. Chromium's namespace + `seccomp-bpf` sandbox would need `SYS_ADMIN` (or a `seccomp` profile permitting `clone(CLONE_NEWUSER)`), which conflicts with `cap_drop: ALL`. The hypervisor → container-runtime → `cap_drop: ALL` + `no-new-privileges` stack provides stronger isolation than Chromium's in-process sandbox would. macOS uses the Lima VM (ADR-002); Windows uses the WSL2 / Hyper-V boundary (ADR-004).
-- **Headless shell over full Chromium.** The base image ships `chromium_headless_shell`, which omits the crashpad broker, dbus, GPU, and audio stack — none of which can start under `cap_drop: ALL` with `no-new-privileges`. Web platform APIs exposed to MCP tools are identical.
-- **`shm_size: 2g`.** The 64 MiB default `/dev/shm` is too small for multi-page Playwright sessions; Chromium crashes at page load with `ENOMEM`. A 2 GiB RAM-backed region avoids that without a writable volume.
+- **VM isolation replaces Chromium's in-process sandbox.** `--no-sandbox` is required because the container drops all capabilities. Chromium's namespace + `seccomp-bpf` sandbox would need `SYS_ADMIN` (or a `seccomp` profile permitting `clone(CLONE_NEWUSER)`)[^4], which conflicts with `cap_drop: ALL`. The hypervisor → container-runtime → `cap_drop: ALL` + `no-new-privileges` stack provides stronger isolation than Chromium's in-process sandbox would. macOS uses the Lima VM (ADR-002); Windows uses the WSL2 / Hyper-V boundary (ADR-004).
+- **Headless shell over full Chromium.** The base image ships `chromium_headless_shell`, which omits dbus[^2] and the crashpad broker, GPU, and audio stack (unverified) — none of which can start under `cap_drop: ALL` with `no-new-privileges`. Web platform APIs exposed to MCP tools are identical[^2].
+- **`shm_size: 2g`.** The 64 MiB default `/dev/shm`[^3] is too small for multi-page Playwright sessions; Chromium crashes at page load with `ENOMEM`. A 2 GiB RAM-backed region avoids that without a writable volume.
 - **Larger `tmpfs /tmp` (`size=1g`, `noexec`, `nosuid`).** Chromium's user-data dir and screenshot compositing live in `/tmp` because the root filesystem is `read_only`. Restarting the container wipes `/tmp`, giving a fresh profile every session.
 - **No `/workspace` mount in v1.** Screenshots and content return inline as base64 in the MCP tool response, reducing the blast radius of a compromised browser session to the current conversation rather than the project directory.
 
@@ -23,7 +23,7 @@ The original § Decision 2 claimed the server runs with `--allowed-hosts mcp-hub
 
 ## Heartbeat patch as deliberate tech debt
 
-`@playwright/mcp` 0.0.70 enables a Streamable-HTTP heartbeat by default (ping every 3 s, kill the session after 5 s with no ack). The hub uses a plain request-response cycle, so the ping has nowhere to land and the server closes the connection mid-response, truncating output to zero bytes. The build patches the compiled `playwright-core` JavaScript to flip that flag to `false`, with a `grep -q` guard on a later layer that fails the build with a clear FATAL message if a version bump renames the patched call. This is acknowledged tech debt; the long-term fix is an upstream `--no-heartbeat` flag, after which the patch is replaced by the CLI flag and the pin is bumped.
+`@playwright/mcp` 0.0.70[^5] enables a Streamable-HTTP heartbeat by default (ping every 3 s (unverified), kill the session after 5 s with no ack)[^6]. The hub uses a plain request-response cycle, so the ping has nowhere to land and the server closes the connection mid-response, truncating output to zero bytes. The build patches the compiled `playwright-core` JavaScript to flip that flag to `false`, with a `grep -q` guard on a later layer that fails the build with a clear FATAL message if a version bump renames the patched call. This is acknowledged tech debt; the long-term fix is an upstream `--no-heartbeat` flag, after which the patch is replaced by the CLI flag and the pin is bumped.
 
 ## Where it lives in code
 
@@ -48,3 +48,15 @@ The original § Decision 2 claimed the server runs with `--allowed-hosts mcp-hub
 - **Keep Chromium's in-process sandbox.** Rejected: it requires `SYS_ADMIN` or a relaxed `seccomp` profile, both incompatible with `cap_drop: ALL`. The VM + container hardening layers provide stronger isolation.
 - **Pin `--allowed-hosts` to a single hostname (`mcp-hub`).** Rejected (see Correction): it authenticates nothing on a shared compose network and only breaks the hub's legitimate calls.
 - **Mount `/workspace:rw` in v1.** Deferred (YAGNI): base64 inline output covers small screenshots; a writable mount can be added later if a concrete file-output use case appears.
+
+[^1]: `@playwright/mcp`, official Microsoft repository: https://github.com/microsoft/playwright-mcp
+
+[^2]: Chrome for Developers, "Download old Headless Chrome as chrome-headless-shell" - describes the standalone `headless_shell` binary as a lightweight wrapper around Chromium's content module sharing the same browser code, with substantially fewer dependencies and no requirement on D-Bus or X11/Wayland: https://developer.chrome.com/blog/chrome-headless-shell
+
+[^3]: Docker containers default to a 64 MB `/dev/shm`, resized via `--shm-size` / compose `shm_size`: https://last9.io/blog/how-to-configure-dockers-shared-memory-size-dev-shm/
+
+[^4]: Chromium's Linux sandbox needs to create a user namespace (`CLONE_NEWUSER`) to sandbox itself, which Docker's default profile blocks without added privileges: https://github.com/jessfraz/dockerfiles/issues/65
+
+[^5]: `@playwright/mcp` release `v0.0.70`: https://github.com/microsoft/playwright-mcp/releases/tag/v0.0.70
+
+[^6]: GitHub issue documenting the hardcoded ping/heartbeat timeout that kills long-running Streamable HTTP sessions in `playwright-mcp`: https://github.com/microsoft/playwright-mcp/issues/1293

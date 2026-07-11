@@ -11,8 +11,8 @@ Each project gets its own isolated container network and its own dedicated token
 
 - Per-project network (`speedwave_<project>_network`) keeps one project's containers off another project's wire — built by `render_compose()` from the network name `{compose_prefix}_{project}_network`.
 - Per-project tokens directory (`~/.speedwave/tokens/<project>/`) means each project's service credentials live in their own tree; a worker only ever sees its own service's subdirectory.
-- The VM isolation layer (Lima + Apple VZ on macOS, WSL2 + Hyper-V on Windows) adds a kernel-level hypervisor boundary beneath the container hardening. Linux as a host platform was dropped — see [ADR-059](ADR-059-drop-linux-support.md).
-- OWASP container hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`) remains unchanged on both platforms.
+- The VM isolation layer (Lima + Apple VZ on macOS[^1], WSL2 + Hyper-V on Windows[^2]) adds a kernel-level hypervisor boundary beneath the container hardening. Linux as a host platform was dropped — see [ADR-059](ADR-059-drop-linux-support.md).
+- OWASP container hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`) remains unchanged on both platforms.[^3]
 
 ## Token mounts
 
@@ -34,4 +34,8 @@ When this ADR was first written, SharePoint was the single exception: it mounted
 
 ---
 
-[OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
+[^1]: Lima's `vz` VM type wraps Apple's Virtualization.framework and is the default driver on macOS >= 13.5. [Lima docs: VZ](https://lima-vm.io/docs/config/vmtype/vz/)
+
+[^2]: WSL 2 runs the Linux kernel inside a lightweight Hyper-V-based utility VM (the "Virtual Machine Platform" optional component). [Microsoft Learn: Comparing WSL Versions](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
+
+[^3]: OWASP Docker Security Cheat Sheet, recommendations on dropping capabilities, `no-new-privileges`, and read-only filesystems. [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)

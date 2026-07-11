@@ -5,20 +5,20 @@
 
 ## Decision (historical)
 
-The original plan: when the configured LLM provider was not Anthropic, Speedwave would add an `llm-proxy` container running LiteLLM to translate the Anthropic Messages API into the target provider's API. Ollama was the exception — Claude Code would connect to it directly. This was never the shipped end state; ADR-040 removed the proxy.
+The original plan: when the configured LLM provider was not Anthropic, Speedwave would add an `llm-proxy` container running LiteLLM to translate the Anthropic Messages API into the target provider's API[^1]. Ollama was the exception — Claude Code would connect to it directly. This was never the shipped end state; ADR-040 removed the proxy.
 
 ## Why (historical rationale)
 
-- Claude Code natively honours `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, sending every request to whatever endpoint implements `POST /v1/messages`. The design leveraged this without patching Claude Code.
+- Claude Code natively honours `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, sending every request to whatever endpoint implements `POST /v1/messages`[^2]. The design leveraged this without patching Claude Code.
 - A proxy was thought necessary to bridge cloud providers (OpenAI, Gemini, DeepSeek, OpenRouter) whose wire formats differ from the Anthropic Messages schema.
-- Ollama already implements the Anthropic-format `POST /v1/messages`, so it needed no proxy even in this design.
+- Ollama already implements the Anthropic-format `POST /v1/messages`[^3], so it needed no proxy even in this design.
 
 ## What actually shipped (current state)
 
 ADR-040 deleted LiteLLM and the `llm-proxy` container. The current behaviour, implemented in `apply_llm_config_in` in `crates/speedwave-runtime/src/compose.rs`:
 
 - Only two provider classes are accepted: `anthropic` (direct to `api.anthropic.com`) and the local family — `ollama`, `lmstudio`, `llamacpp`, `local` (the SSOT list `LOCAL_PROVIDERS` in `crates/speedwave-runtime/src/config.rs`). Any other provider hard-fails with `bail!`. Cloud providers (OpenAI, Gemini, DeepSeek, OpenRouter) are explicitly unsupported.
-- For a local provider, Speedwave injects `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_AUTH_TOKEN` directly into the `claude` container — there is no proxy and no per-session token. The auth token is the user's own `api_key` when present, otherwise the documented dummy `sk-no-key-required`. A function named `generate_session_token()` does not exist; a test pins that `apply_llm_config` injects no UUID.
+- For a local provider, Speedwave injects `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_AUTH_TOKEN` directly into the `claude` container — there is no proxy and no per-session token. The auth token is the user's own `api_key` when present, otherwise the dummy `sk-no-key-required` (`DUMMY_TOKEN` in `crates/speedwave-runtime/src/compose/llm.rs`). A function named `generate_session_token()` does not exist; a test pins that `apply_llm_config` injects no UUID.
 
 ## Secrets management (current state)
 
@@ -39,3 +39,9 @@ There is no `~/.speedwave/secrets/<project>/llm.env` file and no `env_file` mech
 ## Rejected alternatives
 
 - Patching Claude Code to speak provider-native APIs directly — rejected because Claude Code's `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` env support already redirects every request, so no fork or patch was needed.
+
+[^1]: LiteLLM's unified `/v1/messages` endpoint translates Anthropic-format requests to non-Anthropic providers and translates the responses back: https://docs.litellm.ai/docs/anthropic_unified/
+
+[^2]: Claude Code environment variables, including `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`: https://code.claude.com/docs/en/env-vars
+
+[^3]: Ollama's Anthropic Messages API compatibility, exposing `POST /v1/messages`: https://docs.ollama.com/api/anthropic-compatibility

@@ -75,11 +75,11 @@ Surfacing registered hooks per plugin in the Desktop UI (informed consent at ena
 
 ## Footnotes
 
-[^1]: Claude Code documentation, "Hooks reference" — hooks are configured in settings files (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed policy settings); hook arrays from multiple scopes merge. <https://code.claude.com/docs/en/hooks>
+[^1]: Claude Code documentation, "Hooks reference" - hooks are configured in settings files (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed policy settings); hook arrays from multiple scopes merge. <https://code.claude.com/docs/en/hooks>
 
-[^2]: Claude Code documentation, "Plugins" — native plugins register hooks via `hooks/hooks.json` with a `.claude-plugin/plugin.json` manifest and reference files via `${CLAUDE_PLUGIN_ROOT}`. <https://code.claude.com/docs/en/plugins>
+[^2]: Claude Code documentation, "Plugins" - native plugins register hooks via `hooks/hooks.json` with a `.claude-plugin/plugin.json` manifest and reference files via `${CLAUDE_PLUGIN_ROOT}`. <https://code.claude.com/docs/en/plugins>
 
-[^3]: Node.js documentation, "Type stripping" — Node.js 24 runs TypeScript files with erasable types directly. <https://nodejs.org/docs/latest-v24.x/api/typescript.html>
+[^3]: Node.js documentation, "Type stripping" - Node.js 24 runs TypeScript files with erasable types directly. <https://nodejs.org/docs/latest-v24.x/api/typescript.html>
 
 [ADR-009]: ADR-009-per-project-isolation-preserved.md
 [ADR-015]: ADR-015-plugin-system.md

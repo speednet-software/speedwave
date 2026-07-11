@@ -13,11 +13,11 @@ Ship a built-in MCP worker `office` (compose name `mcp-office`, hub env `WORKER_
 - **Image weight.** LibreOffice headless plus the Python/Office/PDF libraries is a large image (LibreOffice dominates). As a worker it builds once and starts only when `office` is enabled per-project; baked into `Containerfile.claude` it would burden every machine and project.
 - **Deterministic contract.** Named tools with fixed schemas are reproducible and tested in the same commit, unlike whatever glue code Claude would otherwise write per-task.
 - **Consistency & free per-project toggle.** Reuses the existing worker pattern (hub discovery via `WORKER_*_URL`, the `_meta` policy from ADR-036) and is gated by `ENABLED_SERVICES` automatically.
-- **Own thin worker, not wrapping an upstream MCP server (ADR-053 gate).** No single mature upstream MCP server covers the full scope: `markitdown-mcp` is read-only, `pptx-xlsx-mcp` is Windows-only COM automation, the rest are single-maintainer community projects. So we glue mature libraries/CLIs instead.
+- **Own thin worker, not wrapping an upstream MCP server (ADR-053 gate).** No single mature upstream MCP server covers the full scope: `markitdown-mcp` is read-only[^1], `pptx-xlsx-mcp` is Windows-only COM automation[^2], the rest are single-maintainer community projects. So we glue mature libraries/CLIs instead.
 
 ## Security contract (part of the decision)
 
-- **No egress at the network layer.** `mcp-office` is attached only to a dedicated `internal: true` network (`${NETWORK_NAME}_office`) with no gateway route, so it has no internet. `mcp-hub` attaches to both that and the main network so discovery still works (the hub holds zero tokens). When `office` is disabled, the filter removes the network and the hub's attachment. Application-level defenses layer on top: WeasyPrint's `url_fetcher` restricted to `file://` under `/workspace`, `pandoc` and LibreOffice run offline.
+- **No egress at the network layer.** `mcp-office` is attached only to a dedicated `internal: true` network (`${NETWORK_NAME}_office`) with no gateway route, so it has no internet. `mcp-hub` attaches to both that and the main network so discovery still works (the hub holds zero tokens). When `office` is disabled, the filter removes the network and the hub's attachment. Application-level defenses layer on top: WeasyPrint's `url_fetcher`[^3] restricted to `file://` under `/workspace`, `pandoc` and LibreOffice run offline.
 - **Path policy, enforced in the worker.** Every input/output path is canonicalized, rejected if not under `/workspace/` or if any component is a symlink, written atomically, and defaulted to `/workspace/.speedwave/office/` so an exploited parser cannot overwrite `.git`/`.speedwave.json`/scripts.
 - **Anti-DoS limits.** Per-call caps on input-file size, PDF pages, subprocess wall-time (longer for LibreOffice via `_meta.timeoutClass`), container memory, and bounded subprocess output buffers. Exceeding any limit is a clear tool error.
 - **No service credentials, but an internal Bearer.** `auth_fields: &[]` in `TOGGLEABLE_MCP_SERVICES`; the closest precedent for a credential-less toggleable MCP service is `playwright` (also `auth_fields: &[]`, `credential_files: &[]`). The worker still receives the standard internal Bearer token and fails fast (`process.exit(1)`) without `MCP_OFFICE_AUTH_TOKEN`.
@@ -49,5 +49,13 @@ Three layers select tools across the large tool set: `_meta.keywords` + `_meta.d
 - **A plugin (sibling repo)** — this is a core capability users requested, not an optional add-on; a plugin means coordinating two repositories and slower iteration.
 - **Keep the prior container-to-container PDF workaround** — fragile (depends on a private container IP), expensive (large base64 through the model context), and opens an unauthenticated path bypassing the hub.
 - **`docling`/OCR in v1** — YAGNI: large ML models, and `readDocument` covers the structured-text case.
-- **SheetJS on the write path** — the SheetJS Community Edition writes no cell styles or charts, so writes stay on `openpyxl`.
+- **SheetJS on the write path** — the SheetJS Community Edition writes no cell styles or charts, so writes stay on `openpyxl`[^4].
 - **`mcp-office` on the shared network with only application-level fetch restrictions** — a network-level egress block is stronger and cheaper than auditing every tool for remote-fetch paths; the application restrictions remain as defense in depth.
+
+[^1]: [markitdown-mcp package README](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp): exposes a single `convert_to_markdown(uri)` tool, no write/edit tool.
+
+[^2]: [jenstangen1/pptx-xlsx-mcp](https://github.com/jenstangen1/pptx-xlsx-mcp): uses `pywin32` COM automation against locally running PowerPoint/Excel, Windows-only.
+
+[^3]: [WeasyPrint API reference, `url_fetcher`](https://doc.courtbouillon.org/weasyprint/stable/api_reference.html): `HTML`/`CSS` accept a custom `url_fetcher` callable that can restrict or reject fetched URL schemes.
+
+[^4]: [SheetJS issue #3214](https://git.sheetjs.com/sheetjs/sheetjs/issues/3214): reading and re-writing a file with the Community Edition does not preserve cell styles; styling and chart-writing support is reserved for the Pro edition.

@@ -65,7 +65,7 @@ Build only the images that the user actually needs:
 
 ---
 
-[^1]: [Playwright Docker images — Chromium + system dependencies](https://playwright.dev/docs/docker)
+[^1]: [Playwright Docker images - Chromium + system dependencies](https://playwright.dev/docs/docker)
 
 [^2]: [docs/adr/ADR-030-bundle-reconcile-after-app-update.md](ADR-030-bundle-reconcile-after-app-update.md)
 
