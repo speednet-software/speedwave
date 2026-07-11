@@ -435,6 +435,8 @@ jobs:
           calls_compose_down_for_each_project
           empty_projects_is_noop
           failure_does_not_abort_remaining_projects
+          cli_session_appearing_during_compose_down_loop_skips_stop_vm
+          cli_session_appearing_mid_batch_aborts_remaining_teardown
           windows_nsis_resolves_exe_parent_when_resources_alongside
           windows_fallback_to_resources_subdir
           windows_exe_parent_takes_priority_over_resources_subdir

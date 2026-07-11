@@ -89,8 +89,11 @@ PY
 @test "every Windows-cfg-gated test in desktop crate is named in the workflow's windows-only invocation" {
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
 
-    mapfile -t workflow_names < <(_workflow_windows_test_names)
-    mapfile -t crate_names < <(_crate_windows_only_test_names)
+    # macOS ships bash 3.2 which lacks mapfile; while-read is the compatible equivalent.
+    workflow_names=()
+    while IFS= read -r _n; do workflow_names+=("$_n"); done < <(_workflow_windows_test_names)
+    crate_names=()
+    while IFS= read -r _n; do crate_names+=("$_n"); done < <(_crate_windows_only_test_names)
 
     [ "${#crate_names[@]}" -gt 0 ]
 
@@ -116,6 +119,7 @@ PY
 }
 
 @test "workflow windows-only test list is non-empty" {
-    mapfile -t workflow_names < <(_workflow_windows_test_names)
+    workflow_names=()
+    while IFS= read -r _n; do workflow_names+=("$_n"); done < <(_workflow_windows_test_names)
     [ "${#workflow_names[@]}" -gt 0 ]
 }
