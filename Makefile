@@ -398,7 +398,8 @@ test-desktop-build-run:
 	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+	  _tests/desktop/bundle-native-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run:
@@ -576,7 +577,8 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+	  _tests/desktop/bundle-native-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
