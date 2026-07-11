@@ -36,7 +36,7 @@ pub(crate) fn apply_llm_config_in(
                 let caller_token = super::proxy::ensure_caller_token_in(data_dir, project)?;
                 return apply_llm_config_proxy(yaml, llm, &caller_token);
             }
-            log::info!("llm: custom headers configured — using the direct (non-proxy) path");
+            log::info!("custom headers configured — using the direct (non-proxy) path");
         }
     } else if let Some(entry) = llm.active_provider() {
         // Legacy direct path supports only anthropic + local; erroring beats
@@ -86,7 +86,7 @@ fn apply_llm_config_proxy(
             // not-yet-healed config → account default, not 404.
             if crate::config::is_foreign_anthropic_model(&model) {
                 log::warn!(
-                    "llm: ignoring foreign model '{model}' under anthropic provider '{}' — using account default",
+                    "ignoring foreign model '{model}' under anthropic provider '{}' — using account default",
                     entry.id
                 );
             } else if !model.is_empty() {
@@ -175,7 +175,7 @@ fn apply_llm_config_legacy_in(
             // back to account default rather than 404 the API.
             if crate::config::is_foreign_anthropic_model(model) {
                 log::warn!(
-                    "llm: ignoring foreign model '{model}' on direct anthropic path — using account default"
+                    "ignoring foreign model '{model}' on direct anthropic path — using account default"
                 );
             } else if !model.is_empty() {
                 extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
@@ -406,7 +406,11 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

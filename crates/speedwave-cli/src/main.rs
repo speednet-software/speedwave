@@ -29,7 +29,11 @@ fn redact_err(e: &impl std::fmt::Display) -> String {
 
 /// Single output sink for `out!`/`err!`; every line passes through the
 /// `log_sanitizer` SSOT before reaching the terminal.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI's single output sink — every other call site routes through out!/err!"
+)]
 fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
     let line = sanitize_output_line(&args.to_string());
     if to_stderr {
@@ -323,7 +327,7 @@ fn maybe_print_update_hint() {
 /// Re-exec the new binary with `update` to rebuild container images with the
 /// correct image tags; CWD is inherited from the caller.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new(exe)
+    let status = speedwave_runtime::binary::interactive_command(&exe.to_string_lossy())
         .arg("update")
         .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
         .status()
@@ -944,7 +948,7 @@ fn main() -> anyhow::Result<()> {
     // Idempotent; secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
-        log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
+        log::info!("legacy token cleanup sanitised {cleaned} project(s)");
     }
 
     // Self-heal legacy/partial oauth.json shape (ADR-060 addendum); idempotent.
@@ -1218,7 +1222,11 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
 

@@ -2,7 +2,10 @@
 //! with `DEBIAN_FRONTEND=noninteractive` — a debconf prompt (e.g. tzdata's
 //! timezone dialog on upgrade) hangs buildkit forever, since builds have no TTY.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::path::{Path, PathBuf};
 

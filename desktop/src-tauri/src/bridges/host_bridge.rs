@@ -564,7 +564,7 @@ impl HostBridge {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        log::warn!(target: "host_bridge", "watchdog runtime: {e}");
+                        log::warn!(target: "host_bridge", "failed to build watchdog runtime: {e}");
                         return;
                     }
                 };
@@ -581,7 +581,7 @@ impl HostBridge {
                                     if let Err(e) = write_lock_file_atomic(&watchdog_path, &body) {
                                         log::warn!(
                                             target: "host_bridge",
-                                            "watchdog: failed to re-create lock file: {e}"
+                                            "watchdog failed to re-create lock file: {e}"
                                         );
                                     }
                                 }
@@ -735,7 +735,10 @@ async fn run_endpoint_loop(
     let endpoint_auth = match &config.auth {
         Some(a) => a.clone(),
         None => {
-            log::error!(target: "host_bridge", "endpoint loop without auth scheme");
+            log::error!(
+                target: "host_bridge",
+                "endpoint accept loop started without an auth scheme"
+            );
             return;
         }
     };
@@ -747,7 +750,7 @@ async fn run_endpoint_loop(
                 let (stream, peer_addr) = match accept_res {
                     Ok(p) => p,
                     Err(e) => {
-                        log::warn!(target: "host_bridge", "accept error: {e}");
+                        log::warn!(target: "host_bridge", "endpoint accept failed: {e}");
                         continue;
                     }
                 };
@@ -888,7 +891,7 @@ async fn run_pairing_loop(
                 let (stream, peer_addr) = match accept_res {
                     Ok(p) => p,
                     Err(e) => {
-                        log::warn!(target: "host_bridge", "accept error: {e}");
+                        log::warn!(target: "host_bridge", "pairing accept failed: {e}");
                         continue;
                     }
                 };
@@ -1015,7 +1018,10 @@ async fn run_pairing_loop(
                 };
 
                 let Ok(mut st) = state.lock() else {
-                    log::warn!(target: "host_bridge", "pairing state poisoned, skipping connection");
+                    log::warn!(
+                        target: "host_bridge",
+                        "pairing state lock poisoned, skipping connection"
+                    );
                     continue;
                 };
                 st.pending.insert(
@@ -1104,7 +1110,10 @@ fn spawn_pending_slot_watcher(
                             }
                         });
                     } else {
-                        log::warn!(target: "host_bridge", "pending watcher: state poisoned");
+                        log::warn!(
+                            target: "host_bridge",
+                            "pending slot watcher state lock poisoned"
+                        );
                     }
                     if let Some(cb) = &event_cb {
                         for role in expired {
@@ -1319,13 +1328,13 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
             Ok(ip) => ip,
             Err(e) => {
                 log::warn!(
-                    "cleanup_stale_lock_files: host_bind_address {addr:?} unparseable ({e}); skipping"
+                    "skipping stale lock cleanup: host bind address {addr:?} unparseable ({e})"
                 );
                 return;
             }
         },
         Err(e) => {
-            log::warn!("cleanup_stale_lock_files: host_bind_address failed ({e}); skipping");
+            log::warn!("skipping stale lock cleanup: host_bind_address failed ({e})");
             return;
         }
     };
@@ -1362,7 +1371,11 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use http::Uri;

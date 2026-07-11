@@ -86,7 +86,7 @@ pub async fn cancel_queued_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
     use speedwave_runtime::session::QueuedMessageService;

@@ -355,7 +355,11 @@ pub(crate) fn check_project(name: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions use unwrap/expect"
+)]
 mod tests {
     use super::*;
 

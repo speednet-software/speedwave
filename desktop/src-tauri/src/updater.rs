@@ -221,7 +221,11 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only assertions"
+)]
 mod tests {
     use super::*;
 

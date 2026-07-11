@@ -1,7 +1,10 @@
 //! Guards for the bundled instruction files (CLAUDE.md + output style):
 //! tell-free characters, line budget, required section anchors.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::fs;
 use std::path::PathBuf;

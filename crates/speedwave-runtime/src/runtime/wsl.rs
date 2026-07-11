@@ -447,7 +447,7 @@ impl ContainerRuntime for WslRuntime {
         // project); skip so nerdctl doesn't fatally error and retry for ~70s.
         // Check the host-side Windows path, not the /mnt/c engine path.
         if super::compose_down_is_noop(&super::compose_file_path(project)?) {
-            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            log::info!("no compose.yml for '{project}' — nothing to stop");
             return Ok(());
         }
         let remote = super::shell_quote_argv(&[
@@ -515,9 +515,7 @@ impl ContainerRuntime for WslRuntime {
         .collect();
         let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
 
-        // Raw Command::new — intentionally bypasses binary::system_command() because
-        // interactive TTY sessions need a console window on Windows.
-        let mut command = Command::new("wsl.exe");
+        let mut command = crate::binary::interactive_command("wsl.exe");
         command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
         command
     }
@@ -908,7 +906,11 @@ impl WslRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;

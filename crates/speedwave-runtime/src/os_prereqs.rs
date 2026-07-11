@@ -121,14 +121,15 @@ fn check_wsl_mirrored_mode_supported() -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_build_number() -> Option<u32> {
-    let output = crate::binary::powershell_command()
-        .args([
+    let output = crate::binary::run_powershell_capture(
+        &[
             "-NoProfile",
             "-Command",
             "[System.Environment]::OSVersion.Version.Build",
-        ])
-        .output()
-        .ok()?;
+        ],
+        std::time::Duration::from_secs(10),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -185,17 +186,13 @@ fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
 fn check_nested_virt() -> Vec<String> {
     use crate::binary;
 
-    let mut cmd = binary::powershell_command();
-    cmd.args([
+    let args = [
         "-NoProfile",
         "-Command",
         "(Get-CimInstance Win32_ComputerSystem | Select-Object -Property Model,Manufacturer | ConvertTo-Json)",
-    ]);
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    ];
 
-    // No explicit timeout — cmd.output() blocks until PowerShell exits.
-    let output = match cmd.output() {
+    let output = match binary::run_powershell_capture(&args, std::time::Duration::from_secs(10)) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(_) | Err(_) => return Vec::new(), // Fail open
     };

@@ -207,7 +207,11 @@ pub(crate) async fn write_http_response(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     use super::*;
 

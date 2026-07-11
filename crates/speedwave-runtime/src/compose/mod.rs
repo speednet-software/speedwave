@@ -167,7 +167,7 @@ pub fn host_bridges_from_disk() -> HostBridgesInfo {
     match plugin::plugins_base_dir() {
         Ok(dir) => host_bridges_from_disk_in(&dir),
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot resolve plugins dir: {e}");
+            log::warn!("cannot resolve plugins dir for host bridges: {e}");
             HostBridgesInfo::default()
         }
     }
@@ -181,7 +181,7 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
     let plugins = match plugin::list_verified_from_dir(plugins_dir) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot list verified plugins: {e}");
+            log::warn!("cannot list verified plugins for host bridges: {e}");
             return HostBridgesInfo::default();
         }
     };
@@ -728,7 +728,7 @@ pub(crate) fn inject_claude_env(
                     }
                 } else {
                     log::warn!(
-                        "inject_claude_env: claude service 'environment' field is not a sequence \
+                        "claude service 'environment' field is not a sequence \
                          (got {:?}) — env vars not injected",
                         environment
                     );
@@ -758,7 +758,7 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
                     // compose.template.yml uses sequence form uniformly; mapping form is intentionally skipped.
                     None => {
                         log::warn!(
-                            "inject_host_timezone: service 'environment' is not a sequence \
+                            "service 'environment' is not a sequence \
                              (got {:?}) — TZ not injected",
                             existing
                         );
@@ -926,7 +926,7 @@ fn apply_oauth_config_with_paths(
         if !bearer_file.exists() {
             // Lazily write the per-service bearer file (chmod 0o600).
             if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
-                log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
+                log::warn!("failed to write per-service oauth bearer for '{service_id}': {e}");
                 continue;
             }
         }
@@ -1055,7 +1055,7 @@ pub(crate) fn inject_env_into(
 ) {
     let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) else {
         log::warn!(
-            "inject_env_into: 'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
+            "'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
         );
         return;
     };
@@ -1063,7 +1063,7 @@ pub(crate) fn inject_env_into(
         .get_mut(serde_yaml_ng::Value::String(service.to_string()))
         .and_then(|s| s.as_mapping_mut())
     else {
-        log::warn!("inject_env_into: service '{service}' absent — cannot inject {env_name}");
+        log::warn!("service '{service}' absent — cannot inject {env_name}");
         return;
     };
 
@@ -1072,7 +1072,9 @@ pub(crate) fn inject_env_into(
         .entry(env_key)
         .or_insert_with(|| serde_yaml_ng::Value::Sequence(Vec::new()));
     let Some(env_seq) = env_entry.as_sequence_mut() else {
-        log::warn!("inject_env_into: service '{service}' 'environment' is not a sequence — cannot inject {env_name}");
+        log::warn!(
+            "service '{service}' 'environment' is not a sequence — cannot inject {env_name}"
+        );
         return;
     };
 
@@ -1172,7 +1174,11 @@ pub(crate) fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, valu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use strum::IntoEnumIterator;
@@ -4992,6 +4998,7 @@ services:
         service: crate::host_mcp_process::lock::LockService,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use crate::host_mcp_process::lock::{self, LockFile};
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -6241,6 +6248,7 @@ services:
     fn test_oauth_config_skipped_when_worker_pid_is_dead() {
         // Reap a real child so its PID is deterministically dead (not merely
         // "probably unused") — avoids the 999999-might-exist flakiness.
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -9260,7 +9268,6 @@ services:
     // not apply_plugins directly (it reads the plugins filesystem).
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
         // A plugin without service_id should be toggled by slug.
         // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
@@ -9268,10 +9275,8 @@ services:
             plugins: std::collections::HashMap::from([("my-skills".to_string(), true)]),
             ..Default::default()
         };
-        // The key lookup: service_id.unwrap_or(slug) = "my-skills"
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be enabled when slug is in plugins map"
@@ -9279,16 +9284,14 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_disabled_by_slug_excluded() {
         // A plugin without service_id should be excluded when disabled.
         let integrations = ResolvedIntegrationsConfig {
             plugins: std::collections::HashMap::from([("my-skills".to_string(), false)]),
             ..Default::default()
         };
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be excluded when disabled"
@@ -9296,13 +9299,11 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_absent_from_config_is_disabled() {
         // A freshly installed plugin not in config should be disabled.
         let integrations = ResolvedIntegrationsConfig::default();
-        let slug = "new-plugin";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "new-plugin";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Plugin not in config should be disabled by default"

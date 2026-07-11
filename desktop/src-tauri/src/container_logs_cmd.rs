@@ -23,7 +23,10 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            log::warn!("read_tail_desktop_logs: cannot read {}: {e}", dir.display());
+            log::warn!(
+                "failed to read desktop log directory {}: {e}",
+                dir.display()
+            );
             return String::new();
         }
     };
@@ -44,10 +47,7 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     for (path, _) in files {
         match std::fs::read_to_string(&path) {
             Ok(content) => combined.extend(content.lines().map(str::to_string)),
-            Err(e) => log::warn!(
-                "read_tail_desktop_logs: cannot read {}: {e}",
-                path.display()
-            ),
+            Err(e) => log::warn!("failed to read desktop log file {}: {e}", path.display()),
         }
     }
     let start = combined.len().saturating_sub(tail);
@@ -227,12 +227,12 @@ async fn fetch_compose_logs_bounded(project: String, tail: u32) -> String {
     match tokio::time::timeout(COMPOSE_LOGS_TIMEOUT, handle).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            log::warn!("get_all_logs: compose logs task failed: {e}");
+            log::warn!("compose logs task failed: {e}");
             String::new()
         }
         // The detached task clears the in-flight flag when it eventually ends.
         Err(_) => {
-            log::warn!("get_all_logs: compose logs timed out — container engine busy");
+            log::warn!("compose logs timed out — container engine busy");
             compose_busy_marker()
         }
     }
@@ -280,7 +280,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 

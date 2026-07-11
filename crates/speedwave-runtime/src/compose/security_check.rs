@@ -1662,7 +1662,10 @@ pub(crate) fn get_services(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test-only module: unwraps assert setup succeeded"
+    )]
     use super::*;
 
     #[test]

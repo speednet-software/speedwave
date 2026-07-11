@@ -52,7 +52,10 @@ pub fn has_api_key(project: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test module uses unwrap() only, never expect()"
+)]
 mod tests {
     use super::*;
 

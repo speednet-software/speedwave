@@ -422,7 +422,11 @@ fn access_token_path(project: &str, slug: &str) -> Result<std::path::PathBuf, St
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

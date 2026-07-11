@@ -176,7 +176,11 @@ fn cleanup_legacy_files(state_dir: &Path, port_file: &str, pid_file: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only module: unwraps/expects assert setup succeeded"
+)]
 mod tests {
     use super::*;
     fn fixture() -> LockFile {

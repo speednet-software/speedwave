@@ -79,7 +79,7 @@ pub fn host_total_memory_gib() -> u32 {
 #[cfg(target_os = "macos")]
 fn host_total_memory_gib_impl() -> Option<u32> {
     // Shell out to sysctl(1) to avoid `unsafe` blocks (forbidden by project lints).
-    let output = std::process::Command::new("sysctl")
+    let output = crate::binary::system_command("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
         .ok()?;
@@ -178,7 +178,10 @@ pub const OOM_MESSAGE: &str = "\
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
 
@@ -413,6 +416,7 @@ mod tests {
     #[test]
     fn is_oom_exit_code_137() {
         // Spawn a process that exits with code 137.
+        // SSOT-allow: test fixture spawn
         let status = std::process::Command::new("sh")
             .args(["-c", "exit 137"])
             .status()
@@ -422,12 +426,14 @@ mod tests {
 
     #[test]
     fn is_oom_exit_code_0() {
+        // SSOT-allow: test fixture spawn
         let status = std::process::Command::new("true").status().unwrap();
         assert!(!is_oom_exit(&status));
     }
 
     #[test]
     fn is_oom_exit_code_1() {
+        // SSOT-allow: test fixture spawn
         let status = std::process::Command::new("false").status().unwrap();
         assert!(!is_oom_exit(&status));
     }

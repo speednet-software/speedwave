@@ -288,7 +288,11 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
     use crate::config::{save_user_config_to, SpeedwaveUserConfig};

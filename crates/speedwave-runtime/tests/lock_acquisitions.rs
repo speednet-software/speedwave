@@ -2,7 +2,10 @@
 //! exactly once; passthrough methods do not. Own process, so `LOCK_ACQUISITIONS`
 //! starts at zero.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 

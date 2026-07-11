@@ -1,7 +1,10 @@
 //! Mock-runtime builder for `LockedRuntime`. Single entry point for tests —
 //! `ContainerRuntime` is `pub(crate)`, so this is the only legal way for
 //! downstream crates to build a mock. Gated behind feature `test-support`.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test-support builder/mock: unwrap on locked test fixtures is sound"
+)]
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
@@ -498,6 +501,7 @@ impl ContainerRuntime for MockRuntime {
             container: container.to_string(),
             argv: cmd.iter().map(|s| s.to_string()).collect(),
         });
+        // SSOT-allow: test fixture spawn
         Command::new(&self.container_exec_program)
     }
 
@@ -519,17 +523,20 @@ impl ContainerRuntime for MockRuntime {
             }
         };
         if let Some(msg) = next_failure {
+            // SSOT-allow: test fixture spawn
             let mut c = Command::new("sh");
             c.env("SW_MOCK_EXEC_STDERR", msg)
                 .args(["-c", "echo \"$SW_MOCK_EXEC_STDERR\" >&2; exit 1"]);
             return Ok(c);
         }
         if let Some(script) = &self.exec_piped_script {
+            // SSOT-allow: test fixture spawn
             let mut c = Command::new("sh");
             c.env("SW_MOCK_EXEC_SCRIPT", script)
                 .args(["-c", "printf '%s' \"$SW_MOCK_EXEC_SCRIPT\""]);
             return Ok(c);
         }
+        // SSOT-allow: test fixture spawn
         Ok(Command::new(&self.container_exec_program))
     }
 
@@ -777,7 +784,7 @@ impl ContainerRuntime for MockRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
 

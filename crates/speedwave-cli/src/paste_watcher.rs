@@ -55,7 +55,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let target = clip_path(project_dir);
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("paste_watcher: cannot create {}: {e}", parent.display());
+            log::warn!("cannot create paste directory {}: {e}", parent.display());
             return;
         }
     }
@@ -63,7 +63,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let mut clipboard = match Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("paste_watcher: clipboard unavailable: {e} — CLI paste disabled");
+            log::warn!("clipboard unavailable: {e} — CLI paste disabled");
             return;
         }
     };
@@ -75,14 +75,9 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 let h = hash_image(&img);
                 if Some(h) != last_hash {
                     if let Err(e) = write_png(&target, &img) {
-                        log::warn!("paste_watcher: write {} failed: {e}", target.display());
+                        log::warn!("failed to write {}: {e}", target.display());
                     } else {
-                        log::debug!(
-                            "paste_watcher: wrote {} ({}x{})",
-                            target.display(),
-                            img.width,
-                            img.height
-                        );
+                        log::debug!("wrote {} ({}x{})", target.display(), img.width, img.height);
                     }
                     last_hash = Some(h);
                 }
@@ -91,7 +86,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 // No image in clipboard — keep the last file (or absence) as is.
             }
             Err(e) => {
-                log::trace!("paste_watcher: get_image error: {e}");
+                log::trace!("failed to get clipboard image: {e}");
             }
         }
         thread::sleep(Duration::from_millis(POLL_MS));
@@ -142,7 +137,7 @@ fn set_owner_only(_path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 

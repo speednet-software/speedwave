@@ -1256,7 +1256,11 @@ pub fn strip_compose_container_prefix<'a>(name: &'a str, project: &str) -> &'a s
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -1583,7 +1587,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts SLACK_OAUTH_REDIRECT_PORT stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts SLACK_OAUTH_REDIRECT_PORT stays sane"
+    )]
     fn test_slack_oauth_consts_are_complete() {
         assert!(!SLACK_OAUTH_CLIENT_ID.is_empty());
         // client_id format: <app>.<id> — two numeric segments.
@@ -1963,7 +1970,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts WSL_SERVICE_START_DELAY_SECS stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts WSL_SERVICE_START_DELAY_SECS stays sane"
+    )]
     fn test_wsl_service_start_delay_is_positive() {
         assert!(
             WSL_SERVICE_START_DELAY_SECS > 0,
@@ -1972,7 +1982,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts WSL_SERVICE_CHECK_MAX_RETRIES stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts WSL_SERVICE_CHECK_MAX_RETRIES stays sane"
+    )]
     fn test_wsl_service_check_max_retries_is_positive() {
         assert!(
             WSL_SERVICE_CHECK_MAX_RETRIES > 0,
@@ -2340,7 +2353,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts EXIT_CLEANUP_TIMEOUT_SECS stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts EXIT_CLEANUP_TIMEOUT_SECS stays sane"
+    )]
     fn test_exit_cleanup_timeout_is_positive() {
         assert!(
             EXIT_CLEANUP_TIMEOUT_SECS > 0,
@@ -2349,7 +2365,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts LIMA_VM_STOP_TIMEOUT_SECS stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts LIMA_VM_STOP_TIMEOUT_SECS stays sane"
+    )]
     fn test_lima_vm_stop_timeout_is_positive() {
         assert!(
             LIMA_VM_STOP_TIMEOUT_SECS > 0,
@@ -2543,6 +2562,59 @@ mod tests {
         assert_eq!(
             &cap[1], HOST_GATEWAY_ALIAS,
             "TS HOST_GATEWAY_ALIAS must match Rust consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    // The desktop and proxy crates are standalone workspaces and cannot inherit
+    // the root `[workspace.lints]`; their `[lints]` tables must stay byte-equal
+    // (modulo whitespace) or one platform/binary silently runs weaker lints.
+    #[test]
+    fn lint_tables_are_aligned() {
+        fn lint_table(src: &str, header: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut in_table = false;
+            for line in src.lines() {
+                let t = line.trim();
+                if t.starts_with('[') {
+                    in_table = t == header;
+                    continue;
+                }
+                if in_table && !t.is_empty() && !t.starts_with('#') {
+                    out.push(t.split_whitespace().collect::<Vec<_>>().join(" "));
+                }
+            }
+            out.sort();
+            out
+        }
+
+        let root = include_str!("../../../Cargo.toml");
+        let desktop = include_str!("../../../desktop/src-tauri/Cargo.toml");
+        let proxy = include_str!("../../../containers/proxy/Cargo.toml");
+
+        let root_clippy = lint_table(root, "[workspace.lints.clippy]");
+        assert!(
+            root_clippy.contains(&"unwrap_used = \"deny\"".to_string()),
+            "root [workspace.lints.clippy] extraction is empty — did the header rename?"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(desktop, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal desktop [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(desktop, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal desktop [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(proxy, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal proxy [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(proxy, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal proxy [lints.rust]"
         );
     }
 

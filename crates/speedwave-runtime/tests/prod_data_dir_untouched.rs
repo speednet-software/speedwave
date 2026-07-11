@@ -2,7 +2,10 @@
 //! catches *transitive* data-dir leaks. Drives the `_in` variants with an
 //! explicit tempdir and never asserts on OnceLock state.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test file uses expect() only, never unwrap()"
+)]
 
 use std::path::PathBuf;
 use std::time::SystemTime;

@@ -1,7 +1,10 @@
 //! Drift detector: production code must channel bind addresses through
 //! `compose::host_bind_address()`. Bypass with `// SSOT-allow: <reason>`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::path::{Path, PathBuf};
 

@@ -94,7 +94,7 @@ fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
          \tcreate window with default profile command \"{escaped}\"\n\
          end tell"
     );
-    let status = std::process::Command::new("osascript")
+    let status = speedwave_runtime::binary::system_command("osascript")
         .args(["-e", &script])
         .status()?;
     if !status.success() {
@@ -110,7 +110,7 @@ fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
         "tell application \"Terminal\" to do script \"{escaped}\"\n\
          tell application \"Terminal\" to activate"
     );
-    let status = std::process::Command::new("osascript")
+    let status = speedwave_runtime::binary::system_command("osascript")
         .args(["-e", &script])
         .status()?;
     if !status.success() {
@@ -211,7 +211,10 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 
     // wt.exe is an App Execution Alias; spawn by name (is_file() returns false).
     let argv = build_wt_terminal_argv(ps, cmd);
-    match std::process::Command::new("wt.exe").args(argv).status() {
+    match speedwave_runtime::binary::interactive_command("wt.exe")
+        .args(argv)
+        .status()
+    {
         Ok(s) if s.success() => return Ok(()),
         Ok(s) => log::warn!("wt.exe exited {s}; falling back to direct PowerShell"),
         Err(e) => log::warn!("wt.exe not available ({e}); falling back to direct PowerShell"),
@@ -219,7 +222,9 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 
     // Direct PowerShell spawn (its own console window) — pumps input from start.
     let argv = build_powershell_argv(cmd);
-    std::process::Command::new(ps).args(argv).spawn()?;
+    speedwave_runtime::binary::interactive_command(ps)
+        .args(argv)
+        .spawn()?;
     Ok(())
 }
 
@@ -230,7 +235,7 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 pub async fn start_oauth_login(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        log::info!("start_oauth_login: project={project}");
+        log::info!("starting OAuth login terminal for project {project}");
 
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
@@ -245,7 +250,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
             cfg!(target_os = "windows"),
         );
         open_terminal_with_command(&cmd).map_err(|e| {
-            log::error!("start_oauth_login: terminal spawn failed: {e}");
+            log::error!("failed to spawn OAuth login terminal: {e}");
             e.to_string()
         })
     })
@@ -254,7 +259,11 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     #[cfg(target_os = "macos")]
     use super::*;

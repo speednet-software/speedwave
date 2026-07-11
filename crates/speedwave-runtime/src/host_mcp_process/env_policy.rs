@@ -74,7 +74,6 @@ pub fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) mod test_support {
     use super::EnvSource;
     use std::collections::HashMap;
@@ -107,7 +106,6 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::test_support::FakeEnv;
     use super::*;

@@ -116,7 +116,11 @@ pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
     use crate::host_mcp_process::drain::test_support::write_fake_worker;
@@ -132,6 +136,7 @@ mod tests {
 
     #[test]
     fn mcp_os_spec_apply_env_sets_port_zero_and_token() {
+        // SSOT-allow: test fixture spawn
         let mut cmd = Command::new("true");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock");
@@ -258,6 +263,7 @@ mod tests {
     fn respawn_does_not_delete_new_token_mount() {
         let tmp = tempfile::tempdir().unwrap();
         let script = write_fake_worker(tmp.path(), "fake.js");
+        // SSOT-allow: test fixture spawn
         let node_ok = Command::new("node")
             .arg("--version")
             .stdout(Stdio::null())
@@ -300,6 +306,7 @@ mod tests {
 
         let script = write_fake_worker(tmp.path(), "fake.js");
         // `which node` — skip when node unavailable in test env.
+        // SSOT-allow: test fixture spawn
         let node_ok = Command::new("node")
             .arg("--version")
             .stdout(Stdio::null())

@@ -442,7 +442,11 @@ pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only module: unwraps/expects assert setup succeeded"
+)]
 mod credentials_digest_tests {
     use super::*;
 

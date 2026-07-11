@@ -5,7 +5,7 @@
 #[cfg(target_os = "macos")]
 fn open_privacy_subpane(anchor: &str) -> Result<(), String> {
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
-    std::process::Command::new("open")
+    speedwave_runtime::binary::system_command("open")
         .arg(&url)
         .spawn()
         .map_err(|e| format!("Failed to open System Settings: {e}"))?;
@@ -52,7 +52,6 @@ pub fn open_audio_capture_pane() -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     #[cfg(target_os = "windows")]
     use super::*;

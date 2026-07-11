@@ -29,7 +29,7 @@ fn run_with_data_dir(data_dir: &Path) -> usize {
         Ok(e) => e,
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot read {}: {e}",
+                "cannot read oauth state directory {}: {e}",
                 oauth_root.display()
             );
             return 0;
@@ -40,7 +40,7 @@ fn run_with_data_dir(data_dir: &Path) -> usize {
         let project = match project {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("oauth_state_migration: skipping unreadable entry: {e}");
+                log::warn!("skipping unreadable oauth state entry: {e}");
                 continue;
             }
         };
@@ -60,7 +60,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         Ok(e) => e,
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot read {}: {e}",
+                "cannot read oauth project directory {}: {e}",
                 project_dir.display()
             );
             return 0;
@@ -71,7 +71,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         let path = match entry {
             Ok(e) => e.path(),
             Err(e) => {
-                log::warn!("oauth_state_migration: skipping unreadable entry: {e}");
+                log::warn!("skipping unreadable oauth state entry: {e}");
                 continue;
             }
         };
@@ -80,7 +80,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         }
         if migrate_file(&path) {
             migrated += 1;
-            log::info!("oauth_state_migration: healed {}", path.display());
+            log::info!("healed legacy oauth state layout in {}", path.display());
         }
     }
     migrated
@@ -91,7 +91,7 @@ fn migrate_file(path: &Path) -> bool {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("oauth_state_migration: cannot read {}: {e}", path.display());
+            log::warn!("cannot read oauth state file {}: {e}", path.display());
             return false;
         }
     };
@@ -112,7 +112,7 @@ fn migrate_file(path: &Path) -> bool {
         Ok(s) => s + "\n",
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot serialise {}: {e}",
+                "cannot serialise migrated oauth state {}: {e}",
                 path.display()
             );
             return false;
@@ -121,10 +121,7 @@ fn migrate_file(path: &Path) -> bool {
     match crate::fs_perms::write_restricted_file(path, &body) {
         Ok(()) => true,
         Err(e) => {
-            log::warn!(
-                "oauth_state_migration: cannot write {}: {e}",
-                path.display()
-            );
+            log::warn!("cannot write migrated oauth state {}: {e}", path.display());
             false
         }
     }
@@ -177,7 +174,7 @@ pub fn oauth_json_key_for(key: &str) -> &str {
             );
             #[cfg(not(debug_assertions))]
             if other.contains('_') {
-                log::warn!("oauth_json_key_for: unknown snake_case key — add an arm");
+                log::warn!("unknown snake_case oauth state key — add a mapping arm");
             }
             other
         }
@@ -203,7 +200,7 @@ pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json:
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use std::io::Write;

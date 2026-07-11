@@ -284,7 +284,11 @@ pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use base64::Engine;

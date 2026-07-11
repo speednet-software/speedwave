@@ -441,7 +441,7 @@ impl StreamParser {
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
                     && self.seen_unknown_types.insert(label.to_string())
                 {
-                    log::debug!("parse_line: unknown stream-json type '{label}' — ignored");
+                    log::debug!("ignored unknown stream-json type '{label}'");
                     return (
                         Vec::new(),
                         Some(LogEntry {
@@ -540,7 +540,7 @@ impl StreamParser {
         // Drop entries without question text; logged at count level only.
         if question.trim().is_empty() {
             log::warn!(
-                "AskUserQuestion: dropping entry with empty question text \
+                "dropping AskUserQuestion entry with empty question text \
                  (header_present={}, options={})",
                 !header.is_empty(),
                 options.len()
@@ -570,7 +570,7 @@ impl StreamParser {
         let total = raw_questions.len();
         let bounded = if total > MAX_ASK_USER_QUESTIONS {
             log::warn!(
-                "AskUserQuestion: received {} questions, truncating to {}",
+                "received {} AskUserQuestion questions, truncating to {}",
                 total,
                 MAX_ASK_USER_QUESTIONS
             );
@@ -590,7 +590,7 @@ impl StreamParser {
     pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
         let questions = Self::parse_ask_user_questions(req);
         if questions.is_empty() {
-            log::warn!("AskUserQuestion: 'questions' array is empty after parsing");
+            log::warn!("AskUserQuestion 'questions' array is empty after parsing");
             return None;
         }
         Some(StreamChunk::AskUserQuestion {
@@ -620,9 +620,7 @@ impl StreamParser {
                         let id = match block["id"].as_str() {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
-                                log::warn!(
-                                    "content_block_start: tool_use block missing 'id' field"
-                                );
+                                log::warn!("content_block_start tool_use block missing 'id' field");
                                 return (None, None);
                             }
                         };
@@ -630,7 +628,7 @@ impl StreamParser {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
                                 log::warn!(
-                                    "content_block_start: tool_use block missing 'name' field"
+                                    "content_block_start tool_use block missing 'name' field"
                                 );
                                 return (None, None);
                             }
@@ -803,7 +801,7 @@ impl StreamParser {
             let tool_use_id = match block["tool_use_id"].as_str() {
                 Some(s) if !s.is_empty() => s.to_string(),
                 _ => {
-                    log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
+                    log::warn!("user message tool_result block missing 'tool_use_id'");
                     continue;
                 }
             };
@@ -856,10 +854,10 @@ impl StreamParser {
             if result_text.trim().is_empty() {
                 // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
                 log::warn!(
-                    "parse_result: is_error=true but result text is empty; \
+                    "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
-                log::debug!("parse_result: empty-error payload: {parsed}");
+                log::debug!("empty-error result payload: {parsed}");
                 return (
                     Some(StreamChunk::Error {
                         content: "The LLM returned an error without details. \
@@ -879,7 +877,7 @@ impl StreamParser {
 
         let session_id = parsed["session_id"].as_str().unwrap_or("").to_string();
         if session_id.is_empty() {
-            log::warn!("parse_result: result message missing 'session_id'");
+            log::warn!("result message missing 'session_id'");
         }
 
         // Cost: prefer total_cost_usd (real CLI), fall back to total_cost (legacy)
@@ -1212,7 +1210,8 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
         let key = q.question.as_str();
         if !seen_keys.insert(key) {
             log::warn!(
-                "AskUserQuestion: duplicate question text — refusing to emit lossy answers map"
+                "AskUserQuestion request has duplicate question text — \
+                 refusing to emit lossy answers map"
             );
             anyhow::bail!(
                 "AskUserQuestion request contained duplicate question text — \
@@ -1506,7 +1505,7 @@ impl ChatSession {
                             );
                         }
                         Err(e) => {
-                            log::warn!("stderr reader: I/O error: {e}");
+                            log::warn!("stderr reader I/O error: {e}");
                             break;
                         }
                     }
@@ -1558,7 +1557,7 @@ impl ChatSession {
                 let line = match line {
                     Ok(l) => l,
                     Err(e) => {
-                        log::warn!("stdout reader: I/O error: {e}");
+                        log::warn!("stdout reader I/O error: {e}");
                         break;
                     }
                 };
@@ -1736,7 +1735,7 @@ impl ChatSession {
             // this session down deliberately (that EOF is ours, not a crash).
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if !got_result && !stopping {
-                log::warn!("stdout reader: stream ended without result");
+                log::warn!("stdout reader stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
                         "Claude session ended unexpectedly. Check the session log for details."
@@ -1787,7 +1786,7 @@ impl ChatSession {
             );
         }
         log::info!(
-            "ChatSession::send_message: serialized={} bytes, blocks={}",
+            "sending user message: serialized={} bytes, blocks={}",
             serialized.len(),
             blocks.len()
         );
@@ -1945,12 +1944,10 @@ impl ChatSession {
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
         if let Err(e) = write_interrupt(&mut *stdin, &payload) {
-            log::error!(
-                "interrupt: failed to write control_request (request_id={request_id}): {e}"
-            );
+            log::error!("failed to write interrupt control_request (request_id={request_id}): {e}");
             return Err(e);
         }
-        log::info!("interrupt: control_request sent (request_id={request_id})");
+        log::info!("interrupt control_request sent (request_id={request_id})");
         Ok(())
     }
 
@@ -1966,10 +1963,10 @@ impl ChatSession {
         match rt.container_exec_piped(&container, &argv_refs) {
             Ok(mut cmd) => {
                 if let Err(e) = cmd.status() {
-                    log::warn!("reap_instance: kill exec failed: {e}");
+                    log::warn!("kill exec for orphaned instance failed: {e}");
                 }
             }
-            Err(e) => log::warn!("reap_instance: could not build kill exec: {e}"),
+            Err(e) => log::warn!("could not build kill exec for orphaned instance: {e}"),
         }
     }
 
@@ -1991,13 +1988,13 @@ impl ChatSession {
                     Ok(Some(_)) => break,
                     Ok(None) => {
                         if std::time::Instant::now() >= deadline {
-                            log::warn!("stop: child did not exit within 5s, abandoning");
+                            log::warn!("child did not exit within 5s of stop, abandoning");
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     Err(e) => {
-                        log::warn!("stop: try_wait error (treating as exited): {e}");
+                        log::warn!("try_wait error during stop (treating as exited): {e}");
                         break;
                     }
                 }
@@ -2016,12 +2013,13 @@ impl ChatSession {
             if !handle.is_finished() {
                 // Pipe wedged — detach so `stop()` returns in bounded time.
                 log::warn!(
-                    "stop: reader thread {name} still running after {READER_GRACE_MS}ms grace, detaching"
+                    "reader thread {name} still running after {READER_GRACE_MS}ms grace \
+                     on stop, detaching"
                 );
                 continue;
             }
             if let Err(e) = handle.join() {
-                log::warn!("stop: reader thread panicked: {e:?}");
+                log::warn!("reader thread panicked during stop: {e:?}");
             }
         }
         // Log session end ONLY if session actually started
@@ -2063,16 +2061,16 @@ fn drain_queued_message(
     match stdin.lock() {
         Ok(mut handle) => {
             if let Err(e) = writeln!(handle, "{}", payload) {
-                log::warn!("queued-message write failed: {e}");
+                log::warn!("failed to write queued message to stdin: {e}");
                 return;
             }
             if let Err(e) = handle.flush() {
-                log::warn!("queued-message flush failed: {e}");
+                log::warn!("failed to flush queued message to stdin: {e}");
                 return;
             }
         }
         Err(e) => {
-            log::warn!("queued-message stdin lock poisoned: {e}");
+            log::warn!("stdin lock poisoned while draining queued message: {e}");
             return;
         }
     }
@@ -2088,7 +2086,11 @@ fn drain_queued_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

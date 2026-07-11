@@ -64,7 +64,10 @@ pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test-only module: unwraps assert setup succeeded"
+)]
 mod tests {
     use super::*;
 

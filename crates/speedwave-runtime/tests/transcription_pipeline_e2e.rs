@@ -4,7 +4,10 @@
 //! `STT_E2E_EXPECT` (markdown substring assertion, requires STT_E2E_WAV).
 
 #![cfg(feature = "audio-transcription")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test file uses expect() only, never unwrap()"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

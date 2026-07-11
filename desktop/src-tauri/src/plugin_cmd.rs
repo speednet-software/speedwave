@@ -372,7 +372,7 @@ fn is_plugin_configured_in(
 pub async fn peek_plugin_manifest(
     zip_path: String,
 ) -> Result<plugin::PluginManifestSummary, String> {
-    log::info!("peek_plugin_manifest: zip_path={zip_path}");
+    log::info!("peeking plugin manifest at {zip_path}");
     let path = std::path::PathBuf::from(&zip_path);
     if !path.exists() {
         return Err(format!("File not found: {}", zip_path));
@@ -388,7 +388,7 @@ pub async fn install_plugin(
     zip_path: String,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    log::info!("install_plugin: zip_path={zip_path}");
+    log::info!("installing plugin from {zip_path}");
     let path = std::path::PathBuf::from(&zip_path);
     if !path.exists() {
         return Err(format!("File not found: {}", zip_path));
@@ -448,7 +448,7 @@ pub async fn install_plugin(
 
 #[tauri::command]
 pub fn remove_plugin(slug: String) -> Result<(), String> {
-    log::info!("remove_plugin: slug={slug}");
+    log::info!("removing plugin {slug}");
     crate::bridges::plugin_bridge_manager::stop_for(&slug);
 
     // Removal must work for tampered plugins too; tolerant lister gives a slug fallback.
@@ -543,7 +543,7 @@ pub fn set_plugin_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("set_plugin_enabled: project={project} service_id={service_id} enabled={enabled}");
+    log::info!("setting plugin enabled={enabled} for project={project} service_id={service_id}");
 
     // Verified-only on enable (re-checked here, UI gate is advisory); disable skips the check.
     if enabled {
@@ -606,7 +606,7 @@ pub fn save_plugin_credentials(
     credentials: HashMap<String, String>,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("save_plugin_credentials: project={project} slug={slug}");
+    log::info!("saving plugin credentials for project={project} slug={slug}");
 
     // Verified-only: reject credential writes for an unverified plugin.
     let manifest = require_verified_with_manifest(&slug)?;
@@ -691,7 +691,7 @@ pub fn plugin_save_settings(
     settings: serde_json::Value,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("plugin_save_settings: project={project} slug={slug}");
+    log::info!("saving plugin settings for project={project} slug={slug}");
 
     // Verified-only: reject settings writes for an unverified plugin.
     let manifest = require_verified_with_manifest(&slug)?;
@@ -776,7 +776,7 @@ fn validate_settings_against_schema(
 #[tauri::command]
 pub fn plugin_load_settings(project: String, slug: String) -> Result<serde_json::Value, String> {
     check_project(&project)?;
-    log::info!("plugin_load_settings: project={project} slug={slug}");
+    log::info!("loading plugin settings for project={project} slug={slug}");
 
     // Verified-only: settings can hold non-secret private project metadata.
     require_verified(&slug)?;
@@ -798,7 +798,7 @@ pub fn plugin_load_settings(project: String, slug: String) -> Result<serde_json:
 #[tauri::command]
 pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("delete_plugin_credentials: project={project} slug={slug}");
+    log::info!("deleting plugin credentials for project={project} slug={slug}");
 
     // Recovery action: clear credentials even for a tampered plugin (tolerant lister).
     // Token dir keyed by service_id (or slug when no manifest); every deletion stays inside it.
@@ -848,7 +848,7 @@ pub fn delete_plugin_credential_field(
     key: String,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("delete_plugin_credential_field: project={project} slug={slug} key={key}");
+    log::info!("deleting plugin credential field key={key} for project={project} slug={slug}");
 
     let manifest = require_verified_with_manifest(&slug)?;
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
@@ -887,7 +887,11 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

@@ -71,7 +71,6 @@ pub(crate) fn hide_main_window(app: &tauri::AppHandle) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

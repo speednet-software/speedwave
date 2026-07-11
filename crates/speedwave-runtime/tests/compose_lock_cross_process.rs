@@ -2,7 +2,11 @@
 //! per `tests/data_dir_integration.rs` pattern, asserts the second process
 //! blocks until the first releases.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![expect(
+    clippy::expect_used,
+    clippy::print_stderr,
+    reason = "test child process reports failure on stderr and asserts on setup calls"
+)]
 
 use std::process::Command;
 use std::time::Duration;

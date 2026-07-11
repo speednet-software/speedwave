@@ -232,7 +232,7 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe (host): GET {url} failed: {e}");
+                log::warn!("LLM probe GET {url} failed on host transport: {e}");
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -258,7 +258,7 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe (host): POST {url} failed: {e}");
+                log::warn!("LLM probe POST {url} failed on host transport: {e}");
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -393,9 +393,7 @@ fn run_vm_curl_blocking(
                 .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
                 .unwrap_or(false)
             {
-                log::warn!(
-                    "LLM probe (vm): dropping Authorization from custom_headers (use api_key)"
-                );
+                log::warn!("dropping Authorization from custom_headers in VM probe (use api_key)");
                 continue;
             }
             args.push("-H".into());
@@ -416,7 +414,7 @@ fn run_vm_curl_blocking(
     let out = runtime
         .vm_exec("curl", &args_ref, &[], exec_timeout)
         .map_err(|e| {
-            log::warn!("LLM probe (vm): vm_exec curl failed: {e}");
+            log::warn!("vm_exec curl failed for LLM probe: {e}");
             format!("VM probe failed: {e}")
         })?;
 
@@ -562,7 +560,7 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
         if resp.status == 401 || resp.status == 403 {
             // Reachable but auth rejected — never log the key.
             log::warn!(
-                "LLM model discovery: {} returned HTTP {} (auth) — bad or missing API key",
+                "{} returned HTTP {} (auth) during LLM model discovery — bad or missing API key",
                 url,
                 resp.status
             );
@@ -570,19 +568,23 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
         }
         if resp.is_redirect() {
             log::warn!(
-                "LLM model discovery: refusing to follow {} redirect from {}",
+                "refusing to follow {} redirect from {} during LLM model discovery",
                 resp.status,
                 url
             );
         } else {
-            log::warn!("LLM model discovery: {} returned HTTP {}", url, resp.status);
+            log::warn!(
+                "{} returned HTTP {} during LLM model discovery",
+                url,
+                resp.status
+            );
         }
         return Err(format!("{ERR_HTTP_STATUS_PREFIX}{}", resp.status));
     }
     if let Some(ct) = resp.content_type.as_deref() {
         if ct.to_ascii_lowercase().starts_with("text/html") {
             log::warn!(
-                "LLM model discovery: {} returned HTML content-type, refusing",
+                "{} returned HTML content-type during LLM model discovery, refusing",
                 url
             );
             return Err(ERR_HTML_RESPONSE.to_string());
@@ -763,7 +765,7 @@ pub(crate) async fn do_discover_llm_models(
         .collect();
 
     log::info!(
-        "LLM model discovery: {} returned {} model(s) (messages_ok={:?})",
+        "LLM model discovery for {} returned {} model(s) (messages_ok={:?})",
         provider,
         models.len(),
         messages_endpoint_ok
@@ -797,7 +799,7 @@ pub struct DiscoverLlmModelsArgs {
 #[tauri::command]
 pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<DiscoverResult, String> {
     log::info!(
-        "discover_llm_models: provider={} base_url={} api_key_present={} custom_headers_present={}",
+        "discovering LLM models: provider={} base_url={} api_key_present={} custom_headers_present={}",
         args.provider,
         args.base_url,
         args.api_key.is_some(),
@@ -822,7 +824,7 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
         if vm_res.is_ok() {
             vm_res
         } else {
-            log::info!("discover_llm_models: VM probe failed, retrying via host transport");
+            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
             let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
             let host_transport = HostProbe::new(client, timeout);
             do_discover_llm_models(&args.provider, &args.base_url, &host_transport).await
@@ -834,11 +836,11 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     };
     match &result {
         Ok(r) => log::info!(
-            "discover_llm_models: ok — {} model(s), messages_endpoint_ok={:?}",
+            "LLM model discovery succeeded: {} model(s), messages_endpoint_ok={:?}",
             r.models.len(),
             r.messages_endpoint_ok
         ),
-        Err(e) => log::warn!("discover_llm_models: err — {e}"),
+        Err(e) => log::warn!("LLM model discovery failed: {e}"),
     }
     result
 }
@@ -847,7 +849,7 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
 // Tests
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};

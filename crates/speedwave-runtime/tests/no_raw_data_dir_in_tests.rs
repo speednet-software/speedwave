@@ -2,7 +2,10 @@
 //! `consts::data_dir()`. Catches only literal tokens; transitive resolution is
 //! backstopped by `prod_data_dir_untouched.rs`. Bypass with `// SSOT-allow:`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::path::{Path, PathBuf};
 

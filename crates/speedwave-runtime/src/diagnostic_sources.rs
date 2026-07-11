@@ -142,7 +142,10 @@ pub fn resolve_file_path(key: &str, data_dir: &Path, project: &str) -> Option<Pa
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test-only module: expects assert setup succeeded"
+)]
 mod tests {
     use super::*;
 

@@ -17,9 +17,9 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
         return Err("API key too long".to_string());
     }
     tokio::task::spawn_blocking(move || {
-        log::info!("save_api_key: project={project}");
+        log::info!("saving API key for project {project}");
         auth::save_api_key(&project, &api_key).map_err(|e| {
-            log::error!("save_api_key: error: {e}");
+            log::error!("failed to save API key: {e}");
             e.to_string()
         })
     })
@@ -31,9 +31,9 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
 pub async fn delete_api_key(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("delete_api_key: project={project}");
+        log::info!("deleting API key for project {project}");
         auth::delete_api_key(&project).map_err(|e| {
-            log::error!("delete_api_key: error: {e}");
+            log::error!("failed to delete API key: {e}");
             e.to_string()
         })
     })
@@ -45,14 +45,14 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 pub async fn anthropic_logout(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("anthropic_logout: project={project}");
+        log::info!("logging out of Anthropic for project {project}");
         speedwave_runtime::claude_home::remove_claude_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
         )
         .map(|_| ())
         .map_err(|e| {
-            log::error!("anthropic_logout: error: {e}");
+            log::error!("failed to remove Anthropic credentials: {e}");
             e.to_string()
         })
     })
@@ -92,7 +92,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         crate::containers_cmd::ensure_images_ready()?;
-        log::info!("get_auth_status: project={project}");
+        log::info!("resolving auth status for project {project}");
         let api_key_configured = auth::has_api_key(&project);
         // Real OAuth state = credentials file present (provider-independent).
         let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
@@ -280,7 +280,7 @@ fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("get_auth_command: project={project}");
+        log::info!("building auth command for project {project}");
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
         Ok(build_auth_command(
@@ -296,7 +296,11 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

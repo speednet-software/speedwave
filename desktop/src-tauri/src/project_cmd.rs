@@ -283,7 +283,11 @@ pub(crate) fn rollback_and_emit_failed(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};

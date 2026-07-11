@@ -126,7 +126,7 @@ pub async fn retry_last_turn(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions use unwrap")]
 mod tests {
     use super::*;
 

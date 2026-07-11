@@ -289,7 +289,7 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
 
                         if consecutive_unhealthy >= MAX_UNHEALTHY {
                             log::error!(
-                                "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                                "mcp-os unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
                             );
                             std::thread::sleep(COOLDOWN);
                             consecutive_unhealthy = 0;
@@ -297,26 +297,26 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                         }
 
                         log::warn!(
-                            "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                            "mcp-os process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
                         );
                         match proc.respawn() {
                             Ok(port) => {
-                                log::info!("mcp-os watchdog: respawned (port {port})");
+                                log::info!("mcp-os respawned (port {port})");
                                 reconcile::reconcile_compose_port(&app_handle);
                             }
                             Err(e) => {
-                                log::error!("mcp-os watchdog: respawn failed: {e}");
+                                log::error!("mcp-os respawn failed: {e}");
                             }
                         }
                     }
                 },
                 Err(e) => {
-                    log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                    log::error!("mcp-os watchdog mutex poisoned: {e}");
                     break;
                 }
             }
         }
-        log::info!("mcp-os watchdog: stopped");
+        log::info!("mcp-os watchdog stopped");
     });
 }
 
@@ -331,7 +331,7 @@ pub(crate) fn ensure_ide_bridge_running(
     let mut guard = match ide_bridge.lock() {
         Ok(g) => g,
         Err(e) => {
-            log::error!("ensure_ide_bridge_running: mutex poisoned: {e}");
+            log::error!("IDE Bridge mutex poisoned: {e}");
             return;
         }
     };
@@ -350,7 +350,7 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
         Err(e) => {
-            log::error!("ensure_mcp_os_running: mutex poisoned: {e}");
+            log::error!("mcp-os mutex poisoned: {e}");
             return;
         }
     };
@@ -362,13 +362,13 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
         let script_str = script_path.to_string_lossy().to_string();
         match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
-                log::info!("ensure_mcp_os_running: started (port {})", proc.port());
+                log::info!("mcp-os started (port {})", proc.port());
                 *guard = Some(proc);
                 drop(guard); // release before spawning watchdog thread
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
             }
-            Err(e) => log::error!("ensure_mcp_os_running: spawn failed: {e}"),
+            Err(e) => log::error!("mcp-os spawn failed: {e}"),
         }
     }
 }
@@ -405,7 +405,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
         Err(e) => {
-            log::error!("ensure_oauth_running: map mutex poisoned: {e}");
+            log::error!("oauth worker map mutex poisoned: {e}");
             return false;
         }
     };
@@ -413,14 +413,14 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     let user_config = match config::load_user_config() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("ensure_oauth_running: cannot load user config: {e}");
+            log::warn!("cannot load user config: {e}");
             return false;
         }
     };
     let project_dir = match user_config.find_project(project) {
         Some(p) => std::path::PathBuf::from(&p.dir),
         None => {
-            log::warn!("ensure_oauth_running: unknown project '{project}'");
+            log::warn!("unknown project '{project}'");
             return false;
         }
     };
@@ -440,7 +440,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
             OauthReconcile::NoChange => return false,
             OauthReconcile::Respawn { clear_bearer_map } => {
                 log::info!(
-                    "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
+                    "oauth worker for '{project}' consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
                 );
                 if let Some(mut proc) = map.remove(project) {
                     let _ = proc.stop();
@@ -462,7 +462,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
 
     if oauth_consumers.is_empty() {
         log::debug!(
-            "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
+            "no oauth-consuming integration enabled for '{project}' — not spawning oauth worker"
         );
         return false;
     }
@@ -475,7 +475,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         Some(s) => s.to_string_lossy().to_string(),
         None => {
             log::warn!(
-                "ensure_oauth_running: oauth worker script not found — \
+                "oauth worker script not found — \
                  OAuth refresh will be unavailable for '{project}'"
             );
             return false;
@@ -488,14 +488,17 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         &consumer_refs,
     ) {
         Ok(proc) => {
-            log::info!("oauth[{project}]: started (port {})", proc.port());
+            log::info!(
+                "oauth worker for '{project}' started (port {})",
+                proc.port()
+            );
             map.insert(project.to_string(), proc);
             drop(map);
             OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
             true
         }
         Err(e) => {
-            log::error!("oauth[{project}]: spawn failed: {e}");
+            log::error!("oauth worker for '{project}' spawn failed: {e}");
             false
         }
     }
@@ -521,14 +524,14 @@ where
             continue;
         }
         if let Some(proc) = workers.get_mut(&name) {
-            log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
+            log::warn!("{log_prefix} worker for '{name}' unhealthy — respawning");
             match proc.respawn() {
                 Ok(port) => {
-                    log::info!("{log_prefix}: respawned '{name}' (port {port})");
+                    log::info!("{log_prefix} respawned '{name}' (port {port})");
                     respawned.push(name);
                 }
                 Err(e) => {
-                    log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
+                    log::error!("{log_prefix} respawn for '{name}' failed: {e}");
                 }
             }
         }
@@ -576,7 +579,7 @@ fn start_per_project_watchdog<P>(
                 let mut map = match workers.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        log::error!("{log_prefix}: map mutex poisoned: {e}");
+                        log::error!("{log_prefix} worker map mutex poisoned: {e}");
                         break;
                     }
                 };
@@ -590,11 +593,11 @@ fn start_per_project_watchdog<P>(
                 }));
                 if let Err(payload) = result {
                     let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
-                    log::error!("{log_prefix}: recreate panicked for '{name}': {msg}");
+                    log::error!("{log_prefix} recreate panicked for '{name}': {msg}");
                 }
             }
         }
-        log::info!("{log_prefix}: stopped");
+        log::info!("{log_prefix} stopped");
     });
 }
 
@@ -652,7 +655,10 @@ fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
         // Sanctioned panic-hook stderr fallback (logging.md) — the log
         // sink itself panicked, so bypass it entirely.
-        #[allow(clippy::print_stderr)]
+        #[expect(
+            clippy::print_stderr,
+            reason = "panic-hook stderr fallback (logging.md)"
+        )]
         {
             eprintln!("PANIC: {sanitized} (log sink also panicked)");
         }
@@ -671,7 +677,10 @@ fn main() {
         {
             let _ = &default_hook; // suppress unused warning
                                    // Sanctioned panic-hook stderr fallback (logging.md).
-            #[allow(clippy::print_stderr)]
+            #[expect(
+                clippy::print_stderr,
+                reason = "panic-hook stderr fallback (logging.md)"
+            )]
             {
                 eprintln!("PANIC: {sanitized}");
             }
@@ -836,12 +845,12 @@ fn main() {
             if let Err(e) = speedwave_runtime::config::migrate_drop_log_level_in(
                 speedwave_runtime::consts::data_dir(),
             ) {
-                log::warn!("config migration: {e:#}");
+                log::warn!("config migration failed: {e:#}");
             }
             // v3 LLM provenance self-heal: clear foreign models stuck under
             // anthropic entries on disk (ADR-073). Best-effort, idempotent.
             if let Err(e) = speedwave_runtime::config::heal_llm_config_on_disk() {
-                log::warn!("llm config heal: {e:#}");
+                log::warn!("LLM config heal failed: {e:#}");
             }
 
             clipboard_bridge::spawn(app.handle().clone());
@@ -872,7 +881,7 @@ fn main() {
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
                 if cleaned > 0 {
-                    log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
+                    log::info!("legacy token cleanup sanitised {cleaned} project(s)");
                 }
 
                 // Self-heal legacy oauth.json shape (ADR-060 addendum); shape-only, never moves secrets.
@@ -991,19 +1000,20 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             match updater::check_for_update(&app_clone).await {
                                 Ok(updater::UpdateCheckOutcome::UpdateAvailable(info)) => {
-                                    log::info!("tray: update available: {}", info.version);
+                                    log::info!(
+                                        "update available from tray check: {}",
+                                        info.version
+                                    );
                                     use tauri::Emitter;
                                     if let Err(e) = app_clone.emit("update_available", &info) {
-                                        log::error!(
-                                            "tray: failed to emit update_available event: {e}"
-                                        );
+                                        log::error!("failed to emit update_available event: {e}");
                                     }
                                 }
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
-                                    log::info!("tray: already up to date");
+                                    log::info!("tray update check found no new version");
                                 }
                                 Err(e) => {
-                                    log::error!("tray: check failed: {e}");
+                                    log::error!("tray update check failed: {e}");
                                 }
                             }
                         });
@@ -1023,14 +1033,16 @@ fn main() {
 
                                 match result {
                                     Ok(()) => {
-                                        log::info!("tray: update action completed");
+                                        log::info!("tray install-update action completed");
                                     }
                                     Err(e) => {
-                                        log::error!("tray: install failed: {e}");
+                                        log::error!("tray install-update action failed: {e}");
                                     }
                                 }
                             } else {
-                                log::warn!("tray: install_update clicked but no version available");
+                                log::warn!(
+                                    "install_update clicked from tray but no version available"
+                                );
                             }
                         });
                     }
@@ -1042,7 +1054,7 @@ fn main() {
                             if let Err(e) =
                                 ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
                             {
-                                log::error!("tray: beta toggle failed: {e}");
+                                log::error!("beta toggle from tray failed: {e}");
                             }
                         });
                     }
@@ -1050,7 +1062,7 @@ fn main() {
                         app.exit(0);
                     }
                     other => {
-                        log::warn!("tray: unhandled menu event: {other}");
+                        log::warn!("unhandled tray menu event: {other}");
                     }
                 });
 
@@ -1078,7 +1090,7 @@ fn main() {
                                 Ok(d) => d.as_millis() as u64,
                                 Err(e) => {
                                     log::warn!(
-                                        "tray: system clock error (before Unix epoch?): {e}"
+                                        "system clock error (before Unix epoch?): {e}"
                                     );
                                     0
                                 }
@@ -1093,12 +1105,12 @@ fn main() {
                                 Some(w) => match w.is_visible() {
                                     Ok(v) => v,
                                     Err(e) => {
-                                        log::error!("tray: failed to check window visibility: {e}");
+                                        log::error!("failed to check main window visibility: {e}");
                                         false
                                     }
                                 },
                                 None => {
-                                    log::warn!("tray: main window not found for visibility check");
+                                    log::warn!("main window not found for visibility check");
                                     false
                                 }
                             };
@@ -1113,12 +1125,12 @@ fn main() {
 
             match tray_builder.build(app) {
                 Ok(_tray) => {
-                    log::info!("tray: system tray created");
+                    log::info!("system tray created");
                     tray_available_setup.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
                     // Tray creation failed; window is already visible (tauri.conf.json: visible=true).
-                    log::error!("tray: failed to create system tray: {e}");
+                    log::error!("failed to create system tray: {e}");
                 }
             }
 
@@ -1135,7 +1147,7 @@ fn main() {
                         tray::refresh_tray_menu(&app_handle_listener);
                     }
                     Err(e) => {
-                        log::warn!("tray: failed to deserialize update_available payload: {e}");
+                        log::warn!("failed to deserialize update_available payload: {e}");
                     }
                 },
             );
@@ -1369,7 +1381,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test-only assertions")]
 mod tests {
     use super::*;
 

@@ -71,7 +71,7 @@ fn detect_oauth_action_required_in(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             log::warn!(
-                "detect_oauth_action_required: cannot read {} ({e}) — treating as stale",
+                "cannot read OAuth state file {} ({e}) — treating as stale",
                 oauth_path.display()
             );
             return Some("scope_mismatch".to_string());
@@ -543,7 +543,9 @@ pub fn set_integration_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("set_integration_enabled: project={project} service={service} enabled={enabled}");
+    log::info!(
+        "setting integration enabled state project={project} service={service} enabled={enabled}"
+    );
 
     if enabled && !is_service_configured(&project, &service) {
         return Err(format!("{service} has no credentials configured"));
@@ -670,7 +672,7 @@ fn check_os_permission_with_timeout_in(
 ) -> Result<(), String> {
     let binary_path = resolve_native_cli_binary_in(service, resources_dir)?;
     log::info!(
-        "check_os_permission: spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
+        "spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
         binary_path.display()
     );
     let spawn_started = std::time::Instant::now();
@@ -680,13 +682,12 @@ fn check_os_permission_with_timeout_in(
     if launch_if_needed {
         cmd.arg("--launch");
     }
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            log::error!(
-                "check_os_permission: spawn failed for {service}: {e} (binary={})",
+    // Bounded capture: handles spawn, poll, timeout-kill, and deadlock-free
+    // stdout/stderr draining in one call.
+    let output =
+        speedwave_runtime::binary::run_with_timeout_capture(&mut cmd, timeout).map_err(|e| {
+            log::warn!(
+                "{service}-cli run failed: {e} (binary={})",
                 binary_path.display()
             );
             format!(
@@ -694,58 +695,13 @@ fn check_os_permission_with_timeout_in(
                 binary_path.display()
             )
         })?;
-
-    // Poll try_wait() every 200ms until exit or timeout
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    log::warn!(
-                        "check_os_permission: {service}-cli timed out after {}s",
-                        timeout.as_secs()
-                    );
-                    return Err(format!(
-                        "Permission check timed out after {}s. Try again.",
-                        timeout.as_secs()
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(e) => {
-                log::error!("check_os_permission: try_wait failed for {service}: {e}");
-                return Err(format!("Permission check failed: {e}"));
-            }
-        }
-    };
-
-    // Read stdout/stderr AFTER child exits — avoids pipe-buffer deadlock
-    let stdout = child
-        .stdout
-        .take()
-        .map(|mut s| {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut s, &mut buf).ok();
-            buf
-        })
-        .unwrap_or_default();
-
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut s| {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut s, &mut buf).ok();
-            buf
-        })
-        .unwrap_or_default();
+    let status = output.status;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     let elapsed_ms = spawn_started.elapsed().as_millis();
     log::debug!(
-        "check_os_permission: {service}-cli exited code={} elapsed_ms={elapsed_ms} stdout_len={} stderr_len={}",
+        "{service}-cli exited code={} elapsed_ms={elapsed_ms} stdout_len={} stderr_len={}",
         status.code().unwrap_or(-1),
         stdout.len(),
         stderr.len()
@@ -754,7 +710,7 @@ fn check_os_permission_with_timeout_in(
     // Surface Swift CLI stderr to the log line by line.
     if !stderr.trim().is_empty() {
         for line in stderr.lines() {
-            log::info!("check_os_permission: {service}-cli stderr: {line}");
+            log::info!("{service}-cli stderr: {line}");
         }
     }
 
@@ -765,7 +721,7 @@ fn check_os_permission_with_timeout_in(
             stderr.trim().to_string()
         };
         log::warn!(
-            "check_os_permission: {service}-cli non-zero exit (code={}): {detail}",
+            "{service}-cli exited non-zero (code={}): {detail}",
             status.code().unwrap_or(-1)
         );
         return Err(format!("Permission check failed: {detail}"));
@@ -773,8 +729,8 @@ fn check_os_permission_with_timeout_in(
 
     let parse_result = parse_permission_output(&stdout);
     match &parse_result {
-        Ok(()) => log::info!("check_os_permission: {service} GRANTED"),
-        Err(reason) => log::warn!("check_os_permission: {service} NOT GRANTED — {reason}"),
+        Ok(()) => log::info!("{service} permission GRANTED"),
+        Err(reason) => log::warn!("{service} permission NOT GRANTED — {reason}"),
     }
     parse_result
 }
@@ -789,14 +745,14 @@ pub fn set_os_integration_enabled(
         return Err("OS integrations are only available on macOS".to_string());
     }
     check_project(&project)?;
-    log::info!("set_os_integration_enabled: project={project} service={service} enabled={enabled}");
+    log::info!(
+        "setting OS integration enabled state project={project} service={service} enabled={enabled}"
+    );
 
     // When enabling, check macOS permission first
     if enabled {
         if let Err(reason) = check_os_permission(&service, true) {
-            log::warn!(
-                "set_os_integration_enabled: rejecting enable for {service} (project={project}) — {reason}"
-            );
+            log::warn!("rejecting enable for {service} (project={project}) — {reason}");
             return Err(reason);
         }
     }
@@ -824,10 +780,10 @@ pub fn set_os_integration_enabled(
 
     match &result {
         Ok(()) => log::info!(
-            "set_os_integration_enabled: persisted project={project} service={service} enabled={enabled}"
+            "persisted OS integration state project={project} service={service} enabled={enabled}"
         ),
         Err(e) => log::error!(
-            "set_os_integration_enabled: persist failed project={project} service={service} enabled={enabled} — {e}"
+            "failed to persist OS integration state project={project} service={service} enabled={enabled} — {e}"
         ),
     }
     result
@@ -852,13 +808,11 @@ pub fn validate_os_integrations_on_startup(
     project: String,
 ) -> Result<Vec<OsIntegrationValidation>, String> {
     if !cfg!(target_os = "macos") {
-        log::debug!(
-            "validate_os_integrations_on_startup: skipping on non-macOS host (project={project})"
-        );
+        log::debug!("skipping OS integration validation on non-macOS host (project={project})");
         return Ok(Vec::new());
     }
     check_project(&project)?;
-    log::info!("validate_os_integrations_on_startup: project={project} — start");
+    log::info!("validating OS integrations on startup project={project} — start");
 
     // SSOT: list of OS services to validate comes from speedwave_runtime::consts.
     let os_services: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES
@@ -867,27 +821,28 @@ pub fn validate_os_integrations_on_startup(
         .collect();
 
     // Phase 1: short config_lock — snapshot enabled state per service, unlock.
-    let prev_state: std::collections::HashMap<&'static str, bool> = config::with_config_lock(|| {
-        let user_config = config::load_user_config()?;
-        let entry = user_config
-            .find_project(&project)
-            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-        let os_cfg = entry.integrations.as_ref().and_then(|i| i.os.as_ref());
-        Ok(os_services
-            .iter()
-            .map(|svc| {
-                let enabled = os_cfg
-                    .and_then(|os| os.get_service(svc))
-                    .and_then(|cfg| cfg.enabled)
-                    .unwrap_or(false);
-                (*svc, enabled)
-            })
-            .collect())
-    })
-    .map_err(|e: anyhow::Error| {
-        log::error!("validate_os_integrations_on_startup: config snapshot failure for project={project}: {e}");
-        e.to_string()
-    })?;
+    let prev_state: std::collections::HashMap<&'static str, bool> =
+        config::with_config_lock(|| {
+            let user_config = config::load_user_config()?;
+            let entry = user_config
+                .find_project(&project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let os_cfg = entry.integrations.as_ref().and_then(|i| i.os.as_ref());
+            Ok(os_services
+                .iter()
+                .map(|svc| {
+                    let enabled = os_cfg
+                        .and_then(|os| os.get_service(svc))
+                        .and_then(|cfg| cfg.enabled)
+                        .unwrap_or(false);
+                    (*svc, enabled)
+                })
+                .collect())
+        })
+        .map_err(|e: anyhow::Error| {
+            log::error!("OS integration config snapshot failed for project={project}: {e}");
+            e.to_string()
+        })?;
 
     let to_check: Vec<&'static str> = os_services
         .iter()
@@ -898,9 +853,7 @@ pub fn validate_os_integrations_on_startup(
     let checked = to_check.len();
     for svc in &os_services {
         if !*prev_state.get(svc).unwrap_or(&false) {
-            log::debug!(
-                "validate_os_integrations_on_startup: skipping {svc} (already disabled in config)"
-            );
+            log::debug!("skipping {svc} (already disabled in config)");
         }
     }
 
@@ -908,9 +861,7 @@ pub fn validate_os_integrations_on_startup(
     let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
         .into_iter()
         .map(|svc| {
-            log::info!(
-                "validate_os_integrations_on_startup: checking {svc} (currently enabled in config)"
-            );
+            log::info!("checking {svc} (currently enabled in config)");
             let handle = std::thread::spawn(move || check_os_permission(svc, false));
             (svc, handle)
         })
@@ -923,13 +874,9 @@ pub fn validate_os_integrations_on_startup(
             .join()
             .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked")));
         match result {
-            Ok(()) => log::info!(
-                "validate_os_integrations_on_startup: {svc} VALID (TCC granted, keeping enabled)"
-            ),
+            Ok(()) => log::info!("{svc} VALID (TCC granted, keeping enabled)"),
             Err(reason) => {
-                log::warn!(
-                    "validate_os_integrations_on_startup: auto-disabling {svc} (was enabled, TCC reports: {reason})"
-                );
+                log::warn!("auto-disabling {svc} (was enabled, TCC reports: {reason})");
                 to_disable.push(svc);
                 validations.push(OsIntegrationValidation {
                     service: svc.to_string(),
@@ -961,15 +908,13 @@ pub fn validate_os_integrations_on_startup(
             config::save_user_config(&user_config)
         })
         .map_err(|e| {
-            log::error!(
-                "validate_os_integrations_on_startup: config persist failure for project={project}: {e}"
-            );
+            log::error!("OS integration config persist failed for project={project}: {e}");
             e.to_string()
         })?;
     }
 
     log::info!(
-        "validate_os_integrations_on_startup: project={project} done — total_services={} checked={checked} skipped_already_disabled={already_disabled} auto_disabled={} services=[{}]",
+        "OS integration validation done for project={project} — total_services={} checked={checked} skipped_already_disabled={already_disabled} auto_disabled={} services=[{}]",
         os_services.len(),
         validations.len(),
         validations.iter().map(|v| v.service.as_str()).collect::<Vec<_>>().join(",")
@@ -985,7 +930,7 @@ pub fn save_integration_credentials(
     credentials: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("save_integration_credentials: project={project} service={service}");
+    log::info!("saving integration credentials project={project} service={service}");
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
@@ -1131,7 +1076,7 @@ fn read_existing_oauth_state(
         Ok(v) => Ok(v),
         Err(e) => {
             log::warn!(
-                "oauth state at {} is corrupt — replacing skeleton, losing pre-existing fields ({e})",
+                "OAuth state at {} is corrupt — replacing with a fresh skeleton, losing pre-existing fields ({e})",
                 path.display()
             );
             Ok(fresh_oauth_skeleton(provider))
@@ -1157,7 +1102,7 @@ pub fn save_redmine_mappings(
     mappings: std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("save_redmine_mappings: project={project}");
+    log::info!("saving Redmine mappings project={project}");
     let config_path = speedwave_runtime::consts::data_dir()
         .join("tokens")
         .join(&project)
@@ -1201,7 +1146,7 @@ pub fn save_redmine_mappings(
 #[tauri::command]
 pub fn delete_integration_credentials(project: String, service: String) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("delete_integration_credentials: project={project} service={service}");
+    log::info!("deleting integration credentials project={project} service={service}");
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
@@ -1287,14 +1232,14 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
     let user_config = match speedwave_runtime::config::load_user_config() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("prune_unused_worker_images: load_user_config failed: {e}");
+            log::warn!("failed to load user config while pruning worker images: {e}");
             return;
         }
     };
     let dir = match user_config.find_project(project) {
         Some(p) => p.dir.clone(),
         None => {
-            log::warn!("prune_unused_worker_images: project '{project}' not in config");
+            log::warn!("project '{project}' not in config — skipping worker image prune");
             return;
         }
     };
@@ -1307,14 +1252,14 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
     let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("prune_unused_worker_images: load manifest failed: {e}");
+            log::warn!("failed to load bundle manifest while pruning worker images: {e}");
             return;
         }
     };
     if let Err(e) =
         speedwave_runtime::build::prune_orphan_current_bundle_images_locked(rt, &manifest, &keep)
     {
-        log::warn!("prune_unused_worker_images failed: {e}");
+        log::warn!("failed to prune unused worker images: {e}");
     }
 }
 
@@ -1366,14 +1311,14 @@ pub async fn restart_integration_containers(
             }
         }
         log::info!(
-            "restart_integration_containers: project={project} just_enabled={just_enabled:?}"
+            "restarting integration containers project={project} just_enabled={just_enabled:?}"
         );
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Build OUTSIDE the compose lock (ADR-066).
         if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
-            log::error!("restart_integration_containers: image build failed: {sanitized}");
+            log::error!("image build failed while restarting integration containers: {sanitized}");
             if let Some(svc) = just_enabled.as_deref() {
                 rollback_integration_to_disabled(&project, svc);
             }
@@ -1402,16 +1347,14 @@ pub async fn restart_integration_containers(
                     .and_then(|()| rt.compose_up(&project));
 
             if let Err(e) = up_result {
-                log::error!(
-                    "restart_integration_containers: up failed: {e}, attempting rollback"
-                );
+                log::error!("compose up failed while restarting integration containers: {e}, attempting rollback");
                 // Roll the config toggle back alongside the containers.
                 if let Some(svc) = just_enabled.as_deref() {
                     rollback_integration_to_disabled(&project, svc);
                 }
                 // Nested transaction: rollback acquires its own — reentrant via HELD_LOCKS.
                 if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
-                    log::error!("restart_integration_containers: rollback also failed: {rb_err}");
+                    log::error!("rollback also failed after restart failure: {rb_err}");
                     anyhow::bail!(
                         "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
                     );
@@ -1436,7 +1379,11 @@ pub async fn restart_integration_containers(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only assertions"
+)]
 mod tests {
     use super::*;
 

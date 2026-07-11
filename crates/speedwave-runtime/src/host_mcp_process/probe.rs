@@ -3,15 +3,13 @@
 //! TCP connect with optional retry+backoff.
 
 use std::net::{IpAddr, SocketAddr, TcpStream};
-#[cfg(unix)]
-use std::process::Command;
 use std::time::Duration;
 
 /// Returns true if a process with the given PID is currently running.
 /// Cross-platform: `kill -0` on Unix, `tasklist /FI` on Windows.
 #[cfg(unix)]
 pub fn is_pid_alive(pid: u32) -> bool {
-    Command::new("kill")
+    crate::binary::system_command("kill")
         .args(["-0", &pid.to_string()])
         .output()
         .map(|o| o.status.success())
@@ -47,7 +45,7 @@ pub fn probe_tcp(bind_address: &str, port: u16, attempts: u32, backoff: Duration
     let ip: IpAddr = match bind_address.parse() {
         Ok(ip) => ip,
         Err(_) => {
-            log::warn!("probe_tcp: invalid bind address {bind_address:?}");
+            log::warn!("invalid bind address {bind_address:?} for TCP probe");
             return false;
         }
     };
@@ -70,14 +68,14 @@ pub fn host_bind_address_for_probe() -> String {
     match crate::compose::host_bind_address() {
         Ok(addr) => addr,
         Err(e) => {
-            log::warn!("probe_tcp: host_bind_address failed ({e}); falling back to 127.0.0.1");
+            log::warn!("failed to resolve host bind address ({e}); falling back to 127.0.0.1");
             "127.0.0.1".to_string()
         }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use std::net::TcpListener;

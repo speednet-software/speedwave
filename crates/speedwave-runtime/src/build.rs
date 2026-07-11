@@ -261,7 +261,7 @@ pub fn images_exist(
     let manifest = match crate::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("images_exist: cannot load bundle manifest: {e}");
+            log::warn!("cannot load bundle manifest: {e}");
             return false;
         }
     };
@@ -277,7 +277,7 @@ pub fn images_exist_with_manifest(
 ) -> bool {
     enabled_images(integrations).iter().all(|img| {
         let Ok(tag) = manifest.image_tag(img.name) else {
-            log::warn!("images_exist: no hash for {} in manifest", img.name);
+            log::warn!("no manifest hash for image {}", img.name);
             return false;
         };
         rt.image_exists(&tag).unwrap_or(false)
@@ -878,7 +878,7 @@ fn try_build_images(
         Ok(n) => n.get().min(total),
         Err(e) => {
             log::warn!(
-                "build_images: available_parallelism failed ({e}); using fallback of {DEFAULT_BUILD_WORKER_FALLBACK}"
+                "available_parallelism failed ({e}); using fallback of {DEFAULT_BUILD_WORKER_FALLBACK} build workers"
             );
             DEFAULT_BUILD_WORKER_FALLBACK.min(total)
         }
@@ -894,7 +894,7 @@ fn try_build_images(
         indices.chunks(total.div_ceil(worker_count)).collect()
     };
     log::info!(
-        "build_images: building {total} images from {} ({} parallel workers)",
+        "building {total} images from {} ({} parallel workers)",
         vm_root.display(),
         chunks.len()
     );
@@ -913,7 +913,7 @@ fn try_build_images(
                     let abs_containerfile =
                         crate::engine_path::vm_path_join(root_str, img.containerfile);
                     log::info!(
-                        "build_images: [{}/{}] building {} (context={}, file={})",
+                        "[{}/{}] building {} (context={}, file={})",
                         idx + 1,
                         total,
                         tag,
@@ -924,15 +924,10 @@ fn try_build_images(
                         runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args);
                     match &res {
                         Ok(()) => {
-                            log::info!("build_images: [{}/{}] {} built OK", idx + 1, total, tag);
+                            log::info!("[{}/{}] {} built OK", idx + 1, total, tag);
                         }
                         Err(err) => {
-                            log::error!(
-                                "build_images: [{}/{}] {} failed: {err:#}",
-                                idx + 1,
-                                total,
-                                tag
-                            );
+                            log::error!("[{}/{}] {} failed: {err:#}", idx + 1, total, tag);
                         }
                     }
                     results
@@ -957,7 +952,7 @@ fn try_build_images(
 
     let also_failed = |idx: usize, e: &anyhow::Error| {
         log::error!(
-            "build_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+            "[{}/{}] {} also failed (not selected for retry classification): {e:#}",
             idx + 1,
             total,
             images[idx].name
@@ -980,7 +975,7 @@ fn try_build_images(
     }
 
     if total_errors == 0 {
-        log::info!("build_images: all {total} images built successfully");
+        log::info!("all {total} images built successfully");
         return Ok(total as u32);
     }
 
@@ -1107,7 +1102,11 @@ fn is_network_build_error(err: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

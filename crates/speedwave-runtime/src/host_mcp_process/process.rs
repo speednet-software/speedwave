@@ -321,7 +321,10 @@ pub fn kill_stale_node(pid: u32, service_tag: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixture: lock().unwrap() on an infallible Mutex"
+)]
 pub(crate) mod test_support {
     //! Fake `WorkerSpec` + helpers for testing the generic struct
     //! without spawning real Node workers.
@@ -372,7 +375,11 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::test_support::FakeSpec;
     use super::*;

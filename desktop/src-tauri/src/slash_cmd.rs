@@ -47,7 +47,6 @@ pub(crate) fn invalidate_slash_cache(project_id: String) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

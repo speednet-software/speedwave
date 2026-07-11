@@ -968,7 +968,7 @@ async fn handle_test_connection<S>(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test module")]
 mod tests {
     use super::{
         dispatch_method, find_available_port, handle_jsonrpc_message, jsonrpc_error,

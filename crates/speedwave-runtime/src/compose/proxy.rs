@@ -120,7 +120,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
 
     for entry in &llm.providers {
         if !crate::plugin::is_valid_slug(&entry.id) {
-            log::warn!("proxy config: skipping provider with invalid id");
+            log::warn!("skipping provider with invalid id");
             continue;
         }
         match entry.kind {
@@ -140,10 +140,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
             }
             LlmProviderKind::Local => {
                 let Some(base_url) = entry.base_url.as_deref() else {
-                    log::warn!(
-                        "proxy config: provider '{}' has no base_url — skipped",
-                        entry.id
-                    );
+                    log::warn!("provider '{}' has no base_url — skipped", entry.id);
                     continue;
                 };
                 // Normalize BEFORE validating — v1 configs persisted the raw form
@@ -151,7 +148,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 if let Err(e) = super::llm::validate_base_url(&base_url) {
                     log::warn!(
-                        "proxy config: provider '{}' has invalid base_url — skipped: {e}",
+                        "provider '{}' has invalid base_url — skipped: {e}",
                         entry.id
                     );
                     continue;
@@ -264,13 +261,13 @@ pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &
     }
     // Source of truth for "is there a legacy key to migrate": the legacy file.
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
-        log::debug!("proxy: no legacy local-llm api_key to migrate (missing or unreadable)");
+        log::debug!("no legacy local-llm api_key to migrate (missing or unreadable)");
         return;
     };
     if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
-        log::warn!("proxy: legacy local key migration failed: {e}");
+        log::warn!("legacy local key migration failed: {e}");
     } else {
-        log::info!("proxy: migrated legacy local-llm api_key into the llm token namespace");
+        log::info!("migrated legacy local-llm api_key into the llm token namespace");
     }
 }
 
@@ -315,7 +312,7 @@ pub fn remove_llm_provider_key_in(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use crate::config::{LlmActive, LlmProviderEntry};

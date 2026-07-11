@@ -459,7 +459,7 @@ fn resample_linear(src: &[f32], from: u32, to: u32) -> Vec<f32> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
 

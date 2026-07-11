@@ -43,7 +43,10 @@ fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
 /// **Returns `Err` on any Win32 failure** — caller must remove/quarantine the
 /// target.
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "Windows DACL FFI boundary; every block carries a SAFETY comment"
+)]
 fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL};
@@ -59,22 +62,30 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
 
     unsafe {
         let mut token_handle = std::mem::zeroed();
+        // SAFETY: GetCurrentProcess returns a pseudo-handle needing no close;
+        // token_handle is a plain out-param, closed on every exit path below.
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
             return Err("OpenProcessToken failed".to_string());
         }
-        let mut buf = vec![0u8; 256];
+        // u64 backing keeps the TOKEN_USER cast below aligned; 256 B exceeds the
+        // maximum payload (SID_AND_ATTRIBUTES + SECURITY_MAX_SID_SIZE).
+        let mut buf = [0u64; 32];
         let mut returned = 0u32;
+        // SAFETY: token_handle is live; buf is writable for the byte length passed.
+        // A too-small buffer fails the call and we return Err.
         if GetTokenInformation(
             token_handle,
             TokenUser,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            std::mem::size_of_val(&buf) as u32,
             &mut returned,
         ) == 0
         {
             CloseHandle(token_handle);
             return Err("GetTokenInformation failed".to_string());
         }
+        // SAFETY: the call above succeeded, so buf holds an initialized TOKEN_USER;
+        // the u64 backing satisfies its pointer alignment.
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: GENERIC_ALL,
@@ -89,6 +100,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             },
         };
         let mut new_acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: ea's SID pointer targets buf, which outlives this call; on success
+        // new_acl is a LocalAlloc'd ACL, freed exactly once below.
         if SetEntriesInAclW(1, &ea, std::ptr::null_mut(), &mut new_acl) != 0 {
             CloseHandle(token_handle);
             return Err("SetEntriesInAclW failed".to_string());
@@ -98,6 +111,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
+        // SAFETY: wide_path is NUL-terminated UTF-16 and new_acl is valid from
+        // SetEntriesInAclW; both stay alive across the call.
         let rc = SetNamedSecurityInfoW(
             wide_path.as_ptr(),
             SE_FILE_OBJECT,
@@ -107,6 +122,7 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             new_acl,
             std::ptr::null_mut(),
         );
+        // SAFETY: new_acl and token_handle are owned here and released exactly once.
         LocalFree(new_acl.cast());
         CloseHandle(token_handle);
         if rc != 0 {
@@ -337,7 +353,11 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
 

@@ -124,7 +124,7 @@ pub(crate) fn teardown_only(
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Option<String> {
     rt.compose_down(new_project).err().map(|e| {
-        log::warn!("teardown new '{new_project}' failed: {e}");
+        log::warn!("failed to tear down new project '{new_project}': {e}");
         format!("teardown of '{new_project}' failed: {e}")
     })
 }
@@ -167,7 +167,7 @@ fn record_teardown_intent(project: &str) {
     if !entries.iter().any(|e| e == project) {
         entries.push(project.to_string());
         if let Err(e) = write_intents_atomic(&path, &entries) {
-            log::warn!("could not record teardown intent for '{project}': {e}");
+            log::warn!("failed to record teardown intent for '{project}': {e}");
         }
     }
 }
@@ -194,7 +194,7 @@ fn clear_teardown_intent(project: &str) {
         write_intents_atomic(&path, &entries)
     };
     if let Err(e) = result {
-        log::warn!("could not clear teardown intent for '{project}': {e}");
+        log::warn!("failed to clear teardown intent for '{project}': {e}");
     }
 }
 
@@ -216,13 +216,13 @@ fn spawn_background_teardown_with(
     record_teardown_intent(&prev);
     let project = prev.clone();
     let handle = std::thread::spawn(move || {
-        log::info!("background teardown: stopping previous project '{project}'");
+        log::info!("stopping previous project '{project}' in the background");
         match down(&project) {
             Ok(()) => {
-                log::info!("background teardown: '{project}' stopped");
+                log::info!("background teardown of '{project}' stopped");
                 clear_teardown_intent(&project);
             }
-            Err(e) => log::warn!("background teardown: compose_down('{project}') failed: {e}"),
+            Err(e) => log::warn!("background compose_down('{project}') failed: {e}"),
         }
     });
     if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
@@ -418,18 +418,18 @@ pub async fn run_system_check() -> Result<(), String> {
 #[tauri::command]
 pub async fn check_runtime() -> Result<String, String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("check_runtime: starting");
+        log::info!("checking runtime status");
         let status = setup_wizard::check_runtime().map_err(|e| {
-            log::error!("check_runtime: error: {e}");
+            log::error!("failed to check runtime status: {e}");
             e.to_string()
         })?;
         match status {
             setup_wizard::RuntimeStatus::Ready => {
-                log::info!("check_runtime: Ready");
+                log::info!("runtime status is Ready");
                 Ok("Ready".to_string())
             }
             setup_wizard::RuntimeStatus::NotInstalled => {
-                log::info!("check_runtime: NotInstalled");
+                log::info!("runtime status is NotInstalled");
                 Ok("NotInstalled".to_string())
             }
         }
@@ -441,9 +441,9 @@ pub async fn check_runtime() -> Result<String, String> {
 #[tauri::command]
 pub async fn init_vm() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("init_vm: starting");
+        log::info!("initializing VM");
         setup_wizard::init_vm().map_err(|e| {
-            log::error!("init_vm: error: {e}");
+            log::error!("failed to initialize VM: {e}");
             e.to_string()
         })
     })
@@ -454,9 +454,9 @@ pub async fn init_vm() -> Result<(), String> {
 #[tauri::command]
 pub async fn create_project(name: String, dir: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        log::info!("create_project: name={name}, dir={dir}");
+        log::info!("creating project name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
-            log::error!("create_project: error: {e}");
+            log::error!("failed to create project: {e}");
             e.to_string()
         })
     })
@@ -467,9 +467,9 @@ pub async fn create_project(name: String, dir: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn link_cli() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("link_cli: starting");
+        log::info!("linking CLI");
         setup_wizard::link_cli().map_err(|e| {
-            log::error!("link_cli: error: {e}");
+            log::error!("failed to link CLI: {e}");
             e.to_string()
         })
     })
@@ -522,9 +522,9 @@ pub async fn add_project(
         let name = name.clone();
         let dir = dir.clone();
         move || {
-            log::info!("add_project: name={name}, dir={dir}");
+            log::info!("adding project name={name}, dir={dir}");
             speedwave_runtime::project::add_project(&name, &dir).map_err(|e| {
-                log::error!("add_project: error: {e}");
+                log::error!("failed to add project: {e}");
                 e.to_string()
             })
         }
@@ -560,15 +560,15 @@ pub async fn add_project(
             // No provider is a valid state ("choose a provider" screen) —
             // skip starting containers rather than let render_compose bail.
             if project_llm_is_unconfigured(proj)? {
-                log::info!("add_project: '{proj}' has no LLM provider — skipping container start");
+                log::info!("'{proj}' has no LLM provider — skipping container start");
                 return Ok(());
             }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
             crate::ensure_oauth_running(&oauth_arc, proj);
-            log::info!("add_project: starting containers for project={proj}");
+            log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
-                log::error!("add_project: start_containers failed: {e}");
+                log::error!("failed to start containers: {e}");
                 e.to_string()
             })
         })
@@ -591,7 +591,7 @@ pub async fn add_project(
     // Rebind chat session
     if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
         // Containers running but chat failed — transient, still emit succeeded
-        log::warn!("add_project: rebind_chat failed: {e}");
+        log::warn!("rebind_chat failed after adding project: {e}");
     }
 
     // Previous project is stopped in the background.
@@ -615,11 +615,11 @@ pub(crate) fn remove_project_core(
 ) -> Result<(), String> {
     if rt.is_available() {
         rt.compose_down(name).map_err(|e| {
-            log::error!("remove_project: compose_down('{name}') failed: {e}");
+            log::error!("compose_down('{name}') failed: {e}");
             format!("Failed to stop containers for '{name}': {e}")
         })?;
     }
-    log::info!("remove_project: name={name}");
+    log::info!("removing project name={name}");
     remove_fn(name)
 }
 
@@ -631,7 +631,7 @@ pub async fn remove_project(name: String) -> Result<(), String> {
         let rt = speedwave_runtime::runtime::detect_runtime();
         remove_project_core(&name, &rt, &|n| {
             speedwave_runtime::project::remove_project(n).map_err(|e| {
-                log::error!("remove_project: error: {e}");
+                log::error!("failed to remove project: {e}");
                 e.to_string()
             })
         })
@@ -651,9 +651,9 @@ pub async fn is_setup_complete() -> Result<bool, String> {
 #[tauri::command]
 pub async fn build_images() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("build_images: starting");
+        log::info!("building images");
         setup_wizard::build_images().map_err(|e| {
-            log::error!("build_images: error: {e}");
+            log::error!("failed to build images: {e}");
             e.to_string()
         })
     })
@@ -687,9 +687,9 @@ pub async fn start_containers(
                 )?;
             }
         }
-        log::info!("start_containers: project={project}");
+        log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
-            log::error!("start_containers: error: {e}");
+            log::error!("failed to start containers: {e}");
             e.to_string()
         })
     })
@@ -709,7 +709,7 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         setup_wizard::defer_container_start(&project).map_err(|e| {
-            log::error!("defer_container_start: error: {e}");
+            log::error!("failed to defer container start: {e}");
             e.to_string()
         })
     })
@@ -724,25 +724,25 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
 pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("check_containers_running: project={project}");
+        log::info!("checking whether containers are running for project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
         // Intentional double check: is_available() gives a clean "no
         // containers" signal where compose_ps() would Err (confusing UX).
         if !rt.is_available() {
-            log::warn!("check_containers_running: runtime not available");
+            log::warn!("runtime not available");
             return Ok(false);
         }
         // A deferred-start project (no LLM provider yet) has no compose.yml
         // at all — compose_ps would Err rather than report "not running".
         if !speedwave_runtime::runtime::project_has_compose_file(&project) {
-            log::info!("check_containers_running: no compose.yml yet for '{project}'");
+            log::info!("no compose.yml yet for '{project}'");
             return Ok(false);
         }
         let containers = rt.compose_ps(&project).map_err(|e| {
-            log::error!("check_containers_running: error: {e}");
+            log::error!("failed to check containers running: {e}");
             e.to_string()
         })?;
-        log::info!("check_containers_running: {} containers", containers.len());
+        log::info!("found {} running containers", containers.len());
         Ok(!containers.is_empty())
     })
     .await
@@ -758,40 +758,34 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         .ok()
         .and_then(|c| c.active_project);
     if active.as_deref() != Some(project) {
-        log::debug!(
-            "recreate_project_containers_if_running: '{project}' is not the active project — skipping"
-        );
+        log::debug!("'{project}' is not the active project — skipping recreate");
         return;
     }
     // Bundle reconcile may be rebuilding images. compose_up_recreate against a
     // missing image tag emits "image not available" to the user. Wait first.
     if let Err(e) = ensure_images_ready() {
-        log::warn!("recreate_project_containers_if_running: images not ready for '{project}': {e}");
+        log::warn!("images not ready for '{project}' — skipping recreate: {e}");
         return;
     }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
-        log::debug!("recreate_project_containers_if_running: runtime not available — skipping");
+        log::debug!("runtime not available — skipping recreate");
         return;
     }
     let running = match rt.compose_ps(project) {
         Ok(c) => !c.is_empty(),
         Err(e) => {
-            log::debug!(
-                "recreate_project_containers_if_running: compose_ps failed ({e}) — skipping"
-            );
+            log::debug!("compose_ps failed ({e}) — skipping recreate");
             return;
         }
     };
     if !running {
-        log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
+        log::debug!("'{project}' not running — skipping recreate");
         return;
     }
     // Build OUTSIDE the compose lock (ADR-066).
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
-        log::warn!(
-            "recreate_project_containers_if_running: pre-build failed for '{project}': {sanitized}"
-        );
+        log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
         return;
     }
     use crate::types::IntoAnyhow;
@@ -806,7 +800,7 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
             log::info!("recreated containers for '{project}' so the hub re-discovers");
         }
         Err(e) => {
-            log::warn!("recreate_project_containers_if_running: failed for '{project}': {e}");
+            log::warn!("failed to recreate containers for '{project}': {e}");
         }
     }
 }
@@ -826,14 +820,14 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
                 )?;
             }
         }
-        log::info!("recreate_project_containers: project={project}");
+        log::info!("recreating containers for project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Lazy build (ADR-057).
         if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, &project)
         {
-            log::error!("recreate_project_containers: image build failed: {sanitized}");
+            log::error!("image build failed: {sanitized}");
             return Err(format!("Image build failed: {sanitized}"));
         }
 
@@ -847,7 +841,7 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         })
         .map_err(|e| e.to_string())?;
 
-        log::info!("recreate_project_containers: done for project={project}");
+        log::info!("finished recreating containers for project={project}");
         Ok(())
     })
     .await
@@ -870,7 +864,7 @@ pub async fn factory_reset(
     if let Ok(mut guard) = ide_bridge.lock() {
         if let Some(mut bridge) = guard.take() {
             if let Err(e) = bridge.stop() {
-                log::warn!("factory_reset: IDE Bridge stop: {e}");
+                log::warn!("failed to stop IDE Bridge during factory reset: {e}");
             }
         }
     }
@@ -880,7 +874,7 @@ pub async fn factory_reset(
     if let Ok(mut guard) = mcp_os.lock() {
         if let Some(mut proc) = guard.take() {
             if let Err(e) = proc.stop() {
-                log::warn!("factory_reset: mcp-os stop: {e}");
+                log::warn!("failed to stop mcp-os during factory reset: {e}");
             }
             proc.cleanup_files();
         }
@@ -888,9 +882,9 @@ pub async fn factory_reset(
 
     // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
     let result = tokio::task::spawn_blocking(|| {
-        log::info!("factory_reset: starting wipe");
+        log::info!("starting factory reset wipe");
         setup_wizard::factory_reset().map_err(|e| {
-            log::error!("factory_reset: error: {e}");
+            log::error!("factory reset failed: {e}");
             e.to_string()
         })
     })
@@ -900,7 +894,7 @@ pub async fn factory_reset(
     // 5. Always restart: success → clean wizard start (data dir gone);
     //    failure → recover subsystems (data dir may partially exist).
     if let Err(ref e) = result {
-        log::error!("factory_reset: wipe failed ({e}), restarting to recover");
+        log::error!("factory reset wipe failed ({e}), restarting to recover");
     }
     app.restart();
 }
@@ -928,7 +922,7 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     if let Some(ref url) = llm.base_url {
         let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
         if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
-            log::warn!("get_llm_config: stored base_url '{url}' fails current SSRF policy: {e}");
+            log::warn!("stored base_url '{url}' fails current SSRF policy: {e}");
         }
     }
 
@@ -1173,7 +1167,7 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
         Err(e) => {
             // UI verdict stays boolean; the reason (DNS/TLS/refused/timeout) is only
             // useful in diagnostics, so surface it at debug rather than discard it.
-            log::debug!("probe_otlp_endpoint: collector unreachable: {e}");
+            log::debug!("OTLP collector unreachable: {e}");
             Ok(false)
         }
     }
@@ -1232,7 +1226,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         canonicalize_provider_base_urls(providers);
     }
     log::info!(
-        "update_llm_config: provider={:?} model={:?} context_tokens={:?} \
+        "updating LLM config: provider={:?} model={:?} context_tokens={:?} \
          api_key_change={} custom_headers_change={}",
         update.provider,
         update.model,
@@ -1263,7 +1257,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
         let port_str = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
         log::info!(
-            "update_llm_config: base_url={}://{}{port_str}",
+            "updating LLM config base_url={}://{}{port_str}",
             parsed.scheme(),
             parsed.host_str().unwrap_or("<no-host>"),
         );
@@ -1341,7 +1335,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         apply_llm_config(&mut user_config, merged)?;
         config::save_user_config(&user_config)?;
         log::info!(
-            "update_llm_config: persisted to active_project={:?}",
+            "persisted LLM config to active_project={:?}",
             user_config.active_project
         );
         Ok(())
@@ -1471,7 +1465,7 @@ fn validate_provider_entries(
 #[tauri::command]
 pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
     log::info!(
-        "set_llm_provider_key: provider_id={provider_id} action={}",
+        "setting LLM provider key provider_id={provider_id} action={}",
         if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
             "write"
         } else {
@@ -1515,9 +1509,7 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
             } else {
                 // update_llm_config normally rewrites providers wholesale; a
                 // direct caller leaves has_api_key stuck false — surface that.
-                log::warn!(
-                    "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
-                );
+                log::warn!("provider '{provider_id}' not in config — has_api_key not updated");
             }
         }
         config::save_user_config(&user_config)?;
@@ -1530,7 +1522,7 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
 /// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
 #[tauri::command]
 pub fn clear_active_llm_provider() -> Result<(), String> {
-    log::info!("clear_active_llm_provider");
+    log::info!("clearing active LLM provider");
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let active = user_config
@@ -1616,7 +1608,7 @@ fn apply_credential_action(
             let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
             // One syscall, no TOCTOU — `NotFound` is the expected idempotent case.
             match std::fs::remove_file(&path) {
-                Ok(()) => log::info!("update_llm_config: removed token file {}", path.display()),
+                Ok(()) => log::info!("removed LLM token file {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
@@ -1628,7 +1620,7 @@ fn apply_credential_action(
             let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
             speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, value)?;
             log::info!(
-                "update_llm_config: wrote token file {} ({} bytes)",
+                "wrote LLM token file {} ({} bytes)",
                 path.display(),
                 value.len()
             );
@@ -1664,7 +1656,7 @@ fn mirror_local_key_to_llm_namespace(
         ),
     };
     if let Err(e) = result {
-        log::warn!("update_llm_config: mirroring local api_key to llm namespace failed: {e}");
+        log::warn!("failed to mirror local api_key to llm namespace: {e}");
     }
     Ok(())
 }
@@ -1673,7 +1665,11 @@ fn mirror_local_key_to_llm_namespace(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};

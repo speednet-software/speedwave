@@ -48,7 +48,6 @@ pub(crate) async fn apply_beta_toggle_inner(app: &AppHandle, enabled: bool) -> R
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use speedwave_runtime::config::{SpeedwaveUserConfig, UiPrefsConfig};
 

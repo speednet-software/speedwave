@@ -593,7 +593,11 @@ fn render_fresh_compose_for_rollback(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: unwrap/expect on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
 
@@ -1008,7 +1012,10 @@ mod tests {
     }
 
     // SSOT guard: asserts CONTAINER_STABILIZATION_DELAY_SECS stays sane.
-    #[allow(clippy::assertions_on_constants)]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "deliberately asserting a compile-time SSOT constant stays in range"
+    )]
     #[test]
     fn test_stabilization_delay_is_reasonable() {
         assert!(

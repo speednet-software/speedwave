@@ -2,7 +2,10 @@
 //! (`to_engine_path` / `str_to_engine_path` / `vm_path_join`).
 //! Bypass a false positive with `// SSOT-allow: <reason>`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test file uses expect() only, never unwrap()"
+)]
 
 use std::path::{Path, PathBuf};
 

@@ -463,7 +463,7 @@ fn spawn_event_forwarder(
     let sub = match store.subscribe(id) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("subscribe_transcript: {e}");
+            log::warn!("failed to subscribe to transcript {}: {e}", short_id(id));
             if let Ok(mut set) = forwarders.lock() {
                 set.remove(&id);
             }
@@ -493,7 +493,7 @@ async fn forward_events(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                log::warn!("transcript {event_name}: subscriber lagged by {n} events");
+                log::warn!("transcript subscriber for {event_name} lagged by {n} events");
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -676,7 +676,7 @@ pub async fn delete_transcription_model(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;

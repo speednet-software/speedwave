@@ -51,25 +51,23 @@ mod windows_impl {
 
     fn ensure_firewall_rule_inner() {
         let Some(script) = resolve_bundled_windows_script("firewall.ps1") else {
-            log::warn!(
-                "firewall: firewall.ps1 not found in bundle — skipping (WDF prompts may appear)"
-            );
+            log::warn!("firewall.ps1 not found in bundle — skipping (WDF prompts may appear)");
             return;
         };
         let programs = host_listener_programs();
 
         match run_firewall_mode(&script, "ensure", &programs) {
-            EnsureOutcome::Ready => log::info!("firewall: rules present"),
+            EnsureOutcome::Ready => log::info!("firewall rules present"),
             EnsureOutcome::Failed => {
-                log::warn!("firewall: ensure failed (non-fatal) — will retry next launch")
+                log::warn!("firewall ensure failed (non-fatal) — will retry next launch")
             }
             EnsureOutcome::Skipped => {
-                log::warn!("firewall: ensure could not run (non-fatal) — will retry next launch")
+                log::warn!("firewall ensure could not run (non-fatal) — will retry next launch")
             }
             EnsureOutcome::NeedsElevation => {
                 if !is_interactive_session() {
                     log::warn!(
-                        "firewall: rules missing and session non-interactive — skipping elevation"
+                        "firewall rules missing and session non-interactive — skipping elevation"
                     );
                     return;
                 }
@@ -93,7 +91,7 @@ mod windows_impl {
                     progs.push(node.to_string_lossy().into_owned());
                 } else {
                     log::warn!(
-                        "firewall: bundled node.exe not found at {} — skipping its allow rule",
+                        "bundled node.exe not found at {} — skipping its allow rule",
                         node.display()
                     );
                 }
@@ -139,21 +137,21 @@ mod windows_impl {
                     run_firewall_mode(script, "ensure", programs),
                     EnsureOutcome::Ready
                 ) {
-                    log::info!("firewall: rules created via elevation");
+                    log::info!("firewall rules created via elevation");
                 } else {
                     log::warn!(
-                        "firewall: elevation ran but rules still missing — will retry next launch"
+                        "firewall elevation ran but rules still missing — will retry next launch"
                     );
                 }
             }
             // UAC cancelled / elevation refused.
             Ok(Some(10)) => {
-                log::warn!("firewall: UAC declined — WDF prompts may appear until granted")
+                log::warn!("firewall UAC declined — WDF prompts may appear until granted")
             }
             Ok(other) => {
-                log::warn!("firewall: elevation launcher exited {other:?} (non-fatal) — will retry next launch")
+                log::warn!("firewall elevation launcher exited {other:?} (non-fatal) — will retry next launch")
             }
-            Err(e) => log::warn!("firewall: elevation spawn failed (non-fatal): {e}"),
+            Err(e) => log::warn!("firewall elevation spawn failed (non-fatal): {e}"),
         }
     }
 
@@ -184,7 +182,7 @@ mod windows_impl {
         match cmd.status() {
             Ok(status) => classify_ensure_exit(status.code()),
             Err(e) => {
-                log::warn!("firewall: spawn failed (non-fatal): {e}");
+                log::warn!("firewall spawn failed (non-fatal): {e}");
                 EnsureOutcome::Skipped
             }
         }
@@ -204,7 +202,6 @@ mod windows_impl {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

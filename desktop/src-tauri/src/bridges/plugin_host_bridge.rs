@@ -288,7 +288,7 @@ fn translate_pairing_event(evt: PairingEvent) -> Option<PluginBridgeEvent> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test module")]
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};

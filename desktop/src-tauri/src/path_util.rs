@@ -20,7 +20,7 @@ pub(crate) fn which_in_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
     use std::io::Write;

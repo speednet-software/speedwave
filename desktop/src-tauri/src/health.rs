@@ -449,7 +449,7 @@ impl HealthMonitor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::{
         compute_ide_state_diff, parse_container_entries, reset_ide_state_for_tests,

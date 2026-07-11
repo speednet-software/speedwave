@@ -55,7 +55,10 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests assert error branches via unwrap_err"
+)]
 mod tests {
     use super::*;
 

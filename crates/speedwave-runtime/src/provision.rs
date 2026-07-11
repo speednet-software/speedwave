@@ -202,7 +202,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     }
 
     log::info!(
-        "Lima VM config migration: applying SSOT values (memory {}, cpus {}; host_ram/2 + host_cores/2)",
+        "migrating Lima VM config to SSOT values (memory {}, cpus {}; host_ram/2 + host_cores/2)",
         desired_lima_vm_memory(),
         desired_lima_vm_cpus()
     );
@@ -440,9 +440,10 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
         escaped
     );
-    let output = crate::binary::powershell_command()
-        .args(["-NoProfile", "-Command", &cmd])
-        .output();
+    let output = crate::binary::run_powershell_capture(
+        &["-NoProfile", "-Command", &cmd],
+        std::time::Duration::from_secs(120),
+    );
     match output {
         Ok(o) if o.status.success() => {
             let actual = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -467,7 +468,7 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     // Enable WSL2 mirrored networking before any distro starts; non-fatal.
     if let Err(e) = ensure_wslconfig_vpn_compat() {
-        log::warn!("ensure_wslconfig_vpn_compat failed (non-fatal): {e}");
+        log::warn!("failed to ensure .wslconfig VPN compatibility (non-fatal): {e}");
     }
 
     let list = crate::binary::system_command("wsl.exe")
@@ -504,10 +505,7 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
         // Shared write: the WSL service must read this file — an owner-only
         // protected DACL breaks it ("access denied" in non-user contexts).
         crate::fs_perms::write_shared_file_atomic(&path, &updated)?;
-        log::info!(
-            "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
-            path.display()
-        );
+        log::info!("wrote VPN-compatible [wsl2] keys to {}", path.display());
         // .wslconfig is read only on WSL2 boot; new keys need `wsl --shutdown`.
         log::warn!(
             ".wslconfig changed — run `wsl --shutdown` from PowerShell to \
@@ -690,12 +688,13 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
 /// prompt (success) or an installation failure message.
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = crate::binary::powershell_command()
-        .args([
+    let status = crate::binary::run_powershell(
+        &[
             "-Command",
             "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-        ])
-        .status()?;
+        ],
+        std::time::Duration::from_secs(900),
+    )?;
     if !status.success() {
         anyhow::bail!(
             "WSL2 installation failed or was cancelled.\n\
@@ -761,9 +760,10 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             escaped_rootfs,
             expected_sha256
         );
-        let download = crate::binary::powershell_command()
-            .args(["-NoProfile", "-Command", &download_and_verify])
-            .status()?;
+        let download = crate::binary::run_powershell(
+            &["-NoProfile", "-Command", &download_and_verify],
+            std::time::Duration::from_secs(1800),
+        )?;
         if !download.success() {
             anyhow::bail!(
                 "Failed to download or verify Ubuntu rootfs for WSL2 \
@@ -838,7 +838,7 @@ pub fn wsl_conf_or_warn(read: anyhow::Result<String>, distro: &str, when: &str) 
     match read {
         Ok(content) => content,
         Err(e) => {
-            log::warn!("read_wsl_conf failed for {distro} ({when}); treating as empty: {e}");
+            log::warn!("failed to read wsl.conf for {distro} ({when}); treating as empty: {e}");
             String::new()
         }
     }
@@ -855,7 +855,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     let updated = merge_wsl_conf_automount(&existing, &opts);
 
     if updated == existing {
-        log::debug!("ensure_wsl_distro_metadata: automount options already current in {distro}");
+        log::debug!("automount options already current in {distro}");
         return Ok(());
     }
 
@@ -881,17 +881,17 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             .map(|s| s.success())
             .unwrap_or(false);
         if terminated {
-            log::info!(
-                "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
-            );
+            log::info!("enabled metadata automount for {distro} (terminated to apply)");
         } else {
             log::warn!(
-                "ensure_wsl_distro_metadata: wrote metadata automount for {distro} but `wsl --terminate` failed; applies on next WSL restart"
+                "wrote metadata automount for {distro} but `wsl --terminate` failed; \
+                 applies on next WSL restart"
             );
         }
     } else {
         log::info!(
-            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
+            "enabled metadata automount for {distro} (containers running; \
+             applies on next WSL restart)"
         );
     }
     Ok(())
@@ -947,9 +947,7 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
             &String::from_utf8_lossy(&o.stderr),
         ),
         Err(e) => {
-            log::warn!(
-                "wsl_distro_has_running_containers: spawn failed for {distro}; assuming busy: {e}"
-            );
+            log::warn!("spawn failed probing running containers for {distro}; assuming busy: {e}");
             true
         }
     }
@@ -970,9 +968,7 @@ pub fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) 
     if daemon_down {
         false // daemon not up ⇒ nothing running ⇒ idle
     } else {
-        log::warn!(
-            "wsl_distro_has_running_containers: nerdctl ps failed (assuming busy): {stderr}"
-        );
+        log::warn!("nerdctl ps failed (assuming busy): {stderr}");
         true
     }
 }
@@ -1208,7 +1204,7 @@ fn wait_with_output_timeout(
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
                 if let Err(e) = child.kill() {
-                    log::warn!("wait_with_output_timeout: kill failed: {e}");
+                    log::warn!("failed to kill timed-out child process: {e}");
                 }
                 let _ = child.wait();
                 anyhow::bail!("child process timed out after {}s", timeout.as_secs());
@@ -1510,7 +1506,11 @@ pub fn ensure_windows_invariants() {
 pub fn ensure_windows_invariants() {}
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
 
@@ -2015,6 +2015,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wait_with_output_timeout_returns_output_and_kills_on_expiry() {
+        // SSOT-allow: test fixture spawn
         let fast = std::process::Command::new("sh")
             .args(["-c", "echo out"])
             .stdout(std::process::Stdio::piped())
@@ -2025,6 +2026,7 @@ mod tests {
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
 
+        // SSOT-allow: test fixture spawn
         let slow = std::process::Command::new("sh")
             .args(["-c", "sleep 30"])
             .stdout(std::process::Stdio::piped())
@@ -2639,6 +2641,7 @@ mod tests {
             assert!(err.unwrap_err().to_string().contains("boom"));
         }
 
+        // SSOT-allow: test fixture spawn
         fn spawn_shell(script: &str) -> std::process::Child {
             let mut cmd = if cfg!(windows) {
                 let mut c = std::process::Command::new("cmd");

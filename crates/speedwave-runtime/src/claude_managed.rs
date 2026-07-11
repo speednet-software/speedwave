@@ -35,7 +35,11 @@ pub fn write_managed_settings(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are acceptable assertions"
+)]
 mod tests {
     use super::*;
     use crate::config::{OtlpProtocol, ResolvedTelemetry};

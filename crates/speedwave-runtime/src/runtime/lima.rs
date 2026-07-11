@@ -174,7 +174,7 @@ fn retry_on_eof_with_delays<T>(
             Err(e) if is_eof_error(&e) && attempt < RETRY_MAX_ATTEMPTS => {
                 let delay = delays.get(attempt - 1).copied().unwrap_or_default();
                 log::info!(
-                    "{label}: transient EOF on attempt {attempt}/{RETRY_MAX_ATTEMPTS}, \
+                    "{label} hit a transient EOF on attempt {attempt}/{RETRY_MAX_ATTEMPTS}, \
                      retrying after {:?} ({e})",
                     delay
                 );
@@ -202,7 +202,7 @@ fn compose_down_and_cleanup_with_retry(
         runner.run(cmd, compose_down_args).map(|_| ())
     });
     if let Err(ref e) = down_result {
-        log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
+        log::warn!("compose down failed for {project}: {e}");
     }
 
     force_remove_project_containers_with_retry(runner, cmd, project, nerdctl_prefix);
@@ -301,7 +301,7 @@ impl ContainerRuntime for LimaRuntime {
         // No compose.yml → nothing was ever started (deferred no-provider
         // project); skip so nerdctl doesn't fatally error and retry for ~70s.
         if super::compose_down_is_noop(&compose_file) {
-            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            log::info!("no compose.yml for '{project}' — nothing to stop, skipping compose down");
             return Ok(());
         }
         compose_down_and_cleanup_with_retry(
@@ -388,7 +388,7 @@ impl ContainerRuntime for LimaRuntime {
         };
 
         let lima_host = format!("lima-{}", vm);
-        let mut command = Command::new("ssh");
+        let mut command = crate::binary::interactive_command("ssh");
         command.args([
             "-F",
             &ssh_config.to_string_lossy(),
@@ -981,7 +981,11 @@ impl LimaRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;

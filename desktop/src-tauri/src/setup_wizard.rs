@@ -60,7 +60,8 @@ impl SetupState {
                 // Missing file is the normal first-run case; warn on anything else.
                 if !Self::is_missing_state_file(&e) {
                     log::warn!(
-                        "SetupState::load: {} unreadable/corrupt, restarting onboarding from scratch: {e}",
+                        "setup state file {} unreadable/corrupt, restarting onboarding from \
+                         scratch: {e}",
                         path.display()
                     );
                 }
@@ -232,7 +233,7 @@ pub fn build_images() -> anyhow::Result<()> {
         let user_config = match config::load_user_config() {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("build_images: failed to load config, using defaults: {e}");
+                log::warn!("failed to load config, using defaults: {e}");
                 config::SpeedwaveUserConfig::default()
             }
         };
@@ -288,7 +289,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // No provider is a valid state ("choose a provider" screen) — every
     // caller must skip starting rather than let render_compose bail.
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
-        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);
     }
 
@@ -423,24 +424,25 @@ pub(crate) fn project_needs_anthropic_auth(
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
-        log::warn!(
-            "check_claude_auth: failed to load user config, defaulting to anthropic path: {e}"
-        );
+        log::warn!("failed to load user config, defaulting to anthropic path: {e}");
         speedwave_runtime::config::SpeedwaveUserConfig::default()
     });
     if !project_needs_anthropic_auth(&user_config, project) {
-        log::info!("check_claude_auth: non-OAuth provider — skipping Anthropic OAuth check");
+        log::info!("non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
     let container_name = crate::chat::claude_container_name(project);
-    log::info!("check_claude_auth: container={container_name}");
+    log::info!("checking Claude auth in container {container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
-    log::info!("check_claude_auth: container healthy, checking auth");
+    log::info!("container {container_name} healthy, checking auth");
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
-    log::info!("check_claude_auth: auth status exit={}", output.status);
+    log::info!(
+        "auth status check for {container_name} exited with {}",
+        output.status
+    );
     Ok(output.status.success())
 }
 
@@ -770,7 +772,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
-        log::info!("link_cli: data dir missing, skipping");
+        log::info!("data dir missing, skipping CLI link");
         return Ok(());
     }
 
@@ -786,7 +788,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     // Write resources-dir marker so the external CLI can find build context.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
-            log::warn!("link_cli: could not write resources-dir marker: {e}");
+            log::warn!("could not write resources-dir marker: {e}");
         }
     }
 
@@ -918,7 +920,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
         // would kill a user's live `speedwave` session for nothing (ADR-048).
         let target = cli_dir.join(consts::cli_binary_filename(true));
         if files_identical(cli_source, &target) {
-            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+            log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
             run_pre_link_sweep();
@@ -2980,7 +2982,7 @@ networks:
     #[test]
     fn build_images_warns_on_config_load_failure() {
         let source = include_str!("setup_wizard.rs");
-        let snippet = "log::warn!(\"build_images: failed to load config";
+        let snippet = "log::warn!(\"failed to load config";
         assert!(
             source.contains(snippet),
             "build_images must log::warn before defaulting on config load error, \

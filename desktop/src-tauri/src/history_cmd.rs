@@ -10,9 +10,9 @@ pub(crate) async fn list_conversations(
 ) -> Result<Vec<history::ConversationSummary>, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("list_conversations: project={project}");
+        log::info!("listing conversations for project={project}");
         history::list_conversations(&project).map_err(|e| {
-            log::error!("list_conversations: error: {e}");
+            log::error!("failed to list conversations for project={project}: {e}");
             e.to_string()
         })
     })
@@ -27,9 +27,9 @@ pub(crate) async fn get_conversation(
 ) -> Result<history::ConversationTranscript, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("get_conversation: project={project}");
+        log::info!("getting conversation for project={project}");
         history::get_conversation(&project, &session_id).map_err(|e| {
-            log::error!("get_conversation: error: {e}");
+            log::error!("failed to get conversation for project={project}: {e}");
             e.to_string()
         })
     })
@@ -41,9 +41,9 @@ pub(crate) async fn get_conversation(
 pub(crate) async fn delete_conversation(project: String, session_id: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("delete_conversation: project={project}");
+        log::info!("deleting conversation for project={project}");
         history::delete_conversation(&project, &session_id).map_err(|e| {
-            log::error!("delete_conversation: error: {e}");
+            log::error!("failed to delete conversation for project={project}: {e}");
             e.to_string()
         })
     })
@@ -55,9 +55,9 @@ pub(crate) async fn delete_conversation(project: String, session_id: String) -> 
 pub(crate) async fn get_project_memory(project: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("get_project_memory: project={project}");
+        log::info!("getting project memory for project={project}");
         history::get_project_memory(&project).map_err(|e| {
-            log::error!("get_project_memory: error: {e}");
+            log::error!("failed to get project memory for project={project}: {e}");
             e.to_string()
         })
     })

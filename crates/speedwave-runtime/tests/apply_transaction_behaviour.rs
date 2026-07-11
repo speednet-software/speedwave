@@ -2,7 +2,11 @@
 //! `update::apply_rollback_transaction` via mocked `LockedRuntime` call
 //! recording. Own binary: `consts::data_dir()` `OnceLock` resolves once.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::sync::OnceLock;
 

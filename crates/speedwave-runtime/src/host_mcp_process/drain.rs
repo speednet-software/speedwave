@@ -100,7 +100,7 @@ pub fn drain_and_read_port(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test fixture setup")]
 pub(crate) mod test_support {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Stdio};
@@ -154,7 +154,11 @@ setTimeout(() => {}, 60000);
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::test_support::spawn_stdout_lines;
     use super::*;
