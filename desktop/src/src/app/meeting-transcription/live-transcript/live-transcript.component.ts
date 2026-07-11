@@ -64,6 +64,14 @@ interface TranscriptLine {
             <p class="text-[13px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
           </div>
         }
+        @if (draft()) {
+          <p
+            class="mb-2 text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
+            data-testid="live-draft"
+          >
+            {{ draft() }}
+          </p>
+        }
       </div>
 
       @if (session()) {
@@ -117,6 +125,11 @@ export class LiveTranscriptComponent {
 
   /** Lifecycle state of the active session ('' if none). */
   readonly status = computed(() => this.session()?.status.state ?? '');
+
+  /** Uncommitted decode tail, shown as a muted line only while recording. */
+  readonly draft = computed(() =>
+    this.status() === 'recording' ? this.transcription.liveDraft() : ''
+  );
   /** Finalize progress 0–100 (0 when not finalizing). */
   readonly finalizePct = computed(() => {
     const st = this.session()?.status;

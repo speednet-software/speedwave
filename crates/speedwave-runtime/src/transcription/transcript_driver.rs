@@ -112,6 +112,8 @@ pub struct TranscriptDriver {
     next_pcm_warn_at: f32,
     /// End of the last committed live segment; the live view is append-only.
     published_until: Duration,
+    /// Draft (uncommitted tail) last published to the store.
+    last_draft: String,
 }
 
 impl TranscriptDriver {
@@ -128,6 +130,7 @@ impl TranscriptDriver {
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
             published_until: Duration::ZERO,
+            last_draft: String::new(),
         }
     }
 
@@ -212,8 +215,11 @@ impl TranscriptDriver {
         }
     }
 
-    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm`, appending segments older than
-    /// [`LIVE_COMMIT_HOLDBACK`] (unstable tail → append-only). `flush` commits the held-back part.
+    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and appends only
+    /// segments older than [`LIVE_COMMIT_HOLDBACK`] — the window tail is still
+    /// unstable between passes, so the live view stays append-only and never
+    /// flickers. The held-back tail goes out as a replace-only draft so the UI
+    /// shows text within one decode. `flush` commits the tail before finalize.
     fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -240,23 +246,35 @@ impl TranscriptDriver {
 
         let total = Duration::from_secs_f32(self.pcm.len() as f32 / SAMPLE_RATE_HZ as f32);
         let horizon = total.saturating_sub(LIVE_COMMIT_HOLDBACK);
-        let commit = uncommitted(&absolute, self.published_until)
-            .into_iter()
-            .filter(|s| flush || s.end <= horizon);
         // Trim overlap and collect the whole decode-window's commits first, so they persist as
-        // one fsync'd save instead of one durable write per segment.
+        // one fsync'd save instead of one durable write per segment; the still-unstable tail
+        // (not yet ripe to commit) is streamed out separately as a replace-only draft.
         let mut batch = Vec::new();
-        for seg in commit {
-            let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
-                continue;
-            };
-            self.published_until = seg.end;
-            batch.push(seg);
+        let mut draft = String::new();
+        for seg in uncommitted(&absolute, self.published_until) {
+            if flush || seg.end <= horizon {
+                let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
+                    continue;
+                };
+                self.published_until = seg.end;
+                batch.push(seg);
+            } else {
+                if !draft.is_empty() {
+                    draft.push(' ');
+                }
+                draft.push_str(&seg.text);
+            }
         }
         if !batch.is_empty() {
             self.store
                 .append_segments(self.id, batch)
                 .map_err(|e| DriverError::Store(e.to_string()))?;
+        }
+        if draft != self.last_draft {
+            self.store
+                .live_draft(self.id, draft.clone())
+                .map_err(|e| DriverError::Store(e.to_string()))?;
+            self.last_draft = draft;
         }
         Ok(())
     }
@@ -617,6 +635,48 @@ mod tests {
         );
         // Seq monotonic and > 0.
         assert!(snap.last_seq > 0);
+    }
+
+    #[test]
+    fn draft_events_stream_the_held_back_tail_and_clear_on_flush() {
+        let (_fixture_guard, fixture) = make_fixture_wav(20.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let mut sub = store.subscribe(id).unwrap();
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "s{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        driver
+            .run(&store.session_dir(id).join("audio.wav"))
+            .unwrap();
+
+        let mut drafts = Vec::new();
+        while let Ok(ev) = sub.events.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::LiveDraft {
+                text, ..
+            } = ev
+            {
+                drafts.push(text);
+            }
+        }
+        // The held-back tail reaches the UI as a draft well before commit…
+        assert!(
+            drafts.iter().any(|d| !d.is_empty()),
+            "expected at least one non-empty draft, got {drafts:?}"
+        );
+        // …and the stop flush commits everything, clearing the draft.
+        assert_eq!(drafts.last().map(String::as_str), Some(""));
+        assert_eq!(store.get(id).unwrap().live_draft, "");
     }
 
     #[test]

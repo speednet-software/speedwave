@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::audio::SAMPLE_RATE_HZ;
+use super::audio::{rms, SAMPLE_RATE_HZ};
 
 /// Languages this feature transcribes (forced into Whisper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -282,15 +282,6 @@ const NO_SPEECH_SUSPECT: f32 = 0.3;
 /// RMS below this (−45 dBFS) cannot be intelligible speech.
 const SPEECH_RMS_FLOOR: f32 = 0.0055;
 
-/// RMS of a PCM span (0.0 for an empty span).
-fn rms(pcm: &[f32]) -> f32 {
-    if pcm.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    (sum_sq / pcm.len() as f64).sqrt() as f32
-}
-
 /// `true` if `pcm` is quiet enough to be silence (empty counts as silent).
 fn is_silent(pcm: &[f32]) -> bool {
     rms(pcm) < SILENCE_RMS
@@ -419,13 +410,6 @@ mod tests {
         assert!(segment_pcm(&pcm, 200, 300).is_empty());
         // Negative timestamps clamp to the start.
         assert_eq!(segment_pcm(&pcm, -5, 10), &pcm[0..1_600]);
-    }
-
-    #[test]
-    fn rms_of_known_signals() {
-        assert_eq!(rms(&[]), 0.0);
-        assert!((rms(&vec![0.5f32; 100]) - 0.5).abs() < 1e-6);
-        assert!((rms(&vec![-0.5f32; 100]) - 0.5).abs() < 1e-6);
     }
 
     #[test]
