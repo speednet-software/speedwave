@@ -1074,19 +1074,22 @@ export class GitLabClient {
     projectId: string | number,
     pipelineId: number
   ): Promise<{ artifacts: unknown[]; truncated: boolean }> {
+    // One row over the cap is fetched purely as a truncation sentinel.
     const jobs = await this.gitlab.Jobs.all(projectId, {
       pipelineId,
-      perPage: JOB_LIST_PAGE_CAP,
+      perPage: JOB_LIST_PAGE_CAP + 1,
       maxPages: 1,
     });
+    const truncated = jobs.length > JOB_LIST_PAGE_CAP;
     const artifacts = jobs
+      .slice(0, JOB_LIST_PAGE_CAP)
       .filter((j: Record<string, unknown>) => j.artifacts && (j.artifacts as unknown[]).length > 0)
       .map((j: Record<string, unknown>) => ({
         job_id: j.id,
         job_name: j.name,
         artifacts: j.artifacts,
       }));
-    return { artifacts, truncated: jobs.length >= JOB_LIST_PAGE_CAP };
+    return { artifacts, truncated };
   }
 
   /**
@@ -1352,12 +1355,14 @@ export class GitLabClient {
   async showPipeline(projectId: string | number, pipelineId: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
     const pipeline = await this.gitlab.Pipelines.show(projectId, pipelineId);
-    const jobs = await this.gitlab.Jobs.all(projectId, {
+    // One row over the cap is fetched purely as a truncation sentinel.
+    const fetched = await this.gitlab.Jobs.all(projectId, {
       pipelineId,
-      perPage: JOB_LIST_PAGE_CAP,
+      perPage: JOB_LIST_PAGE_CAP + 1,
       maxPages: 1,
     });
-    return { pipeline, jobs, truncated: jobs.length >= JOB_LIST_PAGE_CAP };
+    const truncated = fetched.length > JOB_LIST_PAGE_CAP;
+    return { pipeline, jobs: fetched.slice(0, JOB_LIST_PAGE_CAP), truncated };
   }
 
   /**

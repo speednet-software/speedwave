@@ -343,7 +343,8 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     });
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_telemetry_locked(resolved.telemetry.any_locked);
     // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {

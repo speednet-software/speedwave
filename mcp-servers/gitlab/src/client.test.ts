@@ -1434,7 +1434,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Pipelines.show).toHaveBeenCalledWith(1, 1);
       expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
         pipelineId: 1,
-        perPage: 100,
+        perPage: 101,
         maxPages: 1,
       });
       expect(result).toEqual({
@@ -1444,7 +1444,7 @@ describe('GitLabClient', () => {
       });
     });
 
-    it('flags truncated when the job page is full', async () => {
+    it('exactly the cap of jobs is not flagged truncated', async () => {
       const mockJobs = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `job-${i}` }));
 
       mockGitlabInstance.Pipelines.show.mockResolvedValue({ id: 1 });
@@ -1452,7 +1452,19 @@ describe('GitLabClient', () => {
 
       const result = await client.showPipeline(1, 1);
 
-      expect((result as { truncated: boolean }).truncated).toBe(true);
+      expect((result as { truncated: boolean }).truncated).toBe(false);
+    });
+
+    it('flags truncated and caps jobs when the sentinel row is present', async () => {
+      const mockJobs = Array.from({ length: 101 }, (_, i) => ({ id: i + 1, name: `job-${i}` }));
+
+      mockGitlabInstance.Pipelines.show.mockResolvedValue({ id: 1 });
+      mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+
+      const result = (await client.showPipeline(1, 1)) as { jobs: unknown[]; truncated: boolean };
+
+      expect(result.truncated).toBe(true);
+      expect(result.jobs).toHaveLength(100);
     });
   });
 
@@ -2451,7 +2463,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
         pipelineId: 100,
-        perPage: 100,
+        perPage: 101,
         maxPages: 1,
       });
       expect(result.truncated).toBe(false);
@@ -2476,8 +2488,8 @@ describe('GitLabClient', () => {
       expect(result.artifacts).toHaveLength(0);
     });
 
-    it('flags truncated when the job page is full', async () => {
-      const mockJobs = Array.from({ length: 100 }, (_, i) => ({
+    it('flags truncated only past the cap, never at exactly the cap', async () => {
+      const mockJobs = Array.from({ length: 101 }, (_, i) => ({
         id: i + 1,
         name: `job-${i}`,
         artifacts: [],

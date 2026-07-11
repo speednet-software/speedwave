@@ -117,9 +117,16 @@ export class TranscriptionService {
     try {
       await this.attachListener(ack.event_name);
     } catch (e) {
-      this.recordingSessionIdSignal.set(null);
-      this.recordingSourceSignal.set(null);
-      this.recordingLanguageSignal.set(null);
+      // The backend capture already runs; stop it rather than orphan it.
+      try {
+        await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
+        this.recordingSessionIdSignal.set(null);
+        this.recordingSourceSignal.set(null);
+        this.recordingLanguageSignal.set(null);
+      } catch {
+        // Stop failed — keep the id so the Stop control still targets the session.
+        this.recordingSessionIdSignal.set(ack.session_id);
+      }
       throw e;
     }
     this.recordingSessionIdSignal.set(ack.session_id);

@@ -101,20 +101,44 @@ describe('TranscriptionService', () => {
       expect(svc.recordingLanguage()).toBe('pl');
     });
 
-    it('rolls back recordingSessionId/Source/Language when attachListener rejects', async () => {
+    it('stops the already-started backend capture when attachListener rejects', async () => {
       const ack = {
         session_id: 'sess-1',
         event_name: 'transcript_event::sess-1',
         snapshot: snapshot(),
       };
-      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      const invoked: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked.push(cmd);
+        return cmd === 'start_transcription' ? ack : undefined;
+      };
       mockTauri.listen = vi.fn(async () => {
         throw new Error('ipc down');
       });
       await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      expect(invoked).toContain('stop_transcription');
       expect(svc.recordingSessionId()).toBeNull();
       expect(svc.recordingSource()).toBeNull();
       expect(svc.recordingLanguage()).toBeNull();
+    });
+
+    it('keeps the session id when both attachListener and the rollback stop fail', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'start_transcription') return ack;
+        if (cmd === 'stop_transcription') throw new Error('stop failed');
+        return undefined;
+      };
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      // The backend still records; the Stop control must keep its target.
+      expect(svc.recordingSessionId()).toBe('sess-1');
     });
   });
 
