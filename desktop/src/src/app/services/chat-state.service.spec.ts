@@ -611,6 +611,60 @@ describe('ChatStateService', () => {
       });
     });
 
+    it('Result stores context_usage and the fit-gate tokens from the last API call', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'x' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.05,
+          // Turn-sum usage is inflated (tool-heavy turn) — must not reach ctx.
+          usage: { input_tokens: 4864, output_tokens: 1808, cache_read_tokens: 464_000 },
+          context_usage: {
+            input_tokens: 2,
+            output_tokens: 1660,
+            cache_read_tokens: 66_844,
+            cache_write_tokens: 4920,
+          },
+        },
+      });
+
+      expect(service.sessionStats?.context_usage).toEqual({
+        input_tokens: 2,
+        output_tokens: 1660,
+        cache_read_tokens: 66_844,
+        cache_write_tokens: 4920,
+      });
+      // 2 + 66,844 + 4,920 (input-only, no output)
+      expect(service.lastContextTokens).toBe(71_766);
+    });
+
+    it('a Result without context_usage keeps the previous meter value', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'x' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.05,
+          context_usage: {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+          },
+        },
+      });
+      // Next turn: e.g. a local slash command — no API call, no context_usage.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'y' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.context_usage?.cache_read_tokens).toBe(30);
+      expect(service.lastContextTokens).toBe(80);
+    });
+
     it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       // get_conversation_cost is the SSOT total (no frontend delta sum); the
@@ -2121,15 +2175,24 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('lastSuccessfulInputTokens', () => {
-    it('exposes input_tokens from the last successful Result and survives reset', () => {
+  describe('lastContextTokens', () => {
+    it('exposes the last call context total from Result and survives reset', () => {
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 's1', usage: { input_tokens: 24771, output_tokens: 20 } },
+        data: {
+          session_id: 's1',
+          usage: { input_tokens: 24771, output_tokens: 20 },
+          context_usage: {
+            input_tokens: 24771,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+        },
       });
-      expect(service.lastSuccessfulInputTokens).toBe(24771);
+      expect(service.lastContextTokens).toBe(24771);
       (service as unknown as { resetCoreStreamState(): void }).resetCoreStreamState();
-      expect(service.lastSuccessfulInputTokens).toBe(24771); // durable across reset
+      expect(service.lastContextTokens).toBe(24771); // durable across reset
     });
   });
 
@@ -3091,7 +3154,7 @@ describe('ChatStateService', () => {
     };
     /** Casts onto private token fields so a test can force history (not) fitting. */
     type TokensInternal = {
-      _lastSuccessfulInputTokens: number | null;
+      _lastContextTokens: number | null;
       _persistedContextTokens: number | null;
     };
 
@@ -3140,10 +3203,54 @@ describe('ChatStateService', () => {
       });
     });
 
+    it('seeds the ctx meter from the transcript last per-call usage on resume', async () => {
+      service.seedSessionId('sess-seed');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-seed',
+            messages: [
+              { role: 'user', content: 'q' },
+              {
+                role: 'assistant',
+                content: 'a1',
+                usage: {
+                  input_tokens: 5,
+                  output_tokens: 9,
+                  cache_read_tokens: 30_000,
+                  cache_write_tokens: 100,
+                },
+              },
+              {
+                role: 'assistant',
+                content: 'a2',
+                usage: {
+                  input_tokens: 2,
+                  output_tokens: 1660,
+                  cache_read_tokens: 66_844,
+                  cache_write_tokens: 4920,
+                },
+              },
+              // Trailing sidechain (subagent) line: history.rs strips its
+              // usage, so the seed must fall back to the previous message.
+              { role: 'assistant', content: 'subagent output' },
+            ],
+          };
+        }
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      // Last usage-bearing main-chain call wins — truthful before any live Result.
+      expect(service.sessionStats?.context_usage?.cache_read_tokens).toBe(66_844);
+      expect(service.lastContextTokens).toBe(71_766);
+    });
+
     it('auto-resumes when unmounted even if history does not fit the target window', async () => {
       service.seedSessionId('sess-2');
       // History exceeds the window → would prompt if mounted; unmounted ⇒ resume.
-      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -3160,7 +3267,7 @@ describe('ChatStateService', () => {
     it('starts a fresh session (not resume) when a decider returns "fresh" and history does not fit', async () => {
       projectState.status.set('ready');
       service.seedSessionId('sess-3');
-      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('fresh'));
       const calls: string[] = [];
@@ -3179,7 +3286,7 @@ describe('ChatStateService', () => {
 
     it('resumes when the decider returns "resume" and history does not fit', async () => {
       service.seedSessionId('sess-4');
-      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('resume'));
       const calls: string[] = [];
@@ -3196,7 +3303,7 @@ describe('ChatStateService', () => {
 
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
       service.seedSessionId('sess-window');
-      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
       // Stale cache from the PREVIOUS model: too small — would wrongly ask.
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       const decider = vi.fn(() => Promise.resolve('fresh' as const));
@@ -3218,7 +3325,7 @@ describe('ChatStateService', () => {
 
     it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
       service.seedSessionId('sess-shrunk');
-      (service as unknown as TokensInternal)._lastSuccessfulInputTokens = 25229;
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
       // Stale cache from the PREVIOUS model: big — would wrongly auto-resume.
       (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
       const decider = vi.fn(() => Promise.resolve('resume' as const));

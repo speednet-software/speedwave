@@ -119,14 +119,21 @@ if [[ -n "$INPUT" ]]; then
 fi
 model_name="${model_name:-Claude}"
 
-# Context window size
-context_window_size="$(extract_json_number "$INPUT" "context_window_size")"
-context_window_size="${context_window_size:-0}"
-
-# Context usage percentage — truncate to integer for bash arithmetic
-used_pct_raw="$(extract_json_float "$INPUT" "used_percentage")"
-used_pct="${used_pct_raw%%.*}"
-used_pct="${used_pct:-0}"
+# Context fields live under "context_window" (CC ≥2.1.132, nested schema).
+# Scope the scan there — a whole-input scan would read rate_limits'
+# used_percentage as CTX whenever the context value is null (early session).
+context_window_size=0
+used_pct=0
+cw_pattern='"context_window"[[:space:]]*:[[:space:]]*\{'
+if [[ "$INPUT" =~ $cw_pattern ]]; then
+    cw_scope="${INPUT#*\"context_window\"}"
+    cw_scope="${cw_scope%%\"rate_limits\"*}"
+    context_window_size="$(extract_json_number "$cw_scope" "context_window_size")"
+    context_window_size="${context_window_size:-0}"
+    used_pct_raw="$(extract_json_float "$cw_scope" "used_percentage")"
+    used_pct="${used_pct_raw%%.*}"
+    used_pct="${used_pct:-0}"
+fi
 
 # Rate limits — detect rate_limits key, then extract five_hour/seven_day from INPUT.
 has_rl_key=false

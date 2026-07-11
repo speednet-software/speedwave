@@ -29,6 +29,8 @@ export type StreamChunk =
         turn_cost?: number;
         /** Model name for this turn, if known at emission time. */
         model?: string;
+        /** Usage of the most recent main-chain API call — the context-occupancy source. */
+        context_usage?: TurnUsage;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
@@ -104,6 +106,15 @@ export interface TurnUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+/**
+ * Context-window occupancy from one API call: input-only (fresh + cached +
+ * cache-written), matching Claude Code's own `used_percentage` formula.
+ * @param u - Per-call usage from the last main-chain API response.
+ */
+export function contextTokensFrom(u: TurnUsage): number {
+  return u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
 }
 
 /**
@@ -248,10 +259,16 @@ export interface SessionStats {
   /** Project cost in USD from the proxy SSOT; `null` when unpriced (subscription) → "—". */
   total_cost: number | null;
   /**
-   * Latest turn's full-prompt usage from flat result.usage (not summed across
-   * turns). Drives CTX % (input + cache_read + cache_write); `in:` uses input only.
+   * Per-turn sums from flat result.usage (every API call of the turn added
+   * together) — feeds `in:`/`out:` counters, NEVER context occupancy: cache
+   * reads repeat per call, so this total exceeds the window on tool-use turns.
    */
   usage?: UsageInfo;
+  /**
+   * Usage of the most recent main-chain API call; `contextTokensFrom` of it
+   * is the context-window occupancy that drives the CTX meter.
+   */
+  context_usage?: TurnUsage;
   model?: string;
   rate_limit?: RateLimitInfo;
   /**
