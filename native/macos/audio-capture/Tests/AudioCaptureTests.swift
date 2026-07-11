@@ -151,6 +151,8 @@ final class AudioCaptureTests: XCTestCase {
     }
 
     // MARK: - Mic restart gating
+    // The false branch (running engine → restart ignored) needs live audio
+    // hardware; AVAudioEngine.start() is unreliable on headless CI runners.
 
     @available(macOS 14.4, *)
     func testMicRestartNeededWhenEngineIsGone() {
