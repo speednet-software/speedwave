@@ -1,12 +1,11 @@
-//! Per-project process manager for the `oauth` MCP worker (ADR-060).
-//! `OauthProcess` aliases [`crate::host_mcp_process::HostMcpProcess`]
-//! with `OauthSpec`; this module carries only worker-specific bits.
+//! Per-project process manager for the `oauth` MCP worker (ADR-060). `OauthProcess` aliases
+//! [`crate::host_mcp_process::HostMcpProcess`] with `OauthSpec`; carries only worker-specific bits.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::consts;
-use crate::fs_perms::write_restricted_file;
+use crate::fs_perms::{set_owner_only_dir, write_restricted_file};
 use crate::host_mcp_process::lock::LockService;
 use crate::host_mcp_process::{HostMcpProcess, LivenessProbe, SpawnContext, WorkerSpec};
 
@@ -135,16 +134,9 @@ pub fn is_oauth_alive(port: u16) -> bool {
     )
 }
 
-/// Set owner-only permissions on the per-project state dir.
-fn set_dir_owner_only(_dir: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = consts::OAUTH_PROJECT_DIR_MODE;
-        std::fs::set_permissions(_dir, std::fs::Permissions::from_mode(mode))?;
-    }
-    // On Windows the parent dir's ACL inherits from `~/.speedwave/` (user-owned).
-    Ok(())
+/// Set owner-only permissions on the per-project state dir (Unix chmod / Windows DACL).
+fn set_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
+    set_owner_only_dir(dir).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]

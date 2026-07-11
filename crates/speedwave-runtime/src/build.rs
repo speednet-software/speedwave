@@ -14,9 +14,8 @@ pub struct ImageDef {
     pub containerfile: &'static str,
     /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
     pub build_args: &'static [(&'static str, &'static str)],
-    /// Paths (relative to build root; file or dir) feeding this image's
-    /// build-input hash. Must cover the containerfile and every COPY/ADD
-    /// source — enforced by `hash_inputs_cover_copy_sources` (ADR-072).
+    /// Paths (relative to build root) feeding this image's build-input hash: the containerfile plus
+    /// every COPY/ADD source — enforced by `hash_inputs_cover_copy_sources` (ADR-072).
     pub hash_inputs: &'static [&'static str],
 }
 
@@ -184,9 +183,8 @@ pub const IMAGES: &[ImageDef] = &[
     },
 ];
 
-/// Build set for the given integrations: `claude` + `mcp-hub` always, plus the
-/// worker image for each enabled built-in MCP service. Plugin images go through
-/// `plugin::ensure_plugin_images`; the `os` worker has no image.
+/// Build set for the given integrations: `claude` + `mcp-hub` always, plus each enabled built-in
+/// MCP worker image. Plugin images go through `plugin::ensure_plugin_images`; `os` has no image.
 pub fn enabled_images(integrations: &ResolvedIntegrationsConfig) -> Vec<&'static ImageDef> {
     IMAGES
         .iter()
@@ -208,13 +206,12 @@ fn image_for_service_key(config_key: &str) -> Option<&'static ImageDef> {
     IMAGES.iter().find(|img| img.name == target)
 }
 
-/// Used when `std::thread::available_parallelism()` cannot determine CPU count.
-/// Conservative for nested-VM hosts where extra parallelism amplifies I/O
-/// contention (see ADR-032).
+/// Used when `std::thread::available_parallelism()` cannot determine CPU count. Conservative for
+/// nested-VM hosts where extra parallelism amplifies I/O contention (see ADR-032).
 const DEFAULT_BUILD_WORKER_FALLBACK: usize = 4;
 
-/// How many times to retry a build that failed with a transient error
-/// (I/O hiccup, DNS not yet settled after VM boot — see `is_transient_build_error`).
+/// How many times to retry a build that failed with a transient error (I/O hiccup, DNS not yet
+/// settled after VM boot — see `is_transient_build_error`).
 const TRANSIENT_BUILD_RETRIES: u32 = 2;
 
 /// Base wait before the first transient retry; the Nth retry waits `BASE * N`.
@@ -229,13 +226,12 @@ pub fn image_ref(name: &str, hash: &str) -> String {
     format!("{name}:{hash}")
 }
 
-/// In-process half of the global image-build lock. Cross-process half is the
-/// `<data_dir>/build.lock` file — see [`with_build_lock`].
+/// In-process half of the global image-build lock. Cross-process half is `<data_dir>/build.lock`
+/// — see [`with_build_lock`].
 static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Serialises image builds + tag prunes across processes (Desktop reconcile,
-/// CLI update, project switch). Outside compose locks per ADR-066; hold around
-/// a build+prune sequence, never around `compose up`. Not reentrant (ADR-072).
+/// Serialises image builds + tag prunes across processes (Desktop reconcile, CLI update, switch),
+/// outside compose locks (ADR-066). Hold build+prune, never `compose up`. Not reentrant (ADR-072).
 pub fn with_build_lock<F, T>(f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
@@ -251,9 +247,8 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// `true` if every [`enabled_images`] image for `integrations` is present.
-/// Pass the union across projects when reconciling. Call `rt.ensure_ready()`
-/// first; do not guard with `is_available()`.
+/// `true` if every [`enabled_images`] image for `integrations` is present. Pass the union across
+/// projects when reconciling. Call `rt.ensure_ready()` first; do not guard with `is_available()`.
 pub fn images_exist(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
@@ -284,12 +279,8 @@ pub fn images_exist_with_manifest(
     })
 }
 
-/// Resolves the root directory containing container build context (`containers/`, `mcp-servers/`).
-///
-/// Resolution order:
-/// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/build-context/` (production — Tauri sets this)
-/// 2. `CARGO_MANIFEST_DIR` parent chain (baked at compile time — dev source tree)
-/// 3. `~/.speedwave/resources-dir` marker file → `<dir>/build-context/` (CLI reads Desktop's marker)
+/// Resolves the build-context root (`containers/`, `mcp-servers/`).
+/// Order: `SPEEDWAVE_RESOURCES_DIR` env, dev-tree (`CARGO_MANIFEST_DIR`), resources-dir marker.
 pub fn resolve_build_root() -> anyhow::Result<PathBuf> {
     resolve_build_root_with_home(dirs::home_dir())
 }
@@ -341,12 +332,8 @@ fn resolve_build_root_inner(
     )
 }
 
-/// Resolves the path to the mcp-os `index.js` entry point.
-///
-/// Resolution order:
-/// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/mcp-os/os/dist/index.js`
-/// 2. `CARGO_MANIFEST_DIR` source tree → `<repo>/mcp-servers/os/dist/index.js`
-/// 3. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
+/// Resolves the path to the mcp-os `index.js` entry point. Order: `SPEEDWAVE_RESOURCES_DIR` env,
+/// `CARGO_MANIFEST_DIR` source tree, `~/.speedwave/resources-dir` marker.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
     let dev = repo_dev_path("mcp-servers/os/dist/index.js");
     resolve_worker_script_inner(
@@ -450,9 +437,8 @@ fn resolve_worker_script_inner(
     None
 }
 
-/// Reads the `~/.speedwave/resources-dir` marker and returns the build-context path
-/// if it points to a valid directory containing `containers/`.
-/// Read by `resolve_build_root()`; written by Desktop via `write_resources_marker()`.
+/// Reads the `~/.speedwave/resources-dir` marker, returning the build-context path if valid
+/// (contains `containers/`). Read by `resolve_build_root()`; written by `write_resources_marker()`.
 fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
     let marker = home
         .join(crate::consts::DATA_DIR)
@@ -488,16 +474,13 @@ fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-/// Writes the `~/.speedwave/resources-dir` marker file atomically (write-to-tmp + rename).
+/// Writes the `~/.speedwave/resources-dir` marker file atomically with a durable fsync.
 /// Called by the Desktop app on startup so the CLI can locate bundled resources.
 pub fn write_resources_marker(resources_dir: &std::path::Path) -> anyhow::Result<()> {
     let marker_dir = crate::consts::data_dir();
     let marker = marker_dir.join(crate::consts::RESOURCES_MARKER);
-    std::fs::create_dir_all(marker_dir)?;
-    let tmp = marker_dir.join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
-    std::fs::write(&tmp, resources_dir.to_string_lossy().as_bytes())?;
-    std::fs::rename(&tmp, &marker)?;
-    Ok(())
+    std::fs::create_dir_all(&marker_dir)?;
+    crate::fs_perms::write_shared_file_atomic(&marker, &resources_dir.to_string_lossy())
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
@@ -509,15 +492,11 @@ fn write_resources_marker_to(
     let marker_dir = home.join(crate::consts::DATA_DIR);
     let marker = marker_dir.join(crate::consts::RESOURCES_MARKER);
     std::fs::create_dir_all(&marker_dir)?;
-    let tmp = marker_dir.join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
-    std::fs::write(&tmp, resources_dir.to_string_lossy().as_bytes())?;
-    std::fs::rename(&tmp, &marker)?;
-    Ok(())
+    crate::fs_perms::write_shared_file_atomic(&marker, &resources_dir.to_string_lossy())
 }
 
-/// Containerd overlayfs snapshotter corruption that survived a prune attempt.
-/// Produced by [`with_build_recovery`] when the error persists after prune + retry;
-/// bundle-build callers downcast it to restart the engine, others surface its `Display` hint.
+/// Containerd overlayfs snapshotter corruption that survived a prune attempt. Produced by
+/// [`with_build_recovery`] after prune+retry fails; callers downcast it to restart the engine.
 #[derive(Debug)]
 pub struct SnapshotterRecoveryFailed {
     /// The underlying build error after prune-and-retry also failed.
@@ -605,9 +584,8 @@ pub fn build_missing_images(
     build_missing_images_in(runtime, images, manifest, &root)
 }
 
-/// Env-free core of [`build_missing_images`]: takes an explicit build root so
-/// tests never read `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave`
-/// marker.
+/// Env-free core of [`build_missing_images`]: takes an explicit build root so tests never read
+/// `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave` marker.
 pub fn build_missing_images_in(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
@@ -636,9 +614,8 @@ pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) ->
     }
 }
 
-/// Force-removes orphan tags for the current manifest — tags that exist in the
-/// runtime but are not in `keep`. Filtered through `image_exists` so a fresh
-/// setup that never built a worker doesn't spam `rmi: no such image` warnings.
+/// Force-removes orphan tags for the current manifest (exist in runtime, not in `keep`). Filtered
+/// through `image_exists` so a fresh setup never spams `rmi: no such image` warnings.
 pub fn prune_orphan_current_bundle_images(
     runtime: &crate::runtime::LockedRuntime,
     manifest: &bundle::BundleManifest,
@@ -659,9 +636,8 @@ pub fn prune_orphan_current_bundle_images(
     Ok(())
 }
 
-/// Force-removes superseded per-image tags: for every image whose applied hash
-/// differs from the manifest's, removes `name:old_hash`. Only touches tags from
-/// this install's own applied history — never sweeps by repo name (ADR-072).
+/// Force-removes superseded per-image tags: for every image whose applied hash differs from the
+/// manifest's, removes `name:old_hash`. Only touches this install's own applied history (ADR-072).
 pub(crate) fn prune_replaced_images(
     runtime: &crate::runtime::LockedRuntime,
     applied_image_hashes: &std::collections::BTreeMap<String, String>,
@@ -684,9 +660,8 @@ pub(crate) fn prune_replaced_images(
     Ok(())
 }
 
-/// Warn-only post-restore prune under the build lock: per-image replaced tags
-/// plus one-time legacy single-id tags. Callers MUST invoke only after new
-/// containers are confirmed running.
+/// Warn-only post-restore prune under the build lock: per-image replaced tags plus one-time legacy
+/// single-id tags. Callers MUST invoke only after new containers are confirmed running.
 pub fn prune_superseded_images(
     runtime: &crate::runtime::LockedRuntime,
     applied_image_hashes: &std::collections::BTreeMap<String, String>,
@@ -712,9 +687,8 @@ pub fn prune_superseded_images(
     }
 }
 
-/// Force-removes a pre-ADR-072 bundle's image tags (`name:<old_bundle_id>` for
-/// every catalogue image) — one-time migration prune. `--force` is required
-/// because stopped containers from the previous session block plain `rmi`.
+/// Force-removes a pre-ADR-072 bundle's tags (`name:<old_bundle_id>`); one-time migration prune.
+/// `--force` is required: stopped containers from a prior session block plain `rmi`.
 pub fn prune_old_bundle_images(
     runtime: &crate::runtime::LockedRuntime,
     old_bundle_id: &str,
@@ -745,9 +719,8 @@ pub fn build_images_for_bundle(
     build_images_for_bundle_in(runtime, images, manifest, &root)
 }
 
-/// Env-free core of [`build_images_for_bundle`]: takes an explicit build root so
-/// tests never read `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave`
-/// marker. The public no-arg shim resolves the root from env at the call site.
+/// Env-free core of [`build_images_for_bundle`]: takes an explicit build root so tests never read
+/// `SPEEDWAVE_RESOURCES_DIR`/the production marker. Public no-arg shim resolves root from env.
 pub fn build_images_for_bundle_in(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
@@ -800,9 +773,8 @@ pub fn build_images_for_bundle_in(
     result
 }
 
-/// Runs `attempt`; on a recoverable failure (disk-full, snapshotter corruption,
-/// transient I/O/DNS) prunes the matching cache and retries. Snapshotter corruption
-/// surviving the retry becomes [`SnapshotterRecoveryFailed`].
+/// Runs `attempt`; on a recoverable failure (disk-full, snapshotter corruption, transient I/O/DNS)
+/// prunes the matching cache and retries. Snapshotter corruption → [`SnapshotterRecoveryFailed`].
 pub(crate) fn with_build_recovery<T>(
     runtime: &crate::runtime::LockedRuntime,
     mut attempt: impl FnMut() -> anyhow::Result<T>,
@@ -856,9 +828,8 @@ pub(crate) fn with_build_recovery<T>(
     })
 }
 
-/// Builds `images` using a bounded worker pool, re-invoked per attempt by
-/// [`with_build_recovery`]. Worker count bounded by CPU + image count (ADR-032).
-/// Errors collected; propagate by priority: snapshotter > transient > first.
+/// Builds `images` using a bounded worker pool, re-invoked per attempt by [`with_build_recovery`].
+/// Worker count bounded by CPU + image count (ADR-032); errors: snapshotter > transient > first.
 fn try_build_images(
     runtime: &crate::runtime::LockedRuntime,
     images: &[&ImageDef],
@@ -1024,14 +995,8 @@ fn is_disk_full_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// `true` if any error in the chain looks like a containerd overlayfs snapshotter bug.
-/// Known containerd patterns:
-/// - `"apply layer error"` — wrapper from containerd's differ
-/// - `"failed to prepare extraction snapshot"` — from snapshotter.Prepare()
-/// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
-/// - `"failed to stat parent"` + `"snapshots/"` — overlayfs parent snapshot dir gone
-///
-/// Known upstream race (containerd#11719, nerdctl#3420), not a Speedwave bug.
+/// `true` if the chain matches known containerd snapshotter-bug patterns: apply-layer-error,
+/// prepare-extraction, rename+file-exists, stat-parent+snapshots/ (containerd#11719, nerdctl#3420).
 fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1051,9 +1016,8 @@ fn is_snapshotter_error(err: &anyhow::Error) -> bool {
 const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
     &["registry-1.docker.io", "docker.io", "mcr.microsoft.com"];
 
-/// `true` if the build error is transient (I/O timeout, connection reset, temporary
-/// unavailable, or a DNS hiccup naming a base-image registry) and may succeed on retry.
-/// DNS-shaped cases are scoped to `BASE_IMAGE_REGISTRY_HOSTS`; matching is case-insensitive.
+/// `true` if the build error is transient (I/O timeout, connection reset, temp unavailable, or a
+/// DNS hiccup naming a registry in `BASE_IMAGE_REGISTRY_HOSTS`); matching is case-insensitive.
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1085,9 +1049,8 @@ fn is_dns_shaped(msg: &str) -> bool {
         || (msg.contains("dial tcp") && msg.contains("lookup"))
 }
 
-/// `true` if a transient build error is network/DNS-shaped (vs. a local I/O stall).
-/// Lets the enrichment pick guidance that matches the actual cause instead of always
-/// blaming VM memory — the DNS-resolver race names a base-image registry.
+/// `true` if a transient build error is network/DNS-shaped (vs. a local I/O stall), so enrichment
+/// picks guidance matching the actual cause instead of always blaming VM memory.
 fn is_network_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
@@ -1115,9 +1078,8 @@ mod tests {
         IMAGES.iter().collect()
     }
 
-    /// Integrations config with every built-in MCP service enabled — so
-    /// `enabled_images` yields the full `IMAGES` list (used by tests that
-    /// predate lazy builds).
+    /// Integrations config with every built-in MCP service enabled — so `enabled_images` yields
+    /// the full `IMAGES` list (used by tests that predate lazy builds).
     fn all_enabled() -> ResolvedIntegrationsConfig {
         ResolvedIntegrationsConfig {
             slack: true,
@@ -1131,9 +1093,8 @@ mod tests {
         }
     }
 
-    /// Builds the full `IMAGES` set, mirroring the old `build_all_images_for_bundle`.
-    /// Takes an explicit build root so no test reads `SPEEDWAVE_RESOURCES_DIR` or
-    /// the production `~/.speedwave` marker.
+    /// Builds the full `IMAGES` set, mirroring old `build_all_images_for_bundle`. Takes an explicit
+    /// build root so no test reads `SPEEDWAVE_RESOURCES_DIR` or the production marker.
     fn build_all_for_bundle(
         rt: &crate::runtime::LockedRuntime,
         bundle_id: &str,
@@ -1181,9 +1142,8 @@ mod tests {
         }
     }
 
-    /// Anti-under-rebuild guard (ADR-072): every COPY/ADD source in every
-    /// Containerfile must be covered by that image's `hash_inputs`, else a
-    /// source change would not change the image hash and ship stale code.
+    /// Anti-under-rebuild guard (ADR-072): every COPY/ADD source in every Containerfile must be
+    /// covered by that image's `hash_inputs`, else a source change ships stale code.
     #[test]
     fn every_base_image_is_digest_pinned() {
         // Every external FROM must carry an @sha256 digest (ADR-072).
@@ -1700,10 +1660,34 @@ mod tests {
 
         write_resources_marker_to(&fake_resources, &fake_home).unwrap();
 
-        let tmp_marker = fake_home
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        let entries: Vec<_> = std::fs::read_dir(&marker_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![crate::consts::RESOURCES_MARKER.to_string()],
+            "no tmp file should remain: {entries:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_resources_marker_is_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let marker = fake_home
             .join(crate::consts::DATA_DIR)
-            .join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
-        assert!(!tmp_marker.exists(), "stale .tmp file should not remain");
+            .join(crate::consts::RESOURCES_MARKER);
+        let mode = std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "marker is non-secret and CLI-readable");
     }
 
     #[test]
@@ -2745,9 +2729,8 @@ mod tests {
             rt
         }
 
-        /// Synthetic manifest so `images_exist_with_manifest` never reads
-        /// `SPEEDWAVE_RESOURCES_DIR` or the production `~/.speedwave` marker. The
-        /// hash is irrelevant — the mock matches on the image name substring.
+        /// Synthetic manifest so the test never reads `SPEEDWAVE_RESOURCES_DIR` or the production
+        /// marker; the hash is irrelevant since the mock matches on image name substring.
         fn fake_manifest() -> crate::bundle::BundleManifest {
             crate::bundle::BundleManifest::for_tests("testbundle")
         }
@@ -2794,9 +2777,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Containerfile structural tests (Step 1)
-    // -----------------------------------------------------------------------
+    // ── Containerfile structural tests (Step 1) ──────────────────────────────
 
     #[test]
     fn test_containerfile_claude_uses_apt_retries() {
@@ -2846,9 +2827,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // is_transient_build_error() tests (Step 2)
-    // -----------------------------------------------------------------------
+    // ── is_transient_build_error() tests (Step 2) ────────────────────────────
 
     #[test]
     fn test_is_transient_build_error_io_timeout() {
@@ -2933,9 +2912,7 @@ mod tests {
         assert!(is_transient_build_error(&outer));
     }
 
-    // -----------------------------------------------------------------------
-    // is_transient_build_error() — DNS hiccup while pulling a base image
-    // -----------------------------------------------------------------------
+    // ── is_transient_build_error() — DNS hiccup while pulling a base image ───
 
     #[test]
     fn test_is_transient_build_error_dns_server_misbehaving() {
@@ -3010,9 +2987,7 @@ mod tests {
         assert!(!is_transient_build_error(&no_metadata));
     }
 
-    // -----------------------------------------------------------------------
-    // is_snapshotter_error() Boy Scout case-insensitivity test
-    // -----------------------------------------------------------------------
+    // ── is_snapshotter_error() Boy Scout case-insensitivity test ─────────────
 
     #[test]
     fn test_is_snapshotter_error_case_insensitive() {
@@ -3020,9 +2995,7 @@ mod tests {
         assert!(is_snapshotter_error(&err));
     }
 
-    // -----------------------------------------------------------------------
-    // Priority: snapshotter error takes precedence over transient
-    // -----------------------------------------------------------------------
+    // ── Priority: snapshotter error takes precedence over transient ──────────
 
     #[test]
     fn test_snapshotter_error_takes_priority_over_transient() {
@@ -3034,9 +3007,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Error enrichment tests
-    // -----------------------------------------------------------------------
+    // ── Error enrichment tests ────────────────────────────────────────────────
 
     /// A DNS-resolver-race failure naming a base-image registry is network-shaped,
     /// so the enrichment must NOT blame VM memory.
@@ -3099,9 +3070,8 @@ mod tests {
 
     // ── prune_old_bundle_images tests ─────────────────────────────────────
 
-    /// Minimal mock runtime that records remove_images and prune_buildkit_cache calls.
-    /// Flatten the recorded `remove_images` calls into a single `Vec<String>`
-    /// of removed tags (the old `PruneMockRuntime::removed_tags` shape).
+    /// Flattens a mock's recorded `remove_images` calls into a single `Vec<String>` of removed tags
+    /// (the old `PruneMockRuntime::removed_tags` shape).
     fn collect_removed_tags(handles: &crate::runtime::mock_runtime::MockHandles) -> Vec<String> {
         handles
             .remove_images_calls

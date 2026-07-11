@@ -1,7 +1,5 @@
-// Integration management commands — extracted from main.rs for clarity.
-//
-// All `#[tauri::command]` functions here are registered in the main
-// `generate_handler!` macro via their fully-qualified paths.
+// Integration management commands — extracted from main.rs for clarity. All `#[tauri::command]`
+// functions here are registered in the main `generate_handler!` macro via fully-qualified paths.
 
 use crate::types::{
     check_project, get_allowed_fields, get_auth_fields, is_secret_field, IntegrationStatusEntry,
@@ -100,9 +98,8 @@ enum ReauthorizeReason {
     Stale,
 }
 
-/// Pure helper for `detect_oauth_action_required`. Extracted so unit tests do
-/// not round-trip through the filesystem and the `consts::data_dir()`
-/// `OnceLock` cache.
+/// Pure helper for `detect_oauth_action_required`. Extracted so unit tests do not round-trip
+/// through the filesystem and the `consts::data_dir()` `OnceLock` cache.
 fn detect_scope_mismatch_or_stale(oauth_json_raw: &str, required: &[String]) -> ReauthorizeReason {
     let json: serde_json::Value = match serde_json::from_str(oauth_json_raw) {
         Ok(v) => v,
@@ -191,11 +188,7 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------
-// Redmine helpers — Redmine stores host_url and project_id inside a single
-// config.json file rather than as individual credential files.
-// These helpers isolate that difference so the generic handlers stay clean.
-// ---------------------------------------------------------------------------
+// ── Redmine helpers — stores host_url/project_id in one config.json, not per-file credentials ──
 
 /// True when any of `files` exists as a non-empty file under `svc_token_dir`.
 fn has_any_credential_file(svc_token_dir: &std::path::Path, files: &[&str]) -> bool {
@@ -319,9 +312,7 @@ fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
+// ── Tauri commands ──────────────────────────────────────
 
 #[tauri::command]
 pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String> {
@@ -572,15 +563,10 @@ pub fn set_integration_enabled(
     .map_err(|e| e.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// macOS permission check — verifies TCC/Automation access before enabling
-// an OS integration. Uses the native Swift CLI binaries (same binaries as
-// mcp-os) with a `check_permission` subcommand.
-// ---------------------------------------------------------------------------
+// ── macOS permission check — TCC/Automation via native Swift CLI (same bins as mcp-os) ──
 
-/// Resolves the absolute path to a native macOS CLI binary.
-/// `resources_dir` `Some` selects the bundle dir; `None` selects the dev fallback
-/// `CARGO_MANIFEST_DIR -> ../../native/macos/<pkg>/.build/release/<binary>`.
+/// Resolves the absolute path to a native macOS CLI binary. `resources_dir` `Some` selects the
+/// bundle dir; `None` selects the dev fallback under `native/macos/<pkg>/.build/release/<binary>`.
 // SYNC: binary paths must match mcp-servers/os/src/platform-runner.ts::resolveDarwinPaths()
 fn resolve_native_cli_binary_in(
     service: &str,
@@ -607,9 +593,8 @@ fn resolve_native_cli_binary_in(
         .join(binary_name))
 }
 
-/// Parses `check_permission` JSON `{"granted": bool, "status": str, "error": str}`.
-/// `Ok(())` if `granted` is boolean `true`; `Err(error)` if false, missing, or
-/// non-boolean.
+/// Parses `check_permission` JSON `{"granted": bool, "status": str, "error": str}`. `Ok(())` if
+/// `granted` is boolean `true`; `Err(error)` if false, missing, or non-boolean.
 fn parse_permission_output(stdout: &str) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("Failed to parse permission check output: {e}"))?;
@@ -643,9 +628,8 @@ fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), Stri
     )
 }
 
-/// Inner implementation with configurable timeout for testability.
-/// `launch_if_needed=true` auto-launches the target app; `false` keeps the check
-/// passive.
+/// Inner implementation with configurable timeout for testability. `launch_if_needed=true`
+/// auto-launches the target app; `false` keeps the check passive.
 fn check_os_permission_with_timeout(
     service: &str,
     launch_if_needed: bool,
@@ -789,9 +773,8 @@ pub fn set_os_integration_enabled(
     result
 }
 
-/// Result of validating one OS integration against the actual macOS TCC state.
-/// Returned per-service to the frontend so the UI can render a toast for each
-/// integration that was auto-disabled.
+/// Result of validating one OS integration against the actual macOS TCC state. Returned per-service
+/// to the frontend so the UI can render a toast for each integration that was auto-disabled.
 #[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub struct OsIntegrationValidation {
     pub service: String,
@@ -800,9 +783,8 @@ pub struct OsIntegrationValidation {
     pub reason: String,
 }
 
-/// Reconcile enabled OS integrations with live macOS TCC state — auto-disable
-/// any whose permission no longer holds. No-op on non-macOS. Migration path
-/// for the embedded-Info.plist identifier change is in ADR-049.
+/// Reconcile enabled OS integrations with live macOS TCC state — auto-disable any whose
+/// permission no longer holds. No-op on non-macOS. Embedded-Info.plist ID migration: ADR-049.
 #[tauri::command]
 pub fn validate_os_integrations_on_startup(
     project: String,
@@ -949,9 +931,8 @@ pub fn save_integration_credentials(
     save_with_field_storage(&project, &service, &svc_dir, &credentials)
 }
 
-/// Generic per-field routing of UI credentials by `FieldStorage` tier.
-/// Partitions `credentials` into the worker-mounted file set and the OAuth
-/// state JSON merge set, then writes both atomically with `0o600`.
+/// Generic per-field routing of UI credentials by `FieldStorage` tier. Partitions `credentials`
+/// into the worker-mounted file set and the OAuth state JSON merge set, writing both with `0o600`.
 fn save_with_field_storage(
     project: &str,
     service: &str,
@@ -1002,9 +983,8 @@ fn save_with_field_storage(
     Ok(())
 }
 
-/// Read-modify-write merge into `oauth/<project>/<service>.json`. `provider`
-/// is derived from the descriptor; IdP-specific fields land under
-/// `providerData`, the rest stay top-level (ADR-060 schema). 0o600 preserved.
+/// Read-modify-write merge into `oauth/<project>/<service>.json`. `provider` is derived from the
+/// descriptor; IdP-specific fields land under `providerData`, rest top-level (ADR-060). 0o600 kept.
 fn merge_oauth_state_json(
     project: &str,
     service: &str,
@@ -1032,12 +1012,7 @@ fn merge_oauth_state_json_in(
     let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
     let parent = path.parent().ok_or_else(|| "no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
+    speedwave_runtime::fs_perms::set_owner_only_dir(parent)?;
     let mut state: serde_json::Value = read_existing_oauth_state(&path, provider)?;
     let obj = state
         .as_object_mut()
@@ -1225,9 +1200,8 @@ pub fn ensure_project_images_built(
     Ok(())
 }
 
-/// Removes worker images that `project` no longer enables. Per-project scope
-/// (ADR-057): switching to a project that needs a pruned image triggers a
-/// lazy build. Warn-only — failure never blocks restart.
+/// Removes worker images that `project` no longer enables. Per-project scope (ADR-057): switching
+/// to a project that needs a pruned image triggers a lazy build. Warn-only — never blocks restart.
 fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, project: &str) {
     let user_config = match speedwave_runtime::config::load_user_config() {
         Ok(c) => c,
@@ -1374,9 +1348,7 @@ pub async fn restart_integration_containers(
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -1387,9 +1359,8 @@ pub async fn restart_integration_containers(
 mod tests {
     use super::*;
 
-    /// Drift guard: the camelCase keys derived from `OAuthStateProviderData`
-    /// descriptors must equal the runtime `IDENTITY_KEYS` nested under
-    /// `providerData`.
+    /// Drift guard: the camelCase keys derived from `OAuthStateProviderData` descriptors must
+    /// equal the runtime `IDENTITY_KEYS` nested under `providerData`.
     #[test]
     fn provider_data_descriptor_keys_match_runtime_identity_keys() {
         let mut got: Vec<&str> = speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES
@@ -3033,6 +3004,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "oauth.json must be created with chmod 600");
+
+            let parent_mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(parent_mode, 0o700, "oauth-state dir must be chmod 700");
         }
     }
 

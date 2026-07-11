@@ -138,16 +138,14 @@ impl LlmConfig {
         self.active_provider().is_none()
     }
 
-    /// Narrower than [`is_unconfigured`](Self::is_unconfigured): true only for an
-    /// explicit logout (v2-shaped, active cleared) vs. never-configured. Exists
-    /// solely to pick bail wording in `apply_llm_config_in` — not a gate.
+    /// Narrower than [`is_unconfigured`](Self::is_unconfigured): true only for explicit logout
+    /// (v2-shaped, active cleared). Picks bail wording in `apply_llm_config_in` — not a gate.
     pub(crate) fn is_logged_out(&self) -> bool {
         self.is_v2_shaped() && self.active.is_none()
     }
 
-    /// Selects an Anthropic provider as active, adding an `anthropic` OAuth
-    /// entry if none exists. The active pointer mirrors the entry's own model
-    /// (provenance, ADR-073; foreign shapes cleared). True when state changed.
+    /// Selects an Anthropic provider active, adding an `anthropic` OAuth entry if none exists
+    /// (mirrors the entry's own model, ADR-073; foreign shapes cleared). Returns true if changed.
     pub fn set_active_to_anthropic(&mut self) -> bool {
         let (id, model) = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
             Some(entry) => (entry.id.clone(), entry.model.clone()),
@@ -667,7 +665,7 @@ pub enum OtlpProtocol {
 
 /// User-layer OTLP telemetry config. Top-level user-only, like `ui`. Field
 /// semantics mirror [`TelemetryField`](crate::telemetry_env::TelemetryField).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct TelemetryConfig {
     /// Master switch: emit telemetry at all.
     pub enabled: Option<bool>,
@@ -699,9 +697,48 @@ pub struct TelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+        } = self;
+        f.debug_struct("TelemetryConfig")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .finish()
+    }
+}
+
 /// MDM-layer telemetry policy. Presence IS the lock; unknown keys are rejected
 /// (fail-closed) so a misspelled admin key never silently unlocks (ADR-076).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedTelemetryConfig {
     /// Force the master switch (kill-switch when `false`).
@@ -734,8 +771,47 @@ pub struct ManagedTelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for ManagedTelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+        } = self;
+        f.debug_struct("ManagedTelemetryConfig")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .finish()
+    }
+}
+
 /// Fully resolved telemetry after the per-field merge + cross-field gates.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub struct ResolvedTelemetry {
     /// Resolved master switch.
     pub enabled: bool,
@@ -771,6 +847,51 @@ pub struct ResolvedTelemetry {
     pub any_locked: bool,
     /// True when MDM forced telemetry off (kill-switch).
     pub kill_switch: bool,
+}
+
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for ResolvedTelemetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+            locked_keys,
+            any_locked,
+            kill_switch,
+        } = self;
+        f.debug_struct("ResolvedTelemetry")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .field("locked_keys", locked_keys)
+            .field("any_locked", any_locked)
+            .field("kill_switch", kill_switch)
+            .finish()
+    }
 }
 
 impl ResolvedTelemetry {
@@ -1087,9 +1208,8 @@ pub fn resolve_project_config(
     )
 }
 
-/// Testable variant of [`resolve_project_config`] with an explicit data dir —
-/// every on-disk lookup (legacy-key migration, has_api_key disk-sync, anthropic
-/// secret) resolves under `data_dir` so the migrate→sync ordering can be tested.
+/// Testable variant of [`resolve_project_config`] with an explicit data dir — legacy-key migration,
+/// has_api_key disk-sync, and anthropic secret lookups resolve under it so ordering is testable.
 pub(crate) fn resolve_project_config_in(
     data_dir: &Path,
     project_dir: &Path,
@@ -1223,14 +1343,12 @@ pub(crate) fn resolve_project_config_in_with_managed(
     );
     apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
 
-    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
-    // disk-sync below — otherwise the sync re-derives has_api_key from the (still
-    // empty) new path and the migration, gated on the new file, never runs.
+    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the disk-sync below —
+    // otherwise sync re-derives has_api_key from the still-empty new path and migration never runs.
     crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
 
-    // Re-derive each provider's `has_api_key` from disk — the key file is the
-    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
-    // injection) reads the resolved config, so this is the single sync point.
+    // Re-derive each provider's `has_api_key` from disk — the key file is SSOT, the persisted flag
+    // only an echo. Every renderer (proxy/compose) reads resolved config; the single sync point.
     llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
     // Local LLMs keep the full default system prompt; two local-only additions
@@ -1641,9 +1759,8 @@ mod tests {
 
     #[test]
     fn is_unconfigured_true_for_dangling_active() {
-        // Dangling active (points at a missing entry) is unconfigured: render
-        // must refuse rather than silently fall back to the Anthropic default
-        // for a config that names a provider id which doesn't exist.
+        // Dangling active (missing entry) is unconfigured: render must refuse rather than silently
+        // fall back to the Anthropic default for a nonexistent provider id.
         let llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![],
@@ -2379,6 +2496,31 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_telemetry(Some(&u), None).is_err());
+    }
+
+    #[test]
+    fn telemetry_debug_impls_redact_headers() {
+        let secret = "Authorization=Bearer tok-3ns";
+        let user = TelemetryConfig {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        let resolved = ResolvedTelemetry {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        for dbg in [
+            format!("{user:?}"),
+            format!("{managed:?}"),
+            format!("{resolved:?}"),
+        ] {
+            assert!(!dbg.contains("tok-3ns"), "leaked: {dbg}");
+            assert!(dbg.contains("[redacted]"));
+        }
     }
 
     #[test]
@@ -4076,9 +4218,8 @@ mod tests {
 
     #[test]
     fn resolve_injects_no_local_only_flags_when_local_entry_present_but_inactive() {
-        // A Local entry sitting unused in `providers` must not leak its flags
-        // onto a different active provider: the discriminator is `active`,
-        // not mere presence of a Local kind in the list.
+        // A Local entry sitting unused in `providers` must not leak its flags onto a different
+        // active provider: the discriminator is `active`, not mere presence of a Local kind.
         let tmp = tempfile::tempdir().unwrap();
         let mut user_config = make_ollama_user_config(tmp.path(), None);
         user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
@@ -4124,9 +4265,8 @@ mod tests {
 
     #[test]
     fn resolve_injects_local_only_flags_when_active_local_coexists_with_other_provider() {
-        // The mirror case: Local IS active alongside a non-Local sibling
-        // entry: the flags must still land, keyed off `active`, not the
-        // list's first/only entry.
+        // Mirror case: Local IS active alongside a non-Local sibling entry: flags must still land,
+        // keyed off `active`, not the list's first/only entry.
         let tmp = tempfile::tempdir().unwrap();
         let mut user_config = make_ollama_user_config(tmp.path(), None);
         user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
@@ -5229,10 +5369,8 @@ mod plugin_order_tests {
         }
     }
 
-    /// Locks the real bug site: on a v1→v3 upgrade with a legacy local key on
-    /// disk, the full resolve must end with has_api_key==true. This fails if the
-    /// migrate→sync ordering in resolve_project_config_in is reversed (the
-    /// original bug). Drives the real resolve, unlike the proxy.rs unit test.
+    /// Locks the real bug site: a v1→v3 upgrade with a legacy local key must end has_api_key==true;
+    /// fails on reversed migrate→sync order. Real resolve, unlike proxy.rs's unit test.
     #[test]
     fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
         let data_dir = tempfile::tempdir().unwrap();

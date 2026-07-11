@@ -59,7 +59,7 @@ pub struct Route {
 
 /// Top-level proxy routing config, deserialized from `/config/proxy.json`.
 /// `usage_path` is resolved once at startup from `SPW_USAGE_PATH`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
     /// Per-project caller secret only the `claude` container holds; the auth
@@ -72,6 +72,20 @@ pub struct Config {
     /// once with no-redirect (SSRF, ADR-041) and connection reuse.
     #[serde(skip, default = "build_forward_client")]
     pub client: reqwest::Client,
+}
+
+// Manual Debug: `caller_token` is a per-project secret and must never reach logs.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("routes", &self.routes)
+            .field(
+                "caller_token",
+                &self.caller_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("usage_path", &self.usage_path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Outbound forwarding client: rustls TLS, no redirects (SSRF defence). Retries
@@ -184,6 +198,15 @@ mod tests {
             usage_path: PathBuf::from("/usage/usage.jsonl"),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn config_debug_redacts_caller_token() {
+        let mut cfg = fixture_config();
+        cfg.caller_token = Some("super-secret-caller-token".to_string());
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("super-secret-caller-token"), "leaked: {dbg}");
+        assert!(dbg.contains("[redacted]"));
     }
 
     #[test]

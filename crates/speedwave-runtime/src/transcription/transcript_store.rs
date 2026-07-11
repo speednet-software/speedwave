@@ -1,6 +1,5 @@
-//! Per-session state store + live event stream (snapshot + seq, like
-//! ADR-043's history_plus_stream). Mutators atomically: update session, bump
-//! seq, push event, persist.
+//! Per-session state store + live event stream (snapshot + seq, like ADR-043's
+//! history_plus_stream). Mutators atomically: update session, bump seq, push event, persist.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,14 +12,12 @@ use uuid::Uuid;
 use crate::transcription::transcriber::Segment;
 use crate::transcription::transcript::{TranscriptSession, TranscriptStatus};
 
-/// Capacity of each session's `broadcast` channel — generous enough that a
-/// slow subscriber falls behind only after thousands of events; if it does,
-/// it re-subscribes via the snapshot path.
+/// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
+/// falls behind only after thousands of events; if it does, it re-subscribes via the snapshot.
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// Live events on a transcript stream. Every event carries a `seq` (1-indexed,
-/// monotonic per session). Consumers apply events idempotently: ignore
-/// `seq <= last_applied`.
+/// Live events on a transcript stream. Every event carries a `seq` (1-indexed, monotonic per
+/// session). Consumers apply events idempotently: ignore `seq <= last_applied`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TranscriptEvent {
@@ -89,9 +86,8 @@ impl TranscriptEvent {
     }
 }
 
-/// What `subscribe()` returns: a current-state snapshot plus a stream of
-/// future events. Consumers replay the snapshot first, then apply events with
-/// `seq > snapshot.last_seq` idempotently.
+/// What `subscribe()` returns: a current-state snapshot plus a stream of future events.
+/// Consumers replay the snapshot first, then apply events with `seq > snapshot.last_seq`.
 #[derive(Debug)]
 pub struct Subscription {
     /// Current session state.
@@ -117,13 +113,8 @@ struct Entry {
     tx: broadcast::Sender<TranscriptEvent>,
 }
 
-/// Per-session state store + live event stream.
-///
-/// `<root>/<uuid>/transcript.json` + `<root>/<uuid>/audio.wav`. The store
-/// caches the active session in memory; `list()` walks the disk for inactive
-/// ones. `subscribe()` returns a snapshot + receiver — mutators bump seq,
-/// emit, and persist atomically so the snapshot, the stream, and the disk
-/// state never drift.
+/// Per-session state store + live event stream: `<root>/<uuid>/{transcript.json,audio.wav}`.
+/// Caches active sessions (`list()` walks disk for inactive); mutators bump seq, emit, persist.
 pub struct TranscriptStore {
     root: PathBuf,
     sessions: Arc<DashMap<Uuid, Entry>>,
@@ -179,9 +170,8 @@ impl TranscriptStore {
         Ok(TranscriptSession::load(&dir)?)
     }
 
-    /// Walks `<root>/` and returns one snapshot per session directory.
-    /// Corrupt `transcript.json` files are skipped (logged warn — runtime
-    /// recovery, not panic).
+    /// Walks `<root>/` and returns one snapshot per session directory. Corrupt
+    /// `transcript.json` files are skipped (logged warn — runtime recovery, not panic).
     pub fn list(&self) -> Vec<TranscriptSession> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
@@ -235,9 +225,8 @@ impl TranscriptStore {
         self.sessions.len()
     }
 
-    /// Loads `id` into cache if needed; returns its `Entry`. Atomic against
-    /// concurrent callers: the entry actually living in `sessions` is the one
-    /// returned, so subscribers can never end up holding an orphaned `tx`.
+    /// Loads `id` into cache if needed; returns its `Entry`. Atomic against concurrent callers:
+    /// the entry living in `sessions` is the one returned, so no subscriber holds an orphaned `tx`.
     fn activate(&self, id: Uuid) -> Result<EntryHandle, StoreError> {
         use dashmap::mapref::entry::Entry as MapEntry;
         match self.sessions.entry(id) {
@@ -272,9 +261,8 @@ impl TranscriptStore {
     where
         F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
     {
-        // `activate` loads from disk on a cache miss, so mutators work on
-        // sessions persisted by an earlier run (a cache-only lookup returned
-        // NotFound for them — the "no such transcript session" on any mutator).
+        // `activate` loads from disk on a cache miss, so mutators work on sessions persisted
+        // by an earlier run (a cache-only lookup would return NotFound for them).
         let h = self.activate(id)?;
         let dir = self.session_dir(id);
         let event;
@@ -350,9 +338,8 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Installs the offline pass's `final_segments` and emits
-    /// `FinalSegmentsReady` so an open UI swaps the live transcript for the
-    /// higher-quality one.
+    /// Installs the offline pass's `final_segments` and emits `FinalSegmentsReady` so an open
+    /// UI swaps the live transcript for the higher-quality one.
     pub fn set_final_segments(
         &self,
         id: Uuid,
@@ -392,13 +379,9 @@ struct EntryHandle {
 }
 
 fn restrict_dir_perms(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    if let Err(e) = crate::fs_perms::set_owner_only_dir(dir) {
+        log::warn!("failed to restrict permissions on {}: {e}", dir.display());
     }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 #[cfg(test)]
@@ -455,6 +438,22 @@ mod tests {
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, seq);
         assert!(snap.live_segments.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_sets_owner_only_perms_on_session_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        let mode = std::fs::metadata(store.session_dir(id))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
     }
 
     #[tokio::test]
@@ -619,9 +618,8 @@ mod tests {
         ));
     }
 
-    /// Regression: a session persisted by an earlier run (on disk, never in
-    /// this store's cache) is still mutable. Cache-only lookup returned
-    /// NotFound — the "no such transcript session" on a mutator.
+    /// Regression: a session persisted by an earlier run (on disk, never in this store's cache)
+    /// is still mutable — a cache-only lookup used to return NotFound for it.
     #[tokio::test]
     async fn mutators_work_on_a_disk_only_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -638,9 +636,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_subscribe_on_a_disk_only_session_yields_a_single_entry() {
-        // Guards against the previous activate() race: two concurrent
-        // subscribers used to load the session twice and the first caller
-        // could end up holding a tx that was not the one in the map.
+        // Guards against the previous activate() race: two concurrent subscribers used to load
+        // the session twice, and the first caller could hold a tx that wasn't the one in the map.
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();

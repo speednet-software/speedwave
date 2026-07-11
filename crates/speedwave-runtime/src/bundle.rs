@@ -306,9 +306,8 @@ pub fn manifest_app_version_in(build_root: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Per-image hashes cover each image's declared `hash_inputs` + build args;
-/// `claude_version` overrides the `CLAUDE_VERSION` build-arg value so callers
-/// (desktop build.rs, CLI fallback, tests) control the pin. See ADR-072.
+/// Per-image hashes cover `hash_inputs` + build args; `claude_version` overrides `CLAUDE_VERSION`
+/// so callers (desktop build.rs, CLI fallback, tests) control the pin (ADR-072).
 pub fn generate_bundle_manifest(
     app_version: &str,
     claude_version: &str,
@@ -554,26 +553,7 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
     }
 
     let json = serde_json::to_string_pretty(state)?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(json.as_bytes())?;
-        // fsync before rename — APFS/virtiofs can persist the rename before data blocks (torn write).
-        crate::fs_perms::fsync_file_durable(&file)
-            .map_err(|e| anyhow::anyhow!("fsync bundle-state before rename: {e}"))?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::fs_perms::write_restricted_file_atomic(path, &json)
 }
 
 #[cfg(test)]
@@ -694,9 +674,8 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
-/// Host build-output dir names that are never image content — skipped from digests here,
-/// pruned by bundle-build-context.{sh,ps1}, and ignored via `containers/.dockerignore`
-/// (alignment test-enforced).
+/// Host build-output dir names that are never image content — skipped from digests here, pruned by
+/// bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
 pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
@@ -1561,10 +1540,8 @@ mod tests {
             .any(|asset| asset.path == "mcp-os/os/dist/index.js"));
     }
 
-    /// Drift guard: every signed macOS Mach-O (sign-bundled-binaries.sh
-    /// SIGN_TARGETS / tauri.macos.conf.json bundle.resources) must also be a
-    /// required bundled asset, or it ships unverified. audio-capture-cli was
-    /// missing here while present in both other lists.
+    /// Drift guard: every signed macOS Mach-O (sign-bundled-binaries.sh SIGN_TARGETS /
+    /// tauri.macos.conf.json bundle.resources) must be a bundled asset, else it ships unverified.
     #[test]
     fn required_bundled_assets_for_macos_include_audio_capture_cli() {
         let assets = required_bundled_assets("macos").unwrap();

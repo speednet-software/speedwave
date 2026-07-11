@@ -166,18 +166,12 @@ fn record_teardown_intent(project: &str) {
         .unwrap_or_default();
     if !entries.iter().any(|e| e == project) {
         entries.push(project.to_string());
-        if let Err(e) = write_intents_atomic(&path, &entries) {
+        if let Err(e) =
+            speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &entries.join("\n"))
+        {
             log::warn!("failed to record teardown intent for '{project}': {e}");
         }
     }
-}
-
-/// tmp + rename: this file exists ONLY for crash recovery, so a torn write
-/// (fs::write truncates first on Windows) would defeat its purpose.
-fn write_intents_atomic(path: &std::path::Path, entries: &[String]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, entries.join("\n"))?;
-    std::fs::rename(&tmp, path)
 }
 
 fn clear_teardown_intent(project: &str) {
@@ -187,11 +181,10 @@ fn clear_teardown_intent(project: &str) {
         return;
     };
     let entries: Vec<&str> = content.lines().filter(|l| *l != project).collect();
-    let entries: Vec<String> = entries.into_iter().map(str::to_string).collect();
     let result = if entries.is_empty() {
-        std::fs::remove_file(&path)
+        std::fs::remove_file(&path).map_err(anyhow::Error::from)
     } else {
-        write_intents_atomic(&path, &entries)
+        speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &entries.join("\n"))
     };
     if let Err(e) = result {
         log::warn!("failed to clear teardown intent for '{project}': {e}");
@@ -201,9 +194,6 @@ fn clear_teardown_intent(project: &str) {
 /// Projects whose background teardown a previous process never finished.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
     let path = teardown_intents_path();
-    // write_intents_atomic writes to .tmp then renames; a crash between those
-    // two steps leaves the .tmp behind permanently — clean it up now.
-    let _ = std::fs::remove_file(path.with_extension("tmp"));
     std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default()
@@ -2780,14 +2770,32 @@ mod tests {
 
     #[test]
     #[serial_test::serial(teardown_intents)]
-    fn crashed_teardown_intents_removes_stale_tmp_file() {
+    fn teardown_intent_write_is_durable_atomic_rename() {
+        let project = format!("intent-atomic-{}", std::process::id());
+        record_teardown_intent(&project);
         let path = teardown_intents_path();
-        let tmp = path.with_extension("tmp");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&tmp, "stale").unwrap();
-        assert!(tmp.exists());
-        let _ = crashed_teardown_intents();
-        assert!(!tmp.exists(), "stale .tmp file should be removed");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.lines().any(|l| l == project));
+        // No leftover tempfile from the write-then-rename.
+        let stray = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("write-"));
+        assert!(!stray, "no tempfile should remain after atomic rename");
+        clear_teardown_intent(&project);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn teardown_intents_file_is_not_owner_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = format!("intent-perm-{}", std::process::id());
+        record_teardown_intent(&project);
+        let path = teardown_intents_path();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "shared intents file must stay world-readable");
+        clear_teardown_intent(&project);
     }
 
     #[test]
@@ -2852,9 +2860,8 @@ mod tests {
         );
     }
 
-    /// Structural: add_project's closure must check for a missing LLM provider
-    /// BEFORE calling start_containers — otherwise render_compose bails and
-    /// teardown_only is attempted against a compose.yml that was never written.
+    /// Structural: add_project must check for a missing LLM provider BEFORE start_containers, else
+    /// render_compose bails and teardown_only targets a never-written compose.yml.
     #[test]
     fn add_project_checks_no_provider_before_start() {
         let source = include_str!("containers_cmd.rs");

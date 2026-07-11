@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use image::{ColorType, ImageEncoder};
 use speedwave_runtime::consts::DATA_DIR;
+use speedwave_runtime::fs_perms::set_owner_only;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -118,21 +119,10 @@ fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
             .context("png encode")?;
     }
     // Owner-only perm BEFORE rename so the final inode never appears world-readable.
-    set_owner_only(&tmp)?;
+    set_owner_only(&tmp)
+        .map_err(|e| anyhow::anyhow!(e))
+        .with_context(|| format!("owner-only perms {}", tmp.display()))?;
     std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_owner_only(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_owner_only(_path: &Path) -> Result<()> {
-    // Windows: NTFS ACLs handled by parent dir creation; no per-file chmod.
     Ok(())
 }
 
